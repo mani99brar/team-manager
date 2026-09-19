@@ -1,75 +1,35 @@
-# React + TypeScript + Vite
+# MD Manager
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Minimal, read-only Markdown file listing built with React, Vite, Fastify and TypeScript.
 
-Currently, two official plugins are available:
+## Start
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Requires Node.js 22.12+ (tested with 24) and npm.
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```sh
+npm ci
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+Open http://127.0.0.1:5173. This starts Vite and the Fastify API together; Ctrl-C stops both. The API listens on http://127.0.0.1:3001 and Vite proxies `/api` requests to it.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Checks
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```sh
+npx playwright install chromium  # first-time browser setup
+npm test
+npm run lint
+npm run build
 ```
+
+API tests verify the exact fixture listing, empty results, failure handling and symlink exclusion. Browser tests start the app and verify its real listing plus simulated loading, empty, HTTP-error and network-error states.
+
+To preview the production frontend, run `npm run start:api` in one terminal and `npm run preview` in another after building.
+
+## Listing boundary
+
+`GET /api/files` returns `{ files: [{ source: "Pi" | "Claude", path: string }] }`. Paths are relative to `fixtures/pi/` or `fixtures/claude/`. These locations are resolved from the server module, not the shell's working directory. No request parameter can change them.
+
+Discovery recursively includes regular `.md` files (case-insensitive), including empty files. Symlinks and other extensions are skipped. Results are ordered by source (Pi, Claude), then sorted directory traversal. Missing or unreadable source folders produce an error rather than an incomplete listing. Only filenames are read; file contents and live agent configuration folders are never accessed.
+
+This slice intentionally has no file viewing, rendering, editing, saving, search or filters.

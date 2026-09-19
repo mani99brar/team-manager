@@ -4,7 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently --kill-others --names api,web \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "tsx watch server/index.ts",
+    "dev:web": "vite --host 127.0.0.1",
+    "start:api": "tsx server/index.ts",
+    "test": "tsx --test server/app.test.ts && playwright test",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
