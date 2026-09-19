@@ -8,16 +8,20 @@
     "dev:api": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
     "start:api": "tsx server/index.ts",
-    "test": "tsx --test server/app.test.ts && playwright test",
+    "test": "npm run test:unit && npm run test:e2e",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:unit": "tsx --test server/app.test.ts tests/unit/model.test.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/merge": "^6.12.2",
     "@fastify/static": "^10.1.4",
+    "@types/d3-force": "^3.0.10",
     "codemirror": "^6.0.2",
+    "d3-force": "^3.0.0",
     "fastify": "^5.12.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
