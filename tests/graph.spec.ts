@@ -210,6 +210,43 @@ test('keyboard: outline-order tabbing, Enter selects, arrows expand/collapse, P 
   await expect(page).toHaveURL('/Pi')
 })
 
+test('keyboard focus reveals off-screen node bodies, expand controls and pin controls', async ({ page }) => {
+  await openGraph(page)
+  await nodeBody(page, 'Pi').focus()
+  await page.keyboard.press('p')
+
+  const canvas = page.locator('.graph-canvas')
+  const bounds = await canvas.boundingBox()
+  if (!bounds) throw new Error('Graph canvas has no bounding box')
+  const panAway = async () => {
+    await page.mouse.move(bounds.x + 10, bounds.y + 10)
+    await page.mouse.down()
+    await page.mouse.move(bounds.x + bounds.width + 500, bounds.y + 10)
+    await page.mouse.up()
+    await expect(nodeBody(page, 'Pi')).not.toBeInViewport()
+  }
+
+  await panAway()
+  // Outline is the last toolbar button before the graph in DOM order.
+  await page.getByRole('button', { name: 'Outline', exact: true }).focus()
+  await page.keyboard.press('Tab')
+  await expect(nodeBody(page, 'Pi')).toBeFocused()
+  await expect(nodeBody(page, 'Pi')).toBeInViewport({ ratio: 1 })
+
+  await panAway()
+  await expandButton(page, 'Pi').focus()
+  await expect(expandButton(page, 'Pi')).toBeFocused()
+  await expect(expandButton(page, 'Pi')).toBeInViewport({ ratio: 1 })
+
+  await panAway()
+  const unpin = page.getByRole('button', { name: 'Unpin Pi', exact: true })
+  await unpin.focus()
+  await expect(unpin).toBeFocused()
+  await expect(unpin).toBeInViewport({ ratio: 1 })
+  await expect(page).toHaveURL('/')
+  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude'])
+})
+
 test('outline mode replaces the graph and shares selection, expansion, breadcrumbs and refresh', async ({ page }) => {
   await openGraph(page)
   await expandButton(page, 'Pi').click()

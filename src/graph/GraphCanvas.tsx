@@ -330,7 +330,17 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
             const lines = node.kind === 'source' ? [node.name] : wrapLabel(node.name)
             const classes = ['node', `node-${node.kind}`, isSelected ? 'is-selected' : '', pinned ? 'is-pinned' : '']
             return (
-              <g key={node.id} className={classes.join(' ').trim()} transform={`translate(${position.x} ${position.y})`} data-node-id={node.id} data-node-kind={node.kind}>
+              <g
+                key={node.id}
+                className={classes.join(' ').trim()}
+                transform={`translate(${position.x} ${position.y})`}
+                data-node-id={node.id}
+                data-node-kind={node.kind}
+                onFocus={event => {
+                  // Pointer focus must not move the click/drag target before the gesture finishes.
+                  if (event.target.matches(':focus-visible')) ensureVisible(node.id)
+                }}
+              >
                 <g
                   className="node-body"
                   role={isFolder ? 'button' : 'group'}
