@@ -12,13 +12,14 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:unit": "tsx --test server/app.test.ts server/file.test.ts tests/unit/model.test.ts tests/unit/document.test.ts",
+    "test:unit": "tsx --test server/app.test.ts server/file.test.ts server/write.test.ts server/mutate.test.ts tests/unit/model.test.ts tests/unit/document.test.ts tests/unit/editSession.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",
     "@codemirror/merge": "^6.12.2",
     "@fastify/static": "^10.1.4",
+    "@lezer/highlight": "^1.2.3",
     "@types/d3-force": "^3.0.10",
     "codemirror": "^6.0.2",
     "d3-force": "^3.0.0",

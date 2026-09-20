@@ -200,3 +200,52 @@
 .markdown input[type='checkbox'] { margin-right: 6px; }
 .markdown hr { border: 0; border-top: 1px solid var(--border); }
 .markdown .link-inert { color: var(--text-muted); text-decoration: underline dotted; cursor: not-allowed; }
+
+/* ---- Editing ---- */
+.document-header-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.document-notice { margin: 0; padding: 8px 16px; color: var(--text-muted); font-size: 0.9rem; border-bottom: 1px solid var(--border); }
+.document-editing { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.editor { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.editor-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-right: 16px; }
+.editor-toolbar .tabs { border-bottom: none; }
+.editor-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding-bottom: 6px; }
+.save-status { font-size: 0.85rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-muted); min-width: 70px; text-align: center; }
+.save-status-unsaved { color: var(--text); border-color: var(--focus); }
+.save-status-saving { color: var(--text); font-style: italic; }
+.save-status-saved { color: var(--text); }
+.save-status-error { color: var(--danger-text); background: var(--danger-bg); border-color: var(--danger-border); }
+.editor-error { margin: 12px 16px 0; }
+.editor-panel { flex: 1; padding: 16px; min-width: 0; }
+.editor-host .cm-editor { min-height: 240px; }
+.editor-host .cm-content, .editor-host .cm-gutter { min-height: 240px; }
+@media (max-width: 600px) {
+  .editor-toolbar { padding-right: 8px; }
+  .editor-panel { padding: 8px; }
+  .editor-actions { width: 100%; justify-content: flex-end; }
+}
+
+/* ---- Dialogs and recovery ---- */
+.confirm-dialog { border: 1px solid var(--border); border-radius: 8px; padding: 0; background: var(--surface); color: var(--text); max-width: min(90vw, 480px); }
+.confirm-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+.confirm-dialog form { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.confirm-dialog h2 { margin: 0; font-size: 1.05rem; }
+.confirm-description p { margin: 0; }
+.confirm-description .dialog-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.button-danger { border-color: var(--danger-border); color: var(--danger-text); background: var(--danger-bg); }
+.editor-fallback { margin: 12px 16px 0; display: flex; flex-direction: column; gap: 8px; }
+.editor-fallback p { margin: 0; }
+.editor-fallback textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; color: var(--text); background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; padding: 8px; box-sizing: border-box; }
+
+/* ---- Operations ---- */
+.toolbars { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+.banner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.banner-info { background: var(--surface-alt); border: 1px solid var(--border); color: var(--text); }
+.button-small { min-height: 30px; padding: 4px 10px; font-size: 0.8rem; }
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; }
+.field input, .field select { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-height: 36px; }
+.field input:focus-visible, .field select:focus-visible, .confirm-dialog .button:focus-visible, .editor-fallback textarea:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+.dialog-error { margin: 0; color: var(--danger-text); }
