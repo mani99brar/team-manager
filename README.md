@@ -1,6 +1,6 @@
 # MD Manager
 
-Read-only, free-form graph explorer and document viewer for the Pi and Claude Markdown fixture folders. Built with React, Vite, Fastify, TypeScript, d3-force and react-markdown.
+Free-form graph explorer, document viewer and explicit-save Markdown editor for the Pi and Claude fixture folders, with bounded create/rename/move/delete/copy operations. Built with React, Vite, Fastify, TypeScript, d3-force, react-markdown and CodeMirror.
 
 ## Start
 
@@ -24,7 +24,7 @@ npm run lint
 npm run build
 ```
 
-`npm run test:unit` runs the API tests (temporary fixture roots covering nested and empty directories, uppercase `.MD`, ignored extensions, symlink exclusion, source failures, and the `GET /api/file` validator: traversal, absolute and Windows/UNC paths, encoded separators, NULs, symlinks at every level, non-Markdown targets and simulated read failures), the pure graph-model tests and the document URL tests. `npm run test:e2e` starts the app against the committed fixtures on a single Playwright worker with reduced motion, so the layout settles instantly and no test depends on animation timing. Browser tests that need Markdown content create `scratch-*` files and remove them afterwards; HTTPS image requests are intercepted so nothing depends on public servers.
+`npm run test:unit` runs the API tests (temporary fixture roots covering nested and empty directories, uppercase `.MD`, ignored extensions, symlink exclusion, source failures, the `GET /api/file` validator: traversal, absolute and Windows/UNC paths, encoded separators, NULs, symlinks at every level, non-Markdown targets and simulated read failures; the `PUT /api/file` write pipeline: byte preservation, stale-hash and concurrent-save conflicts, mode preservation, injected write/chmod/rename failures, external changes during staging, size limits; and the `POST /api/mutate` matrix: every operation in both sources, collisions including dangling symlinks, nonempty folders, source escapes, concurrency), the pure graph-model, document URL and edit-session state-machine tests. `npm run test:e2e` starts the app against the committed fixtures on a single Playwright worker with reduced motion, so the layout settles instantly and no test depends on animation timing. Browser tests that need Markdown content create `scratch-*` files and remove them afterwards; HTTPS image requests are intercepted so nothing depends on public servers.
 
 ### Isolated test ports and final Slice 2 evidence
 
@@ -47,7 +47,7 @@ These are example environment overrides, not hardcoded alternate defaults. See `
 ### Fixture testing rules
 
 - Browser tests use the default fixture root. Never modify the committed sample files.
-- Tests that need changes on disk create uniquely named `scratch-*` artifacts under `fixtures/pi/` or `fixtures/claude/` and remove them in `afterEach`, including on failure.
+- Tests that need changes on disk create uniquely named `scratch-*` artifacts under `fixtures/pi/` or `fixtures/claude/` and remove them in `afterEach`, including on failure. Editing and operation tests only ever save, rename, move, delete or copy their own scratch files; conflict tests change those scratch files through `node:fs`.
 - The last spec (`tests/zz-fixtures-clean.spec.ts`) asserts that `git status` reports no modified or untracked files under `fixtures/`.
 
 ## API
@@ -88,8 +88,51 @@ Missing/disappeared/rejected targets return safe 404 errors; unexpected metadata
 
 - `source` is `"Pi"` or `"Claude"` and `path` is the complete source-relative path with `/` separators, both passed as ordinary query parameters (build them with `URLSearchParams`; the value is decoded exactly once, so a literal `%` in a filename works). Each parameter must appear exactly once.
 - Only regular files whose name ends in `.md` (case-insensitive) are readable. `content` is the file decoded as UTF-8 with no trimming, newline normalisation or frontmatter removal; `hash` is the SHA-256 of the exact bytes of that same read. An empty file returns `""` and the digest of empty input.
-- Responses carry `Cache-Control: no-store`, so reopening or reloading a file always reflects the disk. The hash is reserved for hash-guarded writes in a later slice; this slice has no write routes.
+- Responses carry `Cache-Control: no-store`, so reopening or reloading a file always reflects the disk. The hash is the `expectedHash` for `PUT /api/file`.
 - Errors are `{ "error": "..." }`: **400** for missing, duplicate or non-string parameters, an unknown source, an empty path, `..` or `.` components, empty components, backslashes, NULs, absolute paths (including `C:` and UNC forms); **404** for a missing file, a directory, a non-Markdown or non-regular target, or a symlink; **500** for an unexpected read failure. Error bodies never contain absolute paths, stack traces or file content.
+
+### `PUT /api/file`
+
+Hash-guarded content write of an existing Markdown file. There is no implicit create.
+
+```json
+{ "source": "Pi", "path": "skills/review.md", "content": "# Updated review\n", "expectedHash": "<SHA-256 from the last read or successful write>" }
+```
+
+Success is HTTP 200 with `{ "source": "Pi", "path": "skills/review.md", "hash": "<SHA-256 of the bytes written>" }` and `Cache-Control: no-store`.
+
+- The body must be a JSON object with a valid source, a shared-validator path, a string `content` and a 64-character lowercase hexadecimal `expectedHash`. `content` is written as UTF-8 with no trimming, newline or frontmatter changes.
+- The target must be an existing regular `.md` file reached through the same descriptor walk as reads (symlinks at any component are refused). The current bytes are read and hashed first; a mismatch returns **409 `HASH_CONFLICT`** and the file is untouched.
+- Writes are staged in an exclusively created temp file in the same directory (its name never ends in `.md`), which receives the original file's permission mode via `fstat`/`fchmod`, is written and synced, then renamed over the original after the original's identity and bytes are re-checked. Handled failures remove the temp file and leave the original bytes and mode intact. Ownership, timestamps, ACLs and extended attributes are not preserved.
+- App requests are serialized through one process-local queue, so two saves carrying the same hash cannot both succeed. This is **not** an OS-wide compare-and-swap: an external writer racing between the final re-check and the rename is not detected.
+- Request bodies are limited to **8 MiB**; larger requests return **413 `REQUEST_TOO_LARGE`** without touching the file. Documents well over 100 KB save normally.
+
+### `POST /api/mutate`
+
+One discriminated JSON request per operation. Every path is source-relative and validated by the shared validator; paths are literal (never URL-decoded).
+
+```text
+{ "op": "create-file",   "source": "Pi", "path": "skills/new.md", "content": "" }   // content optional, default ""
+{ "op": "create-folder", "source": "Pi", "path": "skills/topics" }
+{ "op": "rename",        "source": "Pi", "path": "skills/new.md", "destinationPath": "skills/renamed.md" }
+{ "op": "move",          "source": "Pi", "path": "skills/renamed.md", "destinationPath": "archive/renamed.md" }
+{ "op": "delete",        "source": "Pi", "path": "skills/topics" }
+{ "op": "copy",          "source": "Pi", "path": "skills/review.md", "destinationSource": "Claude", "destinationPath": "imported/review.md" }
+```
+
+Success is **201** for `create-file`, `create-folder` and `copy`, **200** for `rename`, `move` and `delete`, with `{ "op", "source", "path" }` plus `destinationSource` and `destinationPath` for rename/move/copy.
+
+- `create-file` needs a `.md` name and an existing parent (parents are never created implicitly); `create-folder` needs a name that does not end in `.md`.
+- `rename` keeps the same parent; `move` stays within the source and needs an existing destination parent; a folder cannot move into itself. Files keep a `.md` name, folders never take one. Identical source and destination is **409 `NO_CHANGE`**.
+- `rename`, `move` and `delete` accept a regular Markdown file or an **empty** directory. Emptiness is checked on disk at execution and counts hidden and non-Markdown entries: **409 `FOLDER_NOT_EMPTY`**. Nothing recurses.
+- `copy` duplicates the saved bytes of one Markdown file (mode included) into the other source only.
+- Source roots (empty path) are never targets. Symlinks anywhere in a source or destination path are refused (404).
+- No operation overwrites: the destination is probed on disk (`lstat`, so dangling symlinks count as occupied) and creation uses exclusive primitives; file renames use `link` + `unlink`, which fails atomically on an existing name. Existing entries return **409 `DESTINATION_EXISTS`**. A case-only rename therefore succeeds on a case-sensitive filesystem and is refused on a case-insensitive one, without overwriting either way.
+- Mutations carry no content hash: deletion is irreversible within the app and the UI requires explicit confirmation. Cross-device moves fail safely rather than falling back to copy-and-delete.
+
+### Errors
+
+Both write routes (and `GET /api/file`) return `{ "code": "...", "error": "..." }` with stable codes: **400** `INVALID_BODY`, `INVALID_OP`, `INVALID_SOURCE`, `INVALID_PATH`, `INVALID_CONTENT`, `INVALID_HASH`; **404** `NOT_FOUND`; **409** `HASH_CONFLICT`, `DESTINATION_EXISTS`, `FOLDER_NOT_EMPTY`, `NO_CHANGE`; **413** `REQUEST_TOO_LARGE`; **415** `UNSUPPORTED_MEDIA_TYPE`; **500** `READ_FAILED`, `WRITE_FAILED`, `MUTATION_FAILED`. Messages never include absolute paths, stack traces or document content. There is no cross-origin access; the API is a localhost tool.
 
 ### Filesystem boundary
 
@@ -115,7 +158,7 @@ The page shows a header with Refresh, a breadcrumb bar (Home / source / folder �
 
 ## Document view
 
-Opening a file from the graph or the outline replaces the browsing workspace with a read-only document view. There is no permanent preview pane.
+Opening a file from the graph or the outline replaces the browsing workspace with the document view. There is no permanent preview pane.
 
 - **Identity**: the heading shows the filename and the line below it the source and full relative path, so `workflow.md` in Pi and in Claude are never confused. Breadcrumbs link to Home, the source root and each ancestor folder; the filename is the current item and not a link.
 - **URLs**: `/file/Pi/skills/review.md`, `/file/Claude/a%20b/c%23d%3F%25.md`. Every path segment is encoded individually and decoded exactly once, so spaces, `#`, `?`, `%`, Unicode and nested paths survive direct links, reloads and Back/Forward. A malformed link shows an invalid-link explanation with links to Home and the source roots. Whether a file is readable is decided by `GET /api/file` at open time, never by a cached listing.
@@ -125,6 +168,37 @@ Opening a file from the graph or the outline replaces the browsing workspace wit
 - **Images**: HTTPS images are loaded. **Privacy note:** loading a remote image contacts that third-party server from your browser. Relative images are not served in this slice and appear as an accessible “image unavailable” placeholder; they are never resolved against the app's routes or fetched through an asset endpoint (deferred until a fixture needs one).
 - **States**: loading (“Loading name…”, announced), empty, not found or unavailable (Back to folder), invalid link, and failed read or unreachable API (Retry and Back to folder). A stale response can never replace a newer selection or reopen a document after navigating away, and a failed load keeps the saved browsing context.
 - Light/dark theme follows the system preference; long code lines and wide tables scroll inside the document rather than the page.
+
+## Editing
+
+Editing is explicit and the fixtures are editable: what you save is written to `fixtures/pi/` or `fixtures/claude/` (or the configured root).
+
+- **Edit** appears once a document has loaded. It is unavailable for files that cannot be round-tripped byte for byte: mixed or bare-CR line endings, or bytes that are not valid UTF-8 (detected by comparing the re-encoded text's SHA-256 with the server's hash). Such files stay read-only with an explanation.
+- The editor is CodeMirror with Markdown highlighting and **Edit** / **Preview** tabs; Preview renders the current draft with the same safe renderer as the document view. Switching tabs never saves or discards anything.
+- **No autosave.** Nothing is written on keystrokes, tab switches, navigation or timers. Save with the **Save** button or **Ctrl/Cmd+S** (the browser's Save Page is suppressed while editing). Unchanged text is written back byte for byte, including CRLF endings, a BOM and a missing final newline; new lines take the file's own line ending.
+- Status is shown next to the buttons: **Unsaved**, **Saving**, **Saved** or **Error**. Saved is only shown once the server has acknowledged exactly the current draft; edits made during a save keep the status at Unsaved after it completes.
+- One save is in flight at a time. Pressing Save again while one is pending queues one snapshot (the latest requested draft replaces it) and sends it with the hash the first save returned. A failure or conflict empties the queue and never retries on its own.
+- **Failed save**: the draft, including edits made during the failed request, is kept. **Retry** re-sends with the last acknowledged hash; if the earlier write actually reached the disk, the retry reports a conflict rather than overwriting silently. **Copy draft** copies the current draft, with a selectable-text fallback when the clipboard is unavailable.
+- **Conflict** (the file changed on disk since it was read or last saved): Save and Revert are blocked, the draft is kept, and **Reload** (after confirmation) discards the draft and starts a fresh editing session from the file on disk. A failed reload keeps the draft and the conflict.
+- **Revert** saves the content the file had when Edit was pressed (not the last save), after confirmation, through the same hash check. It is unavailable while a save is pending or while conflicted.
+- **Done** leaves editing mode and shows the saved content.
+
+### Recovery limits
+
+- In-app navigation that would abandon a dirty draft (breadcrumbs, Back to folder, Done) asks **Discard changes?**; Cancel keeps the draft, the URL and focus. While a save is pending those actions are refused until it settles.
+- The browser's own leave-page warning is registered while there is unsaved or unacknowledged work; browsers decide whether and how to show it.
+- Browser Back/Forward are **not** intercepted: unsaved drafts, including after a failed save, are lost when history navigation leaves the editor, and returning reads the file from disk. Drafts are never persisted across reloads or browser closure. A request already sent may still complete after you leave.
+- Deleted files and folders have no recovery in the app: there is no trash, backup or version history. For the committed fixtures, git is the only safety net.
+
+## File and folder operations
+
+The **File operations** toolbar acts on the selected source or folder while browsing: **New file…**, **New folder…**, and, for folders other than a source root, **Rename…**, **Move…** and **Delete…**. The document header offers **Rename…**, **Move…**, **Delete…** and **Copy to Pi/Claude…** for the open file. Every operation uses a labelled dialog with Cancel; only one request is submitted per dialog and repeated confirmation is disabled while it is pending.
+
+- Names must be single components (no `/`); files end in `.md`, folders do not. The dialog validates first, and the server remains authoritative: its errors (already exists, not empty, not found) are shown in the dialog.
+- Rename keeps the folder; Move chooses another folder of the same source from a list (never an arbitrary path); Delete shows the full source and relative path and cannot be undone; only empty folders can be renamed, moved or deleted, and nothing recurses.
+- Copy sends the **saved bytes on disk** to the other source, never the unsaved editor buffer; the button says so while a draft is dirty and is disabled while a save is pending. Frontmatter is copied as is and may not be accepted by the other agent.
+- The open file cannot be renamed, moved or deleted while it has unsaved changes, an unresolved conflict or a pending save; the app explains that you must save or discard first and does neither for you.
+- After success the listing is refetched without resetting expansion, pins or positions. Creating a file opens it, creating a folder reveals and selects it, renaming or moving the open file updates its URL, deleting it returns to its folder, and copying keeps the original open and reports the destination. If the operation succeeded but the refresh failed, both facts are reported with a Refresh button; the operation is never offered again as a retry.
 
 ## Accessibility
 
@@ -136,4 +210,4 @@ Opening a file from the graph or the outline replaces the browsing workspace wit
 
 ## Out of scope
 
-No editing, saving or autosave, no create/rename/move/copy/delete, no relative-image or asset serving, no following of relative document links, no search or filters, no reference/dependency edges, no persistence of layout positions or scroll positions across reloads, and no access to live agent directories.
+No autosave, automatic formatting, draft persistence, version history, trash or automatic conflict merging; no recursive or bulk folder operations, image uploads, relative-image or asset serving, following of relative document links, search or filters, reference/dependency edges, persistence of layout positions or scroll positions across reloads, multi-user collaboration or access to live agent directories.

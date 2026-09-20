@@ -2,6 +2,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import './App.css'
 import { Breadcrumbs } from './graph/Breadcrumbs.tsx'
 import { DocumentView } from './document/DocumentView.tsx'
+import { ConfirmDialog } from './document/ConfirmDialog.tsx'
+import type { EditingState } from './document/EditingSession.tsx'
+import type { MutationResponse } from './operations/api.ts'
+import { OperationDialog, type Operation } from './operations/OperationDialog.tsx'
 import { useDocument } from './document/useDocument.ts'
 import { GraphCanvas, type GraphCanvasHandle, type View, type ViewRequest } from './graph/GraphCanvas.tsx'
 import { GraphLayout, type LayoutSnapshot } from './graph/layout.ts'
@@ -102,6 +106,8 @@ function App() {
   const [mode, setMode] = useState<Mode>('graph')
   const [browsingRevision, setBrowsingRevision] = useState(0)
   const [announcement, setAnnouncement] = useState('')
+  const [operation, setOperation] = useState<{ request: Operation; context: number } | null>(null)
+  const [discardAction, setDiscardAction] = useState<{ run: () => void } | null>(null)
   const [viewRequest, setViewRequest] = useState<ViewRequest | null>(null)
   const canvasRef = useRef<GraphCanvasHandle>(null)
   const requestToken = useRef(0)
@@ -112,12 +118,15 @@ function App() {
   // History carries only opaque keys; snapshots live in this page session, never across reloads.
   const [initialHistoryKey] = useState(() => crypto.randomUUID())
   const historyKey = useRef(initialHistoryKey)
+  // Monotonic navigation context: leaving and returning to the same history entry still abandons async navigation.
+  const navigationRevision = useRef(0)
   const historyEntries = useRef(new Map<string, HistoryEntry>())
   useLayoutEffect(() => {
     historyEntries.current.set(initialHistoryKey, { pathname: window.location.pathname })
     window.history.replaceState({ mdManager: initialHistoryKey }, '', window.location.pathname)
   }, [initialHistoryKey])
   const writeHistory = useCallback((entry: Omit<HistoryEntry, 'pathname'>, pathname: string, replace = false) => {
+    navigationRevision.current += 1
     const key = replace ? historyKey.current : crypto.randomUUID()
     historyEntries.current.set(key, { ...entry, pathname })
     historyKey.current = key
@@ -167,25 +176,36 @@ function App() {
     void loadEntries()
   }, [loadEntries])
 
-  const refresh = useCallback(async () => {
-    if (data.status !== 'ready' || data.refreshing) return
-    setData({ ...data, refreshing: true })
-    setAnnouncement('Refreshing the listing.')
+  /** Refetches the listing while keeping selection, expansion and pins. Resolves with the new index or null on failure. */
+  const reloadListing = useCallback(async (): Promise<TreeIndex | null> => {
+    setData(previous => (previous.status === 'ready' ? { ...previous, refreshing: true } : previous))
     try {
       const entries = await fetchEntries()
       const index = buildIndex(entries)
       setExpanded(previous => pruneIds(index, previous))
       layout.prune(new Set(index.nodes.keys()))
+      indexRef.current = index
       setData({ status: 'ready', index, refreshing: false, refreshError: null })
-      const current = locationRef.current
-      const missing = current.kind === 'folder' && !folderExists(index, current.ref)
-      setAnnouncement(missing ? 'Refreshed. The selected folder no longer exists.' : `Refreshed: ${summary(index)}.`)
+      return index
     } catch (error) {
       const message = errorMessage(error)
       setData(previous => (previous.status === 'ready' ? { ...previous, refreshing: false, refreshError: message } : previous))
-      setAnnouncement('Refresh failed. Showing the previous listing, which may be outdated.')
+      return null
     }
-  }, [data, layout])
+  }, [layout])
+
+  const refresh = useCallback(async () => {
+    if (data.status !== 'ready' || data.refreshing) return
+    setAnnouncement('Refreshing the listing.')
+    const index = await reloadListing()
+    if (!index) {
+      setAnnouncement('Refresh failed. Showing the previous listing, which may be outdated.')
+      return
+    }
+    const current = locationRef.current
+    const missing = current.kind === 'folder' && !folderExists(index, current.ref)
+    setAnnouncement(missing ? 'Refreshed. The selected folder no longer exists.' : `Refreshed: ${summary(index)}.`)
+  }, [data, reloadListing])
 
   const captureBrowsing = useCallback((focusId: string | null = null): ReturnContext => ({
     pathname: historyEntries.current.get(historyKey.current)!.pathname, location: locationRef.current, focusId,
@@ -232,6 +252,9 @@ function App() {
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
+      navigationRevision.current += 1
+      setOperation(null)
+      setDiscardAction(null)
       saveBrowsingRef.current()
       const entry = historyEntries.current.get(event.state?.mdManager)
       if (entry) historyKey.current = event.state.mdManager
@@ -263,6 +286,31 @@ function App() {
     onLoaded: document => setAnnouncement(`Loaded ${fileName(document)}.`),
     onFailed: (ref, kind) => setAnnouncement(kind === 'missing' ? `${fileName(ref)} was not found.` : `Loading ${fileName(ref)} failed.`),
   })
+  // Editing state of the open document, for navigation guards and file-operation eligibility.
+  const [editingState, setEditingState] = useState<EditingState | null>(null)
+  const editingRef = useRef<EditingState | null>(null)
+  useEffect(() => { editingRef.current = editingState }, [editingState])
+  const announce = useCallback((message: string) => setAnnouncement(message), [])
+  const [pendingNotice, setPendingNotice] = useState(false)
+  // The notice is derived: it only shows while the refused action's save is still pending.
+  const showPendingNotice = pendingNotice && editingState?.pending === true
+  /**
+   * App-controlled actions that would abandon the editing session: refused while a save is pending,
+   * confirmed while the draft is dirty, otherwise run immediately. Browser history is never intercepted.
+   */
+  const guardLeave = useCallback((leave: () => void) => {
+    const editing = editingRef.current
+    if (editing?.pending) {
+      setPendingNotice(true)
+      setAnnouncement('A save is in progress. Wait for it to finish before leaving this file.')
+      return
+    }
+    if (editing?.dirty) {
+      setDiscardAction({ run: leave })
+      return
+    }
+    leave()
+  }, [])
   const openFile = useCallback((node: GraphNode) => {
     if (node.kind !== 'file') return
     const ref: FileRef = { source: node.source, path: node.path }
@@ -273,7 +321,7 @@ function App() {
     setLocation({ kind: 'file', ref })
   }, [writeHistory])
 
-  const backToFolder = useCallback(() => {
+  const leaveFile = useCallback(() => {
     const current = locationRef.current
     if (current.kind !== 'file') return
     const context = historyEntries.current.get(historyKey.current)?.origin
@@ -287,6 +335,8 @@ function App() {
       navigate(parentFolderOf(current.ref), { reveal: true })
     }
   }, [navigate, restoreBrowsing, writeHistory])
+  const backToFolder = useCallback(() => guardLeave(leaveFile), [guardLeave, leaveFile])
+  const navigateFromBreadcrumb = useCallback((ref: FolderRef | null) => guardLeave(() => navigate(ref, { reveal: true })), [guardLeave, navigate])
 
   // Focus the originating file action once the browsing view has rendered it again.
   useEffect(() => {
@@ -302,6 +352,99 @@ function App() {
       pendingFocus.current = null
     }
   })
+
+  // ---- File and folder operations ----
+  const [operationNotice, setOperationNotice] = useState<string | null>(null)
+  const [outcome, setOutcome] = useState<{ message: string; refreshFailed: boolean } | null>(null)
+  const requestFolderOperation = useCallback((op: 'create-file' | 'create-folder' | 'rename' | 'move' | 'delete') => {
+    const current = locationRef.current
+    const ref: FolderRef | null = current.kind === 'folder' ? current.ref : null
+    if (!ref) return
+    setOperationNotice(null)
+    if (op === 'create-file' || op === 'create-folder') setOperation({ request: { op, parent: ref }, context: navigationRevision.current })
+    else if (ref.path) setOperation({ request: { op, target: { kind: 'folder', ref } }, context: navigationRevision.current })
+  }, [])
+  const requestFileOperation = useCallback((op: 'rename' | 'move' | 'delete' | 'copy') => {
+    const current = locationRef.current
+    if (current.kind !== 'file') return
+    const editing = editingRef.current
+    const name = fileName(current.ref)
+    if (op !== 'copy' && editing && (editing.dirty || editing.pending || editing.conflicted)) {
+      const reason = editing.pending ? 'a save is still pending' : editing.conflicted ? 'its draft conflicts with the file on disk' : 'it has unsaved changes'
+      setOperationNotice(`${name} cannot be ${op === 'delete' ? 'deleted' : `${op}d`} while ${reason}. Save or discard the draft first; nothing is saved or discarded for you.`)
+      setAnnouncement(`${name} has unsaved changes. Save or discard them first.`)
+      return
+    }
+    if (op === 'copy' && editing?.pending) return
+    setOperationNotice(null)
+    const target = { kind: 'file' as const, ref: current.ref, draftDirty: editing?.dirty === true }
+    setOperation({ request: op === 'copy' ? { op, target } : { op, target }, context: navigationRevision.current })
+  }, [])
+  const openCreatedFile = useCallback((ref: FileRef) => {
+    const origin = saveBrowsingRef.current(null)
+    pendingFocus.current = null
+    writeHistory({ origin }, fileToPathname(ref))
+    setLocation({ kind: 'file', ref })
+  }, [writeHistory])
+  const completeOperation = useCallback(async (done: Operation, response: MutationResponse, context: number) => {
+    setOperation(current => current?.request === done ? null : current)
+    // A successful request still refreshes the listing and reports its outcome after departure,
+    // but can only navigate in its originating context, never over newer edits or pending saves.
+    const follow = (action: () => void) => {
+      const editing = editingRef.current
+      if (navigationRevision.current !== context || editing?.dirty || editing?.pending || editing?.conflicted) return
+      guardLeave(action)
+    }
+    const source = response.source
+    const name = fileName({ source, path: response.path })
+    const where = (path: string) => (path ? `${source} / ${path}` : source)
+    let message: string
+    // Identity changes of the open document are applied first so the document view never shows a stale path.
+    if ((done.op === 'rename' || done.op === 'move') && done.target.kind === 'file' && response.destinationPath) {
+      const ref: FileRef = { source, path: response.destinationPath }
+      follow(() => {
+        const entry = historyEntries.current.get(historyKey.current)
+        writeHistory({ origin: entry?.origin }, fileToPathname(ref), true)
+        setLocation({ kind: 'file', ref })
+      })
+    }
+    const index = await reloadListing()
+    switch (done.op) {
+      case 'create-file': {
+        message = `Created ${name} in ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
+        follow(() => openCreatedFile({ source, path: response.path }))
+        break
+      }
+      case 'create-folder': {
+        message = `Created folder ${name} in ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
+        if (index) follow(() => navigate({ source, path: response.path }, { reveal: true }))
+        break
+      }
+      case 'rename':
+      case 'move': {
+        message = `${done.op === 'rename' ? 'Renamed' : 'Moved'} ${name} to ${where(response.destinationPath ?? response.path)}.`
+        if (done.target.kind === 'folder' && response.destinationPath) {
+          const path = response.destinationPath
+          follow(() => navigate({ source, path }, { replace: true, reveal: true }))
+        }
+        break
+      }
+      case 'delete': {
+        message = `Deleted ${name} from ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
+        const parent: FolderRef = { source, path: response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))) }
+        follow(() => {
+          pendingFocus.current = refId(parent)
+          navigate(parent, { reveal: true })
+        })
+        break
+      }
+      case 'copy':
+        message = `Copied ${name} to ${response.destinationSource} / ${response.destinationPath}.`
+        break
+    }
+    setOutcome({ message, refreshFailed: index === null })
+    setAnnouncement(index === null ? `${message} The listing could not be refreshed.` : message)
+  }, [guardLeave, navigate, openCreatedFile, reloadListing, writeHistory])
 
   const index = data.status === 'ready' ? data.index : null
   const selectedRef = location.kind === 'folder' ? location.ref : null
@@ -370,7 +513,7 @@ function App() {
       <header className="app-header">
         <div className="app-title">
           <h1>MD Manager</h1>
-          <p>Pi and Claude fixture folders as a containment graph. Read-only.</p>
+          <p>Pi and Claude fixture folders as a containment graph. Edits are saved only when you press Save.</p>
         </div>
         <button type="button" className="button" onClick={() => void refresh()} disabled={!ready || refreshing} aria-busy={refreshing}>
           {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -379,14 +522,47 @@ function App() {
 
       <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
 
-      {data.status === 'ready' && data.refreshError && (
+      {showPendingNotice && (
+        <div className="banner banner-error" role="alert">
+          A save is in progress. Wait for it to finish before leaving this file; if it fails you can retry or copy the draft.
+        </div>
+      )}
+      {discardAction && (
+        <ConfirmDialog title="Discard changes?" confirmLabel="Discard" destructive onConfirm={() => { const action = discardAction; setDiscardAction(null); action.run() }} onCancel={() => setDiscardAction(null)}>
+          <p>This file has unsaved changes. Leaving now discards them; they cannot be recovered afterwards. Cancel to keep editing, or save first.</p>
+        </ConfirmDialog>
+      )}
+
+      {operationNotice && (
+        <div className="banner banner-error" role="alert">
+          {operationNotice}
+          <button type="button" className="button button-small" onClick={() => setOperationNotice(null)}>Dismiss</button>
+        </div>
+      )}
+      {outcome && (outcome.refreshFailed ? (
+        <div className="banner banner-error" role="alert" data-testid="operation-outcome">
+          {outcome.message} The listing could not be refreshed afterwards, so the graph may be outdated: use Refresh once the API is reachable. Do not repeat the operation.
+          <button type="button" className="button button-small" onClick={() => { setOutcome(null); void refresh() }} disabled={!ready}>Refresh</button>
+          <button type="button" className="button button-small" onClick={() => setOutcome(null)}>Dismiss</button>
+        </div>
+      ) : (
+        <div className="banner banner-info" data-testid="operation-outcome">
+          {outcome.message}
+          <button type="button" className="button button-small" onClick={() => setOutcome(null)}>Dismiss</button>
+        </div>
+      ))}
+      {operation && index && (
+        <OperationDialog operation={operation.request} index={index} onCancel={() => setOperation(null)} onSuccess={(done, response) => { void completeOperation(done, response, operation.context) }} />
+      )}
+
+      {data.status === 'ready' && data.refreshError && !outcome?.refreshFailed && (
         <div className="banner banner-error" role="alert">
           Refresh failed: {data.refreshError} The graph still shows the previous listing, which may be outdated. Try Refresh again once the API and fixture folders are available.
         </div>
       )}
 
       <div className="navigation">
-        <Breadcrumbs selected={selectedRef} file={fileRef} onNavigate={ref => navigate(ref, { reveal: true })} />
+        <Breadcrumbs selected={selectedRef} file={fileRef} onNavigate={navigateFromBreadcrumb} />
         {fileRef ? null : missingNotice ? (
           <div className="missing" role="alert">
             <p>{missingNotice}</p>
@@ -410,18 +586,37 @@ function App() {
       </div>
 
       {browsing && (
-        <div className="toolbar" role="toolbar" aria-label="Graph controls">
-          <button type="button" className="button" onClick={() => canvasRef.current?.zoomIn()} disabled={!graphControlsEnabled} aria-label="Zoom in">+</button>
-          <button type="button" className="button" onClick={() => canvasRef.current?.zoomOut()} disabled={!graphControlsEnabled} aria-label="Zoom out">−</button>
-          <button type="button" className="button" onClick={() => canvasRef.current?.fit()} disabled={!graphControlsEnabled}>Fit</button>
-          <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
-          <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
+        <div className="toolbars">
+          <div className="toolbar" role="toolbar" aria-label="Graph controls">
+            <button type="button" className="button" onClick={() => canvasRef.current?.zoomIn()} disabled={!graphControlsEnabled} aria-label="Zoom in">+</button>
+            <button type="button" className="button" onClick={() => canvasRef.current?.zoomOut()} disabled={!graphControlsEnabled} aria-label="Zoom out">−</button>
+            <button type="button" className="button" onClick={() => canvasRef.current?.fit()} disabled={!graphControlsEnabled}>Fit</button>
+            <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
+            <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
+          </div>
+          <div className="toolbar" role="toolbar" aria-label="File operations">
+            <button type="button" className="button" onClick={() => requestFolderOperation('create-file')} disabled={!selectedExists}>New file…</button>
+            <button type="button" className="button" onClick={() => requestFolderOperation('create-folder')} disabled={!selectedExists}>New folder…</button>
+            <button type="button" className="button" onClick={() => requestFolderOperation('rename')} disabled={!selectedExists || !selectedRef?.path}>Rename…</button>
+            <button type="button" className="button" onClick={() => requestFolderOperation('move')} disabled={!selectedExists || !selectedRef?.path}>Move…</button>
+            <button type="button" className="button" onClick={() => requestFolderOperation('delete')} disabled={!selectedExists || !selectedRef?.path}>Delete…</button>
+          </div>
         </div>
       )}
 
       <main className={browsing ? 'workspace' : 'workspace workspace-document'} aria-busy={browsing && data.status === 'loading'}>
         {fileRef && documentState && (
-          <DocumentView fileRef={fileRef} state={documentState} onBack={backToFolder} onRetry={retryDocument} />
+          <DocumentView
+            fileRef={fileRef}
+            state={documentState}
+            editingState={editingState}
+            onBack={backToFolder}
+            onRetry={retryDocument}
+            onAnnounce={announce}
+            onEditingChange={setEditingState}
+            onOperation={requestFileOperation}
+            guardLeave={guardLeave}
+          />
         )}
         {browsing && data.status === 'loading' && (
           <div className="placeholder">
