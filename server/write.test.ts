@@ -5,7 +5,12 @@ import fs, { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeF
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createApp, defaultFixtureRoot } from './app.ts'
+import { createApp } from './app.ts'
+import { defaultFixtureRoot, fixtureLocations } from './config.ts'
+
+const PI = 'pi-fixtures'
+const CLAUDE = 'claude-fixtures'
+const loc = (source: string) => (source === 'Pi' ? PI : CLAUDE)
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -38,28 +43,28 @@ test('PUT writes exact UTF-8 bytes, returns the written hash, and the next read 
     await writeFile(join(root, 'pi', 'note.md'), original)
     await mkdir(join(root, 'claude', 'nested'))
     await writeFile(join(root, 'claude', 'nested', 'NOTE.MD'), 'claude original')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const updated = '# Updated — 日本語 🚀\n\nbody'
-      const response = await put(app, { source: 'Pi', path: 'note.md', content: updated, expectedHash: sha256(original) })
+      const response = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: updated, expectedHash: sha256(original) })
       assert.equal(response.statusCode, 200, response.body)
       assert.equal(response.headers['cache-control'], 'no-store')
-      assert.deepEqual(response.json(), { source: 'Pi', path: 'note.md', hash: sha256(Buffer.from(updated, 'utf8')) })
+      assert.deepEqual(response.json(), { source: 'Pi', locationId: PI, path: 'note.md', hash: sha256(Buffer.from(updated, 'utf8')) })
       assert.equal((await readFile(join(root, 'pi', 'note.md'))).toString('utf8'), updated)
 
-      const read = await app.inject('/api/file?source=Pi&path=note.md')
+      const read = await app.inject('/api/file?source=Pi&locationId=pi-fixtures&path=note.md')
       assert.equal(read.json().content, updated)
       assert.equal(read.json().hash, response.json().hash)
 
       // The returned hash is the acknowledged hash for the next write.
-      const again = await put(app, { source: 'Pi', path: 'note.md', content: 'third', expectedHash: response.json().hash })
+      const again = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'third', expectedHash: response.json().hash })
       assert.equal(again.statusCode, 200)
       assert.equal(await readFile(join(root, 'pi', 'note.md'), 'utf8'), 'third')
 
       // Nested, uppercase .MD, other source.
-      const nested = await put(app, { source: 'Claude', path: 'nested/NOTE.MD', content: 'claude updated', expectedHash: sha256('claude original') })
+      const nested = await put(app, { source: 'Claude', locationId: CLAUDE, path: 'nested/NOTE.MD', content: 'claude updated', expectedHash: sha256('claude original') })
       assert.equal(nested.statusCode, 200)
-      assert.deepEqual(nested.json(), { source: 'Claude', path: 'nested/NOTE.MD', hash: sha256('claude updated') })
+      assert.deepEqual(nested.json(), { source: 'Claude', locationId: CLAUDE, path: 'nested/NOTE.MD', hash: sha256('claude updated') })
       assert.equal(await readFile(join(root, 'claude', 'nested', 'NOTE.MD'), 'utf8'), 'claude updated')
       assert.equal(await readFile(join(root, 'pi', 'note.md'), 'utf8'), 'third')
     } finally { await app.close() }
@@ -69,7 +74,7 @@ test('PUT writes exact UTF-8 bytes, returns the written hash, and the next read 
 test('PUT preserves empty content, whitespace, CRLF, BOM and a missing final newline byte-for-byte', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'note.md'), 'start')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       let hash = sha256('start')
       const contents = [
@@ -82,7 +87,7 @@ test('PUT preserves empty content, whitespace, CRLF, BOM and a missing final new
         '---\ntitle: kept\n---\n# Frontmatter stays\n',
       ]
       for (const content of contents) {
-        const response = await put(app, { source: 'Pi', path: 'note.md', content, expectedHash: hash })
+        const response = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content, expectedHash: hash })
         assert.equal(response.statusCode, 200, JSON.stringify(content))
         const bytes = await readFile(join(root, 'pi', 'note.md'))
         assert.deepEqual(bytes, Buffer.from(content, 'utf8'), JSON.stringify(content))
@@ -96,15 +101,15 @@ test('PUT preserves empty content, whitespace, CRLF, BOM and a missing final new
 test('a stale expected hash returns 409 HASH_CONFLICT and leaves the disk bytes untouched', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'note.md'), 'first')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      const firstRead = (await app.inject('/api/file?source=Pi&path=note.md')).json()
-      const secondRead = (await app.inject('/api/file?source=Pi&path=note.md')).json()
+      const firstRead = (await app.inject('/api/file?source=Pi&locationId=pi-fixtures&path=note.md')).json()
+      const secondRead = (await app.inject('/api/file?source=Pi&locationId=pi-fixtures&path=note.md')).json()
       assert.equal(firstRead.hash, secondRead.hash)
-      const saved = await put(app, { source: 'Pi', path: 'note.md', content: 'second', expectedHash: firstRead.hash })
+      const saved = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'second', expectedHash: firstRead.hash })
       assert.equal(saved.statusCode, 200)
 
-      const stale = await put(app, { source: 'Pi', path: 'note.md', content: 'LOST UPDATE', expectedHash: secondRead.hash })
+      const stale = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'LOST UPDATE', expectedHash: secondRead.hash })
       assert.equal(stale.statusCode, 409)
       assert.equal(stale.json().code, 'HASH_CONFLICT')
       assert.equal(typeof stale.json().error, 'string')
@@ -114,7 +119,7 @@ test('a stale expected hash returns 409 HASH_CONFLICT and leaves the disk bytes 
 
       // An external change also invalidates the last acknowledged hash.
       await writeFile(join(root, 'pi', 'note.md'), 'external')
-      const afterExternal = await put(app, { source: 'Pi', path: 'note.md', content: 'LOST UPDATE', expectedHash: saved.json().hash })
+      const afterExternal = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'LOST UPDATE', expectedHash: saved.json().hash })
       assert.equal(afterExternal.statusCode, 409)
       assert.equal(afterExternal.json().code, 'HASH_CONFLICT')
       assert.equal(await readFile(join(root, 'pi', 'note.md'), 'utf8'), 'external')
@@ -126,12 +131,12 @@ test('a stale expected hash returns 409 HASH_CONFLICT and leaves the disk bytes 
 test('two concurrent saves with the same hash: exactly one succeeds and the file holds the winner', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'note.md'), 'base')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const hash = sha256('base')
       const [a, b] = await Promise.all([
-        put(app, { source: 'Pi', path: 'note.md', content: 'writer A', expectedHash: hash }),
-        put(app, { source: 'Pi', path: 'note.md', content: 'writer B', expectedHash: hash }),
+        put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'writer A', expectedHash: hash }),
+        put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'writer B', expectedHash: hash }),
       ])
       const statuses = [a.statusCode, b.statusCode].sort()
       assert.deepEqual(statuses, [200, 409])
@@ -148,13 +153,13 @@ test('two concurrent saves with the same hash: exactly one succeeds and the file
 
 test('the replaced file keeps the original permission mode', async () => {
   await withTempRoot(async root => {
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       for (const mode of [0o600, 0o640, 0o664, 0o755]) {
         const name = `mode-${mode.toString(8)}.md`
         await writeFile(join(root, 'pi', name), 'before')
         await chmod(join(root, 'pi', name), mode)
-        const response = await put(app, { source: 'Pi', path: name, content: 'after', expectedHash: sha256('before') })
+        const response = await put(app, { source: 'Pi', locationId: PI, path: name, content: 'after', expectedHash: sha256('before') })
         assert.equal(response.statusCode, 200)
         assert.equal((await stat(join(root, 'pi', name))).mode & 0o777, mode)
         assert.equal(await readFile(join(root, 'pi', name), 'utf8'), 'after')
@@ -181,11 +186,11 @@ test('the temp file is created exclusively in the same directory, never ends in 
   await withTempRoot(async root => {
     await mkdir(join(root, 'pi', 'skills'))
     await writeFile(join(root, 'pi', 'skills', 'review.md'), 'before')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       await app.ready()
       const { created, handles } = trackTempCreates()
-      const response = await put(app, { source: 'Pi', path: 'skills/review.md', content: 'after', expectedHash: sha256('before') })
+      const response = await put(app, { source: 'Pi', locationId: PI, path: 'skills/review.md', content: 'after', expectedHash: sha256('before') })
       assert.equal(response.statusCode, 200)
       assert.equal(created.length, 1)
       const tempName = created[0].slice(created[0].lastIndexOf('/') + 1)
@@ -205,7 +210,7 @@ for (const stage of ['write', 'chmod', 'rename'] as const) {
     await withTempRoot(async root => {
       await writeFile(join(root, 'pi', 'note.md'), 'original bytes')
       await chmod(join(root, 'pi', 'note.md'), 0o640)
-      const app = createApp(root)
+      const app = createApp(fixtureLocations(root))
       const open = fs.open
       try {
         await app.ready()
@@ -223,7 +228,7 @@ for (const stage of ['write', 'chmod', 'rename'] as const) {
             return handle
           })
         }
-        const response = await put(app, { source: 'Pi', path: 'note.md', content: 'new bytes', expectedHash: sha256('original bytes') })
+        const response = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'new bytes', expectedHash: sha256('original bytes') })
         assert.ok(injected, 'failure was injected')
         assert.equal(response.statusCode, 500)
         assert.equal(response.json().code, 'WRITE_FAILED')
@@ -236,7 +241,7 @@ for (const stage of ['write', 'chmod', 'rename'] as const) {
         assert.deepEqual(await readdir(join(root, 'pi')), ['note.md'])
         // The file is still writable afterwards with the unchanged hash.
         mock.restoreAll()
-        const retry = await put(app, { source: 'Pi', path: 'note.md', content: 'new bytes', expectedHash: sha256('original bytes') })
+        const retry = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'new bytes', expectedHash: sha256('original bytes') })
         assert.equal(retry.statusCode, 200)
       } finally { mock.restoreAll(); await app.close() }
     })
@@ -246,7 +251,7 @@ for (const stage of ['write', 'chmod', 'rename'] as const) {
 test('an external change during staging is detected before replacement and returns 409 without overwriting it', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'note.md'), 'original bytes')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     const open = fs.open
     try {
       await app.ready()
@@ -259,7 +264,7 @@ test('an external change during staging is detected before replacement and retur
         }
         return handle
       })
-      const response = await put(app, { source: 'Pi', path: 'note.md', content: 'app writer', expectedHash: sha256('original bytes') })
+      const response = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'app writer', expectedHash: sha256('original bytes') })
       assert.ok(changed)
       assert.equal(response.statusCode, 409)
       assert.equal(response.json().code, 'HASH_CONFLICT')
@@ -272,10 +277,10 @@ test('an external change during staging is detected before replacement and retur
 test('invalid bodies are rejected with 400 and a stable code, without touching the disk', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'note.md'), 'untouched')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const hash = sha256('untouched')
-      const valid = { source: 'Pi', path: 'note.md', content: 'x', expectedHash: hash }
+      const valid = { source: 'Pi', locationId: PI, path: 'note.md', content: 'x', expectedHash: hash }
       const cases: Array<[string, unknown]> = [
         ['array', [valid]],
         ['string body', '"text"'],
@@ -340,7 +345,7 @@ test('PUT never creates files and refuses directories, non-Markdown, non-regular
     const socketPath = join(root, 'pi', 'socket.md')
     const socket = createServer()
     await new Promise<void>((resolve, reject) => socket.once('error', reject).listen(socketPath, resolve))
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const cases: Array<[string, string, string]> = [
         ['Pi', 'missing.md', sha256('')],
@@ -356,7 +361,7 @@ test('PUT never creates files and refuses directories, non-Markdown, non-regular
         ['Claude', 'secret.md', sha256('OUTSIDE SOURCE')],
       ]
       for (const [source, path, expectedHash] of cases) {
-        const response = await put(app, { source, path, content: 'WRITTEN BY PUT', expectedHash })
+        const response = await put(app, { source, locationId: loc(source), path, content: 'WRITTEN BY PUT', expectedHash })
         assert.equal(response.statusCode, 404, `${source}/${path}`)
         assert.equal(response.json().code, 'NOT_FOUND', `${source}/${path}`)
         assert.ok(!response.body.includes(root))
@@ -380,15 +385,15 @@ test('JSON paths are literal: an encoded-looking filename is written as itself, 
     await writeFile(join(root, 'pi', '%2e%2e.md'), 'literal')
     await mkdir(join(root, 'claude', 'a b'))
     await writeFile(join(root, 'claude', 'a b', 'c#d?e%f.md'), 'special')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      const literal = await put(app, { source: 'Pi', path: '%2e%2e.md', content: 'still literal', expectedHash: sha256('literal') })
+      const literal = await put(app, { source: 'Pi', locationId: PI, path: '%2e%2e.md', content: 'still literal', expectedHash: sha256('literal') })
       assert.equal(literal.statusCode, 200)
       assert.equal(literal.json().path, '%2e%2e.md')
       assert.equal(await readFile(join(root, 'pi', '%2e%2e.md'), 'utf8'), 'still literal')
       assert.deepEqual(await readdir(join(root, 'pi')), ['%2e%2e.md'])
 
-      const special = await put(app, { source: 'Claude', path: 'a b/c#d?e%f.md', content: 'special 2', expectedHash: sha256('special') })
+      const special = await put(app, { source: 'Claude', locationId: CLAUDE, path: 'a b/c#d?e%f.md', content: 'special 2', expectedHash: sha256('special') })
       assert.equal(special.statusCode, 200)
       assert.equal(await readFile(join(root, 'claude', 'a b', 'c#d?e%f.md'), 'utf8'), 'special 2')
     } finally { await app.close() }
@@ -398,16 +403,16 @@ test('JSON paths are literal: an encoded-looking filename is written as itself, 
 test('documents over 100 KB save; bodies over the documented limit return 413 without changing the file', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'large.md'), 'small')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const large = `# Large\n${'0123456789 '.repeat(20_000)}\n`
       assert.ok(Buffer.byteLength(large) > 200_000)
-      const ok = await put(app, { source: 'Pi', path: 'large.md', content: large, expectedHash: sha256('small') })
+      const ok = await put(app, { source: 'Pi', locationId: PI, path: 'large.md', content: large, expectedHash: sha256('small') })
       assert.equal(ok.statusCode, 200)
       assert.equal(await readFile(join(root, 'pi', 'large.md'), 'utf8'), large)
 
       const oversized = 'x'.repeat(9 * 1024 * 1024)
-      const tooLarge = await put(app, { source: 'Pi', path: 'large.md', content: oversized, expectedHash: ok.json().hash })
+      const tooLarge = await put(app, { source: 'Pi', locationId: PI, path: 'large.md', content: oversized, expectedHash: ok.json().hash })
       assert.equal(tooLarge.statusCode, 413)
       assert.equal(tooLarge.json().code, 'REQUEST_TOO_LARGE')
       assert.equal(typeof tooLarge.json().error, 'string')
@@ -418,10 +423,10 @@ test('documents over 100 KB save; bodies over the documented limit return 413 wi
 })
 
 test('the committed fixtures are never written by the API test suite', async () => {
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
     const before = await hashOnDisk(join(defaultFixtureRoot, 'pi', 'workflow.md'))
-    const response = await put(app, { source: 'Pi', path: 'workflow.md', content: 'nope', expectedHash: sha256('not the real hash') })
+    const response = await put(app, { source: 'Pi', locationId: PI, path: 'workflow.md', content: 'nope', expectedHash: sha256('not the real hash') })
     assert.equal(response.statusCode, 409)
     assert.equal(await hashOnDisk(join(defaultFixtureRoot, 'pi', 'workflow.md')), before)
   } finally { await app.close() }
@@ -431,9 +436,9 @@ for (const name of ['a'.repeat(231) + '.md', 'a'.repeat(252) + '.md', '文'.repe
   test(`PUT supports a ${Buffer.byteLength(name)}-byte ${name.startsWith('文') ? 'UTF-8' : 'ASCII'} basename`, async () => {
     await withTempRoot(async root => {
       await writeFile(join(root, 'pi', name), 'before')
-      const app = createApp(root)
+      const app = createApp(fixtureLocations(root))
       try {
-        const response = await put(app, { source: 'Pi', path: name, content: 'after', expectedHash: sha256('before') })
+        const response = await put(app, { source: 'Pi', locationId: PI, path: name, content: 'after', expectedHash: sha256('before') })
         assert.equal(response.statusCode, 200, response.body)
         assert.equal(await readFile(join(root, 'pi', name), 'utf8'), 'after')
         assert.deepEqual(await readdir(join(root, 'pi')), [name])
@@ -448,7 +453,7 @@ for (const change of ['delete', 'symlink', 'io-error'] as const) {
       const target = join(root, 'pi', 'note.md')
       await writeFile(target, 'before')
       await writeFile(join(root, 'claude', 'outside.md'), 'outside')
-      const app = createApp(root)
+      const app = createApp(fixtureLocations(root))
       const open = fs.open
       let staged = false
       try {
@@ -463,7 +468,7 @@ for (const change of ['delete', 'symlink', 'io-error'] as const) {
           }
           return handle
         })
-        const response = await put(app, { source: 'Pi', path: 'note.md', content: 'app', expectedHash: sha256('before') })
+        const response = await put(app, { source: 'Pi', locationId: PI, path: 'note.md', content: 'app', expectedHash: sha256('before') })
         assert.ok(staged)
         assert.equal(response.statusCode, change === 'io-error' ? 500 : 409, response.body)
         assert.equal(response.json().code, change === 'io-error' ? 'WRITE_FAILED' : 'HASH_CONFLICT')
