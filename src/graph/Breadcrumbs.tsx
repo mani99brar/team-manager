@@ -1,17 +1,19 @@
 import { useState, type MouseEvent } from 'react'
-import { breadcrumbsFor, folderToPathname, type FolderRef } from './model.ts'
+import { breadcrumbsFor, breadcrumbsForFile, folderToPathname, type FileRef, type FolderRef } from './model.ts'
 
 type Props = {
   selected: FolderRef | null
+  /** When set, the trail leads to the file's folder and ends with the filename as a non-navigating item. */
+  file?: FileRef | null
   onNavigate: (ref: FolderRef | null) => void
 }
 
 const MAX_VISIBLE = 4
 
 /** Home / Source / folder … trail. Long trails collapse the middle behind an expandable “…” control. */
-export function Breadcrumbs({ selected, onNavigate }: Props) {
+export function Breadcrumbs({ selected, file = null, onNavigate }: Props) {
   const [showAll, setShowAll] = useState(false)
-  const crumbs = breadcrumbsFor(selected)
+  const crumbs = file ? breadcrumbsForFile(file) : breadcrumbsFor(selected)
   const collapsed = !showAll && crumbs.length > MAX_VISIBLE
   const hidden = collapsed ? crumbs.slice(1, crumbs.length - 2) : []
   const visible = collapsed ? [crumbs[0], ...crumbs.slice(crumbs.length - 2)] : crumbs
@@ -42,9 +44,13 @@ export function Breadcrumbs({ selected, onNavigate }: Props) {
                   <span className="breadcrumb-separator" aria-hidden="true">/</span>
                 </>
               )}
-              <a href={folderToPathname(crumb.ref)} aria-current={isCurrent ? 'page' : undefined} onClick={follow(crumb.ref)}>
-                {crumb.label}
-              </a>
+              {crumb.ref === undefined ? (
+                <span className="breadcrumb-current" aria-current="page">{crumb.label}</span>
+              ) : (
+                <a href={folderToPathname(crumb.ref)} aria-current={isCurrent ? 'page' : undefined} onClick={follow(crumb.ref)}>
+                  {crumb.label}
+                </a>
+              )}
               {!isCurrent && <span className="breadcrumb-separator" aria-hidden="true">/</span>}
             </li>
           )

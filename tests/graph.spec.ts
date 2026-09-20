@@ -50,10 +50,8 @@ test('expansion reveals immediate children with containment edges; collapse hide
   await expandButton(page, 'skills').click()
   await expect(node(page, 'Pi/skills/review.md')).toBeVisible()
   await expect(edge(page, 'Pi/skills', 'Pi/skills/review.md')).toBeVisible()
-  await expect(page.getByRole('group', { name: 'review.md, Markdown file' })).toBeVisible()
-  // File nodes are not buttons and never select a document.
-  await nodeBody(page, 'Pi/skills/review.md').click()
-  await expect(page).toHaveURL('/')
+  // File nodes are actions that open the document (covered in document.spec.ts); they never select a folder.
+  await expect(page.getByRole('button', { name: 'review.md, Markdown file', exact: true })).toBeVisible()
 
   // Pi and Claude are never connected to each other.
   await expandButton(page, 'Claude').click()

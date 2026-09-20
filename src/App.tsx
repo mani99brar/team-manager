@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { Breadcrumbs } from './graph/Breadcrumbs.tsx'
-import { GraphCanvas, type GraphCanvasHandle, type ViewRequest } from './graph/GraphCanvas.tsx'
-import { GraphLayout } from './graph/layout.ts'
+import { DocumentView } from './document/DocumentView.tsx'
+import { useDocument } from './document/useDocument.ts'
+import { GraphCanvas, type GraphCanvasHandle, type View, type ViewRequest } from './graph/GraphCanvas.tsx'
+import { GraphLayout, type LayoutSnapshot } from './graph/layout.ts'
 import { Outline } from './graph/Outline.tsx'
 import {
   buildIndex,
@@ -10,8 +12,11 @@ import {
   collapseNode,
   descendantIds,
   describeCounts,
+  fileToPathname,
   folderExists,
   folderToPathname,
+  nodeId,
+  parentFolderOf,
   parsePathname,
   pruneIds,
   refId,
@@ -19,6 +24,7 @@ import {
   sameRef,
   visibleGraph,
   type Entry,
+  type FileRef,
   type FolderRef,
   type GraphNode,
   type ParsedLocation,
@@ -31,6 +37,17 @@ type Data =
   | { status: 'ready'; index: TreeIndex; refreshing: boolean; refreshError: string | null }
 
 type Mode = 'graph' | 'outline'
+
+/** Where the user was browsing when a document was opened, so Back to folder can restore it exactly. */
+type ReturnContext = {
+  pathname: string; location: ParsedLocation; focusId: string | null
+  mode: Mode; expanded: string[]; layout: LayoutSnapshot; view: View | null; scroll: number
+}
+type HistoryEntry = { pathname: string; browsing?: ReturnContext; origin?: ReturnContext }
+
+function fileName(ref: FileRef): string {
+  return ref.path.slice(ref.path.lastIndexOf('/') + 1)
+}
 
 async function fetchEntries(signal?: AbortSignal): Promise<Entry[]> {
   const response = await fetch('/api/entries', { signal })
@@ -83,10 +100,30 @@ function App() {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
   const [location, setLocation] = useState<ParsedLocation>(() => parsePathname(window.location.pathname))
   const [mode, setMode] = useState<Mode>('graph')
+  const [browsingRevision, setBrowsingRevision] = useState(0)
   const [announcement, setAnnouncement] = useState('')
   const [viewRequest, setViewRequest] = useState<ViewRequest | null>(null)
   const canvasRef = useRef<GraphCanvasHandle>(null)
   const requestToken = useRef(0)
+  const handledRequest = useRef(0)
+  // Graph pan/zoom and outline scroll live here so they survive the workspace being replaced by a document.
+  const viewStore = useRef<View | null>(null)
+  const outlineScroll = useRef(0)
+  // History carries only opaque keys; snapshots live in this page session, never across reloads.
+  const [initialHistoryKey] = useState(() => crypto.randomUUID())
+  const historyKey = useRef(initialHistoryKey)
+  const historyEntries = useRef(new Map<string, HistoryEntry>())
+  useLayoutEffect(() => {
+    historyEntries.current.set(initialHistoryKey, { pathname: window.location.pathname })
+    window.history.replaceState({ mdManager: initialHistoryKey }, '', window.location.pathname)
+  }, [initialHistoryKey])
+  const writeHistory = useCallback((entry: Omit<HistoryEntry, 'pathname'>, pathname: string, replace = false) => {
+    const key = replace ? historyKey.current : crypto.randomUUID()
+    historyEntries.current.set(key, { ...entry, pathname })
+    historyKey.current = key
+    window.history[replace ? 'replaceState' : 'pushState']({ mdManager: key }, '', pathname)
+  }, [])
+  const pendingFocus = useRef<string | null>(null)
   // Mirrors of state for event handlers that must not re-subscribe on every change.
   const locationRef = useRef(location)
   const indexRef = useRef<TreeIndex | null>(null)
@@ -109,11 +146,12 @@ function App() {
         requestView({ type: 'reveal', id: refId(current.ref) })
       }
       setData({ status: 'ready', index, refreshing: false, refreshError: null })
-      setAnnouncement(`Loaded ${summary(index)}.`)
+      // While a document is open its own load/failure announcements take precedence.
+      if (current.kind !== 'file') setAnnouncement(`Loaded ${summary(index)}.`)
     } catch (error) {
       if (signal?.aborted) return
       setData({ status: 'error', message: errorMessage(error) })
-      setAnnouncement('Loading failed.')
+      if (locationRef.current.kind !== 'file') setAnnouncement('Loading failed.')
     }
   }, [requestView])
 
@@ -149,10 +187,38 @@ function App() {
     }
   }, [data, layout])
 
+  const captureBrowsing = useCallback((focusId: string | null = null): ReturnContext => ({
+    pathname: historyEntries.current.get(historyKey.current)!.pathname, location: locationRef.current, focusId,
+    mode, expanded: [...expanded], layout: layout.snapshot(),
+    view: viewStore.current ? { ...viewStore.current } : null, scroll: outlineScroll.current,
+  }), [mode, expanded, layout])
+  const saveBrowsing = useCallback((focusId: string | null = null) => {
+    if (locationRef.current.kind === 'file') return
+    const entry = historyEntries.current.get(historyKey.current)!
+    const snapshot = captureBrowsing(focusId ?? document.activeElement?.closest('[data-node-id]')?.getAttribute('data-node-id') ?? entry.browsing?.focusId ?? null)
+    historyEntries.current.set(historyKey.current, { ...entry, browsing: snapshot })
+    return snapshot
+  }, [captureBrowsing])
+  const restoreBrowsing = useCallback((context: ReturnContext) => {
+    setBrowsingRevision(previous => previous + 1)
+    layout.restore(context.layout)
+    viewStore.current = context.view ? { ...context.view } : null
+    outlineScroll.current = context.scroll
+    setViewRequest(null)
+    setMode(context.mode)
+    setExpanded(new Set(context.expanded))
+    setLocation(context.location)
+    pendingFocus.current = context.focusId
+  }, [layout])
+  // popstate changes the URL first; the retained entry key still identifies the departing snapshot.
+  const saveBrowsingRef = useRef(saveBrowsing)
+  useLayoutEffect(() => { saveBrowsingRef.current = saveBrowsing }, [saveBrowsing])
+
   const navigate = useCallback((ref: FolderRef | null, options: { replace?: boolean; reveal?: boolean } = {}) => {
     const pathname = folderToPathname(ref)
     if (window.location.pathname !== pathname) {
-      window.history[options.replace ? 'replaceState' : 'pushState'](null, '', pathname)
+      saveBrowsing()
+      writeHistory({}, pathname, options.replace)
     }
     setLocation(ref ? { kind: 'folder', ref } : { kind: 'home' })
     const index = indexRef.current
@@ -162,10 +228,22 @@ function App() {
     } else if (!ref) {
       requestView({ type: 'fit' })
     }
-  }, [requestView])
+  }, [requestView, saveBrowsing, writeHistory])
 
   useEffect(() => {
-    const onPopState = () => {
+    const onPopState = (event: PopStateEvent) => {
+      saveBrowsingRef.current()
+      const entry = historyEntries.current.get(event.state?.mdManager)
+      if (entry) historyKey.current = event.state.mdManager
+      else {
+        historyKey.current = crypto.randomUUID()
+        writeHistory({}, window.location.pathname, true)
+      }
+      const context = entry?.browsing
+      if (context) {
+        restoreBrowsing(context)
+        return
+      }
       const next = parsePathname(window.location.pathname)
       setLocation(next)
       const index = indexRef.current
@@ -176,7 +254,54 @@ function App() {
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
-  }, [requestView])
+  }, [requestView, restoreBrowsing, writeHistory])
+
+  // ---- Documents ----
+  const fileRef = location.kind === 'file' ? location.ref : null
+  const { state: documentState, retry: retryDocument } = useDocument(fileRef, {
+    onLoading: ref => setAnnouncement(`Loading ${fileName(ref)}.`),
+    onLoaded: document => setAnnouncement(`Loaded ${fileName(document)}.`),
+    onFailed: (ref, kind) => setAnnouncement(kind === 'missing' ? `${fileName(ref)} was not found.` : `Loading ${fileName(ref)} failed.`),
+  })
+  const openFile = useCallback((node: GraphNode) => {
+    if (node.kind !== 'file') return
+    const ref: FileRef = { source: node.source, path: node.path }
+    const pathname = fileToPathname(ref)
+    const origin = saveBrowsingRef.current(node.id)
+    pendingFocus.current = null
+    writeHistory({ origin }, pathname)
+    setLocation({ kind: 'file', ref })
+  }, [writeHistory])
+
+  const backToFolder = useCallback(() => {
+    const current = locationRef.current
+    if (current.kind !== 'file') return
+    const context = historyEntries.current.get(historyKey.current)?.origin
+    if (context) {
+      // Restore the exact browsing entry: no fit, no re-expansion, no layout reset.
+      writeHistory({ browsing: context }, context.pathname)
+      restoreBrowsing(context)
+    } else {
+      // Direct link or reload: open the containing folder and reveal its ancestors.
+      pendingFocus.current = nodeId(current.ref.source, current.ref.path)
+      navigate(parentFolderOf(current.ref), { reveal: true })
+    }
+  }, [navigate, restoreBrowsing, writeHistory])
+
+  // Focus the originating file action once the browsing view has rendered it again.
+  useEffect(() => {
+    const id = pendingFocus.current
+    if (!id || location.kind === 'file') return
+    const selector = `[data-node-id="${CSS.escape(id)}"]`
+    const target = document.querySelector<HTMLElement | SVGElement>(`${selector} .node-body, ${selector} .outline-name`)
+    if (target) {
+      // Do not let keyboard-focus reveal or native scrolling alter a restored viewport/outline scroll.
+      target.setAttribute('data-restoring-focus', 'true')
+      target.focus({ preventScroll: true })
+      target.removeAttribute('data-restoring-focus')
+      pendingFocus.current = null
+    }
+  })
 
   const index = data.status === 'ready' ? data.index : null
   const selectedRef = location.kind === 'folder' ? location.ref : null
@@ -229,12 +354,13 @@ function App() {
   const ready = data.status === 'ready'
   const refreshing = data.status === 'ready' && data.refreshing
   const graphControlsEnabled = ready && mode === 'graph'
+  const browsing = fileRef === null
 
   let missingNotice: React.ReactNode = null
   if (index && location.kind === 'unknown-source') {
     missingNotice = <>Source “{location.name}” does not exist. Only the Pi and Claude sources are available.</>
   } else if (index && location.kind === 'malformed') {
-    missingNotice = <>This link could not be read.</>
+    missingNotice = <>This link is invalid and could not be read.</>
   } else if (index && selectedRef && !selectedExists) {
     missingNotice = <>Folder “{selectedRef.path || selectedRef.source}” was not found in {selectedRef.source}. It may have been renamed or removed.</>
   }
@@ -260,8 +386,8 @@ function App() {
       )}
 
       <div className="navigation">
-        <Breadcrumbs selected={selectedRef} onNavigate={ref => navigate(ref, { reveal: true })} />
-        {missingNotice ? (
+        <Breadcrumbs selected={selectedRef} file={fileRef} onNavigate={ref => navigate(ref, { reveal: true })} />
+        {fileRef ? null : missingNotice ? (
           <div className="missing" role="alert">
             <p>{missingNotice}</p>
             <p className="missing-links">
@@ -283,29 +409,35 @@ function App() {
         )}
       </div>
 
-      <div className="toolbar" role="toolbar" aria-label="Graph controls">
-        <button type="button" className="button" onClick={() => canvasRef.current?.zoomIn()} disabled={!graphControlsEnabled} aria-label="Zoom in">+</button>
-        <button type="button" className="button" onClick={() => canvasRef.current?.zoomOut()} disabled={!graphControlsEnabled} aria-label="Zoom out">−</button>
-        <button type="button" className="button" onClick={() => canvasRef.current?.fit()} disabled={!graphControlsEnabled}>Fit</button>
-        <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
-        <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
-      </div>
+      {browsing && (
+        <div className="toolbar" role="toolbar" aria-label="Graph controls">
+          <button type="button" className="button" onClick={() => canvasRef.current?.zoomIn()} disabled={!graphControlsEnabled} aria-label="Zoom in">+</button>
+          <button type="button" className="button" onClick={() => canvasRef.current?.zoomOut()} disabled={!graphControlsEnabled} aria-label="Zoom out">−</button>
+          <button type="button" className="button" onClick={() => canvasRef.current?.fit()} disabled={!graphControlsEnabled}>Fit</button>
+          <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
+          <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
+        </div>
+      )}
 
-      <main className="workspace" aria-busy={data.status === 'loading'}>
-        {data.status === 'loading' && (
+      <main className={browsing ? 'workspace' : 'workspace workspace-document'} aria-busy={browsing && data.status === 'loading'}>
+        {fileRef && documentState && (
+          <DocumentView fileRef={fileRef} state={documentState} onBack={backToFolder} onRetry={retryDocument} />
+        )}
+        {browsing && data.status === 'loading' && (
           <div className="placeholder">
             <p>Loading the Pi and Claude fixture folders…</p>
           </div>
         )}
-        {data.status === 'error' && (
+        {browsing && data.status === 'error' && (
           <div className="placeholder" role="alert">
             <p>Unable to load the fixture folders. {data.message}</p>
             <p>Check that the API is running and both fixture folders are readable, then retry.</p>
             <button type="button" className="button" onClick={retry}>Retry</button>
           </div>
         )}
-        {data.status === 'ready' && mode === 'graph' && (
+        {browsing && data.status === 'ready' && mode === 'graph' && (
           <GraphCanvas
+            key={browsingRevision}
             ref={canvasRef}
             layout={layout}
             index={data.index}
@@ -314,17 +446,29 @@ function App() {
             expanded={expanded}
             selectedId={selectedId}
             viewRequest={viewRequest}
+            handledRequest={handledRequest}
+            viewStore={viewStore}
             onSelect={select}
+            onOpenFile={openFile}
             onToggleExpand={toggleExpand}
             onTogglePin={togglePin}
           />
         )}
-        {data.status === 'ready' && mode === 'outline' && (
-          <Outline index={data.index} expanded={expanded} selectedId={selectedId} onSelect={select} onToggleExpand={toggleExpand} />
+        {browsing && data.status === 'ready' && mode === 'outline' && (
+          <Outline
+            key={browsingRevision}
+            index={data.index}
+            expanded={expanded}
+            selectedId={selectedId}
+            scrollRef={outlineScroll}
+            onSelect={select}
+            onOpenFile={openFile}
+            onToggleExpand={toggleExpand}
+          />
         )}
       </main>
 
-      {mode === 'graph' && (
+      {browsing && mode === 'graph' && (
         <footer className="legend" aria-label="Legend">
           <ul>
             <li><svg viewBox="-16 -16 32 32" aria-hidden="true"><circle className="legend-source" r="11" /></svg>Source</li>
@@ -333,7 +477,7 @@ function App() {
             <li><svg viewBox="-16 -16 32 32" aria-hidden="true"><line className="legend-edge" x1="-13" y1="0" x2="8" y2="0" markerEnd="url(#contains-arrow)" /><path className="legend-edge-arrow" d="M 7 -4 L 13 0 L 7 4 z" /></svg>Contains (parent → child)</li>
             <li><svg viewBox="-16 -16 32 32" aria-hidden="true"><circle className="legend-pin" r="9" /><path className="legend-pin-glyph" d="M -3 -4 h 6 l -1 4 h -4 z M 0 0 v 6" /></svg>Pinned (dragged or P)</li>
           </ul>
-          <p>Keyboard: Tab moves through nodes in outline order, Enter selects, → expands, ← collapses, P pins or unpins.</p>
+          <p>Keyboard: Tab moves through nodes in outline order, Enter selects a folder or opens a file, → expands, ← collapses, P pins or unpins.</p>
         </footer>
       )}
     </div>

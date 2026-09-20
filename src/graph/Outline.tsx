@@ -1,15 +1,24 @@
+import { useLayoutEffect, useRef, type MutableRefObject } from 'react'
 import { childCounts, childrenOf, describeCounts, SOURCES, type GraphNode, type TreeIndex } from './model.ts'
 
 type Props = {
   index: TreeIndex
   expanded: ReadonlySet<string>
   selectedId: string | null
+  /** Scroll position survives unmounting (graph mode, document view) through this owner-held store. */
+  scrollRef: MutableRefObject<number>
   onSelect: (node: GraphNode) => void
+  onOpenFile: (node: GraphNode) => void
   onToggleExpand: (node: GraphNode) => void
 }
 
 /** Accessible replacement for the graph: the same tree, expansion state and selection as nested lists. */
-export function Outline({ index, expanded, selectedId, onSelect, onToggleExpand }: Props) {
+export function Outline({ index, expanded, selectedId, scrollRef, onSelect, onOpenFile, onToggleExpand }: Props) {
+  const container = useRef<HTMLElement>(null)
+  useLayoutEffect(() => {
+    if (container.current) container.current.scrollTop = scrollRef.current
+  }, [scrollRef])
+
   function renderFolder(node: GraphNode) {
     const isExpanded = expanded.has(node.id)
     const counts = childCounts(index, node.id)
@@ -55,16 +64,23 @@ export function Outline({ index, expanded, selectedId, onSelect, onToggleExpand 
     return (
       <li key={node.id} className="outline-item outline-file" data-node-id={node.id}>
         <div className="outline-row">
-          <span className="outline-icon" aria-hidden="true">▤</span>
-          <span>{node.name}</span>
-          <span className="outline-counts">Markdown file</span>
+          <button type="button" className="outline-name outline-file-name" onClick={() => onOpenFile(node)}>
+            <span className="outline-icon" aria-hidden="true">▤</span>
+            <span>{node.name}</span>
+            <span className="visually-hidden">, Markdown file</span>
+          </button>
         </div>
       </li>
     )
   }
 
   return (
-    <nav className="outline" aria-label="Directory outline">
+    <nav
+      className="outline"
+      aria-label="Directory outline"
+      ref={container}
+      onScroll={event => { scrollRef.current = event.currentTarget.scrollTop }}
+    >
       <ul className="outline-list outline-root">
         {SOURCES.map(source => renderFolder(index.nodes.get(source)!))}
       </ul>

@@ -16,6 +16,7 @@ import {
   type Entry,
 } from '../../src/graph/model.ts'
 import { wrapLabel } from '../../src/graph/labels.ts'
+import { GraphLayout } from '../../src/graph/layout.ts'
 
 const entries: Entry[] = [
   { source: 'Pi', path: 'skills', kind: 'directory' },
@@ -101,6 +102,38 @@ test('breadcrumbs start at Home and follow the source and directory segments', (
   const crumbs = breadcrumbsFor({ source: 'Pi', path: 'skills/deep' })
   assert.deepEqual(crumbs.map(crumb => crumb.label), ['Home', 'Pi', 'skills', 'deep'])
   assert.deepEqual(crumbs.map(crumb => crumb.ref), [null, { source: 'Pi', path: '' }, { source: 'Pi', path: 'skills' }, { source: 'Pi', path: 'skills/deep' }])
+})
+
+test('a layout snapshot after pruning restores without retaining removed visible nodes', () => {
+  const layout = new GraphLayout({ synchronous: true })
+  try {
+    const index = buildIndex([
+      { source: 'Pi', path: 'removed.md', kind: 'file' },
+      { source: 'Pi', path: 'kept.md', kind: 'file' },
+    ])
+    const graph = visibleGraph(index, new Set(['Pi']))
+    layout.sync(graph.nodes, graph.edges)
+    layout.pin('Pi/kept.md')
+    const position = { x: layout.node('Pi/kept.md')!.x, y: layout.node('Pi/kept.md')!.y }
+    layout.prune(new Set(['Pi', 'Claude', 'Pi/kept.md']))
+    // In Outline mode there is no mounted graph to sync again before this snapshot.
+    const snapshot = layout.snapshot()
+    assert.doesNotThrow(() => layout.restore(snapshot))
+    assert.ok(!snapshot.visibleIds.includes('Pi/removed.md'))
+    assert.equal(layout.node('Pi/removed.md'), undefined)
+    assert.equal(layout.isPinned('Pi/kept.md'), true)
+    assert.deepEqual({ x: layout.node('Pi/kept.md')!.x, y: layout.node('Pi/kept.md')!.y }, position)
+    const remaining = visibleGraph(buildIndex([{ source: 'Pi', path: 'kept.md', kind: 'file' }]), new Set(['Pi']))
+    assert.doesNotThrow(() => layout.sync(remaining.nodes, remaining.edges))
+    // Normalize a stale snapshot too, rather than relying only on snapshot() callers.
+    snapshot.visibleIds.push('Pi/removed.md')
+    snapshot.pinned.push('Pi/removed.md')
+    assert.doesNotThrow(() => layout.restore(snapshot))
+    assert.ok(!layout.snapshot().visibleIds.includes('Pi/removed.md'))
+    assert.equal(layout.isPinned('Pi/removed.md'), false)
+  } finally {
+    layout.dispose()
+  }
 })
 
 test('wrapLabel breaks long names at separators and truncates with an ellipsis', () => {

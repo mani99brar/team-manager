@@ -22,6 +22,8 @@ export type SimNode = SimulationNodeDatum & {
   y: number
 }
 
+export type LayoutSnapshot = { nodes: SimNode[]; pinned: string[]; visibleIds: string[]; hasLaidOut: boolean }
+
 type SimLink = SimulationLinkDatum<SimNode> & { source: SimNode; target: SimNode }
 
 /** Drawn radius of each node type; also used to trim edges. */
@@ -205,6 +207,35 @@ export class GraphLayout {
         this.pinned.delete(id)
       }
     }
+  }
+
+  /** Copy values, never simulation objects: history entries must not share mutable positions. */
+  snapshot(): LayoutSnapshot {
+    return {
+      nodes: [...this.nodes.values()].map(node => ({ ...node })),
+      // prune() can run while the graph is unmounted, before sync() repairs visibility.
+      pinned: [...this.pinned], visibleIds: this.visibleIds.filter(id => this.nodes.has(id)), hasLaidOut: this.hasLaidOut,
+    }
+  }
+
+  restore(snapshot: LayoutSnapshot) {
+    this.simulation.stop()
+    this.simulation.force<ReturnType<typeof forceLink<SimNode, SimLink>>>('link')!.links([])
+    this.nodes.clear()
+    for (const node of snapshot.nodes) this.nodes.set(node.id, { ...node })
+    this.pinned.clear()
+    for (const id of snapshot.pinned) if (this.nodes.has(id)) this.pinned.add(id)
+    this.visibleIds = snapshot.visibleIds.filter(id => this.nodes.has(id))
+    this.hasLaidOut = snapshot.hasLaidOut
+    const visible = this.visibleIds.map(id => this.nodes.get(id)!)
+    this.simulation.nodes(visible)
+    const ids = new Set(this.visibleIds)
+    const links: SimLink[] = []
+    for (const target of visible) {
+      if (target.parentId && ids.has(target.parentId)) links.push({ source: this.nodes.get(target.parentId)!, target })
+    }
+    this.simulation.force<ReturnType<typeof forceLink<SimNode, SimLink>>>('link')!.links(links)
+    this.notify()
   }
 
   /** Clears pins and remembered positions. */

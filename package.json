@@ -12,7 +12,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:unit": "tsx --test server/app.test.ts tests/unit/model.test.ts",
+    "test:unit": "tsx --test server/app.test.ts server/file.test.ts tests/unit/model.test.ts tests/unit/document.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

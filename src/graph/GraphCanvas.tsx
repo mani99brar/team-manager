@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { childCounts, describeCounts, type GraphEdge, type GraphNode, type TreeIndex } from './model.ts'
@@ -18,6 +19,11 @@ export type ViewRequest = { token: number; type: 'fit' } | { token: number; type
 
 export type GraphCanvasHandle = { zoomIn(): void; zoomOut(): void; fit(): void }
 
+export type View = { x: number; y: number; k: number }
+
+/** Pan/zoom survives unmounting (outline mode, document view) through this owner-held store. */
+export type ViewStore = MutableRefObject<View | null>
+
 type Props = {
   layout: GraphLayout
   index: TreeIndex
@@ -26,12 +32,14 @@ type Props = {
   expanded: ReadonlySet<string>
   selectedId: string | null
   viewRequest: ViewRequest | null
+  /** Token of the last request any canvas instance handled, so a remount never replays an old fit/reveal. */
+  handledRequest: MutableRefObject<number>
+  viewStore: ViewStore
   onSelect: (node: GraphNode) => void
+  onOpenFile: (node: GraphNode) => void
   onToggleExpand: (node: GraphNode) => void
   onTogglePin: (node: GraphNode) => void
 }
-
-type View = { x: number; y: number; k: number }
 
 const MIN_ZOOM = 0.15
 const MAX_ZOOM = 3
@@ -70,17 +78,20 @@ function nodeBox(node: GraphNode, labelLines: number): NodeBox {
 }
 
 export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCanvas(props, ref) {
-  const { layout, index, nodes, edges, expanded, selectedId, viewRequest, onSelect, onToggleExpand, onTogglePin } = props
+  const { layout, index, nodes, edges, expanded, selectedId, viewRequest, handledRequest, viewStore, onSelect, onOpenFile, onToggleExpand, onTogglePin } = props
   const svgRef = useRef<SVGSVGElement>(null)
-  const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 })
+  const [view, setView] = useState<View>(() => viewStore.current ?? { x: 0, y: 0, k: 1 })
+  // Whether a viewport was restored from the store at mount (checked before the store is overwritten).
+  const restoredView = useRef(viewStore.current !== null)
   const viewRef = useRef(view)
-  useLayoutEffect(() => { viewRef.current = view }, [view])
+  useLayoutEffect(() => { viewRef.current = view; viewStore.current = view }, [view, viewStore])
   const [, rerender] = useReducer((count: number) => count + 1, 0)
   const pointers = useRef(new Map<number, Point>())
   const drag = useRef<{ id: string; pointerId: number; start: Point; offset: Point; moved: boolean } | null>(null)
   const suppressClick = useRef(false)
 
-  useEffect(() => layout.subscribe(rerender), [layout])
+  // Subscribe before syncing so that a synchronous layout (reduced motion, remount) re-renders with the new positions.
+  useLayoutEffect(() => layout.subscribe(rerender), [layout])
   useLayoutEffect(() => { layout.sync(nodes, edges) }, [layout, nodes, edges])
 
   const size = useCallback(() => {
@@ -138,21 +149,20 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
     zoomOut: () => { const { width, height } = size(); zoomAt({ x: width / 2, y: height / 2 }, 1 / 1.3) },
   }), [fit, size, zoomAt])
 
-  // Fit once on mount; afterwards only explicit requests move the viewport.
+  // Fit once on first mount; a remount restores the stored viewport and afterwards only explicit requests move it.
   const mounted = useRef(false)
   useEffect(() => {
     if (mounted.current) return
     mounted.current = true
-    fit()
+    if (!restoredView.current) fit()
   }, [fit])
 
-  const handledRequest = useRef(0)
   useEffect(() => {
     if (!viewRequest || viewRequest.token === handledRequest.current) return
     handledRequest.current = viewRequest.token
     if (viewRequest.type === 'fit') fit()
     else ensureVisible(viewRequest.id)
-  }, [viewRequest, fit, ensureVisible])
+  }, [viewRequest, handledRequest, fit, ensureVisible])
 
   useEffect(() => {
     const svg = svgRef.current
@@ -233,16 +243,21 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
     drag.current = null
     if (current.moved) layout.endDrag()
   }
+  const activateNode = (node: GraphNode) => {
+    if (node.kind === 'file') onOpenFile(node)
+    else onSelect(node)
+  }
   const onNodeClick = (node: GraphNode) => () => {
+    // A drag that moved the node must never count as activation.
     if (suppressClick.current) { suppressClick.current = false; return }
-    if (node.kind !== 'file') onSelect(node)
+    activateNode(node)
   }
   const onNodeKeyDown = (node: GraphNode) => (event: KeyboardEvent<SVGGElement>) => {
     const isFolder = node.kind !== 'file'
     switch (event.key) {
       case 'Enter':
       case ' ':
-        if (isFolder) onSelect(node)
+        activateNode(node)
         break
       case 'ArrowRight':
         if (isFolder && !expanded.has(node.id)) onToggleExpand(node)
@@ -338,12 +353,12 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
                 data-node-kind={node.kind}
                 onFocus={event => {
                   // Pointer focus must not move the click/drag target before the gesture finishes.
-                  if (event.target.matches(':focus-visible')) ensureVisible(node.id)
+                  if (event.target.matches(':focus-visible') && !event.target.hasAttribute('data-restoring-focus')) ensureVisible(node.id)
                 }}
               >
                 <g
                   className="node-body"
-                  role={isFolder ? 'button' : 'group'}
+                  role="button"
                   tabIndex={0}
                   aria-label={label}
                   aria-pressed={isFolder ? isSelected : undefined}

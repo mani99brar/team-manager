@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import { lstat, readdir } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join, resolve } from 'node:path'
+import { PathError, openFixtureRoot, readMarkdownFile, type FixtureRoot, type ReadFile } from './files.ts'
 
 export type Source = 'Pi' | 'Claude'
 export type EntryKind = 'directory' | 'file'
@@ -69,8 +70,20 @@ export async function listEntries(root: string): Promise<Entry[]> {
   return entries
 }
 
-export function createApp(root: string = resolveFixtureRoot()) {
+export type AppOptions = {
+  /** Injectable for tests that simulate a filesystem read failure deterministically. */
+  readFile?: ReadFile
+}
+
+function singleString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+export function createApp(root: string = resolveFixtureRoot(), options: AppOptions = {}) {
   const app = Fastify({ logger: true })
+  let fixtureRoot: FixtureRoot
+  app.addHook('onReady', async () => { fixtureRoot = await openFixtureRoot(root) })
+  app.addHook('onClose', async () => { await fixtureRoot?.handle.close() })
   app.get('/api/entries', async (_request, reply) => {
     try {
       return { entries: await listEntries(root) }
@@ -80,6 +93,22 @@ export function createApp(root: string = resolveFixtureRoot()) {
         ? error.message
         : 'Unable to list the fixture folders. Check that both fixture folders exist and are readable, then refresh.'
       return reply.code(500).send({ error: message })
+    }
+  })
+  app.get('/api/file', async (request, reply) => {
+    const query = request.query as Record<string, unknown>
+    const source = singleString(query.source)
+    const path = singleString(query.path)
+    if (source === null || path === null) {
+      return reply.code(400).send({ error: 'Both the source and path query parameters are required exactly once.' })
+    }
+    try {
+      const document = await readMarkdownFile(fixtureRoot, source, path, options.readFile)
+      return reply.header('Cache-Control', 'no-store').send(document)
+    } catch (error) {
+      if (error instanceof PathError) return reply.code(error.status).send({ error: error.message })
+      app.log.error(error, 'File read failed')
+      return reply.code(500).send({ error: 'The file could not be read. Check that it is readable, then retry.' })
     }
   })
   return app

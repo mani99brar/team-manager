@@ -12,6 +12,9 @@ export type NodeKind = 'source' | 'directory' | 'file'
 /** A source root (path '') or a directory inside it. */
 export type FolderRef = { source: Source; path: string }
 
+/** A Markdown file identified by source plus nonempty source-relative path. Filename alone is never enough. */
+export type FileRef = { source: Source; path: string }
+
 export type GraphNode = {
   id: string
   source: Source
@@ -46,6 +49,15 @@ export function refId(ref: FolderRef): string {
 
 export function sameRef(a: FolderRef | null, b: FolderRef | null): boolean {
   return a === b || (a !== null && b !== null && a.source === b.source && a.path === b.path)
+}
+
+export function sameFileRef(a: FileRef | null, b: FileRef | null): boolean {
+  return sameRef(a, b)
+}
+
+/** The folder that contains a file: the source root for top-level files. */
+export function parentFolderOf(ref: FileRef): FolderRef {
+  return { source: ref.source, path: parentPath(ref.path) }
 }
 
 function baseName(path: string): string {
@@ -192,27 +204,55 @@ export function folderToPathname(ref: FolderRef | null): string {
   return `/${segments.map(encodeURIComponent).join('/')}`
 }
 
+const FILE_ROUTE = 'file'
+
+/** Encodes a document as `/file/<source>/<segment>/…`, encoding every path segment individually. */
+export function fileToPathname(ref: FileRef): string {
+  return `/${FILE_ROUTE}/${[ref.source, ...ref.path.split('/')].map(encodeURIComponent).join('/')}`
+}
+
 export type ParsedLocation =
   | { kind: 'home' }
   | { kind: 'folder'; ref: FolderRef }
+  | { kind: 'file'; ref: FileRef }
   | { kind: 'unknown-source'; name: string }
   | { kind: 'malformed' }
+
+/** Decodes each raw segment exactly once; malformed percent-encoding yields null instead of throwing. */
+function decodeSegments(raw: string[]): string[] | null {
+  try {
+    return raw.map(decodeURIComponent)
+  } catch {
+    return null
+  }
+}
+
+function parseFilePathname(raw: string[]): ParsedLocation {
+  if (raw.length < 2) return { kind: 'malformed' }
+  const segments = decodeSegments(raw)
+  if (!segments) return { kind: 'malformed' }
+  const [source, ...rest] = segments
+  if (!isSource(source)) return { kind: 'unknown-source', name: source }
+  // Decoded segments must be plain names: no separators, no dot components, nothing empty.
+  if (rest.some(segment => segment === '' || segment === '.' || segment === '..' || segment.includes('/'))) {
+    return { kind: 'malformed' }
+  }
+  return { kind: 'file', ref: { source, path: rest.join('/') } }
+}
 
 export function parsePathname(pathname: string): ParsedLocation {
   const raw = pathname.split('/').filter(segment => segment !== '')
   if (raw.length === 0) return { kind: 'home' }
-  let segments: string[]
-  try {
-    segments = raw.map(decodeURIComponent)
-  } catch {
-    return { kind: 'malformed' }
-  }
+  if (raw[0] === FILE_ROUTE) return parseFilePathname(raw.slice(1))
+  const segments = decodeSegments(raw)
+  if (!segments) return { kind: 'malformed' }
   const [source, ...rest] = segments
   if (!isSource(source)) return { kind: 'unknown-source', name: source }
   return { kind: 'folder', ref: { source, path: rest.join('/') } }
 }
 
-export type Breadcrumb = { label: string; ref: FolderRef | null; id: string }
+/** `ref` is the folder to navigate to (null = Home). A crumb without `ref` is the current document and not a link. */
+export type Breadcrumb = { label: string; ref?: FolderRef | null; id: string }
 
 /** Home, then the source, then one crumb per directory segment. */
 export function breadcrumbsFor(ref: FolderRef | null): Breadcrumb[] {
@@ -226,4 +266,9 @@ export function breadcrumbsFor(ref: FolderRef | null): Breadcrumb[] {
     crumbs.push({ label: segments[i], ref: { source: ref.source, path }, id: nodeId(ref.source, path) })
   }
   return crumbs
+}
+
+/** The containing folder's trail plus the filename as a non-navigating current item. */
+export function breadcrumbsForFile(ref: FileRef): Breadcrumb[] {
+  return [...breadcrumbsFor(parentFolderOf(ref)), { label: baseName(ref.path), id: nodeId(ref.source, ref.path) }]
 }
