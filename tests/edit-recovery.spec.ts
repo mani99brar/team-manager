@@ -365,3 +365,142 @@ test('browser Back after a failed save is not intercepted and loses the draft; r
   await expect(editor(page)).toHaveCount(0)
   expect(await readFile(file.path, 'utf8')).toBe('history\n')
 })
+
+for (const [initial, fresh] of [
+  ['\uFEFFold\r\ntext', 'NEW disk\ntext'],
+  ['old\ntext', '\uFEFFNEW disk\r\ntext'],
+  ['old\r\ntext', 'NEW disk\ntext'],
+]) {
+  test(`Reload refreshes serialization metadata ${JSON.stringify(initial)} to ${JSON.stringify(fresh)}`, async ({ page }) => {
+    const file = await scratchFile('pi', initial)
+    await openForEditing(page, file.url)
+    await typeAtEnd(page, ' draft')
+    await writeFile(file.path, fresh)
+    await saveButton(page).click()
+    await expect(saveStatus(page)).toHaveText('Error')
+    await page.getByRole('button', { name: 'Reload', exact: true }).click()
+    await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+    await expect(dialog(page)).toHaveCount(0)
+    await expect(saveStatus(page)).toHaveText('Saved')
+    await expect(editor(page)).toHaveText('NEW disktext')
+    await typeAtEnd(page, '!')
+    await saveButton(page).click()
+    await expect(saveStatus(page)).toHaveText('Saved')
+    expect(await readFile(file.path, 'utf8')).toBe(fresh + '!')
+    await page.getByRole('button', { name: 'Done', exact: true }).click()
+    await editButton(page).click()
+    await typeAtEnd(page, '?')
+    await saveButton(page).click()
+    await expect(saveStatus(page)).toHaveText('Saved')
+    expect(await readFile(file.path, 'utf8')).toBe(fresh + '!?')
+  })
+}
+
+for (const bytes of [Buffer.from('mixed\r\nline\nend'), Buffer.from([0xff, 0x61])]) {
+  test(`Reload of non-roundtrippable bytes stays read-only and retains recovery draft: ${bytes.toString('hex')}`, async ({ page }) => {
+    const file = await scratchFile('pi', 'original')
+    await openForEditing(page, file.url)
+    await typeAtEnd(page, ' draft')
+    await writeFile(file.path, bytes)
+    await saveButton(page).click()
+    await expect(saveStatus(page)).toHaveText('Error')
+    await page.getByRole('button', { name: 'Reload', exact: true }).click()
+    await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+    await expect(dialog(page)).toHaveCount(0)
+    await expect(page.getByTestId('editor')).toContainText('read-only')
+    await expect(saveButton(page)).toBeDisabled()
+    await expect(revertButton(page)).toBeDisabled()
+    await expect(page.getByRole('textbox', { name: 'Draft before reload' })).toHaveValue('original draft')
+    // Retrying a still-uneditable disk read must not replace the recovery draft with decoded disk text.
+    await page.getByRole('button', { name: 'Reload', exact: true }).click()
+    await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+    await expect(dialog(page)).toHaveCount(0)
+    await expect(page.getByRole('textbox', { name: 'Draft before reload' })).toHaveValue('original draft')
+    await page.keyboard.press('Control+s')
+    expect(await readFile(file.path)).toEqual(bytes)
+    await page.getByRole('button', { name: 'Done', exact: true }).click()
+    await expect(editButton(page)).toBeDisabled()
+    await expect(page.getByTestId('edit-unavailable')).toBeVisible()
+  })
+}
+
+test('pending Reload cannot be dismissed with Escape', async ({ page }) => {
+  const file = await scratchFile('pi', 'original')
+  await openForEditing(page, file.url)
+  await typeAtEnd(page, ' draft')
+  await writeFile(file.path, 'fresh')
+  await saveButton(page).click()
+  await expect(saveStatus(page)).toHaveText('Error')
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/file?**', async route => { await held; await route.continue() })
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(dialog(page).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(dialog(page)).toBeVisible()
+  release()
+  await expect(dialog(page)).toHaveCount(0)
+  await expect(editor(page)).toHaveText('fresh')
+})
+
+test('a Reload response from a session abandoned through history cannot affect the new editor', async ({ page }) => {
+  const file = await scratchFile('pi', 'original')
+  // Establish app-owned history so Back leaves editing without a full page reload.
+  await page.goto('/Pi')
+  await page.locator(`.graph-canvas [data-node-id="Pi/${file.name}"] .node-body`).focus()
+  await page.keyboard.press('Enter')
+  await editButton(page).click()
+  await typeAtEnd(page, ' draft')
+  await writeFile(file.path, 'fresh')
+  await saveButton(page).click()
+  await expect(saveStatus(page)).toHaveText('Error')
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  let received!: () => void
+  const ready = new Promise<void>(resolve => { received = resolve })
+  await page.route('**/api/file?**', async route => {
+    const response = await route.fetch()
+    received()
+    await held
+    await route.fulfill({ response })
+  }, { times: 1 })
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+  await ready
+  await page.goBack()
+  await expect(dialog(page)).toHaveCount(0)
+  await page.goForward()
+  await editButton(page).click()
+  await typeAtEnd(page, ' new draft')
+  release()
+  await expect(editor(page)).toHaveText('fresh new draft')
+  await expect(saveStatus(page)).toHaveText('Unsaved')
+  await saveButton(page).click()
+  await expect(saveStatus(page)).toHaveText('Saved')
+  expect(await readFile(file.path, 'utf8')).toBe('fresh new draft')
+})
+
+test('a read-only Reload can recover to a new editable baseline without dropping the retained draft', async ({ page }) => {
+  const file = await scratchFile('pi', 'original')
+  await openForEditing(page, file.url)
+  await typeAtEnd(page, ' draft')
+  await writeFile(file.path, 'mixed\r\nline\nend')
+  await saveButton(page).click()
+  await expect(saveStatus(page)).toHaveText('Error')
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(saveButton(page)).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'Draft before reload' })).toHaveValue('original draft')
+  const fresh = '\uFEFFnew\r\neditable'
+  await writeFile(file.path, fresh)
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(dialog(page)).toHaveCount(0)
+  await expect(saveButton(page)).toBeEnabled()
+  await expect(page.getByRole('textbox', { name: 'Draft before reload' })).toHaveValue('original draft')
+  await typeAtEnd(page, '!')
+  await saveButton(page).click()
+  await expect(saveStatus(page)).toHaveText('Saved')
+  expect(await readFile(file.path, 'utf8')).toBe(fresh + '!')
+})

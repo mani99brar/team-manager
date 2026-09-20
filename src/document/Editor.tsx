@@ -47,9 +47,8 @@ const editorTheme = EditorView.theme({
 })
 
 type CodeMirrorProps = {
-  /** The session draft; only read when the editor is created or `generation` changes (Revert, Reload). */
+  /** Initial draft; the parent remounts this editor on Revert/Reload with fresh serialization rules. */
   content: string
-  generation: number
   analysis: TextAnalysis
   /** Fires with the serialized document (original line ending and BOM restored) after every change. */
   onChange: (content: string) => void
@@ -57,12 +56,10 @@ type CodeMirrorProps = {
   label: string
 }
 
-function CodeMirror({ content, generation, analysis, onChange, onSave, label }: CodeMirrorProps) {
+function CodeMirror({ content, analysis, onChange, onSave, label }: CodeMirrorProps) {
   const host = useRef<HTMLDivElement>(null)
-  const viewRef = useRef<EditorView | null>(null)
-  const latest = useRef({ onChange, onSave, content })
-  // Layout effect, declared first: the replacement effect below must see this render's content.
-  useLayoutEffect(() => { latest.current = { onChange, onSave, content } })
+  const latest = useRef({ onChange, onSave })
+  useLayoutEffect(() => { latest.current = { onChange, onSave } })
   useEffect(() => {
     const extensions: Extension[] = [
       lineNumbers(), highlightSpecialChars(), history(), drawSelection(), highlightActiveLine(), bracketMatching(),
@@ -74,22 +71,10 @@ function CodeMirror({ content, generation, analysis, onChange, onSave, label }: 
       }),
     ]
     const view = new EditorView({ state: EditorState.create({ doc: textFromContent(content, analysis), extensions }), parent: host.current! })
-    viewRef.current = view
-    return () => { view.destroy(); viewRef.current = null }
-    // The editor is created once per editing session; afterwards CodeMirror owns the text and the effect below syncs it.
+    return () => view.destroy()
+    // CodeMirror owns keystrokes until the parent remounts it with a new baseline/generation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  // Keystrokes flow editor → session only. The session replaces the editor text solely on a generation change,
-  // so a render that lags behind fast typing can never overwrite newer keystrokes. It runs before paint so no
-  // keystroke can land between the new status being visible and the replacement.
-  useLayoutEffect(() => {
-    const view = viewRef.current
-    if (!view || generation === 0) return
-    const next = latest.current.content
-    if (serializeText(view.state.doc, analysis) === next) return
-    const replacement = textFromContent(next, analysis)
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: replacement }, selection: { anchor: Math.min(view.state.selection.main.head, replacement.length) } })
-  }, [generation, analysis])
   return <div ref={host} className="editor-host" />
 }
 
@@ -113,7 +98,7 @@ export function Editor({ fileRef, session, analysis, onEdit, onSave, onRevert, o
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([])
   const current = status(session)
   const pending = isPending(session)
-  const saveEnabled = canSave(session)
+  const saveEnabled = analysis.editable && canSave(session)
 
   // Ctrl/Cmd+S anywhere in editing mode saves and never triggers the browser's Save Page.
   useEffect(() => {
@@ -202,15 +187,18 @@ export function Editor({ fileRef, session, analysis, onEdit, onSave, onRevert, o
             {STATUS_LABEL[current]}
           </span>
           <button type="button" className="button" onClick={onSave} disabled={!saveEnabled} aria-keyshortcuts="Control+S Meta+S">Save</button>
-          <button type="button" className="button" onClick={onRevert} disabled={!canRevert(session)}>Revert</button>
+          <button type="button" className="button" onClick={onRevert} disabled={!analysis.editable || !canRevert(session)}>Revert</button>
           <button type="button" className="button" onClick={onExit} disabled={pending} title={pending ? 'Wait for the save to finish.' : undefined}>Done</button>
         </div>
       </div>
+      {!analysis.editable && <p className="document-notice">This file is read-only here because {analysis.reason}. <button type="button" className="button" onClick={onReload}>Reload</button></p>}
       {guidance}
       {recovery}
       <div className="editor-panel" role="tabpanel" id="editor-panel" aria-labelledby={`editor-tab-${tab}`}>
         <div hidden={tab !== 'edit'}>
-          <CodeMirror content={session.draft} generation={session.generation} analysis={analysis} onChange={onEdit} onSave={onSave} label={`Editing ${fileRef.path}`} />
+          {analysis.editable
+            ? <CodeMirror key={session.generation} content={session.draft} analysis={analysis} onChange={onEdit} onSave={onSave} label={`Editing ${fileRef.path}`} />
+            : <pre className="document-source" tabIndex={0}>{session.draft}</pre>}
         </div>
         {preview}
       </div>

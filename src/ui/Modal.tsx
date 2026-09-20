@@ -5,18 +5,19 @@ type Props = {
   children: ReactNode
   /** Which element receives focus when the dialog opens; the opener is refocused on close. */
   initialFocus?: 'first-field' | 'cancel' | 'confirm'
+  pending?: boolean
   onCancel: () => void
 }
 
 /**
- * Native modal dialog: Escape cancels, the browser traps focus, and closing returns focus to the element that
+ * Native modal dialog: Escape cancels unless pending, the browser traps focus, and closing returns focus to the element that
  * opened it. It is rendered only while open, so mounting shows it and unmounting closes it. The layout-effect
  * cleanup runs before React detaches the element, which is what lets the opener be refocused.
  */
-export function Modal({ title, children, initialFocus = 'confirm', onCancel }: Props) {
+export function Modal({ title, children, initialFocus = 'confirm', pending = false, onCancel }: Props) {
   const ref = useRef<HTMLDialogElement>(null)
-  const latest = useRef(onCancel)
-  useLayoutEffect(() => { latest.current = onCancel })
+  const latest = useRef({ onCancel, pending })
+  useLayoutEffect(() => { latest.current = { onCancel, pending } })
   useLayoutEffect(() => {
     const dialog = ref.current
     if (!dialog) return
@@ -26,7 +27,7 @@ export function Modal({ title, children, initialFocus = 'confirm', onCancel }: P
       ? 'input, select, textarea'
       : initialFocus === 'cancel' ? '[data-dialog-cancel]' : '[data-dialog-confirm]'
     dialog.querySelector<HTMLElement>(selector)?.focus()
-    const onNativeCancel = (event: Event) => { event.preventDefault(); latest.current() }
+    const onNativeCancel = (event: Event) => { event.preventDefault(); if (!latest.current.pending) latest.current.onCancel() }
     dialog.addEventListener('cancel', onNativeCancel)
     return () => {
       dialog.removeEventListener('cancel', onNativeCancel)

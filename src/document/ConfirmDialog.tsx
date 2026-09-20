@@ -15,7 +15,7 @@ type Props = {
 
 export function ConfirmDialog({ title, children, confirmLabel, cancelLabel = 'Cancel', destructive = false, pending = false, onConfirm, onCancel }: Props) {
   return (
-    <Modal title={title} initialFocus={destructive ? 'cancel' : 'confirm'} onCancel={onCancel}>
+    <Modal title={title} initialFocus={destructive ? 'cancel' : 'confirm'} pending={pending} onCancel={onCancel}>
       <form method="dialog" onSubmit={event => { event.preventDefault(); if (!pending) onConfirm() }}>
         <div className="confirm-description">{children}</div>
         <div className="confirm-actions">

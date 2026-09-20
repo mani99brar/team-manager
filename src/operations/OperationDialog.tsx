@@ -183,7 +183,7 @@ export function OperationDialog({ operation, index, onCancel, onSuccess }: Props
 
   const destructive = op === 'delete'
   return (
-    <Modal title={op === 'copy' ? `Copy to ${destinationSource}` : TITLES[op]} initialFocus={fields ? 'first-field' : destructive ? 'cancel' : 'confirm'} onCancel={onCancel}>
+    <Modal title={op === 'copy' ? `Copy to ${destinationSource}` : TITLES[op]} initialFocus={fields ? 'first-field' : destructive ? 'cancel' : 'confirm'} pending={pending} onCancel={onCancel}>
       <form method="dialog" onSubmit={event => { void submit(event) }} aria-busy={pending}>
         <div className="confirm-description">{description}</div>
         {fields}

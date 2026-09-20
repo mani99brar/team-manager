@@ -1,7 +1,7 @@
 import fs, { type FileHandle } from 'node:fs/promises'
 import type { Stats } from 'node:fs'
 import {
-  CREATE_FLAGS, NOT_FOUND, PathError, RequestError, at, isMarkdownName, isSource, openRegularFile, validateEntryPath,
+  CREATE_FLAGS, NOT_FOUND, PathError, RequestError, at, isMarkdownName, isSource, openRegularFile, temporaryFileName, validateEntryPath,
   withParentDirectory, type FixtureRoot, type Source, type Target,
 } from './files.ts'
 
@@ -10,7 +10,8 @@ import {
  * re-resolves a validated pathname. All operations run through the same serial queue as content saves.
  *
  * Collision policy: a filesystem probe (lstat of the destination name inside its open parent) refuses
- * anything that exists, including dangling symlinks; creation uses O_EXCL/mkdir, file renames use
+ * anything that exists, including dangling symlinks; file creation stages with O_EXCL then links,
+ * folders use mkdir, file renames use
  * link + unlink (link fails on an existing name), folder renames use rename after the probe.
  */
 export type MutationRequest =
@@ -109,12 +110,32 @@ function conflictFromErrno(error: unknown): never {
   throw error
 }
 
+/** Finish bytes and permissions privately, then publish with an exclusive hard link. A failed
+ * stage never owns the destination name, so cleanup cannot delete an external replacement there. */
+async function publishFile(parent: FileHandle, name: string, bytes: Buffer, mode?: number): Promise<void> {
+  await assertAbsent(parent, name)
+  const temporary = at(parent, temporaryFileName())
+  const file = await fs.open(temporary, CREATE_FLAGS, 0o644)
+  try {
+    if (mode !== undefined) await file.chmod(mode)
+    await file.writeFile(bytes)
+    await file.close()
+    await fs.link(temporary, at(parent, name)).catch(conflictFromErrno)
+  } finally {
+    await file.close().catch(() => undefined)
+    // Publication commits at link(): cleanup must neither turn success into failure nor
+    // mask an earlier write/collision error. A leaked non-Markdown stage is logged only.
+    await fs.unlink(temporary).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn('Could not remove mutation staging file:', error)
+      }
+    })
+  }
+}
+
 async function createFile(root: FixtureRoot, target: Target, content: string): Promise<void> {
-  await withParentDirectory(root, target.source, target.components, async (parent, name) => {
-    await assertAbsent(parent, name)
-    const file = await fs.open(at(parent, name), CREATE_FLAGS, 0o644).catch(conflictFromErrno)
-    try { await file.writeFile(Buffer.from(content, 'utf8')) } finally { await file.close() }
-  })
+  await withParentDirectory(root, target.source, target.components, (parent, name) =>
+    publishFile(parent, name, Buffer.from(content, 'utf8')))
 }
 
 async function createFolder(root: FixtureRoot, target: Target): Promise<void> {
@@ -176,12 +197,7 @@ async function copyFile(root: FixtureRoot, from: Target, to: Target): Promise<vo
     const stats = await source.stat()
     const bytes = await source.readFile()
     await withParentDirectory(root, to.source, to.components, async (destinationParent, destinationName) => {
-      await assertAbsent(destinationParent, destinationName)
-      const file = await fs.open(at(destinationParent, destinationName), CREATE_FLAGS, 0o644).catch(conflictFromErrno)
-      try {
-        await file.chmod(stats.mode & 0o7777)
-        await file.writeFile(bytes)
-      } finally { await file.close() }
+      await publishFile(destinationParent, destinationName, bytes, stats.mode & 0o7777)
     })
   })
 }

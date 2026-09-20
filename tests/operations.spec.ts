@@ -308,3 +308,124 @@ test('operations are keyboard accessible and usable on a narrow screen', async (
   const overflow = await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth')
   expect(overflow).toBe(0)
 })
+
+test('pending Rename cannot Escape into an editable draft before the response', async ({ page }) => {
+  const scratch = await scratchFolders()
+  await writeFile(join(scratch.pi, 'old.md'), 'original')
+  await page.goto(`/file/Pi/${scratch.name}/old.md`)
+  await expect(editButton(page)).toBeEnabled()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/mutate', async route => { const response = await route.fetch(); await held; await route.fulfill({ response }) })
+  await page.getByRole('button', { name: 'Rename…' }).click()
+  await dialog(page).getByRole('textbox', { name: 'New name' }).fill('new.md')
+  await dialog(page).getByRole('button', { name: 'Rename', exact: true }).click()
+  await expect(dialog(page).getByRole('button', { name: 'Cancel' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(dialog(page)).toBeVisible()
+  release()
+  await expect(page).toHaveURL(`/file/Pi/${scratch.name}/new.md`)
+  await expect(outcome(page)).toContainText('Renamed')
+})
+
+test('delayed create listing refresh cannot abandon a newly opened dirty editor', async ({ page }) => {
+  const scratch = await scratchFolders()
+  await writeFile(join(scratch.pi, 'existing.md'), 'original')
+  await openGraph(page, `/Pi/${scratch.name}`)
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/entries', async route => { const response = await route.fetch(); await held; await route.fulfill({ response }) })
+  await page.getByRole('button', { name: 'New file…' }).click()
+  await dialog(page).getByRole('textbox', { name: 'File name' }).fill('created.md')
+  await dialog(page).getByRole('button', { name: 'Create', exact: true }).click()
+  await expect(dialog(page)).toHaveCount(0)
+  await nodeBody(page, `Pi/${scratch.name}/existing.md`).dblclick()
+  await editButton(page).click()
+  await typeAtEnd(page, ' precious draft')
+  release()
+  await expect(outcome(page)).toContainText('Created created.md')
+  await expect(page).toHaveURL(`/file/Pi/${scratch.name}/existing.md`)
+  await expect(editor(page)).toHaveText('original precious draft')
+  await expect(page.getByTestId('save-status')).toHaveText('Unsaved')
+})
+
+for (const op of ['rename', 'move', 'delete', 'create-file', 'create-folder'] as const) {
+  test(`late ${op} response after native history navigation does not navigate again`, async ({ page }) => {
+    const scratch = await scratchFolders()
+    await writeFile(join(scratch.pi, 'existing.md'), 'original')
+    if (op === 'move') await mkdir(join(scratch.pi, 'destination'))
+    await openGraph(page, `/Pi/${scratch.name}`)
+    await nodeBody(page, `Pi/${scratch.name}/existing.md`).dblclick()
+    await expect(editButton(page)).toBeEnabled()
+    if (op.startsWith('create')) await page.getByRole('button', { name: 'Back to folder' }).click()
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let received!: () => void
+    const ready = new Promise<void>(resolve => { received = resolve })
+    await page.route('**/api/mutate', async route => { const response = await route.fetch(); received(); await held; await route.fulfill({ response }) })
+    const label = op === 'create-file' ? 'New file…' : op === 'create-folder' ? 'New folder…' : `${op[0].toUpperCase()}${op.slice(1)}…`
+    await page.getByRole('button', { name: label, exact: true }).click()
+    if (op === 'rename') await dialog(page).getByRole('textbox', { name: 'New name' }).fill('renamed.md')
+    if (op === 'create-file') await dialog(page).getByRole('textbox', { name: 'File name' }).fill('created.md')
+    if (op === 'create-folder') await dialog(page).getByRole('textbox', { name: 'Folder name' }).fill('created')
+    // Keep move artifacts within this test's owned folder tree.
+    if (op === 'move') await dialog(page).getByRole('combobox').selectOption(`${scratch.name}/destination`)
+    await dialog(page).locator('[data-dialog-confirm]').click()
+    await ready
+    await page.goBack()
+    const url = page.url()
+    await expect(dialog(page)).toHaveCount(0)
+    release()
+    await expect(outcome(page)).toBeVisible()
+    await expect(page).toHaveURL(url)
+  })
+}
+
+test('delayed delete listing refresh respects a newer dirty editor even in the originating location', async ({ page }) => {
+  const scratch = await scratchFolders()
+  await writeFile(join(scratch.pi, 'existing.md'), 'original')
+  const url = `/file/Pi/${scratch.name}/existing.md`
+  await page.goto(url)
+  await expect(editButton(page)).toBeEnabled()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/entries', async route => { const response = await route.fetch(); await held; await route.fulfill({ response }) })
+  await page.getByRole('button', { name: 'Delete…' }).click()
+  await dialog(page).getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(dialog(page)).toHaveCount(0)
+  await editButton(page).click()
+  await typeAtEnd(page, ' keep this draft')
+  release()
+  await expect(outcome(page)).toContainText('Deleted existing.md')
+  await expect(page).toHaveURL(url)
+  await expect(editor(page)).toHaveText('original keep this draft')
+  await expect(page.getByTestId('save-status')).toHaveText('Unsaved')
+})
+
+for (const op of ['rename', 'move', 'delete', 'create-folder'] as const) {
+  test(`delayed folder ${op} listing refresh cannot navigate after history departure and return`, async ({ page }) => {
+    const scratch = await scratchFolders()
+    await mkdir(join(scratch.pi, 'empty'))
+    await mkdir(join(scratch.pi, 'destination'))
+    await writeFile(join(scratch.pi, 'existing.md'), 'original')
+    await openGraph(page, `/Pi/${scratch.name}`)
+    await nodeBody(page, `Pi/${scratch.name}/empty`).click()
+    const originalUrl = page.url()
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    await page.route('**/api/entries', async route => { const response = await route.fetch(); await held; await route.fulfill({ response }) })
+    const label = op === 'create-folder' ? 'New folder…' : `${op[0].toUpperCase()}${op.slice(1)}…`
+    await page.getByRole('button', { name: label, exact: true }).click()
+    if (op === 'rename') await dialog(page).getByRole('textbox', { name: 'New name' }).fill('renamed')
+    if (op === 'move') await dialog(page).getByRole('combobox').selectOption(`${scratch.name}/destination`)
+    if (op === 'create-folder') await dialog(page).getByRole('textbox', { name: 'Folder name' }).fill('child')
+    await dialog(page).locator('[data-dialog-confirm]').click()
+    await expect(dialog(page)).toHaveCount(0)
+    await page.goBack()
+    await page.goForward()
+    await expect(page).toHaveURL(originalUrl)
+    release()
+    await expect(outcome(page)).toBeVisible()
+    await expect(page).toHaveURL(originalUrl)
+  })
+}

@@ -5,6 +5,8 @@ import fs, { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp, defaultFixtureRoot } from './app.ts'
+import { openFixtureRoot } from './files.ts'
+import { performMutation, type MutationRequest } from './mutations.ts'
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -497,3 +499,157 @@ test('the committed fixtures are never changed by the mutation test suite', asyn
     assert.deepEqual(await tree(defaultFixtureRoot), before)
   } finally { await app.close() }
 })
+
+for (const op of ['create-file', 'copy'] as const) {
+  for (const failure of ['partial-write', ...(op === 'copy' ? ['chmod'] : [])]) {
+    test(`${op} ${failure} leaves no partial destination and retry succeeds`, async () => {
+      await withTempRoot(async root => {
+        await writeFile(join(root, 'pi', 'source.md'), 'complete content')
+        const app = createApp(root)
+        const open = fs.open
+        const payload = op === 'copy'
+          ? { op, source: 'Pi', path: 'source.md', destinationSource: 'Claude', destinationPath: 'new.md' }
+          : { op, source: 'Claude', path: 'new.md', content: 'complete content' }
+        try {
+          await app.ready()
+          let injected = false
+          mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+            const handle = await open(path, flags, mode)
+            if (typeof flags === 'number' && (flags & fs.constants.O_EXCL)) {
+              const write = handle.writeFile.bind(handle)
+              mock.method(handle, failure === 'chmod' ? 'chmod' : 'writeFile', async () => {
+                injected = true
+                if (failure === 'partial-write') await write('partial')
+                throw Object.assign(new Error('injected'), { code: failure === 'chmod' ? 'EPERM' : 'ENOSPC' })
+              })
+            }
+            return handle
+          })
+          const response = await mutate(app, payload)
+          assert.ok(injected)
+          assert.equal(response.statusCode, 500)
+          assert.deepEqual(await readdir(join(root, 'claude')), [])
+          assert.equal(await readFile(join(root, 'pi', 'source.md'), 'utf8'), 'complete content')
+          mock.restoreAll()
+          assert.equal((await mutate(app, payload)).statusCode, 201)
+          assert.equal(await readFile(join(root, 'claude', 'new.md'), 'utf8'), 'complete content')
+          assert.equal((await mutate(app, payload)).statusCode, 409)
+          assert.equal(await readFile(join(root, 'claude', 'new.md'), 'utf8'), 'complete content')
+        } finally { mock.restoreAll(); await app.close() }
+      })
+    })
+  }
+
+  test(`${op} never removes an external destination appearing during staging`, async () => {
+    await withTempRoot(async root => {
+      await writeFile(join(root, 'pi', 'source.md'), 'source')
+      const target = join(root, 'claude', 'new.md')
+      const app = createApp(root)
+      const open = fs.open
+      try {
+        await app.ready()
+        mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+          const handle = await open(path, flags, mode)
+          if (typeof flags === 'number' && (flags & fs.constants.O_EXCL)) {
+            mock.method(handle, 'writeFile', async () => {
+              await rm(target, { force: true })
+              await writeFile(target, 'external')
+              throw Object.assign(new Error('full'), { code: 'ENOSPC' })
+            })
+          }
+          return handle
+        })
+        const payload = op === 'copy'
+          ? { op, source: 'Pi', path: 'source.md', destinationSource: 'Claude', destinationPath: 'new.md' }
+          : { op, source: 'Claude', path: 'new.md', content: 'content' }
+        assert.equal((await mutate(app, payload)).statusCode, 500)
+        assert.equal(await readFile(target, 'utf8'), 'external')
+        assert.deepEqual(await readdir(join(root, 'claude')), ['new.md'])
+      } finally { mock.restoreAll(); await app.close() }
+    })
+  })
+}
+
+for (const entry of ['file', 'symlink'] as const) {
+  test(`exclusive publish refuses an external ${entry} installed during staging`, async () => {
+    await withTempRoot(async root => {
+      const target = join(root, 'pi', 'new.md')
+      const outside = join(root, 'claude', 'outside.md')
+      await writeFile(outside, 'outside')
+      const app = createApp(root)
+      const open = fs.open
+      try {
+        await app.ready()
+        mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+          const handle = await open(path, flags, mode)
+          if (typeof flags === 'number' && (flags & fs.constants.O_EXCL)) {
+            if (entry === 'file') await writeFile(target, 'external')
+            else await symlink(outside, target)
+          }
+          return handle
+        })
+        const response = await mutate(app, { op: 'create-file', source: 'Pi', path: 'new.md', content: 'app' })
+        assert.equal(response.statusCode, 409, response.body)
+        assert.equal(response.json().code, 'DESTINATION_EXISTS')
+        assert.equal(await readFile(target, 'utf8'), entry === 'file' ? 'external' : 'outside')
+        assert.equal((await lstat(target)).isSymbolicLink(), entry === 'symlink')
+        assert.equal(await readFile(outside, 'utf8'), 'outside')
+        assert.deepEqual(await readdir(join(root, 'pi')), ['new.md'])
+      } finally { mock.restoreAll(); await app.close() }
+    })
+  })
+}
+
+
+for (const op of ['create-file', 'copy'] as const) {
+  for (const scenario of ['published-EIO', 'published-ENOENT', 'collision', 'partial-write'] as const) {
+    test(`${op} preserves its primary result when staging cleanup fails: ${scenario}`, async () => {
+      await withTempRoot(async directory => {
+        await writeFile(join(directory, 'pi', 'source.md'), 'complete content')
+        const root = await openFixtureRoot(directory)
+        const target = join(directory, 'claude', 'new.md')
+        const request: MutationRequest = op === 'copy'
+          ? { op, source: 'Pi', path: 'source.md', destinationSource: 'Claude', destinationPath: 'new.md' }
+          : { op, source: 'Claude', path: 'new.md', content: 'complete content' }
+        const unlink = fs.unlink
+        const open = fs.open
+        const writeFailure = Object.assign(new Error('primary write failure'), { code: 'ENOSPC' })
+        let cleanupAttempts = 0
+        const warnings: unknown[][] = []
+        try {
+          mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args) })
+          mock.method(fs, 'unlink', async (path: Parameters<typeof unlink>[0]) => {
+            cleanupAttempts++
+            if (scenario === 'published-ENOENT') await unlink(path)
+            throw Object.assign(new Error('cleanup failure'), { code: scenario === 'published-ENOENT' ? 'ENOENT' : 'EIO' })
+          })
+          mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+            const handle = await open(path, flags, mode)
+            if (typeof flags === 'number' && (flags & fs.constants.O_EXCL)) {
+              if (scenario === 'collision') await writeFile(target, 'external')
+              if (scenario === 'partial-write') {
+                const write = handle.writeFile.bind(handle)
+                mock.method(handle, 'writeFile', async () => { await write('partial'); throw writeFailure })
+              }
+            }
+            return handle
+          })
+          if (scenario === 'collision') {
+            await assert.rejects(performMutation(root, request), { code: 'DESTINATION_EXISTS' })
+            assert.equal(await readFile(target, 'utf8'), 'external')
+          } else if (scenario === 'partial-write') {
+            await assert.rejects(performMutation(root, request), error => error === writeFailure)
+            await assert.rejects(lstat(target), { code: 'ENOENT' })
+          } else {
+            assert.equal((await performMutation(root, request)).status, 201)
+            assert.equal(await readFile(target, 'utf8'), 'complete content')
+          }
+          assert.equal(cleanupAttempts, 1)
+          assert.equal(warnings.length, scenario === 'published-ENOENT' ? 0 : 1)
+          if (warnings.length) assert.equal((warnings[0][1] as NodeJS.ErrnoException).code, 'EIO')
+          assert.equal(await readFile(join(directory, 'pi', 'source.md'), 'utf8'), 'complete content')
+        } finally { mock.restoreAll(); await root.handle.close() }
+      })
+    })
+  }
+}

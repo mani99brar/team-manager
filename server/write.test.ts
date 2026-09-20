@@ -426,3 +426,52 @@ test('the committed fixtures are never written by the API test suite', async () 
     assert.equal(await hashOnDisk(join(defaultFixtureRoot, 'pi', 'workflow.md')), before)
   } finally { await app.close() }
 })
+
+for (const name of ['a'.repeat(231) + '.md', 'a'.repeat(252) + '.md', '文'.repeat(84) + '.md']) {
+  test(`PUT supports a ${Buffer.byteLength(name)}-byte ${name.startsWith('文') ? 'UTF-8' : 'ASCII'} basename`, async () => {
+    await withTempRoot(async root => {
+      await writeFile(join(root, 'pi', name), 'before')
+      const app = createApp(root)
+      try {
+        const response = await put(app, { source: 'Pi', path: name, content: 'after', expectedHash: sha256('before') })
+        assert.equal(response.statusCode, 200, response.body)
+        assert.equal(await readFile(join(root, 'pi', name), 'utf8'), 'after')
+        assert.deepEqual(await readdir(join(root, 'pi')), [name])
+      } finally { await app.close() }
+    })
+  })
+}
+
+for (const change of ['delete', 'symlink', 'io-error'] as const) {
+  test(`final recheck after staging: ${change} is classified without overwriting`, async () => {
+    await withTempRoot(async root => {
+      const target = join(root, 'pi', 'note.md')
+      await writeFile(target, 'before')
+      await writeFile(join(root, 'claude', 'outside.md'), 'outside')
+      const app = createApp(root)
+      const open = fs.open
+      let staged = false
+      try {
+        await app.ready()
+        mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+          if (staged && String(path).endsWith('/note.md') && change === 'io-error') throw Object.assign(new Error('I/O'), { code: 'EIO' })
+          const handle = await open(path, flags, mode)
+          if (typeof flags === 'number' && (flags & fs.constants.O_EXCL)) {
+            staged = true
+            if (change !== 'io-error') await fs.unlink(target)
+            if (change === 'symlink') await symlink(join(root, 'claude', 'outside.md'), target)
+          }
+          return handle
+        })
+        const response = await put(app, { source: 'Pi', path: 'note.md', content: 'app', expectedHash: sha256('before') })
+        assert.ok(staged)
+        assert.equal(response.statusCode, change === 'io-error' ? 500 : 409, response.body)
+        assert.equal(response.json().code, change === 'io-error' ? 'WRITE_FAILED' : 'HASH_CONFLICT')
+        assert.deepEqual(await readdir(join(root, 'pi')), change === 'delete' ? [] : ['note.md'])
+        assert.equal(await readFile(join(root, 'claude', 'outside.md'), 'utf8'), 'outside')
+        if (change === 'io-error') assert.equal(await readFile(target, 'utf8'), 'before')
+        if (change === 'symlink') assert.ok((await fs.lstat(target)).isSymbolicLink())
+      } finally { mock.restoreAll(); await app.close() }
+    })
+  })
+}

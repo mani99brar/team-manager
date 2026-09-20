@@ -4,7 +4,7 @@ import { fetchDocument } from './api.ts'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { Editor } from './Editor.tsx'
 import { hasUnacknowledgedWork, isPending, type Snapshot } from './editSession.ts'
-import type { TextAnalysis } from './serialize.ts'
+import { analyzeText, contentHash, type TextAnalysis } from './serialize.ts'
 import { useEditSession } from './useEditSession.ts'
 
 /** What the rest of the app needs to know to guard navigation and refuse operations on the active file. */
@@ -30,8 +30,12 @@ function fileName(ref: FileRef): string {
   return ref.path.slice(ref.path.lastIndexOf('/') + 1)
 }
 
-export function EditingSession({ fileRef, document, analysis, onAnnounce, onStateChange, onAcknowledged, guardLeave, onExit }: Props) {
+export function EditingSession({ fileRef, document, analysis: initialAnalysis, onAnnounce, onStateChange, onAcknowledged, guardLeave, onExit }: Props) {
   const name = fileName(fileRef)
+  const [analysis, setAnalysis] = useState(initialAnalysis)
+  const [retainedDraft, setRetainedDraft] = useState<string | null>(null)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   const { session, edit, save, revert, reload } = useEditSession(fileRef, document, {
     onSaved: purpose => onAnnounce(purpose === 'revert' ? `Reverted ${name} to the version from when editing began.` : `Saved ${name}.`),
     onFailed: (error, purpose) => onAnnounce(error.kind === 'conflict'
@@ -58,14 +62,27 @@ export function EditingSession({ fileRef, document, analysis, onAnnounce, onStat
     onAnnounce(`Reloading ${name} from disk.`)
     try {
       const fresh = await fetchDocument(fileRef)
+      const textAnalysis = analyzeText(fresh.content)
+      const matches = await contentHash(fresh.content) === fresh.hash
+      if (!alive.current) return
+      const nextAnalysis: TextAnalysis = matches ? textAnalysis : {
+        ...textAnalysis, editable: false, reason: 'it is not valid UTF-8, so its bytes cannot be reproduced',
+      }
+      // Install content, hash and serialization rules together, before the editor can accept another key.
+      // Keep the discarded draft selectable when the fresh bytes cannot safely be edited here.
+      if (!nextAnalysis.editable && analysis.editable) setRetainedDraft(sessionRef.current.draft)
+      setAnalysis(nextAnalysis)
       reload({ content: fresh.content, hash: fresh.hash })
       setConfirmation(null)
-      onAnnounce(`Reloaded ${name} from disk. Editing starts again from this version.`)
+      onAnnounce(nextAnalysis.editable
+        ? `Reloaded ${name} from disk. Editing starts again from this version.`
+        : `Reloaded ${name} from disk as read-only. Your previous draft is kept for copying.`)
     } catch {
+      if (!alive.current) return
       setConfirmation(null)
       onAnnounce(`Reloading ${name} failed. The draft and the conflict are unchanged.`)
-    } finally { setReloading(false) }
-  }, [fileRef, name, onAnnounce, reload])
+    } finally { if (alive.current) setReloading(false) }
+  }, [analysis.editable, fileRef, name, onAnnounce, reload])
 
   const copyDraft = useCallback(async () => {
     const draft = sessionRef.current.draft
@@ -103,7 +120,13 @@ export function EditingSession({ fileRef, document, analysis, onAnnounce, onStat
         onReload={() => setConfirmation('reload')}
         onCopyDraft={() => { void copyDraft() }}
         onExit={exitEditing}
-        recovery={recovery}
+        recovery={<>
+          {retainedDraft !== null && <div className="editor-fallback">
+            <p>A reloaded version could not be edited safely. Your previous draft is kept below so you can select and copy it before leaving.</p>
+            <textarea aria-label="Draft before reload" readOnly value={retainedDraft} rows={6} onFocus={event => event.currentTarget.select()} />
+          </div>}
+          {recovery}
+        </>}
       />
       {confirmation === 'reload' && (
         <ConfirmDialog title="Reload from disk?" confirmLabel="Reload" destructive pending={reloading} onConfirm={() => { void performReload() }} onCancel={() => setConfirmation(null)}>

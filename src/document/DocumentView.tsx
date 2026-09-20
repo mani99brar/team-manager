@@ -66,14 +66,14 @@ export function DocumentView({ fileRef, state, editingState, onBack, onRetry, on
   // The hash check is asynchronous; until it settles for this exact document, editing is unavailable.
   const [hashCheck, setHashCheck] = useState<{ document: Snapshot; matches: boolean } | null>(null)
   useEffect(() => {
-    if (!loaded) return
+    if (!shown) return
     let cancelled = false
-    void contentHash(loaded.content).then(hash => { if (!cancelled) setHashCheck({ document: loaded, matches: hash === loaded.hash }) })
+    void contentHash(shown.content).then(hash => { if (!cancelled) setHashCheck({ document: shown, matches: hash === shown.hash }) })
     return () => { cancelled = true }
-  }, [loaded])
+  }, [shown])
   let editability: Editability = { status: 'checking' }
-  if (loaded && hashCheck?.document === loaded) {
-    const analysis = analyzeText(loaded.content)
+  if (shown && hashCheck?.document === shown) {
+    const analysis = analyzeText(shown.content)
     if (!analysis.editable) editability = { status: 'unavailable', reason: analysis.reason }
     else if (!hashCheck.matches) editability = { status: 'unavailable', reason: 'it is not valid UTF-8, so its bytes cannot be reproduced' }
     else editability = { status: 'editable', analysis }
@@ -140,7 +140,7 @@ export function DocumentView({ fileRef, state, editingState, onBack, onRetry, on
   }
 
   const canEdit = shown !== null && editability.status === 'editable'
-  const body = editing && shown && canEdit
+  const body = editing && shown
     ? (
       <div className="document-editing">
         <EditingSession

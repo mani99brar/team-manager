@@ -198,6 +198,11 @@ export async function readMarkdownFile(
   })
 }
 
+/** Bounded sibling staging name, independent of the target basename and never Markdown. */
+export function temporaryFileName(): string {
+  return `.md-manager-${randomBytes(16).toString('hex')}.tmp`
+}
+
 export type WriteResult = { source: Source; path: string; hash: string }
 
 /**
@@ -218,7 +223,7 @@ export async function writeMarkdownFile(
     if (sha256(await original.readFile()) !== expectedHash) throw new RequestError(409, 'HASH_CONFLICT', HASH_CONFLICT_MESSAGE)
 
     const bytes = Buffer.from(content, 'utf8')
-    const tempName = `.${name}.${randomBytes(8).toString('hex')}.tmp`
+    const tempName = temporaryFileName()
     const temp = await fs.open(at(parent, tempName), CREATE_FLAGS, 0o600)
     try {
       await temp.chmod(stats.mode & 0o7777)
@@ -227,7 +232,10 @@ export async function writeMarkdownFile(
       await temp.close()
       // Staging took time: the same name must still be the same regular file with the expected bytes.
       const fresh = await openRegularFile(parent, name).catch(error => {
-        if (error instanceof PathError) throw new RequestError(409, 'HASH_CONFLICT', HASH_CONFLICT_MESSAGE)
+        const code = (error as NodeJS.ErrnoException)?.code
+        if (error instanceof PathError || code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') {
+          throw new RequestError(409, 'HASH_CONFLICT', HASH_CONFLICT_MESSAGE)
+        }
         throw error
       })
       track(fresh)

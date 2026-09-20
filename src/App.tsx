@@ -106,6 +106,8 @@ function App() {
   const [mode, setMode] = useState<Mode>('graph')
   const [browsingRevision, setBrowsingRevision] = useState(0)
   const [announcement, setAnnouncement] = useState('')
+  const [operation, setOperation] = useState<{ request: Operation; context: number } | null>(null)
+  const [discardAction, setDiscardAction] = useState<{ run: () => void } | null>(null)
   const [viewRequest, setViewRequest] = useState<ViewRequest | null>(null)
   const canvasRef = useRef<GraphCanvasHandle>(null)
   const requestToken = useRef(0)
@@ -116,12 +118,15 @@ function App() {
   // History carries only opaque keys; snapshots live in this page session, never across reloads.
   const [initialHistoryKey] = useState(() => crypto.randomUUID())
   const historyKey = useRef(initialHistoryKey)
+  // Monotonic navigation context: leaving and returning to the same history entry still abandons async navigation.
+  const navigationRevision = useRef(0)
   const historyEntries = useRef(new Map<string, HistoryEntry>())
   useLayoutEffect(() => {
     historyEntries.current.set(initialHistoryKey, { pathname: window.location.pathname })
     window.history.replaceState({ mdManager: initialHistoryKey }, '', window.location.pathname)
   }, [initialHistoryKey])
   const writeHistory = useCallback((entry: Omit<HistoryEntry, 'pathname'>, pathname: string, replace = false) => {
+    navigationRevision.current += 1
     const key = replace ? historyKey.current : crypto.randomUUID()
     historyEntries.current.set(key, { ...entry, pathname })
     historyKey.current = key
@@ -247,6 +252,9 @@ function App() {
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
+      navigationRevision.current += 1
+      setOperation(null)
+      setDiscardAction(null)
       saveBrowsingRef.current()
       const entry = historyEntries.current.get(event.state?.mdManager)
       if (entry) historyKey.current = event.state.mdManager
@@ -283,7 +291,6 @@ function App() {
   const editingRef = useRef<EditingState | null>(null)
   useEffect(() => { editingRef.current = editingState }, [editingState])
   const announce = useCallback((message: string) => setAnnouncement(message), [])
-  const [discardAction, setDiscardAction] = useState<{ run: () => void } | null>(null)
   const [pendingNotice, setPendingNotice] = useState(false)
   // The notice is derived: it only shows while the refused action's save is still pending.
   const showPendingNotice = pendingNotice && editingState?.pending === true
@@ -347,7 +354,6 @@ function App() {
   })
 
   // ---- File and folder operations ----
-  const [operation, setOperation] = useState<Operation | null>(null)
   const [operationNotice, setOperationNotice] = useState<string | null>(null)
   const [outcome, setOutcome] = useState<{ message: string; refreshFailed: boolean } | null>(null)
   const requestFolderOperation = useCallback((op: 'create-file' | 'create-folder' | 'rename' | 'move' | 'delete') => {
@@ -355,8 +361,8 @@ function App() {
     const ref: FolderRef | null = current.kind === 'folder' ? current.ref : null
     if (!ref) return
     setOperationNotice(null)
-    if (op === 'create-file' || op === 'create-folder') setOperation({ op, parent: ref })
-    else if (ref.path) setOperation({ op, target: { kind: 'folder', ref } })
+    if (op === 'create-file' || op === 'create-folder') setOperation({ request: { op, parent: ref }, context: navigationRevision.current })
+    else if (ref.path) setOperation({ request: { op, target: { kind: 'folder', ref } }, context: navigationRevision.current })
   }, [])
   const requestFileOperation = useCallback((op: 'rename' | 'move' | 'delete' | 'copy') => {
     const current = locationRef.current
@@ -372,7 +378,7 @@ function App() {
     if (op === 'copy' && editing?.pending) return
     setOperationNotice(null)
     const target = { kind: 'file' as const, ref: current.ref, draftDirty: editing?.dirty === true }
-    setOperation(op === 'copy' ? { op, target } : { op, target })
+    setOperation({ request: op === 'copy' ? { op, target } : { op, target }, context: navigationRevision.current })
   }, [])
   const openCreatedFile = useCallback((ref: FileRef) => {
     const origin = saveBrowsingRef.current(null)
@@ -380,8 +386,15 @@ function App() {
     writeHistory({ origin }, fileToPathname(ref))
     setLocation({ kind: 'file', ref })
   }, [writeHistory])
-  const completeOperation = useCallback(async (done: Operation, response: MutationResponse) => {
-    setOperation(null)
+  const completeOperation = useCallback(async (done: Operation, response: MutationResponse, context: number) => {
+    setOperation(current => current?.request === done ? null : current)
+    // A successful request still refreshes the listing and reports its outcome after departure,
+    // but can only navigate in its originating context, never over newer edits or pending saves.
+    const follow = (action: () => void) => {
+      const editing = editingRef.current
+      if (navigationRevision.current !== context || editing?.dirty || editing?.pending || editing?.conflicted) return
+      guardLeave(action)
+    }
     const source = response.source
     const name = fileName({ source, path: response.path })
     const where = (path: string) => (path ? `${source} / ${path}` : source)
@@ -389,33 +402,40 @@ function App() {
     // Identity changes of the open document are applied first so the document view never shows a stale path.
     if ((done.op === 'rename' || done.op === 'move') && done.target.kind === 'file' && response.destinationPath) {
       const ref: FileRef = { source, path: response.destinationPath }
-      const entry = historyEntries.current.get(historyKey.current)
-      writeHistory({ origin: entry?.origin }, fileToPathname(ref), true)
-      setLocation({ kind: 'file', ref })
+      follow(() => {
+        const entry = historyEntries.current.get(historyKey.current)
+        writeHistory({ origin: entry?.origin }, fileToPathname(ref), true)
+        setLocation({ kind: 'file', ref })
+      })
     }
     const index = await reloadListing()
     switch (done.op) {
       case 'create-file': {
         message = `Created ${name} in ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
-        openCreatedFile({ source, path: response.path })
+        follow(() => openCreatedFile({ source, path: response.path }))
         break
       }
       case 'create-folder': {
         message = `Created folder ${name} in ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
-        if (index) navigate({ source, path: response.path }, { reveal: true })
+        if (index) follow(() => navigate({ source, path: response.path }, { reveal: true }))
         break
       }
       case 'rename':
       case 'move': {
         message = `${done.op === 'rename' ? 'Renamed' : 'Moved'} ${name} to ${where(response.destinationPath ?? response.path)}.`
-        if (done.target.kind === 'folder' && response.destinationPath) navigate({ source, path: response.destinationPath }, { replace: true, reveal: true })
+        if (done.target.kind === 'folder' && response.destinationPath) {
+          const path = response.destinationPath
+          follow(() => navigate({ source, path }, { replace: true, reveal: true }))
+        }
         break
       }
       case 'delete': {
         message = `Deleted ${name} from ${where(response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))))}.`
         const parent: FolderRef = { source, path: response.path.slice(0, Math.max(0, response.path.lastIndexOf('/'))) }
-        pendingFocus.current = refId(parent)
-        navigate(parent, { reveal: true })
+        follow(() => {
+          pendingFocus.current = refId(parent)
+          navigate(parent, { reveal: true })
+        })
         break
       }
       case 'copy':
@@ -424,7 +444,7 @@ function App() {
     }
     setOutcome({ message, refreshFailed: index === null })
     setAnnouncement(index === null ? `${message} The listing could not be refreshed.` : message)
-  }, [navigate, openCreatedFile, reloadListing, writeHistory])
+  }, [guardLeave, navigate, openCreatedFile, reloadListing, writeHistory])
 
   const index = data.status === 'ready' ? data.index : null
   const selectedRef = location.kind === 'folder' ? location.ref : null
@@ -532,7 +552,7 @@ function App() {
         </div>
       ))}
       {operation && index && (
-        <OperationDialog operation={operation} index={index} onCancel={() => setOperation(null)} onSuccess={(done, response) => { void completeOperation(done, response) }} />
+        <OperationDialog operation={operation.request} index={index} onCancel={() => setOperation(null)} onSuccess={(done, response) => { void completeOperation(done, response, operation.context) }} />
       )}
 
       {data.status === 'ready' && data.refreshError && !outcome?.refreshFailed && (
