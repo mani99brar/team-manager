@@ -2,24 +2,22 @@ import { test, expect, type Page } from '@playwright/test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { waitForApi } from './helpers.ts'
+import { CLAUDE, PI, fileUrl, roots, waitForApi } from './helpers.ts'
 
 /**
- * Rendering tests use uniquely named scratch files under fixtures/pi/ that are removed in afterEach,
- * even on failure. Documents are opened by direct link, so no listing refresh is needed.
+ * Rendering tests use uniquely named scratch files under the personal Pi location root that are removed in
+ * afterEach, even on failure. Documents are opened by direct link, so no listing refresh is needed.
  */
-const fixtureRoot = fileURLToPath(new URL('../fixtures/', import.meta.url))
 const created: string[] = []
 
 async function scratchFile(name: string, content: string): Promise<{ path: string; url: string }> {
   const folder = `scratch-render-${randomUUID().slice(0, 8)}`
-  const directory = join(fixtureRoot, 'pi', folder)
+  const directory = join(roots.piPersonal, folder)
   created.push(directory)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, name), content)
   const path = `${folder}/${name}`
-  return { path, url: `/file/Pi/${path.split('/').map(encodeURIComponent).join('/')}` }
+  return { path, url: fileUrl('Pi', PI, path) }
 }
 
 // A 1×1 transparent PNG, served for intercepted HTTPS image requests.
@@ -127,8 +125,8 @@ test('an empty file shows an explicit message and an exactly empty Source', asyn
   await expect(panel).toContainText('This file is empty')
   expect(await sourceText()).toBe('')
 
-  // The committed empty fixture behaves the same way.
-  await openDocument(page, '/file/Claude/empty.md')
+  // The seeded empty file behaves the same way.
+  await openDocument(page, fileUrl('Claude', CLAUDE, 'empty.md'))
   await expect(page.getByRole('tabpanel')).toContainText('This file is empty')
 })
 

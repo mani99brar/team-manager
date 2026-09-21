@@ -23,6 +23,8 @@
   --node-directory-stroke: #7a5a10;
   --node-file-fill: #ffffff;
   --node-file-stroke: #5b6773;
+  --node-location-fill: #dff3e6;
+  --node-location-stroke: #2f7a4b;
   --edge: #8a96a3;
   --edge-highlight: #1f5fbf;
   --pin: #b23a48;
@@ -58,6 +60,8 @@
     --node-directory-stroke: #f1c96b;
     --node-file-fill: #262e37;
     --node-file-stroke: #b3bec9;
+    --node-location-fill: #1f3a2b;
+    --node-location-stroke: #7fd39a;
     --edge: #7c8894;
     --edge-highlight: #7fb0ff;
     --pin: #ff8a9a;

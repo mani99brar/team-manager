@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { nodeBody, openGraph, waitForApi } from './helpers.ts'
+import { CLAUDE, LABELS, PI, browseUrl, nodeBody, openGraph, waitForApi } from './helpers.ts'
 
 test.beforeEach(async ({ request }) => { await waitForApi(request) })
 
@@ -7,20 +7,21 @@ for (const returnAction of ['button', 'history'] as const) {
   test(`return via ${returnAction} survives a listing deletion while the graph is unmounted`, async ({ page }) => {
     const errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
-    await openGraph(page, '/Pi')
+    await openGraph(page, browseUrl('Pi', PI))
     await page.getByRole('button', { name: 'Expand Claude', exact: true }).click()
-    await expect(nodeBody(page, 'Pi/workflow.md')).toBeVisible()
+    await page.getByRole('button', { name: `Expand ${LABELS[CLAUDE]}`, exact: true }).click()
+    await expect(nodeBody(page, `Pi/${PI}/workflow.md`)).toBeVisible()
     await page.getByRole('button', { name: 'Outline', exact: true }).click()
-    // Simulate the post-deletion listing without modifying a committed fixture.
+    // Simulate the post-deletion listing without modifying a seeded file.
     await page.route('**/api/entries', async route => {
       const response = await route.fetch()
-      const body = await response.json() as { entries: Array<{ source: string; path: string }> }
-      await route.fulfill({ json: { entries: body.entries.filter(entry => !(entry.source === 'Pi' && entry.path === 'workflow.md')) } })
+      const body = await response.json() as { locations: unknown[]; entries: Array<{ source: string; locationId: string; path: string }> }
+      await route.fulfill({ json: { locations: body.locations, entries: body.entries.filter(entry => !(entry.locationId === PI && entry.path === 'workflow.md')) } })
     })
     await page.getByRole('button', { name: 'Refresh', exact: true }).click()
     const outline = page.getByRole('navigation', { name: 'Directory outline' })
-    await expect(outline.locator('[data-node-id="Pi/workflow.md"]')).toHaveCount(0)
-    const remaining = outline.locator('[data-node-id="Claude/workflow.md"] .outline-name')
+    await expect(outline.locator(`[data-node-id="Pi/${PI}/workflow.md"]`)).toHaveCount(0)
+    const remaining = outline.locator(`[data-node-id="Claude/${CLAUDE}/workflow.md"] .outline-name`)
     await remaining.click()
     await expect(page.getByRole('tabpanel')).toContainText('Sample Claude workflow')
     if (returnAction === 'button') await page.getByRole('button', { name: 'Back to folder' }).click()
@@ -28,26 +29,27 @@ for (const returnAction of ['button', 'history'] as const) {
     await expect(outline).toBeVisible()
     await expect(remaining).toBeFocused()
     await page.getByRole('button', { name: 'Outline', exact: true }).click()
-    await expect(nodeBody(page, 'Claude/workflow.md')).toBeVisible()
-    await expect(nodeBody(page, 'Pi/workflow.md')).toHaveCount(0)
+    await expect(nodeBody(page, `Claude/${CLAUDE}/workflow.md`)).toBeVisible()
+    await expect(nodeBody(page, `Pi/${PI}/workflow.md`)).toHaveCount(0)
     expect(errors).toEqual([])
   })
 }
 
 test('reload discards the document origin even when history.state contains a prior browsing snapshot', async ({ page }) => {
-  await openGraph(page, '/Claude')
+  await openGraph(page, browseUrl('Claude', CLAUDE))
   await page.getByRole('button', { name: 'Expand Pi', exact: true }).click()
-  await nodeBody(page, 'Pi/workflow.md').click()
+  await page.getByRole('button', { name: `Expand ${LABELS[PI]}`, exact: true }).click()
+  await nodeBody(page, `Pi/${PI}/workflow.md`).click()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Pi workflow')
   await page.reload()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Pi workflow')
   await page.getByRole('button', { name: 'Back to folder' }).click()
-  await expect(page).toHaveURL('/Pi')
+  await expect(page).toHaveURL(browseUrl('Pi', PI))
 })
 
 test('native Back saves the departing browsing entry and Forward restores its latest mode and expansion', async ({ page }) => {
-  await openGraph(page, '/Pi')
-  await nodeBody(page, 'Pi/workflow.md').click()
+  await openGraph(page, browseUrl('Pi', PI))
+  await nodeBody(page, `Pi/${PI}/workflow.md`).click()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Pi workflow')
   await page.getByRole('button', { name: 'Back to folder' }).click()
   await page.getByRole('button', { name: 'Outline', exact: true }).click()
@@ -62,13 +64,14 @@ test('native Back saves the departing browsing entry and Forward restores its la
 
 test('historical outline origin restores its own scroll, focus and expansion after another origin changes them', async ({ page }) => {
   await page.setViewportSize({ width: 600, height: 420 })
-  await openGraph(page, '/Claude')
+  await openGraph(page, browseUrl('Claude', CLAUDE))
   await page.getByRole('button', { name: 'Outline', exact: true }).click()
   const outline = page.getByRole('navigation', { name: 'Directory outline' })
   await outline.getByRole('button', { name: 'Expand Pi', exact: true }).click()
+  await outline.getByRole('button', { name: `Expand ${LABELS[PI]}`, exact: true }).click()
   await outline.getByRole('button', { name: 'Expand skills', exact: true }).click()
   await outline.getByRole('button', { name: 'Expand subagents', exact: true }).click()
-  const file = outline.locator('[data-node-id="Claude/workflow.md"] .outline-name')
+  const file = outline.locator(`[data-node-id="Claude/${CLAUDE}/workflow.md"] .outline-name`)
   await file.focus()
   await outline.evaluate(element => { element.scrollTop = element.scrollHeight })
   const scroll = await outline.evaluate(element => element.scrollTop)
@@ -82,20 +85,20 @@ test('historical outline origin restores its own scroll, focus and expansion aft
   await file.click()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Claude workflow')
   await page.goBack()
-  await expect(page).toHaveURL('/Pi')
+  await expect(page).toHaveURL('/browse/Pi')
   await page.goBack()
-  await expect(page).toHaveURL('/Claude')
+  await expect(page).toHaveURL(browseUrl('Claude', CLAUDE))
   await page.goBack()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Claude workflow')
   await page.getByRole('button', { name: 'Back to folder' }).click()
-  await expect(page).toHaveURL('/Claude')
+  await expect(page).toHaveURL(browseUrl('Claude', CLAUDE))
   await expect(file).toBeFocused()
   await expect(outline.getByRole('button', { name: 'Collapse Pi', exact: true })).toBeVisible()
   expect(await outline.evaluate(element => element.scrollTop)).toBe(scroll)
 })
 
 test('Back between browsing entries restores each graph viewport, and Forward retains changes made before native Back', async ({ page }) => {
-  await openGraph(page, '/Pi')
+  await openGraph(page, browseUrl('Pi', PI))
   const graphView = () => page.locator('.graph-canvas > g').getAttribute('transform')
   const first = await graphView()
   await nodeBody(page, 'Claude').click()
@@ -103,9 +106,9 @@ test('Back between browsing entries restores each graph viewport, and Forward re
   const second = await graphView()
   expect(second).not.toBe(first)
   await page.goBack()
-  await expect(page).toHaveURL('/Pi')
+  await expect(page).toHaveURL(browseUrl('Pi', PI))
   await expect(page.locator('.graph-canvas > g')).toHaveAttribute('transform', first!)
   await page.goForward()
-  await expect(page).toHaveURL('/Claude')
+  await expect(page).toHaveURL('/browse/Claude')
   await expect(page.locator('.graph-canvas > g')).toHaveAttribute('transform', second!)
 })

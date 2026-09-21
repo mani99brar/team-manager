@@ -1,6 +1,6 @@
 import type { FileRef, Source } from '../graph/model.ts'
 
-export type FileDocument = { source: Source; path: string; content: string; hash: string }
+export type FileDocument = { source: Source; locationId: string; path: string; content: string; hash: string }
 
 export type DocumentErrorKind = 'missing' | 'invalid' | 'failed'
 
@@ -12,9 +12,13 @@ export class DocumentError extends Error {
   }
 }
 
+function sameIdentity(record: Record<string, unknown>, ref: FileRef): boolean {
+  return record.source === ref.source && record.locationId === ref.locationId && record.path === ref.path
+}
+
 /** Fetches one document. The query is built with URLSearchParams so any character in the path survives. */
 export async function fetchDocument(ref: FileRef, signal?: AbortSignal): Promise<FileDocument> {
-  const query = new URLSearchParams({ source: ref.source, path: ref.path })
+  const query = new URLSearchParams({ source: ref.source, locationId: ref.locationId, path: ref.path })
   let response: Response
   try {
     response = await fetch(`/api/file?${query.toString()}`, { signal, cache: 'no-store' })
@@ -29,10 +33,10 @@ export async function fetchDocument(ref: FileRef, signal?: AbortSignal): Promise
   if (response.status === 404) throw new DocumentError('missing', serverMessage ?? 'The file was not found.')
   if (response.status === 400) throw new DocumentError('invalid', serverMessage ?? 'The file link is invalid.')
   if (!response.ok) throw new DocumentError('failed', serverMessage ?? `The API responded with status ${response.status}.`)
-  if (!record || typeof record.content !== 'string' || typeof record.hash !== 'string' || record.source !== ref.source || record.path !== ref.path) {
+  if (!record || typeof record.content !== 'string' || typeof record.hash !== 'string' || !sameIdentity(record, ref)) {
     throw new DocumentError('failed', 'The API returned an unexpected response.')
   }
-  return { source: ref.source, path: ref.path, content: record.content, hash: record.hash }
+  return { source: ref.source, locationId: ref.locationId, path: ref.path, content: record.content, hash: record.hash }
 }
 
 export type SaveErrorKind = 'failed' | 'conflict' | 'too-large' | 'missing'
@@ -52,7 +56,7 @@ export async function saveDocument(ref: FileRef, content: string, expectedHash: 
     response = await fetch('/api/file', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ source: ref.source, path: ref.path, content, expectedHash }),
+      body: JSON.stringify({ source: ref.source, locationId: ref.locationId, path: ref.path, content, expectedHash }),
     })
   } catch {
     throw new SaveError('failed', 'The API could not be reached. Check that it is running, then retry.')
@@ -65,7 +69,7 @@ export async function saveDocument(ref: FileRef, content: string, expectedHash: 
   if (response.status === 413) throw new SaveError('too-large', serverMessage ?? 'The document is larger than the server accepts.')
   if (response.status === 404) throw new SaveError('missing', serverMessage ?? 'The file no longer exists on disk.')
   if (!response.ok) throw new SaveError('failed', serverMessage ?? `The API responded with status ${response.status}.`)
-  if (!record || typeof record.hash !== 'string' || record.source !== ref.source || record.path !== ref.path) {
+  if (!record || typeof record.hash !== 'string' || !sameIdentity(record, ref)) {
     throw new SaveError('failed', 'The API returned an unexpected response.')
   }
   return record.hash

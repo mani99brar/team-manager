@@ -97,12 +97,16 @@
 .edge-arrow { fill: var(--edge); }
 
 .node-body { cursor: pointer; outline: none; }
+.node-label { cursor: pointer; }
 .node-file .node-body { cursor: pointer; }
 .node .shape { stroke-width: 2; }
 .node-source .shape { fill: var(--node-source-fill); stroke: var(--node-source-stroke); }
 .node-directory .shape { fill: var(--node-directory-fill); stroke: var(--node-directory-stroke); stroke-linejoin: round; }
 .node-file .shape { fill: var(--node-file-fill); stroke: var(--node-file-stroke); stroke-linejoin: round; }
 .node-file .shape-detail { fill: none; stroke: var(--node-file-stroke); stroke-width: 1.5; }
+.node-location .shape { fill: var(--node-location-fill); stroke: var(--node-location-stroke); stroke-linejoin: round; }
+.node-location.is-unavailable .shape { fill: var(--surface-alt); stroke-dasharray: 5 4; }
+.node .unavailable-tag { font-size: 10px; font-style: italic; fill: var(--danger-text); paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
 .node.is-selected .shape { stroke: var(--accent); stroke-width: 4; }
 .node .label { font-size: 12px; fill: var(--text); paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
 .node-source .label { font-size: 15px; font-weight: 700; stroke: none; }
@@ -127,6 +131,7 @@
 .legend-source { fill: var(--node-source-fill); stroke: var(--node-source-stroke); stroke-width: 2; }
 .legend-directory { fill: var(--node-directory-fill); stroke: var(--node-directory-stroke); stroke-width: 2; }
 .legend-file { fill: var(--node-file-fill); stroke: var(--node-file-stroke); stroke-width: 2; }
+.legend-location { fill: var(--node-location-fill); stroke: var(--node-location-stroke); stroke-width: 2; }
 .legend-edge { stroke: var(--edge); stroke-width: 2; }
 .legend-edge-arrow { fill: var(--edge); }
 .legend-pin { fill: var(--surface); stroke: var(--pin); stroke-width: 2; }
@@ -146,6 +151,7 @@
 .outline-file > .outline-row { padding-left: 34px; }
 .outline-counts, .outline-empty { color: var(--text-muted); font-size: 0.85rem; }
 .outline-empty { padding: 6px 8px; font-style: italic; }
+.outline-unavailable { color: var(--danger-text); }
 
 @media (max-width: 600px) {
   .app { padding: 0 12px; gap: 6px; }
@@ -204,6 +210,8 @@
 /* ---- Editing ---- */
 .document-header-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .document-notice { margin: 0; padding: 8px 16px; color: var(--text-muted); font-size: 0.9rem; border-bottom: 1px solid var(--border); }
+.document-installed { color: var(--text); background: var(--surface-alt); border-left: 4px solid var(--node-directory-stroke); }
+.document-location { font-weight: 600; }
 .document-editing { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .editor { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .editor-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-right: 16px; }

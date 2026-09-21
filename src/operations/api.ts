@@ -2,15 +2,17 @@ import type { Source } from '../graph/model.ts'
 
 export type OperationKind = 'create-file' | 'create-folder' | 'rename' | 'move' | 'delete' | 'copy'
 
-export type MutationRequest =
-  | { op: 'create-file'; source: Source; path: string; content?: string }
-  | { op: 'create-folder'; source: Source; path: string }
-  | { op: 'rename'; source: Source; path: string; destinationPath: string }
-  | { op: 'move'; source: Source; path: string; destinationPath: string }
-  | { op: 'delete'; source: Source; path: string }
-  | { op: 'copy'; source: Source; path: string; destinationSource: Source; destinationPath: string }
+type Addressed = { source: Source; locationId: string; path: string }
 
-export type MutationResponse = { op: OperationKind; source: Source; path: string; destinationSource?: Source; destinationPath?: string }
+export type MutationRequest =
+  | (Addressed & { op: 'create-file'; content?: string })
+  | (Addressed & { op: 'create-folder' })
+  | (Addressed & { op: 'rename'; destinationPath: string })
+  | (Addressed & { op: 'move'; destinationPath: string })
+  | (Addressed & { op: 'delete' })
+  | (Addressed & { op: 'copy'; destinationSource: Source; destinationLocationId: string; destinationPath: string })
+
+export type MutationResponse = Addressed & { op: OperationKind; destinationSource?: Source; destinationLocationId?: string; destinationPath?: string }
 
 export class OperationError extends Error {
   readonly code: string
@@ -38,7 +40,7 @@ export async function performOperation(request: MutationRequest): Promise<Mutati
     const message = typeof record?.error === 'string' ? record.error : `The API responded with status ${response.status}.`
     throw new OperationError(response.status, code, message)
   }
-  if (!record || record.op !== request.op || record.source !== request.source || typeof record.path !== 'string') {
+  if (!record || record.op !== request.op || record.source !== request.source || record.locationId !== request.locationId || typeof record.path !== 'string') {
     throw new OperationError(response.status, 'UNEXPECTED', 'The API returned an unexpected response.')
   }
   return record as MutationResponse

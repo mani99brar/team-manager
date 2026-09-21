@@ -6,7 +6,12 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { syncBuiltinESMExports } from 'node:module'
-import { createApp, defaultFixtureRoot } from './app.ts'
+import { createApp } from './app.ts'
+import { defaultFixtureRoot, fixtureLocations } from './config.ts'
+
+const PI = 'pi-fixtures'
+const CLAUDE = 'claude-fixtures'
+const loc = (source: string) => (source === 'Pi' ? PI : CLAUDE)
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -29,27 +34,27 @@ function fileUrl(params: Record<string, string> | Array<[string, string]>): stri
 }
 
 test('reads committed fixtures from both sources with exact content and a SHA-256 hash', async () => {
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
-    const pi = await app.inject(fileUrl({ source: 'Pi', path: 'skills/review.md' }))
+    const pi = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'skills/review.md' }))
     assert.equal(pi.statusCode, 200)
     assert.equal(pi.headers['cache-control'], 'no-store')
     assert.match(String(pi.headers['content-type']), /application\/json/)
     const content = '# Sample review skill\n\nCheck the result against the acceptance criteria.\n'
-    assert.deepEqual(pi.json(), { source: 'Pi', path: 'skills/review.md', content, hash: sha256(content) })
+    assert.deepEqual(pi.json(), { source: 'Pi', locationId: PI, path: 'skills/review.md', content, hash: sha256(content) })
 
     // Duplicate filenames in different sources are distinct documents.
-    const piWorkflow = (await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md' }))).json()
-    const claudeWorkflow = (await app.inject(fileUrl({ source: 'Claude', path: 'workflow.md' }))).json()
+    const piWorkflow = (await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }))).json()
+    const claudeWorkflow = (await app.inject(fileUrl({ source: 'Claude', locationId: CLAUDE, path: 'workflow.md' }))).json()
     assert.equal(piWorkflow.source, 'Pi')
     assert.equal(claudeWorkflow.source, 'Claude')
     assert.match(piWorkflow.content, /Sample Pi workflow/)
     assert.match(claudeWorkflow.content, /Sample Claude workflow/)
     assert.notEqual(piWorkflow.hash, claudeWorkflow.hash)
 
-    const empty = await app.inject(fileUrl({ source: 'Claude', path: 'empty.md' }))
+    const empty = await app.inject(fileUrl({ source: 'Claude', locationId: CLAUDE, path: 'empty.md' }))
     assert.equal(empty.statusCode, 200)
-    assert.deepEqual(empty.json(), { source: 'Claude', path: 'empty.md', content: '', hash: sha256('') })
+    assert.deepEqual(empty.json(), { source: 'Claude', locationId: CLAUDE, path: 'empty.md', content: '', hash: sha256('') })
     assert.equal(empty.json().hash, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
   } finally { await app.close() }
 })
@@ -61,20 +66,20 @@ test('preserves whitespace, CRLF and Unicode; hashes the bytes of the same read;
     await writeFile(join(root, 'pi', 'nested', 'deeper', 'NOTE.MD'), crlf)
     const unicode = '# Ünïcödé — 日本語 🚀\n'
     await writeFile(join(root, 'claude', 'ünï 日本.md'), unicode)
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      const nested = await app.inject(fileUrl({ source: 'Pi', path: 'nested/deeper/NOTE.MD' }))
+      const nested = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'nested/deeper/NOTE.MD' }))
       assert.equal(nested.statusCode, 200)
       assert.equal(nested.json().content, crlf)
       assert.equal(nested.json().hash, sha256(Buffer.from(crlf, 'utf8')))
 
-      const named = await app.inject(fileUrl({ source: 'Claude', path: 'ünï 日本.md' }))
+      const named = await app.inject(fileUrl({ source: 'Claude', locationId: CLAUDE, path: 'ünï 日本.md' }))
       assert.equal(named.statusCode, 200)
-      assert.deepEqual(named.json(), { source: 'Claude', path: 'ünï 日本.md', content: unicode, hash: sha256(Buffer.from(unicode, 'utf8')) })
+      assert.deepEqual(named.json(), { source: 'Claude', locationId: CLAUDE, path: 'ünï 日本.md', content: unicode, hash: sha256(Buffer.from(unicode, 'utf8')) })
 
       // Changing the bytes on disk changes the hash on the next read (no caching).
       await writeFile(join(root, 'pi', 'nested', 'deeper', 'NOTE.MD'), `${crlf}more`)
-      const changed = await app.inject(fileUrl({ source: 'Pi', path: 'nested/deeper/NOTE.MD' }))
+      const changed = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'nested/deeper/NOTE.MD' }))
       assert.equal(changed.json().content, `${crlf}more`)
       assert.notEqual(changed.json().hash, nested.json().hash)
       assert.equal(changed.json().hash, sha256(`${crlf}more`))
@@ -88,19 +93,19 @@ test('special characters in names: spaces, #, ?, literal % and an encoded-lookin
     await writeFile(join(root, 'claude', 'a b', 'c#d?e%f.md'), 'special\n')
     await writeFile(join(root, 'pi', '100%.md'), 'percent\n')
     await writeFile(join(root, 'pi', '%2e%2e.md'), 'literal percent name\n')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      const special = await app.inject(fileUrl({ source: 'Claude', path: 'a b/c#d?e%f.md' }))
+      const special = await app.inject(fileUrl({ source: 'Claude', locationId: CLAUDE, path: 'a b/c#d?e%f.md' }))
       assert.equal(special.statusCode, 200)
       assert.equal(special.json().path, 'a b/c#d?e%f.md')
       assert.equal(special.json().content, 'special\n')
 
-      const percent = await app.inject(fileUrl({ source: 'Pi', path: '100%.md' }))
+      const percent = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: '100%.md' }))
       assert.equal(percent.statusCode, 200)
       assert.equal(percent.json().content, 'percent\n')
 
       // The query is decoded exactly once: a name that looks encoded is a literal filename.
-      const literal = await app.inject(fileUrl({ source: 'Pi', path: '%2e%2e.md' }))
+      const literal = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: '%2e%2e.md' }))
       assert.equal(literal.statusCode, 200)
       assert.equal(literal.json().path, '%2e%2e.md')
       assert.equal(literal.json().content, 'literal percent name\n')
@@ -109,7 +114,7 @@ test('special characters in names: spaces, #, ?, literal % and an encoded-lookin
 })
 
 test('rejects missing, invalid or duplicate parameters with 400', async () => {
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
     const cases: string[] = [
       '/api/file',
@@ -118,7 +123,13 @@ test('rejects missing, invalid or duplicate parameters with 400', async () => {
       fileUrl({ source: 'pi', path: 'workflow.md' }),
       fileUrl({ source: 'Nope', path: 'workflow.md' }),
       fileUrl({ source: '', path: 'workflow.md' }),
-      fileUrl({ source: 'Pi', path: '' }),
+      fileUrl({ source: 'Pi', locationId: PI, path: '' }),
+      fileUrl({ source: 'Pi', path: 'workflow.md' }),
+      fileUrl({ source: 'Pi', locationId: 'nope', path: 'workflow.md' }),
+      fileUrl({ source: 'Pi', locationId: CLAUDE, path: 'workflow.md' }),
+      fileUrl({ source: 'Pi', locationId: '', path: 'workflow.md' }),
+      fileUrl({ source: 'Pi', locationId: '../pi-fixtures', path: 'workflow.md' }),
+      fileUrl([['source', 'Pi'], ['locationId', PI], ['locationId', PI], ['path', 'workflow.md']]),
       fileUrl([['source', 'Pi'], ['source', 'Claude'], ['path', 'workflow.md']]),
       fileUrl([['source', 'Pi'], ['path', 'workflow.md'], ['path', 'skills/review.md']]),
       '/api/file?source[]=Pi&path=workflow.md',
@@ -143,9 +154,9 @@ test('returns 404 for missing files, directories, non-Markdown files and non-reg
     const socketPath = join(root, 'pi', 'socket.md')
     const socket = createServer()
     await new Promise<void>((resolve, reject) => socket.once('error', reject).listen(socketPath, resolve))
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      assert.equal((await app.inject(fileUrl({ source: 'Pi', path: 'real.md' }))).statusCode, 200)
+      assert.equal((await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'real.md' }))).statusCode, 200)
       const cases: Array<[string, string]> = [
         ['Pi', 'missing.md'],
         ['Pi', 'skills/missing.md'],
@@ -159,7 +170,7 @@ test('returns 404 for missing files, directories, non-Markdown files and non-reg
         ['Claude', 'real.md'],
       ]
       for (const [source, path] of cases) {
-        const response = await app.inject(fileUrl({ source, path }))
+        const response = await app.inject(fileUrl({ source, locationId: loc(source), path }))
         assert.equal(response.statusCode, 404, `${source}/${path}`)
         assert.equal(typeof response.json().error, 'string')
         assert.ok(!response.body.includes(root), `${source}/${path}`)
@@ -178,7 +189,7 @@ test('traversal, absolute, Windows/UNC, NUL, backslash and dot components are re
     await writeFile(join(root, 'pi', 'real.md'), 'inside')
     await mkdir(join(root, 'pi', 'skills'))
     await writeFile(join(root, 'pi', 'skills', 'review.md'), 'review')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       const rejected: string[] = [
         '../secret.md',
@@ -204,7 +215,7 @@ test('traversal, absolute, Windows/UNC, NUL, backslash and dot components are re
         '..\\secret.md',
       ]
       for (const path of rejected) {
-        const response = await app.inject(fileUrl({ source: 'Pi', path }))
+        const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path }))
         assert.equal(response.statusCode, 400, JSON.stringify(path))
         assert.equal(typeof response.json().error, 'string')
         assert.ok(!response.body.includes(root), JSON.stringify(path))
@@ -223,21 +234,21 @@ test('encoded separators and traversal in the query are decoded once and validat
     await writeFile(join(root, 'secret.md'), 'OUTSIDE SOURCE')
     await mkdir(join(root, 'pi', 'skills'))
     await writeFile(join(root, 'pi', 'skills', 'review.md'), 'review')
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
       // A query-encoded slash between safe components is the normal way to address nested files.
-      const nested = await app.inject('/api/file?source=Pi&path=skills%2Freview.md')
+      const nested = await app.inject('/api/file?source=Pi&locationId=pi-fixtures&path=skills%2Freview.md')
       assert.equal(nested.statusCode, 200)
       assert.equal(nested.json().content, 'review')
 
       const rejected = [
-        '/api/file?source=Pi&path=..%2Fsecret.md',
-        '/api/file?source=Pi&path=%2E%2E%2Fsecret.md',
-        '/api/file?source=Pi&path=skills%2F..%2F..%2Fsecret.md',
-        '/api/file?source=Pi&path=%2Fskills%2Freview.md',
-        '/api/file?source=Pi&path=..%5Csecret.md',
-        '/api/file?source=Pi&path=skills%2Freview.md%00',
-        '/api/file?source=Pi&path=%2e%2e/secret.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=..%2Fsecret.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=%2E%2E%2Fsecret.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=skills%2F..%2F..%2Fsecret.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=%2Fskills%2Freview.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=..%5Csecret.md',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=skills%2Freview.md%00',
+        '/api/file?source=Pi&locationId=pi-fixtures&path=%2e%2e/secret.md',
       ]
       for (const url of rejected) {
         const response = await app.inject(url)
@@ -245,7 +256,7 @@ test('encoded separators and traversal in the query are decoded once and validat
         assert.ok(!response.body.includes('OUTSIDE SOURCE'), url)
       }
       // Double-encoded traversal is not decoded twice: it names a literal (absent) file, never the parent.
-      const doubleEncoded = await app.inject('/api/file?source=Pi&path=%252e%252e%252fsecret.md')
+      const doubleEncoded = await app.inject('/api/file?source=Pi&locationId=pi-fixtures&path=%252e%252e%252fsecret.md')
       assert.equal(doubleEncoded.statusCode, 404)
       assert.ok(!doubleEncoded.body.includes('OUTSIDE SOURCE'))
     } finally { await app.close() }
@@ -263,9 +274,9 @@ test('symlinks at the source root, an intermediate directory or the target are r
     // Replace the Claude source root with a symlink to an outside directory.
     await rm(join(root, 'claude'), { recursive: true })
     await symlink(join(root, 'outside'), join(root, 'claude'))
-    const app = createApp(root)
+    const app = createApp(fixtureLocations(root))
     try {
-      assert.equal((await app.inject(fileUrl({ source: 'Pi', path: 'inside.md' }))).statusCode, 200)
+      assert.equal((await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'inside.md' }))).statusCode, 200)
       const cases: Array<[string, string]> = [
         ['Pi', 'linked-file.md'],
         ['Pi', 'linked-directory/secret.md'],
@@ -273,7 +284,7 @@ test('symlinks at the source root, an intermediate directory or the target are r
         ['Claude', 'secret.md'],
       ]
       for (const [source, path] of cases) {
-        const response = await app.inject(fileUrl({ source, path }))
+        const response = await app.inject(fileUrl({ source, locationId: loc(source), path }))
         assert.equal(response.statusCode, 404, `${source}/${path}`)
         assert.ok(!response.body.includes('OUTSIDE SOURCE'), `${source}/${path}`)
         assert.ok(!response.body.includes(root), `${source}/${path}`)
@@ -285,11 +296,11 @@ test('symlinks at the source root, an intermediate directory or the target are r
 test('an unexpected read failure returns a safe 500 without content or paths', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'real.md'), 'real content')
-    const app = createApp(root, {
+    const app = createApp(fixtureLocations(root), {
       readFile: async () => { throw new Error(`EIO: i/o error, read ${join(root, 'pi', 'real.md')}`) },
     })
     try {
-      const response = await app.inject(fileUrl({ source: 'Pi', path: 'real.md' }))
+      const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'real.md' }))
       assert.equal(response.statusCode, 500)
       assert.equal(typeof response.json().error, 'string')
       assert.ok(!response.body.includes(root))
@@ -300,14 +311,14 @@ test('an unexpected read failure returns a safe 500 without content or paths', a
 })
 
 test('the file endpoint does not affect the entries listing and ignores unrelated query parameters', async () => {
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
-    const withExtras = await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md', root: '/etc', extra: '1' }))
+    const withExtras = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md', root: '/etc', extra: '1' }))
     assert.equal(withExtras.statusCode, 200)
     assert.equal(withExtras.json().path, 'workflow.md')
     assert.equal((await app.inject('/api/entries')).statusCode, 200)
     // Only GET is available.
-    assert.notEqual((await app.inject({ method: 'PUT', url: fileUrl({ source: 'Pi', path: 'workflow.md' }) })).statusCode, 200)
+    assert.notEqual((await app.inject({ method: 'PUT', url: fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }) })).statusCode, 200)
   } finally { await app.close() }
 })
 
@@ -321,7 +332,7 @@ for (const component of ['pi', 'pi/nested', 'pi/nested/real.md']) {
       await writeFile(join(root, 'outside/real.md'), 'OUTSIDE SECRET')
       const target = join(root, component)
       const outside = join(root, component === 'pi' ? 'outside' : component.endsWith('.md') ? 'outside/real.md' : 'outside/nested')
-      const app = createApp(root, {
+      const app = createApp(fixtureLocations(root), {
         readFile: async file => {
           await rename(target, `${target}.original`)
           await symlink(outside, target)
@@ -329,7 +340,7 @@ for (const component of ['pi', 'pi/nested', 'pi/nested/real.md']) {
         },
       })
       try {
-        const response = await app.inject(fileUrl({ source: 'Pi', path: 'nested/real.md' }))
+        const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'nested/real.md' }))
         assert.ok(!response.body.includes('OUTSIDE SECRET'))
         assert.equal(response.statusCode, 200)
         assert.equal(response.json().content, 'INSIDE')
@@ -340,11 +351,11 @@ for (const component of ['pi', 'pi/nested', 'pi/nested/real.md']) {
 
 for (const code of ['ENOENT', 'EIO', 'EACCES', 'ENXIO']) {
   test(`read ${code} is classified safely`, async () => {
-    const app = createApp(defaultFixtureRoot, {
+    const app = createApp(fixtureLocations(defaultFixtureRoot), {
       readFile: async () => { throw Object.assign(new Error('private path and content'), { code }) },
     })
     try {
-      const response = await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md' }))
+      const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }))
       assert.equal(response.statusCode, code === 'ENOENT' ? 404 : 500)
       assert.ok(!response.body.includes('private'))
     } finally { await app.close() }
@@ -353,13 +364,13 @@ for (const code of ['ENOENT', 'EIO', 'EACCES', 'ENXIO']) {
 
 test('metadata EIO is a safe 500, not missing', async () => {
   const fail = async () => { throw Object.assign(new Error('private metadata path'), { code: 'EIO' }) }
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
     await app.ready()
     mock.method(fs, 'lstat', fail)
     mock.method(fs, 'open', fail)
     syncBuiltinESMExports()
-    const response = await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md' }))
+    const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }))
     assert.equal(response.statusCode, 500)
     assert.ok(!response.body.includes('private'))
   } finally {
@@ -372,7 +383,7 @@ test('metadata EIO is a safe 500, not missing', async () => {
 test('secure reads fail closed at startup when procfs capability is unavailable', async () => {
   mock.method(fs, 'statfs', async () => { throw Object.assign(new Error('no procfs'), { code: 'ENOENT' }) })
   syncBuiltinESMExports()
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try { await assert.rejects(async () => { await app.ready() }, /Linux.*procfs/) }
   finally { mock.restoreAll(); syncBuiltinESMExports(); await app.close() }
 })
@@ -380,9 +391,9 @@ test('secure reads fail closed at startup when procfs capability is unavailable'
 test('hash and content use exactly one descriptor read, including non-round-trippable bytes', async () => {
   const bytes = Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x0d, 0x0a, 0xff, 0x80])
   let reads = 0
-  const app = createApp(defaultFixtureRoot, { readFile: async () => { reads++; return bytes } })
+  const app = createApp(fixtureLocations(defaultFixtureRoot), { readFile: async () => { reads++; return bytes } })
   try {
-    const response = await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md' }))
+    const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }))
     assert.equal(response.statusCode, 200)
     assert.equal(reads, 1)
     assert.equal(response.json().content, bytes.toString('utf8'))
@@ -402,7 +413,7 @@ for (const timing of ['before', 'after'] as const) {
         await writeFile(join(root, 'outside/real.md'), 'OUTSIDE SECRET')
         const target = join(root, component === 'pi' ? 'pi' : `pi/nested${component === 'real.md' ? '/real.md' : ''}`)
         const outside = join(root, component === 'pi' ? 'outside' : component === 'nested' ? 'outside/nested' : 'outside/real.md')
-        const app = createApp(root)
+        const app = createApp(fixtureLocations(root))
         const open = fs.open
         const handles: Awaited<ReturnType<typeof open>>[] = []
         try {
@@ -418,7 +429,7 @@ for (const timing of ['before', 'after'] as const) {
             if (swap && timing === 'after') await replace()
             return handle
           })
-          const response = await app.inject(fileUrl({ source: 'Pi', path: 'nested/real.md' }))
+          const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'nested/real.md' }))
           assert.ok(replaced)
           assert.ok(!response.body.includes('OUTSIDE SECRET'))
           assert.equal(response.statusCode, timing === 'before' ? 404 : 200)
@@ -432,7 +443,7 @@ for (const timing of ['before', 'after'] as const) {
 
 for (const code of ['ENOENT', 'EIO', 'EACCES']) {
   test(`fstat ${code} is classified safely and all descriptors close`, async () => {
-    const app = createApp(defaultFixtureRoot)
+    const app = createApp(fixtureLocations(defaultFixtureRoot))
     const open = fs.open
     const handles: Awaited<ReturnType<typeof open>>[] = []
     try {
@@ -445,7 +456,7 @@ for (const code of ['ENOENT', 'EIO', 'EACCES']) {
         })
         return handle
       })
-      const response = await app.inject(fileUrl({ source: 'Pi', path: 'workflow.md' }))
+      const response = await app.inject(fileUrl({ source: 'Pi', locationId: PI, path: 'workflow.md' }))
       assert.equal(response.statusCode, code === 'ENOENT' ? 404 : 500)
       assert.ok(!response.body.includes('private'))
       for (const handle of handles) assert.equal(handle.fd, -1)
@@ -456,7 +467,7 @@ for (const code of ['ENOENT', 'EIO', 'EACCES']) {
 test('unsupported platform and non-procfs mounts fail closed', async () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   for (const unsupported of ['platform', 'filesystem']) {
-    const app = createApp(defaultFixtureRoot)
+    const app = createApp(fixtureLocations(defaultFixtureRoot))
     try {
       if (unsupported === 'platform') Object.defineProperty(process, 'platform', { value: 'darwin' })
       else mock.method(fs, 'statfs', async () => ({ type: 0 }))
@@ -470,7 +481,7 @@ test('unsupported platform and non-procfs mounts fail closed', async () => {
 })
 
 
-test('unavailable descriptor access fails startup and closes the fixture-root handle', async () => {
+test('unavailable descriptor access fails startup and closes every handle it opened', async () => {
   const open = fs.open
   const handles: Awaited<ReturnType<typeof open>>[] = []
   mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags: Parameters<typeof open>[1]) => {
@@ -479,10 +490,10 @@ test('unavailable descriptor access fails startup and closes the fixture-root ha
     handles.push(handle)
     return handle
   })
-  const app = createApp(defaultFixtureRoot)
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
   try {
     await assert.rejects(async () => { await app.ready() }, /Linux.*procfs/)
-    assert.equal(handles.length, 1)
-    assert.equal(handles[0].fd, -1)
+    assert.ok(handles.length >= 1)
+    for (const handle of handles) assert.equal(handle.fd, -1)
   } finally { mock.restoreAll(); await app.close() }
 })

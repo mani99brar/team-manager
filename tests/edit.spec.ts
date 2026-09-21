@@ -2,22 +2,22 @@ import { test, expect, type Page, type Route } from '@playwright/test'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { waitForApi } from './helpers.ts'
+import { CLAUDE, PI, browseUrl, fileUrl, roots, waitForApi } from './helpers.ts'
 
-const fixtureRoot = fileURLToPath(new URL('../fixtures/', import.meta.url))
 const created: string[] = []
 
 function sha256(bytes: Buffer | string) {
   return createHash('sha256').update(bytes).digest('hex')
 }
 
+/** A scratch file at the root of one personal location, removed in afterEach. */
 async function scratchFile(source: 'pi' | 'claude', content: string | Buffer, suffix = '.md') {
   const name = `scratch-${randomUUID().slice(0, 8)}${suffix}`
-  const path = join(fixtureRoot, source, name)
+  const locationId = source === 'pi' ? PI : CLAUDE
+  const path = join(source === 'pi' ? roots.piPersonal : roots.claudePersonal, name)
   created.push(path)
   await writeFile(path, content)
-  return { name, path, url: `/file/${source === 'pi' ? 'Pi' : 'Claude'}/${encodeURIComponent(name)}` }
+  return { name, path, locationId, source: source === 'pi' ? 'Pi' as const : 'Claude' as const, url: fileUrl(source === 'pi' ? 'Pi' : 'Claude', locationId, name) }
 }
 
 test.beforeEach(async ({ request }) => { await waitForApi(request) })
@@ -108,7 +108,7 @@ test('nothing is written on keystrokes, tab switches or timers; Save and Ctrl+S 
   await saveButton(page).click()
   await expect(saveStatus(page)).toHaveText('Saved')
   expect(puts).toHaveLength(1)
-  expect(puts[0].body).toEqual({ source: 'Claude', path: file.name, content: '# Note\ntyped', expectedHash: sha256(original) })
+  expect(puts[0].body).toEqual({ source: 'Claude', locationId: CLAUDE, path: file.name, content: '# Note\ntyped', expectedHash: sha256(original) })
   expect(await readFile(file.path, 'utf8')).toBe('# Note\ntyped')
   await expect(page.getByRole('status')).toContainText(`Saved ${file.name}`)
 
@@ -160,6 +160,9 @@ function holdSaves(page: Page) {
   }
 }
 
+const saved = (source: 'Pi' | 'Claude', locationId: string, path: string, hash: string) =>
+  ({ status: 200, contentType: 'application/json', body: JSON.stringify({ source, locationId, path, hash }) })
+
 test('one save in flight; later explicit saves replace one pending slot and use the returned hash; unsent edits stay Unsaved', async ({ page }) => {
   const file = await scratchFile('pi', 'base\n')
   const saves = holdSaves(page)
@@ -184,14 +187,14 @@ test('one save in flight; later explicit saves replace one pending slot and use 
 
   // Release the first save with a server-chosen hash: the queued snapshot is sent with exactly that hash.
   const firstHash = 'a'.repeat(64)
-  await first.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: file.name, hash: firstHash }) })
+  await first.route.fulfill(saved('Pi', PI, file.name, firstHash))
   const second = await saves.next()
   expect(saves.count()).toBe(2)
-  expect(second.body).toEqual({ source: 'Pi', path: file.name, content: 'base\n123', expectedHash: firstHash })
+  expect(second.body).toEqual({ source: 'Pi', locationId: PI, path: file.name, content: 'base\n123', expectedHash: firstHash })
   await expect(saveStatus(page)).toHaveText('Saving')
 
   const secondHash = 'b'.repeat(64)
-  await second.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: file.name, hash: secondHash }) })
+  await second.route.fulfill(saved('Pi', PI, file.name, secondHash))
   // "4" was typed after the last explicit save: it is not saved and must not show Saved.
   await expect(saveStatus(page)).toHaveText('Unsaved')
   await page.waitForTimeout(300)
@@ -201,8 +204,8 @@ test('one save in flight; later explicit saves replace one pending slot and use 
 
   await saveButton(page).click()
   const third = await saves.next()
-  expect(third.body).toEqual({ source: 'Pi', path: file.name, content: 'base\n1234', expectedHash: secondHash })
-  await third.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: file.name, hash: 'c'.repeat(64) }) })
+  expect(third.body).toEqual({ source: 'Pi', locationId: PI, path: file.name, content: 'base\n1234', expectedHash: secondHash })
+  await third.route.fulfill(saved('Pi', PI, file.name, 'c'.repeat(64)))
   await expect(saveStatus(page)).toHaveText('Saved')
 })
 
@@ -231,8 +234,8 @@ test('a failed save stops the queue, keeps every edit, shows Error with Retry, a
 
   await alert.getByRole('button', { name: 'Retry' }).click()
   const retry = await saves.next()
-  expect(retry.body).toEqual({ source: 'Pi', path: file.name, content: 'base\n123', expectedHash: sha256('base\n') })
-  await retry.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: file.name, hash: sha256('base\n123') }) })
+  expect(retry.body).toEqual({ source: 'Pi', locationId: PI, path: file.name, content: 'base\n123', expectedHash: sha256('base\n') })
+  await retry.route.fulfill(saved('Pi', PI, file.name, sha256('base\n123')))
   await expect(saveStatus(page)).toHaveText('Saved')
   await expect(page.getByRole('alert')).toHaveCount(0)
 
@@ -250,7 +253,7 @@ test('a response from an abandoned editing session cannot affect another documen
   const first = await scratchFile('pi', 'first\n')
   const second = await scratchFile('pi', 'second\n')
   const saves = holdSaves(page)
-  await page.goto('/Pi')
+  await page.goto(browseUrl('Pi', PI))
   await page.getByRole('button', { name: 'Outline' }).click()
   const outline = page.getByRole('navigation', { name: 'Directory outline' })
   await outline.getByRole('button', { name: new RegExp(`^${first.name}\\s*, Markdown file$`) }).click()
@@ -262,21 +265,21 @@ test('a response from an abandoned editing session cannot affect another documen
 
   // Browser Back is not intercepted; it abandons the pending session.
   await page.goBack()
-  await expect(page).toHaveURL('/Pi')
+  await expect(page).toHaveURL(browseUrl('Pi', PI))
   await outline.getByRole('button', { name: new RegExp(`^${second.name}\\s*, Markdown file$`) }).click()
   await editButton(page).click()
   await expect(saveStatus(page)).toHaveText('Saved')
   await typeAtEnd(page, ' two')
   await expect(saveStatus(page)).toHaveText('Unsaved')
 
-  await held.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: first.name, hash: 'd'.repeat(64) }) })
+  await held.route.fulfill(saved('Pi', PI, first.name, 'd'.repeat(64)))
   await page.waitForTimeout(300)
   await expect(saveStatus(page)).toHaveText('Unsaved')
   expect(await editor(page).innerText()).toContain(' two')
   await saveButton(page).click()
   const own = await saves.next()
-  expect(own.body).toEqual({ source: 'Pi', path: second.name, content: 'second\n two', expectedHash: sha256('second\n') })
-  await own.route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ source: 'Pi', path: second.name, hash: sha256('second\n two') }) })
+  expect(own.body).toEqual({ source: 'Pi', locationId: PI, path: second.name, content: 'second\n two', expectedHash: sha256('second\n') })
+  await own.route.fulfill(saved('Pi', PI, second.name, sha256('second\n two')))
   await expect(saveStatus(page)).toHaveText('Saved')
   // Returning to the first document reads the disk: the abandoned draft is gone.
   await page.goto(first.url)

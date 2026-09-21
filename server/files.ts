@@ -1,12 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
+import type { Source } from './config.ts'
+import type { LocationRegistry } from './registry.ts'
 
-export type Source = 'Pi' | 'Claude'
-
-/** The only directories a request can ever address. A request source is mapped, never used as a directory name. */
-const SOURCE_DIRECTORIES: Readonly<Record<Source, string>> = { Pi: 'pi', Claude: 'claude' }
+export type { Source }
 
 export function isSource(value: unknown): value is Source {
   return value === 'Pi' || value === 'Claude'
@@ -40,11 +39,13 @@ export class PathError extends RequestError {
 const INVALID_PATH = 'The file path is invalid.'
 export const NOT_FOUND = 'The file was not found or is not a Markdown file.'
 export const HASH_CONFLICT_MESSAGE = 'This file changed on disk. Reload it or copy your draft.'
+/** Version-control internals are never listed, read or changed, however a request addresses them. */
+export const EXCLUDED_DIRECTORY = '.git'
 
 /**
  * Splits a relative path into safe components. Rejects before any normalisation: `..` and `.` components,
- * empty components (leading, trailing or doubled separators), backslashes, NULs and absolute forms,
- * including Windows drive letters and UNC prefixes.
+ * empty components (leading, trailing or doubled separators), backslashes, NULs, absolute forms including
+ * Windows drive letters and UNC prefixes, and any `.git` component.
  */
 export function splitRelativePath(path: string): string[] {
   if (typeof path !== 'string' || path.length === 0) throw new PathError(400, INVALID_PATH)
@@ -53,6 +54,7 @@ export function splitRelativePath(path: string): string[] {
   const components = path.split('/')
   for (const component of components) {
     if (component === '' || component === '.' || component === '..') throw new PathError(400, INVALID_PATH)
+    if (component === EXCLUDED_DIRECTORY) throw new PathError(400, `Paths inside ${EXCLUDED_DIRECTORY} are not managed.`)
   }
   return components
 }
@@ -67,36 +69,14 @@ export class MutationQueue {
   }
 }
 
-export type FixtureRoot = { directory: string; handle: FileHandle; mutations: MutationQueue }
 export type ReadFile = (file: FileHandle) => Promise<Buffer>
-export type FileDocument = { source: Source; path: string; content: string; hash: string }
+/** The identity of a managed file: never a label, never an absolute path. */
+export type Identity = { source: Source; locationId: string; path: string }
+export type FileDocument = Identity & { content: string; hash: string }
 
-const DIRECTORY_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+export const DIRECTORY_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
 export const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
-const CAPABILITY_ERROR = 'Secure file reads require Linux with mounted procfs at /proc/self/fd.'
-
-/** No pathname fallback: Node lacks openat, so descriptor-relative traversal requires Linux procfs. */
-export async function openFixtureRoot(directory: string): Promise<FixtureRoot> {
-  if (process.platform !== 'linux' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY) {
-    throw new Error(CAPABILITY_ERROR)
-  }
-  try {
-    const stats = await fs.statfs('/proc/self/fd')
-    if (stats.type !== 0x9fa0) throw new Error('Not procfs')
-  } catch (cause) { throw new Error(CAPABILITY_ERROR, { cause }) }
-  // The configured root and its ancestors are trusted startup configuration, not request input.
-  // Pin it once; every source/descendant is subsequently opened relative to a retained descriptor.
-  const handle = await fs.open(resolve(directory), DIRECTORY_FLAGS)
-  try {
-    const probe = await fs.open(`/proc/self/fd/${handle.fd}`, constants.O_RDONLY | constants.O_DIRECTORY)
-    await probe.close()
-  } catch (cause) {
-    await handle.close()
-    throw new Error(CAPABILITY_ERROR, { cause })
-  }
-  return { directory: resolve(directory), handle, mutations: new MutationQueue() }
-}
 
 function filesystemError(error: unknown): never {
   const code = (error as NodeJS.ErrnoException)?.code
@@ -107,49 +87,44 @@ function filesystemError(error: unknown): never {
 }
 
 /** A descriptor-relative path: the parent is an already-open directory, the name is one validated component. */
-export function at(parent: FileHandle, name: string): string {
-  return `/proc/self/fd/${parent.fd}/${name}`
+export function at(parent: FileHandle, name?: string): string {
+  const base = `/proc/self/fd/${parent.fd}`
+  return name === undefined ? base : `${base}/${name}`
 }
 
-export type Target = { source: Source; components: string[] }
-
-/** Validates source and path lexically and returns the safe components. Nothing on disk is touched. */
-export function validateEntryPath(source: unknown, path: unknown, kind: 'file' | 'folder' | 'any'): Target {
-  if (!isSource(source)) throw new PathError(400, 'The source must be Pi or Claude.', 'INVALID_SOURCE')
+/** Validates a request path lexically and returns the safe components. Nothing on disk is touched. */
+export function validateEntryPath(path: unknown, kind: 'file' | 'folder' | 'any'): string[] {
   if (typeof path !== 'string') throw new PathError(400, INVALID_PATH)
   const components = splitRelativePath(path)
-  const sourceRoot = resolve('/', SOURCE_DIRECTORIES[source])
-  const inside = relative(sourceRoot, resolve(sourceRoot, ...components))
-  if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
-    throw new PathError(400, INVALID_PATH)
-  }
+  // Defence in depth: the validated components must resolve strictly below a root.
+  if (!resolve('/root', ...components).startsWith('/root/')) throw new PathError(400, INVALID_PATH)
   const markdown = isMarkdownName(components[components.length - 1])
   if (kind === 'file' && !markdown) throw new PathError(400, 'The file name must end in .md.')
   if (kind === 'folder' && markdown) throw new PathError(400, 'A folder name must not end in .md.')
-  return { source, components }
+  return components
 }
 
 /** Read/write validation: a non-Markdown name is reported as an unavailable file, not a malformed path. */
-export function validateMarkdownPath(source: unknown, path: unknown): Target {
-  const target = validateEntryPath(source, path, 'any')
-  if (!isMarkdownName(target.components[target.components.length - 1])) throw new PathError(404, NOT_FOUND)
-  return target
+export function validateMarkdownPath(path: unknown): string[] {
+  const components = validateEntryPath(path, 'any')
+  if (!isMarkdownName(components[components.length - 1])) throw new PathError(404, NOT_FOUND)
+  return components
 }
 
 /**
- * Walks from the pinned root to the directory containing the target, one no-follow open per component.
+ * Walks from an open location root to the directory containing the target, one no-follow open per component.
  * O_NOFOLLOW applies to ONE component at each step; the parent is an already-open directory.
  * Rename/symlink replacement can therefore only yield the pinned original or an unavailable target,
  * never re-resolve an earlier component. Keep all handles alive until the operation completes.
  */
 export async function withParentDirectory<T>(
-  root: FixtureRoot, source: Source, components: string[],
+  root: FileHandle, components: string[],
   operation: (parent: FileHandle, name: string, track: (handle: FileHandle) => void) => Promise<T>,
 ): Promise<T> {
   const handles: FileHandle[] = []
   try {
-    let parent = root.handle
-    for (const component of [SOURCE_DIRECTORIES[source], ...components.slice(0, -1)]) {
+    let parent = root
+    for (const component of components.slice(0, -1)) {
       parent = await fs.open(at(parent, component), DIRECTORY_FLAGS)
       handles.push(parent)
     }
@@ -175,24 +150,25 @@ export async function openRegularFile(parent: FileHandle, name: string): Promise
   return file
 }
 
-/** Reusable path validator with a descriptor-scoped operation, never a checked pathname. */
+/** Validates location and path, opens the root for this operation only, then runs on the validated descriptor. */
 export async function withMarkdownFile<T>(
-  root: FixtureRoot, source: unknown, path: unknown,
-  operation: (file: FileHandle, identity: { source: Source; path: string }) => Promise<T>,
+  registry: LocationRegistry, source: unknown, locationId: unknown, path: unknown,
+  operation: (file: FileHandle, identity: Identity) => Promise<T>,
 ): Promise<T> {
-  const validated = validateMarkdownPath(source, path)
-  return withParentDirectory(root, validated.source, validated.components, async (parent, name, track) => {
+  const location = registry.resolve(source, locationId)
+  const components = validateMarkdownPath(path)
+  return registry.withRoot(location, root => withParentDirectory(root, components, async (parent, name, track) => {
     const file = await openRegularFile(parent, name)
     track(file)
-    return operation(file, { source: validated.source, path: validated.components.join('/') })
-  })
+    return operation(file, { source: location.source, locationId: location.id, path: components.join('/') })
+  }))
 }
 
 /** Reads from the validated descriptor once; content and SHA-256 use that same buffer. */
 export async function readMarkdownFile(
-  root: FixtureRoot, source: unknown, path: unknown, readFile: ReadFile = file => file.readFile(),
+  registry: LocationRegistry, source: unknown, locationId: unknown, path: unknown, readFile: ReadFile = file => file.readFile(),
 ): Promise<FileDocument> {
-  return withMarkdownFile(root, source, path, async (file, identity) => {
+  return withMarkdownFile(registry, source, locationId, path, async (file, identity) => {
     const bytes = await readFile(file)
     return { ...identity, content: bytes.toString('utf8'), hash: sha256(bytes) }
   })
@@ -203,7 +179,7 @@ export function temporaryFileName(): string {
   return `.md-manager-${randomBytes(16).toString('hex')}.tmp`
 }
 
-export type WriteResult = { source: Source; path: string; hash: string }
+export type WriteResult = Identity & { hash: string }
 
 /**
  * Hash-guarded atomic replacement, serialized with every other app mutation:
@@ -213,10 +189,11 @@ export type WriteResult = { source: Source; path: string; hash: string }
  * Residual limit: an external writer racing between the final re-check and the rename is not detected.
  */
 export async function writeMarkdownFile(
-  root: FixtureRoot, source: unknown, path: unknown, content: string, expectedHash: string,
+  registry: LocationRegistry, source: unknown, locationId: unknown, path: unknown, content: string, expectedHash: string,
 ): Promise<WriteResult> {
-  const validated = validateMarkdownPath(source, path)
-  return root.mutations.run(() => withParentDirectory(root, validated.source, validated.components, async (parent, name, track) => {
+  const location = registry.resolve(source, locationId)
+  const components = validateMarkdownPath(path)
+  return registry.mutations.run(() => registry.withRoot(location, root => withParentDirectory(root, components, async (parent, name, track) => {
     const original = await openRegularFile(parent, name)
     track(original)
     const stats = await original.stat()
@@ -248,6 +225,6 @@ export async function writeMarkdownFile(
       await fs.unlink(at(parent, tempName)).catch(() => undefined)
       throw error
     }
-    return { source: validated.source, path: validated.components.join('/'), hash: sha256(bytes) }
-  }))
+    return { source: location.source, locationId: location.id, path: components.join('/'), hash: sha256(bytes) }
+  })))
 }
