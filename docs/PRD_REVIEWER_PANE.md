@@ -2,17 +2,17 @@
 
 Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
 
-This slice is controller work only. Everything it touches lives in `workflow/`, which no feature worker may edit, so it ships as an ordinary commit with offline tests and needs no feature run. Its first live exercise is the review step of the next feature run (slice B).
+This slice is controller work plus the completion schema and docs: `workflow/`, `contracts/workflow/reviewCompletion.schema.json`, `workflow/RUNBOOK.md` and the feature README. None of it is worker-owned, so it ships as an ordinary commit with offline tests and a controlled live smoke test (section 5), and needs no feature run. Its first live exercise inside a full run is the review step of the next feature run (slice B).
 
 ## 1. Goal
 
-The reviewer runs as a native Claude session with the same capabilities as a worker: a Herdr pane the operator can type into, a completion-file protocol, and the same automatic wait. Its transcript is resumable afterwards like a worker's.
+The reviewer runs as a native Claude session with the same session interaction and lifecycle as a worker, with restricted reviewer tools: a Herdr pane the operator can type into, a completion-file protocol, the same automatic wait, and a transcript that is resumable afterwards like a worker's. Its tools stay read-only (Read, Glob, Grep).
 
 Success: on the next automatic run, a third pane labelled `Claude: reviewer` appears in the run's tab when the review node starts, the operator can answer a question the reviewer asks, and the run still completes unattended when nobody types.
 
 ## 2. Confirmed decisions
 
-- Same capabilities as workers: pane, human input, completion protocol, automatic wait.
+- Same session interaction and lifecycle as workers (pane, human input, completion protocol, automatic wait, resumable transcript), with restricted reviewer tools.
 - One review per bundle. A blocked verdict ends the run; fixing findings means a new run with a new bundle.
 - Print mode stays available behind `--reviewer-transport print` for environments without Herdr. Default is the native session.
 
@@ -56,6 +56,8 @@ The finding fields `worker` (`ui`, `adapter`, `both`, `none`) and `requirement` 
 6. Docs: RUNBOOK and feature README describe the third pane, the completion protocol and the resume path for the reviewer transcript.
 
 ## 5. Acceptance
+
+Offline tests (work item 5) gate the commit. Before merging, run one controlled live smoke test: a scratch run directory holding a copy of project-workflows-001's `review-bundle.json`, `review.diff` and verification packets, with the review node driven on its own so the reviewer session launches in a `review-worktree/` at the candidate commit, a pane appears, a completion file is written and the session is stopped. Nothing is integrated and the real run directory is untouched. This catches the launch-time failures (late pid, pane not ready) that the first live run showed offline tests do not.
 
 - The reviewer session appears in `claude agents --json` under the run's reviewer name with a UUID different from both workers, and a third pane exists in the run's tab.
 - A reviewer that stops to ask a question can be answered in the pane, and the run resumes when the completion file appears and the session goes idle.

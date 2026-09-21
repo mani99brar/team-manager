@@ -1,6 +1,6 @@
 # PRD: Review verdict and findings in the viewer (slice B)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice A being on `main` so this run's own review exercises the reviewer pane.
+Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Ordered after slice A by choice, so this run's own review exercises the reviewer pane live. Displaying persisted review results does not technically require A; the only coupling is that findings' `worker` and `requirement` fields are defined by A's completion schema, and the contract treats both as optional so runs reviewed before A still export.
 
 ## 1. Goal
 
@@ -12,7 +12,7 @@ Success: opening the review node of a completed run answers "did the reviewer ap
 
 | Where | Change |
 | --- | --- |
-| `contracts/projects` | new `reviewResult` type: run_id, node_id `review`, attempt, reviewer session, bundle_sha256, candidate_commit, verdict, findings with `worker` and `requirement`, reviewed_at, diff artifact reference. Version 1.1.0, additive. Node `result_uri` may point at it; `session_id` is populated for the review node |
+| `contracts/projects` | new `reviewResult` type: run_id, node_id `review`, attempt, reviewer session, bundle_sha256, candidate_commit, verdict, findings with optional `worker` and `requirement`, reviewed_at, diff artifact reference. Version 1.1.0, additive. Node `result_uri` may point at it; `session_id` is populated for the review node |
 | `contracts/projects/examples.ts`, `contract.test.ts` | positive and negative fixtures both workers build against |
 | `workflow/export_state.py` | `review` section in `run-state.json` from `review.json` and the reviewer receipt. Export version 1.1.0 |
 | `workflow` CLI | `workflow export <run>`: rebuilds `run-state.json` from the run directory under the current export version. Takes the controller lock, launches nothing, refuses a run whose `plan.json` or `review.json` fail validation. Run it on project-workflows-001 after merge |
@@ -40,9 +40,9 @@ Both task files keep the existing boundary: no dependency changes, no edits to c
 
 Controller acceptance: after `workflow export` on project-workflows-001, the viewer shows its verdict, reviewer dd7bdcd1 and six findings.
 
-## 5. Open questions
+## 5. Decided
 
-- Whether issue #3 (stale task error projects a verified node as failed) and issue #6 (unredacted raw error) ride along in the adapter task. Both touch `server/projects.ts` near this work. Proposed: yes, as the last two items of the adapter task.
+- Issues #3 (stale task error projects a verified node as failed) and #6 (unredacted raw error) stay out of the adapter task by default, although both touch `server/projects.ts` near this work. Either is added only if it blocks a named acceptance scenario in section 4. None does: #3 concerns verify nodes, not the review node, and #6 concerns error bodies, which `paths-redacted` does not cover.
 
 ## 6. How to run
 
