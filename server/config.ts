@@ -1,6 +1,7 @@
 import { readFile, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Startup configuration: which filesystem locations the app manages, grouped under the two agents.
@@ -37,6 +38,9 @@ export function defaultConfigPath(env: NodeJS.ProcessEnv): string {
   const home = env.HOME?.trim() || homedir()
   return join(home, '.config', 'md-manager', 'sources.json')
 }
+
+/** The repository's fixtures/ folder, resolved from this module rather than the shell's working directory. */
+export const defaultFixtureRoot = fileURLToPath(new URL('../fixtures/', import.meta.url))
 
 /** Explicit fixture/demo mode: `<root>/pi` and `<root>/claude` become one location per source. */
 export function fixtureLocations(root: string): LocationConfig[] {

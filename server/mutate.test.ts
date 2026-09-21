@@ -8,7 +8,8 @@ import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
 
 const PI = 'pi-fixtures'
-const CLAUDE = 'claude-fixtures'import { LocationRegistry } from './registry.ts'
+const CLAUDE = 'claude-fixtures'
+import { LocationRegistry } from './registry.ts'
 import { performMutation, type MutationRequest } from './mutations.ts'
 
 function sha256(bytes: Buffer | string): string {
@@ -402,7 +403,8 @@ test('missing targets and symlinks anywhere in source or destination paths are r
       for (const [label, payload] of cases) {
         const response = await mutate(app, payload)
         assert.equal(response.statusCode, 404, `${label}: ${response.statusCode} ${response.body}`)
-        assert.equal(response.json().code, 'NOT_FOUND', label)
+        // The Claude root itself is the symlink: that is an unavailable location, not a missing target.
+        assert.equal(response.json().code, label.includes('symlinked source root') ? 'LOCATION_UNAVAILABLE' : 'NOT_FOUND', label)
         assert.ok(!response.body.includes(root), label)
         assert.ok(!response.body.includes('OUTSIDE SOURCE'), label)
       }

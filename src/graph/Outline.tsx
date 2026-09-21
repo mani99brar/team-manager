@@ -12,6 +12,9 @@ type Props = {
   onToggleExpand: (node: GraphNode) => void
 }
 
+const ICONS: Record<GraphNode['kind'], string> = { source: '◎', location: '▣', directory: '▰', file: '▤' }
+const KIND_TEXT: Record<GraphNode['kind'], string> = { source: 'source', location: 'location', directory: 'folder', file: 'Markdown file' }
+
 /** Accessible replacement for the graph: the same tree, expansion state and selection as nested lists. */
 export function Outline({ index, expanded, selectedId, scrollRef, onSelect, onOpenFile, onToggleExpand }: Props) {
   const container = useRef<HTMLElement>(null)
@@ -23,6 +26,8 @@ export function Outline({ index, expanded, selectedId, scrollRef, onSelect, onOp
     const isExpanded = expanded.has(node.id)
     const counts = childCounts(index, node.id)
     const children = childrenOf(index, node.id)
+    const unavailable = node.kind === 'location' && node.location?.status === 'unavailable'
+    const summary = unavailable ? `Unavailable: ${node.location?.error ?? 'this location cannot be read.'}` : describeCounts(counts, node.kind)
     return (
       <li key={node.id} className={`outline-item outline-${node.kind}`} data-node-id={node.id}>
         <div className="outline-row">
@@ -43,17 +48,19 @@ export function Outline({ index, expanded, selectedId, scrollRef, onSelect, onOp
             aria-current={node.id === selectedId ? 'true' : undefined}
             onClick={() => onSelect(node)}
           >
-            <span className="outline-icon" aria-hidden="true">{node.kind === 'source' ? '◎' : '▰'}</span>
+            <span className="outline-icon" aria-hidden="true">{ICONS[node.kind]}</span>
             <span>{node.name}</span>
-            <span className="visually-hidden">, {node.kind === 'source' ? 'source folder' : 'folder'}</span>
+            <span className="visually-hidden">, {KIND_TEXT[node.kind]}{unavailable ? ', unavailable' : ''}</span>
           </button>
-          <span className="outline-counts">{describeCounts(counts)}</span>
+          <span className={unavailable ? 'outline-counts outline-unavailable' : 'outline-counts'}>{summary}</span>
         </div>
         {isExpanded && (
           <ul className="outline-list">
-            {children.length === 0
-              ? <li className="outline-empty">This folder is empty.</li>
-              : children.map(child => (child.kind === 'file' ? renderFile(child) : renderFolder(child)))}
+            {unavailable
+              ? <li className="outline-empty outline-unavailable">{summary}</li>
+              : children.length === 0
+                ? <li className="outline-empty">{node.kind === 'source' ? 'No locations are configured for this source.' : 'This folder is empty.'}</li>
+                : children.map(child => (child.kind === 'file' ? renderFile(child) : renderFolder(child)))}
           </ul>
         )}
       </li>
@@ -65,7 +72,7 @@ export function Outline({ index, expanded, selectedId, scrollRef, onSelect, onOp
       <li key={node.id} className="outline-item outline-file" data-node-id={node.id}>
         <div className="outline-row">
           <button type="button" className="outline-name outline-file-name" onClick={() => onOpenFile(node)}>
-            <span className="outline-icon" aria-hidden="true">▤</span>
+            <span className="outline-icon" aria-hidden="true">{ICONS.file}</span>
             <span>{node.name}</span>
             <span className="visually-hidden">, Markdown file</span>
           </button>

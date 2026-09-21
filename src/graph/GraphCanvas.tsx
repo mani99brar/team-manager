@@ -286,6 +286,7 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
     const shown = node.kind === 'source' || (node.kind === 'file' ? showFileLabels : showFolderLabels)
     return shown && node.kind !== 'source' ? wrapLabel(node.name).length : 0
   }
+  const KIND_TEXT: Record<GraphNode['kind'], string> = { source: 'source', location: 'location', directory: 'folder', file: 'Markdown file' }
 
   return (
     <svg
@@ -336,14 +337,20 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
             const isSelected = node.id === selectedId
             const pinned = layout.isPinned(node.id)
             const counts = isFolder ? childCounts(index, node.id) : null
-            const isEmpty = counts !== null && counts.directories + counts.files === 0
-            const description = counts ? describeCounts(counts) : 'Markdown file'
+            const unavailable = node.kind === 'location' && node.location?.status === 'unavailable'
+            const isEmpty = counts !== null && !unavailable && node.kind !== 'source' && counts.directories + counts.files === 0
+            const description = counts ? (unavailable ? 'unavailable' : describeCounts(counts, node.kind)) : 'Markdown file'
             const label = isFolder
-              ? `${node.name}, ${node.kind === 'source' ? 'source folder' : 'folder'}, ${description}${pinned ? ', pinned' : ''}`
+              ? `${node.name}, ${KIND_TEXT[node.kind]}, ${description}${pinned ? ', pinned' : ''}`
               : `${node.name}, Markdown file${pinned ? ', pinned' : ''}`
             const showLabel = node.kind === 'source' || (node.kind === 'file' ? showFileLabels : showFolderLabels)
             const lines = node.kind === 'source' ? [node.name] : wrapLabel(node.name)
-            const classes = ['node', `node-${node.kind}`, isSelected ? 'is-selected' : '', pinned ? 'is-pinned' : '']
+            const classes = ['node', `node-${node.kind}`, isSelected ? 'is-selected' : '', pinned ? 'is-pinned' : '', unavailable ? 'is-unavailable' : '']
+            // Shared by the shape and its label: both activate and drag the node. Keeping the label outside the
+            // focusable body keeps the body's box equal to the shape, so pointer targets never fall into label gaps.
+            const pointerHandlers = {
+              onPointerDown: onNodePointerDown(node), onPointerMove: onNodePointerMove, onPointerUp: onNodePointerEnd, onPointerCancel: onNodePointerEnd, onClick: onNodeClick(node),
+            }
             return (
               <g
                 key={node.id}
@@ -362,16 +369,13 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
                   tabIndex={0}
                   aria-label={label}
                   aria-pressed={isFolder ? isSelected : undefined}
-                  onPointerDown={onNodePointerDown(node)}
-                  onPointerMove={onNodePointerMove}
-                  onPointerUp={onNodePointerEnd}
-                  onPointerCancel={onNodePointerEnd}
-                  onClick={onNodeClick(node)}
+                  {...pointerHandlers}
                   onKeyDown={onNodeKeyDown(node)}
                 >
                   <title>{label}</title>
                   <circle className="focus-ring" r={radius + 6} />
                   {node.kind === 'source' && <circle className="shape" r={radius} />}
+                  {node.kind === 'location' && <rect className="shape" x={-24} y={-17} width={48} height={34} rx={9} />}
                   {node.kind === 'directory' && <path className="shape" d="M -20 -15 h 12 l 4 4 h 24 v 26 h -40 z" />}
                   {node.kind === 'file' && (
                     <>
@@ -379,15 +383,25 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, Props>(function GraphCa
                       <path className="shape-detail" d="M 4 -14 v 6 h 6 M -6 0 h 12 M -6 6 h 12" />
                     </>
                   )}
-                  {showLabel && (
-                    <text className="label" textAnchor="middle" y={node.kind === 'source' ? 5 : radius + 16} aria-hidden="true">
-                      {lines.map((line, i) => <tspan key={i} x="0" dy={i === 0 ? 0 : 13}>{line}</tspan>)}
-                    </text>
-                  )}
-                  {isExpanded && isEmpty && (
-                    <text className="empty-tag" textAnchor="middle" y={radius + 16 + lines.length * 13} aria-hidden="true">empty</text>
+                  {node.kind === 'source' && showLabel && (
+                    <text className="label" textAnchor="middle" y={5} aria-hidden="true">{node.name}</text>
                   )}
                 </g>
+                {node.kind !== 'source' && (showLabel || (isExpanded && isEmpty) || unavailable) && (
+                  <g className="node-label" aria-hidden="true" {...pointerHandlers}>
+                    {showLabel && (
+                      <text className="label" textAnchor="middle" y={radius + 16}>
+                        {lines.map((line, i) => <tspan key={i} x="0" dy={i === 0 ? 0 : 13}>{line}</tspan>)}
+                      </text>
+                    )}
+                    {isExpanded && isEmpty && (
+                      <text className="empty-tag" textAnchor="middle" y={radius + 16 + (showLabel ? lines.length : 0) * 13}>empty</text>
+                    )}
+                    {unavailable && (
+                      <text className="unavailable-tag" textAnchor="middle" y={radius + 16 + (showLabel ? lines.length : 0) * 13}>unavailable</text>
+                    )}
+                  </g>
+                )}
                 {isFolder && (
                   <g
                     className="node-toggle"

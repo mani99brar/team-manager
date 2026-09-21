@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { fileToPathname, type FileRef } from '../graph/model.ts'
+import { fileToPathname, type FileRef, type Location } from '../graph/model.ts'
 import { EditingSession, type EditingState } from './EditingSession.tsx'
 import type { Snapshot } from './editSession.ts'
 import { Markdown } from './Markdown.tsx'
@@ -14,6 +14,8 @@ const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
 
 type Props = {
   fileRef: FileRef
+  /** The configured location the file belongs to, once the listing knows it; null while loading or unknown. */
+  location: Location | null
   state: DocumentState
   onBack: () => void
   onRetry: () => void
@@ -36,7 +38,7 @@ function baseName(path: string): string {
 }
 
 /** Document shell: identity header, Back to folder, Rendered/Source tabs, load states, and the editing session. */
-export function DocumentView({ fileRef, state, editingState, onBack, onRetry, onAnnounce, onEditingChange, onOperation, guardLeave }: Props) {
+export function DocumentView({ fileRef, location, state, editingState, onBack, onRetry, onAnnounce, onEditingChange, onOperation, guardLeave }: Props) {
   const key = fileToPathname(fileRef)
   const name = baseName(fileRef.path)
   const otherSource = fileRef.source === 'Pi' ? 'Claude' : 'Pi'
@@ -196,6 +198,8 @@ export function DocumentView({ fileRef, state, editingState, onBack, onRetry, on
           <p className="document-meta" data-testid="document-meta">
             <span className="document-source-name">{fileRef.source}</span>
             <span className="document-separator" aria-hidden="true">·</span>
+            <span className="document-location" data-testid="document-location">{location?.label ?? fileRef.locationId}</span>
+            <span className="document-separator" aria-hidden="true">·</span>
             <span className="document-path">{fileRef.path}</span>
           </p>
         </div>
@@ -225,6 +229,11 @@ export function DocumentView({ fileRef, state, editingState, onBack, onRetry, on
           <button type="button" className="button" onClick={onBack}>Back to folder</button>
         </div>
       </header>
+      {location && (location.category === 'package' || location.category === 'plugin') && (
+        <p className="document-notice document-installed" data-testid="installed-notice">
+          This file is part of an installed {location.category} ({location.label}). Saving changes the installed copy directly, and a package update or sync may overwrite it.
+        </p>
+      )}
       {shown && !editing && editability.status === 'unavailable' && (
         <p className="document-notice" id="edit-unavailable" data-testid="edit-unavailable">
           This file is read-only here because {editability.reason}. Editing it in this app could not keep the file byte for byte.

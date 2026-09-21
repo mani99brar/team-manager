@@ -2,10 +2,8 @@ import { test, expect, type Page } from '@playwright/test'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { waitForApi } from './helpers.ts'
+import { CLAUDE, PI, browseUrl, fileUrl, roots, waitForApi } from './helpers.ts'
 
-const fixtureRoot = fileURLToPath(new URL('../fixtures/', import.meta.url))
 const created: string[] = []
 
 function sha256(bytes: Buffer | string) {
@@ -14,10 +12,11 @@ function sha256(bytes: Buffer | string) {
 
 async function scratchFile(source: 'pi' | 'claude', content: string) {
   const name = `scratch-${randomUUID().slice(0, 8)}.md`
-  const path = join(fixtureRoot, source, name)
+  const locationId = source === 'pi' ? PI : CLAUDE
+  const path = join(source === 'pi' ? roots.piPersonal : roots.claudePersonal, name)
   created.push(path)
   await writeFile(path, content)
-  return { name, path, url: `/file/${source === 'pi' ? 'Pi' : 'Claude'}/${encodeURIComponent(name)}` }
+  return { name, path, locationId, url: fileUrl(source === 'pi' ? 'Pi' : 'Claude', locationId, name) }
 }
 
 test.beforeEach(async ({ request }) => { await waitForApi(request) })
@@ -160,7 +159,7 @@ test('Revert restores the Edit baseline on disk after several saves, through the
   await dialog(page).getByRole('button', { name: 'Revert' }).click()
   await expect(saveStatus(page)).toHaveText('Saved')
   expect(puts).toHaveLength(1)
-  expect(puts[0]).toEqual({ source: 'Pi', path: file.name, content: 'baseline\n', expectedHash: sha256('baseline\none two') })
+  expect(puts[0]).toEqual({ source: 'Pi', locationId: PI, path: file.name, content: 'baseline\n', expectedHash: sha256('baseline\none two') })
   expect(await readFile(file.path, 'utf8')).toBe('baseline\n')
   expect(await editor(page).innerText()).not.toContain('one two')
   await expect(page.getByRole('status')).toContainText('Reverted')
@@ -302,7 +301,7 @@ test('while a save is pending, app navigation is refused with an explanation unt
   release()
   await expect(saveStatus(page)).toHaveText('Saved')
   await page.getByRole('button', { name: 'Back to folder' }).click()
-  await expect(page).toHaveURL('/Pi')
+  await expect(page).toHaveURL(browseUrl('Pi', PI))
   expect(await readFile(file.path, 'utf8')).toBe('pending\nx')
 })
 
@@ -344,7 +343,7 @@ test('beforeunload warns only while there is unsaved or unacknowledged work', as
 
 test('browser Back after a failed save is not intercepted and loses the draft; returning reads the disk', async ({ page }) => {
   const file = await scratchFile('claude', 'history\n')
-  await page.goto('/Claude')
+  await page.goto(browseUrl('Claude', CLAUDE))
   await page.getByRole('button', { name: 'Outline' }).click()
   await page.getByRole('navigation', { name: 'Directory outline' }).getByRole('button', { name: new RegExp(`^${file.name}\\s*, Markdown file$`) }).click()
   await editButton(page).click()
@@ -355,7 +354,7 @@ test('browser Back after a failed save is not intercepted and loses the draft; r
   await saveButton(page).click()
   await expect(saveStatus(page)).toHaveText('Error')
   await page.goBack()
-  await expect(page).toHaveURL('/Claude')
+  await expect(page).toHaveURL(browseUrl('Claude', CLAUDE))
   await expect(dialog(page)).toHaveCount(0)
   await page.goForward()
   await expect(page).toHaveURL(file.url)
@@ -367,8 +366,8 @@ test('browser Back after a failed save is not intercepted and loses the draft; r
 })
 
 for (const [initial, fresh] of [
-  ['\uFEFFold\r\ntext', 'NEW disk\ntext'],
-  ['old\ntext', '\uFEFFNEW disk\r\ntext'],
+  ['﻿old\r\ntext', 'NEW disk\ntext'],
+  ['old\ntext', '﻿NEW disk\r\ntext'],
   ['old\r\ntext', 'NEW disk\ntext'],
 ]) {
   test(`Reload refreshes serialization metadata ${JSON.stringify(initial)} to ${JSON.stringify(fresh)}`, async ({ page }) => {
@@ -447,8 +446,8 @@ test('pending Reload cannot be dismissed with Escape', async ({ page }) => {
 test('a Reload response from a session abandoned through history cannot affect the new editor', async ({ page }) => {
   const file = await scratchFile('pi', 'original')
   // Establish app-owned history so Back leaves editing without a full page reload.
-  await page.goto('/Pi')
-  await page.locator(`.graph-canvas [data-node-id="Pi/${file.name}"] .node-body`).focus()
+  await page.goto(browseUrl('Pi', PI))
+  await page.locator(`.graph-canvas [data-node-id="Pi/${PI}/${file.name}"] .node-body`).focus()
   await page.keyboard.press('Enter')
   await editButton(page).click()
   await typeAtEnd(page, ' draft')
@@ -492,7 +491,7 @@ test('a read-only Reload can recover to a new editable baseline without dropping
   await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(saveButton(page)).toBeDisabled()
   await expect(page.getByRole('textbox', { name: 'Draft before reload' })).toHaveValue('original draft')
-  const fresh = '\uFEFFnew\r\neditable'
+  const fresh = '﻿new\r\neditable'
   await writeFile(file.path, fresh)
   await page.getByRole('button', { name: 'Reload', exact: true }).click()
   await dialog(page).getByRole('button', { name: 'Reload', exact: true }).click()

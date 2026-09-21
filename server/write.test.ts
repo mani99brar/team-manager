@@ -363,7 +363,8 @@ test('PUT never creates files and refuses directories, non-Markdown, non-regular
       for (const [source, path, expectedHash] of cases) {
         const response = await put(app, { source, locationId: loc(source), path, content: 'WRITTEN BY PUT', expectedHash })
         assert.equal(response.statusCode, 404, `${source}/${path}`)
-        assert.equal(response.json().code, 'NOT_FOUND', `${source}/${path}`)
+        // The Claude root itself is the symlink: that is an unavailable location, not a missing file.
+        assert.equal(response.json().code, source === 'Claude' ? 'LOCATION_UNAVAILABLE' : 'NOT_FOUND', `${source}/${path}`)
         assert.ok(!response.body.includes(root))
       }
       const piEntries = (await readdir(join(root, 'pi'))).sort()

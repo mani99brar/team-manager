@@ -27,17 +27,18 @@ export type LayoutSnapshot = { nodes: SimNode[]; pinned: string[]; visibleIds: s
 type SimLink = SimulationLinkDatum<SimNode> & { source: SimNode; target: SimNode }
 
 /** Drawn radius of each node type; also used to trim edges. */
-export const NODE_RADIUS: Record<NodeKind, number> = { source: 30, directory: 20, file: 14 }
+export const NODE_RADIUS: Record<NodeKind, number> = { source: 30, location: 24, directory: 20, file: 14 }
 /** Personal space for collision avoidance, leaving room for the label below the shape. */
-const COLLIDE_RADIUS: Record<NodeKind, number> = { source: 54, directory: 42, file: 34 }
-const CHARGE: Record<NodeKind, number> = { source: -700, directory: -380, file: -160 }
+const COLLIDE_RADIUS: Record<NodeKind, number> = { source: 54, location: 50, directory: 42, file: 34 }
+const CHARGE: Record<NodeKind, number> = { source: -700, location: -480, directory: -380, file: -160 }
 /** Each source cluster is gently pulled to its own side so Pi and Claude stay recognisable. */
 const SOURCE_ANCHOR: Record<Source, Point> = { Pi: { x: -180, y: 0 }, Claude: { x: 180, y: 0 } }
 const ALPHA_MIN = 0.02
 const MAX_SYNC_TICKS = 400
 
 function linkDistance(link: SimLink): number {
-  if (link.source.kind === 'source') return 130
+  if (link.source.kind === 'source') return 140
+  if (link.source.kind === 'location') return link.target.kind === 'file' ? 85 : 110
   return link.target.kind === 'file' ? 80 : 105
 }
 

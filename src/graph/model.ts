@@ -1,63 +1,87 @@
 /**
- * Pure graph model: builds a containment tree from the flat /api/entries listing and
- * derives what is visible for a given expansion state. No DOM or layout concerns live here.
+ * Pure graph model: builds a containment tree from the /api/entries listing (the configured locations plus a
+ * flat entry list) and derives what is visible for a given expansion state. No DOM or layout concerns live here.
+ *
+ * Identity is (source, locationId, relativePath). Pi/Claude and the configured locations are virtual
+ * navigation boundaries: every real file or directory belongs to exactly one location, and the same relative
+ * path in two locations is two different things.
  */
 
 export type Source = 'Pi' | 'Claude'
 export const SOURCES: readonly Source[] = ['Pi', 'Claude']
+export type Category = 'personal' | 'package' | 'plugin' | 'project'
+export type LocationStatus = 'available' | 'unavailable'
+/** One configured filesystem location as the API reports it: never an absolute path. */
+export type Location = { id: string; source: Source; label: string; category: Category; status: LocationStatus; error: string | null }
 export type EntryKind = 'directory' | 'file'
-export type Entry = { source: Source; path: string; kind: EntryKind }
-export type NodeKind = 'source' | 'directory' | 'file'
+export type Entry = { source: Source; locationId: string; path: string; kind: EntryKind }
+export type Listing = { locations: Location[]; entries: Entry[] }
+export type NodeKind = 'source' | 'location' | 'directory' | 'file'
 
-/** A source root (path '') or a directory inside it. */
-export type FolderRef = { source: Source; path: string }
+/** A source root (locationId null), a location root (path '') or a directory inside a location. */
+export type FolderRef = { source: Source; locationId: string | null; path: string }
 
-/** A Markdown file identified by source plus nonempty source-relative path. Filename alone is never enough. */
-export type FileRef = { source: Source; path: string }
+/** A Markdown file identified by source, location and nonempty location-relative path. Filename alone is never enough. */
+export type FileRef = { source: Source; locationId: string; path: string }
+
+export type LocationKey = { source: Source; locationId: string }
 
 export type GraphNode = {
   id: string
   source: Source
+  locationId: string | null
   path: string
   name: string
   kind: NodeKind
   parentId: string | null
   depth: number
+  /** Location nodes carry their configured metadata and availability. */
+  location?: Location
 }
 
 export type GraphEdge = { id: string; parentId: string; childId: string }
 
 export type TreeIndex = {
   nodes: Map<string, GraphNode>
-  /** Immediate children in display order: directories first, then files, each alphabetical. */
+  /** Immediate children in display order: locations in configured order; directories first, then files, each alphabetical. */
   children: Map<string, GraphNode[]>
+  /** Configured locations keyed by their node id (`<source>/<locationId>`). */
+  locations: Map<string, Location>
 }
 
-export type ChildCounts = { directories: number; files: number }
+export type ChildCounts = { locations: number; directories: number; files: number }
+
+/** Matches the server's location id contract; anything else in a URL is malformed rather than looked up. */
+export const LOCATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 export function isSource(value: string): value is Source {
   return value === 'Pi' || value === 'Claude'
 }
 
-export function nodeId(source: Source, path: string): string {
-  return path ? `${source}/${path}` : source
+export function isLocationId(value: string): boolean {
+  return LOCATION_ID_PATTERN.test(value)
+}
+
+export function nodeId(source: Source, locationId: string | null, path: string): string {
+  if (locationId === null) return source
+  return path ? `${source}/${locationId}/${path}` : `${source}/${locationId}`
 }
 
 export function refId(ref: FolderRef): string {
-  return nodeId(ref.source, ref.path)
+  return nodeId(ref.source, ref.locationId, ref.path)
 }
 
 export function sameRef(a: FolderRef | null, b: FolderRef | null): boolean {
-  return a === b || (a !== null && b !== null && a.source === b.source && a.path === b.path)
+  return a === b || (a !== null && b !== null && a.source === b.source && a.locationId === b.locationId && a.path === b.path)
 }
 
 export function sameFileRef(a: FileRef | null, b: FileRef | null): boolean {
   return sameRef(a, b)
 }
 
-/** The folder that contains a file: the source root for top-level files. */
+/** The folder that contains a file: the location root for top-level files. */
 export function parentFolderOf(ref: FileRef): FolderRef {
-  return { source: ref.source, path: parentPath(ref.path) }
+  return { source: ref.source, locationId: ref.locationId, path: parentPath(ref.path) }
 }
 
 function baseName(path: string): string {
@@ -71,29 +95,48 @@ function parentPath(path: string): string {
 
 const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' })
 
+const KIND_ORDER: Record<NodeKind, number> = { source: 0, location: 1, directory: 2, file: 3 }
+
 function compareNodes(a: GraphNode, b: GraphNode): number {
-  if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1
+  if (a.kind !== b.kind) return KIND_ORDER[a.kind] - KIND_ORDER[b.kind]
+  // Locations keep their configured order (the sort is stable).
+  if (a.kind === 'location') return 0
   return collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
 }
 
-/** Builds the containment index. Parents are created implicitly if the listing omits them. */
-export function buildIndex(entries: readonly Entry[]): TreeIndex {
+/**
+ * Builds the containment index. Location nodes come from the configured list, in its order, whether or not
+ * they are available; entries naming an unconfigured location are dropped rather than inventing one.
+ * Directory parents are created implicitly if the listing omits them.
+ */
+export function buildIndex(listing: Listing): TreeIndex {
   const nodes = new Map<string, GraphNode>()
+  const locations = new Map<string, Location>()
   for (const source of SOURCES) {
-    nodes.set(source, { id: source, source, path: '', name: source, kind: 'source', parentId: null, depth: 0 })
+    nodes.set(source, { id: source, source, locationId: null, path: '', name: source, kind: 'source', parentId: null, depth: 0 })
   }
-  function ensure(source: Source, path: string, kind: NodeKind): GraphNode {
-    const id = nodeId(source, path)
+  for (const location of listing.locations) {
+    if (!isSource(location.source) || typeof location.id !== 'string' || !isLocationId(location.id)) continue
+    const id = nodeId(location.source, location.id, '')
+    if (nodes.has(id)) continue
+    nodes.set(id, { id, source: location.source, locationId: location.id, path: '', name: location.label, kind: 'location', parentId: location.source, depth: 1, location })
+    locations.set(id, location)
+  }
+  function ensure(source: Source, locationId: string, path: string, kind: NodeKind): GraphNode {
+    const id = nodeId(source, locationId, path)
     const existing = nodes.get(id)
     if (existing) return existing
-    const parent = path.includes('/') ? ensure(source, parentPath(path), 'directory') : nodes.get(source)!
-    const node: GraphNode = { id, source, path, name: baseName(path), kind, parentId: parent.id, depth: parent.depth + 1 }
+    const parent = path.includes('/') ? ensure(source, locationId, parentPath(path), 'directory') : nodes.get(nodeId(source, locationId, ''))!
+    const node: GraphNode = { id, source, locationId, path, name: baseName(path), kind, parentId: parent.id, depth: parent.depth + 1 }
     nodes.set(id, node)
     return node
   }
-  for (const entry of entries) {
-    if (!isSource(entry.source) || !entry.path || entry.path.split('/').some(segment => segment === '')) continue
-    ensure(entry.source, entry.path, entry.kind === 'directory' ? 'directory' : 'file')
+  for (const entry of listing.entries) {
+    if (!isSource(entry.source) || typeof entry.locationId !== 'string' || !entry.path) continue
+    if (entry.path.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) continue
+    const location = locations.get(nodeId(entry.source, entry.locationId, ''))
+    if (!location || location.status !== 'available') continue
+    ensure(entry.source, entry.locationId, entry.path, entry.kind === 'directory' ? 'directory' : 'file')
   }
   const children = new Map<string, GraphNode[]>()
   for (const node of nodes.values()) {
@@ -103,7 +146,12 @@ export function buildIndex(entries: readonly Entry[]): TreeIndex {
     children.set(node.parentId, siblings)
   }
   for (const siblings of children.values()) siblings.sort(compareNodes)
-  return { nodes, children }
+  return { nodes, children, locations }
+}
+
+/** The configured location for a key, only when it belongs to that source. */
+export function locationOf(index: TreeIndex, key: LocationKey): Location | undefined {
+  return index.locations.get(nodeId(key.source, key.locationId, ''))
 }
 
 export function childrenOf(index: TreeIndex, id: string): GraphNode[] {
@@ -111,15 +159,21 @@ export function childrenOf(index: TreeIndex, id: string): GraphNode[] {
 }
 
 export function childCounts(index: TreeIndex, id: string): ChildCounts {
-  const counts = { directories: 0, files: 0 }
+  const counts = { locations: 0, directories: 0, files: 0 }
   for (const child of childrenOf(index, id)) {
     if (child.kind === 'file') counts.files += 1
+    else if (child.kind === 'location') counts.locations += 1
     else counts.directories += 1
   }
   return counts
 }
 
-export function describeCounts({ directories, files }: ChildCounts): string {
+/** Human text for a node's contents. A source counts locations; locations and directories count folders and files. */
+export function describeCounts({ locations, directories, files }: ChildCounts, kind: NodeKind = 'directory'): string {
+  if (kind === 'source') {
+    if (locations === 0) return 'No locations are configured for this source.'
+    return `${locations} ${locations === 1 ? 'location' : 'locations'}`
+  }
   if (directories + files === 0) return 'This folder is empty.'
   const parts = [
     `${directories} ${directories === 1 ? 'folder' : 'folders'}`,
@@ -140,13 +194,15 @@ export function descendantIds(index: TreeIndex, id: string): string[] {
   return result
 }
 
-/** Ids of the source and every ancestor directory of `node`, outermost first (excluding the node itself). */
+/** Ids of the source, the location and every ancestor directory of `node`, outermost first (excluding the node itself). */
 export function ancestorIds(node: GraphNode): string[] {
   const ids: string[] = []
-  if (node.kind === 'source') return ids
+  if (node.kind === 'source' || node.locationId === null) return ids
   ids.push(node.source)
+  if (node.kind === 'location') return ids
+  ids.push(nodeId(node.source, node.locationId, ''))
   const segments = node.path.split('/')
-  for (let i = 1; i < segments.length; i += 1) ids.push(nodeId(node.source, segments.slice(0, i).join('/')))
+  for (let i = 1; i < segments.length; i += 1) ids.push(nodeId(node.source, node.locationId, segments.slice(0, i).join('/')))
   return ids
 }
 
@@ -189,6 +245,7 @@ export function pruneIds(index: TreeIndex, ids: ReadonlySet<string>): Set<string
   return new Set([...ids].filter(id => index.nodes.has(id)))
 }
 
+/** Whether a folder ref names a source, a configured location (available or not) or an existing directory. */
 export function folderExists(index: TreeIndex, ref: FolderRef | null): boolean {
   if (ref === null) return true
   const node = index.nodes.get(refId(ref))
@@ -197,18 +254,23 @@ export function folderExists(index: TreeIndex, ref: FolderRef | null): boolean {
 
 // ---- URLs ---------------------------------------------------------------------------------------
 
-/** Encodes the selected folder as a pathname, encoding every segment so spaces, #, ? and % survive. */
-export function folderToPathname(ref: FolderRef | null): string {
-  if (ref === null) return '/'
-  const segments = ref.path ? [ref.source, ...ref.path.split('/')] : [ref.source]
-  return `/${segments.map(encodeURIComponent).join('/')}`
-}
-
+const BROWSE_ROUTE = 'browse'
 const FILE_ROUTE = 'file'
 
-/** Encodes a document as `/file/<source>/<segment>/…`, encoding every path segment individually. */
+/** Encodes the selected folder as `/browse/<source>[/<locationId>[/segments…]]`, encoding every segment. */
+export function folderToPathname(ref: FolderRef | null): string {
+  if (ref === null) return '/'
+  const segments: string[] = [ref.source]
+  if (ref.locationId !== null) {
+    segments.push(ref.locationId)
+    if (ref.path) segments.push(...ref.path.split('/'))
+  }
+  return `/${BROWSE_ROUTE}/${segments.map(encodeURIComponent).join('/')}`
+}
+
+/** Encodes a document as `/file/<source>/<locationId>/<segment>/…`, encoding every path segment individually. */
 export function fileToPathname(ref: FileRef): string {
-  return `/${FILE_ROUTE}/${[ref.source, ...ref.path.split('/')].map(encodeURIComponent).join('/')}`
+  return `/${FILE_ROUTE}/${[ref.source, ref.locationId, ...ref.path.split('/')].map(encodeURIComponent).join('/')}`
 }
 
 export type ParsedLocation =
@@ -217,6 +279,8 @@ export type ParsedLocation =
   | { kind: 'file'; ref: FileRef }
   | { kind: 'unknown-source'; name: string }
   | { kind: 'malformed' }
+  /** A link from the fixture-only layout (`/<Source>/…`, `/file/<Source>/<name>.md`): explained, never resolved. */
+  | { kind: 'legacy'; source: Source; pathname: string }
 
 /** Decodes each raw segment exactly once; malformed percent-encoding yields null instead of throwing. */
 function decodeSegments(raw: string[]): string[] | null {
@@ -227,48 +291,71 @@ function decodeSegments(raw: string[]): string[] | null {
   }
 }
 
-function parseFilePathname(raw: string[]): ParsedLocation {
-  if (raw.length < 2) return { kind: 'malformed' }
-  const segments = decodeSegments(raw)
-  if (!segments) return { kind: 'malformed' }
-  const [source, ...rest] = segments
-  if (!isSource(source)) return { kind: 'unknown-source', name: source }
-  // Decoded segments must be plain names: no separators, no dot components, nothing empty.
-  if (rest.some(segment => segment === '' || segment === '.' || segment === '..' || segment.includes('/'))) {
-    return { kind: 'malformed' }
-  }
-  return { kind: 'file', ref: { source, path: rest.join('/') } }
+/** Decoded path segments must be plain names: no separators, no dot components, nothing empty. */
+function validSegments(segments: string[]): boolean {
+  return segments.every(segment => segment !== '' && segment !== '.' && segment !== '..' && !segment.includes('/'))
 }
 
 export function parsePathname(pathname: string): ParsedLocation {
   const raw = pathname.split('/').filter(segment => segment !== '')
   if (raw.length === 0) return { kind: 'home' }
-  if (raw[0] === FILE_ROUTE) return parseFilePathname(raw.slice(1))
-  const segments = decodeSegments(raw)
-  if (!segments) return { kind: 'malformed' }
-  const [source, ...rest] = segments
-  if (!isSource(source)) return { kind: 'unknown-source', name: source }
-  return { kind: 'folder', ref: { source, path: rest.join('/') } }
+  const [route, ...rest] = raw
+  if (route === BROWSE_ROUTE) {
+    if (rest.length === 0) return { kind: 'home' }
+    const segments = decodeSegments(rest)
+    if (!segments) return { kind: 'malformed' }
+    const [source, locationId, ...path] = segments
+    if (!isSource(source)) return { kind: 'unknown-source', name: source }
+    if (locationId === undefined) return { kind: 'folder', ref: { source, locationId: null, path: '' } }
+    if (!isLocationId(locationId) || !validSegments(path)) return { kind: 'malformed' }
+    return { kind: 'folder', ref: { source, locationId, path: path.join('/') } }
+  }
+  if (route === FILE_ROUTE) {
+    if (rest.length < 2) return { kind: 'malformed' }
+    const segments = decodeSegments(rest)
+    if (!segments) return { kind: 'malformed' }
+    const [source, locationId, ...path] = segments
+    if (!isSource(source)) return { kind: 'unknown-source', name: source }
+    if (path.length === 0) {
+      // `/file/<Source>/<name>.md` was a fixture-layout document link; a location root is never a file.
+      return locationId.toLowerCase().endsWith('.md') ? { kind: 'legacy', source, pathname } : { kind: 'malformed' }
+    }
+    if (!isLocationId(locationId) || !validSegments(path)) return { kind: 'malformed' }
+    return { kind: 'file', ref: { source, locationId, path: path.join('/') } }
+  }
+  const decoded = decodeSegments([route])
+  if (!decoded) return { kind: 'malformed' }
+  const first = decoded[0]
+  if (isSource(first)) return { kind: 'legacy', source: first, pathname }
+  return { kind: 'unknown-source', name: first }
 }
 
 /** `ref` is the folder to navigate to (null = Home). A crumb without `ref` is the current document and not a link. */
 export type Breadcrumb = { label: string; ref?: FolderRef | null; id: string }
 
-/** Home, then the source, then one crumb per directory segment. */
-export function breadcrumbsFor(ref: FolderRef | null): Breadcrumb[] {
+/** The configured label of a location, or its id when the listing is not loaded or does not know it. */
+export function locationLabel(index: TreeIndex | null, key: LocationKey): string {
+  return (index && locationOf(index, key)?.label) || key.locationId
+}
+
+/** Home, then the source, then the location (by label), then one crumb per directory segment. */
+export function breadcrumbsFor(ref: FolderRef | null, index: TreeIndex | null): Breadcrumb[] {
   const crumbs: Breadcrumb[] = [{ label: 'Home', ref: null, id: 'home' }]
   if (ref === null) return crumbs
-  crumbs.push({ label: ref.source, ref: { source: ref.source, path: '' }, id: ref.source })
+  crumbs.push({ label: ref.source, ref: { source: ref.source, locationId: null, path: '' }, id: ref.source })
+  if (ref.locationId === null) return crumbs
+  const locationId = ref.locationId
+  crumbs.push({ label: locationLabel(index, { source: ref.source, locationId }), ref: { source: ref.source, locationId, path: '' }, id: nodeId(ref.source, locationId, '') })
   if (!ref.path) return crumbs
   const segments = ref.path.split('/')
   for (let i = 0; i < segments.length; i += 1) {
     const path = segments.slice(0, i + 1).join('/')
-    crumbs.push({ label: segments[i], ref: { source: ref.source, path }, id: nodeId(ref.source, path) })
+    crumbs.push({ label: segments[i], ref: { source: ref.source, locationId, path }, id: nodeId(ref.source, locationId, path) })
   }
   return crumbs
 }
 
 /** The containing folder's trail plus the filename as a non-navigating current item. */
-export function breadcrumbsForFile(ref: FileRef): Breadcrumb[] {
-  return [...breadcrumbsFor(parentFolderOf(ref)), { label: baseName(ref.path), id: nodeId(ref.source, ref.path) }]
+export function breadcrumbsForFile(ref: FileRef, index: TreeIndex | null): Breadcrumb[] {
+  return [...breadcrumbsFor(parentFolderOf(ref), index), { label: baseName(ref.path), id: nodeId(ref.source, ref.locationId, ref.path) }]
 }

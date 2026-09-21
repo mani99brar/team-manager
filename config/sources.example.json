@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "locations": [
+    {
+      "id": "pi-personal",
+      "source": "Pi",
+      "label": "Personal skills",
+      "path": "/home/you/.pi/agent/skills",
+      "category": "personal"
+    },
+    {
+      "id": "pi-subagents",
+      "source": "Pi",
+      "label": "Package: pi-subagents",
+      "path": "/home/you/.pi/agent/npm/node_modules/pi-subagents/skills",
+      "category": "package"
+    },
+    {
+      "id": "pi-project-agent-workflow",
+      "source": "Pi",
+      "label": "Project: agent-workflow",
+      "path": "/home/you/dev/agent-workflow/.pi/skills",
+      "category": "project"
+    },
+    {
+      "id": "claude-personal",
+      "source": "Claude",
+      "label": "Personal and synced skills",
+      "path": "/home/you/.claude/skills",
+      "category": "personal"
+    },
+    {
+      "id": "claude-plugin-design",
+      "source": "Claude",
+      "label": "Plugin: design",
+      "path": "/home/you/.claude/plugins/synced/<sync-id>/design/skills",
+      "category": "plugin"
+    }
+  ]
+}
