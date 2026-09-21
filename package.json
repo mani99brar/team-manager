@@ -13,7 +13,9 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test:unit": "tsx --test server/config.test.ts server/app.test.ts server/file.test.ts server/write.test.ts server/mutate.test.ts server/locations.test.ts tests/unit/model.test.ts tests/unit/document.test.ts tests/unit/editSession.test.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "contracts:export": "tsx contracts/workflow/export.ts",
+    "test:contracts": "tsx --test contracts/workflow/contract.test.ts"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",

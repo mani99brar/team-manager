@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "approve",
+        "pause",
+        "resume",
+        "retry",
+        "cancel"
+      ]
+    },
+    "node_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "contract_version",
+    "run_id",
+    "request_id",
+    "expected_sequence",
+    "action",
+    "node_id",
+    "reason"
+  ],
+  "additionalProperties": false
+}
