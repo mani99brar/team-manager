@@ -6,9 +6,11 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -167,11 +169,54 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     env.update(PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
                PYTHONDONTWRITEBYTECODE="1", NO_COLOR="1", FORCE_COLOR="0", CI="1",
                WORKFLOW_VERIFICATION_PHASE=phase)
-    for name in ("TMPDIR", "XDG_CACHE_HOME", "npm_config_cache"):
+    for name in ("XDG_CACHE_HOME", "npm_config_cache"):
         path = directory / name.lower()
         path.mkdir()
         env[name] = str(path)
+    # Unix domain sockets (tsx IPC, Chromium) are limited to ~107 bytes of path, so the
+    # lane's TMPDIR cannot live under the run directory. It is private to this lane,
+    # holds no evidence, and is removed once the checks finish.
+    tmpdir = lane_tmpdir()
+    env["TMPDIR"] = str(tmpdir)
     executions, receipts, errors, effective_commands = [], [], [], []
+    try:
+        run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    # Source edits by checks invalidate the evidence. Ignored caches are allowed.
+    if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
+        errors.append("Verification modified the tested source revision")
+    expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
+                "output_commit": commit, "verification_cwd": str(worktree)}
+    result = {"contract_version": "1.0.0", **{key: value for key, value in expected.items() if key != "verification_cwd"},
+              "session_id": session_id, "status": "succeeded", "changed_files": changed,
+              "checks": executions, "open_assumptions": [], "artifacts": capture.artifacts,
+              "summary": f"Trusted {phase} check capture; not integration approval", "error": None}
+    evidence = {"version": "1.0.0", "policy_sha256": policy_digest(policy),
+                **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
+    packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,
+              "artifact_root": str(artifacts_dir), "artifact_paths": {key: str(path) for key, path in capture.paths.items()},
+              "capture_errors": errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir)}
+    packet = recheck_packet(packet, policy, run)
+    save_json(packet_path, packet)
+    return packet
+
+
+SOCKET_PATH_LIMIT = 107  # sun_path on Linux, excluding the terminating NUL.
+SOCKET_NAME_ALLOWANCE = len("/tsx-4294967295/4294967295.pipe")
+
+
+def lane_tmpdir() -> Path:
+    """A short private temp directory whose sockets fit within sun_path."""
+    tmpdir = Path(tempfile.mkdtemp(prefix="mdwf-"))
+    if len(str(tmpdir)) + SOCKET_NAME_ALLOWANCE > SOCKET_PATH_LIMIT:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise RuntimeError(f"System temp directory is too deep for Unix sockets: {tmpdir.parent}")
+    return tmpdir
+
+
+def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Path, env: dict, capture: "Capture",
+                      executions: list, receipts: list, errors: list, effective_commands: list) -> None:
     for index, setup in enumerate(policy.get("setup", [])):
         log = directory / f"setup-{index}.log"
         code, _, _ = execute(setup["argv"], worktree, log, setup["timeout_seconds"], env)
@@ -208,23 +253,6 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
             except (ValueError, OSError, KeyError, TypeError) as error:
                 errors.append(f"{check['id']}: {error}")
             receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": scenarios})
-    # Source edits by checks invalidate the evidence. Ignored caches are allowed.
-    if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
-        errors.append("Verification modified the tested source revision")
-    expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
-                "output_commit": commit, "verification_cwd": str(worktree)}
-    result = {"contract_version": "1.0.0", **{key: value for key, value in expected.items() if key != "verification_cwd"},
-              "session_id": session_id, "status": "succeeded", "changed_files": changed,
-              "checks": executions, "open_assumptions": [], "artifacts": capture.artifacts,
-              "summary": f"Trusted {phase} check capture; not integration approval", "error": None}
-    evidence = {"version": "1.0.0", "policy_sha256": policy_digest(policy),
-                **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
-    packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,
-              "artifact_root": str(artifacts_dir), "artifact_paths": {key: str(path) for key, path in capture.paths.items()},
-              "capture_errors": errors, "effective_commands": effective_commands}
-    packet = recheck_packet(packet, policy, run)
-    save_json(packet_path, packet)
-    return packet
 
 
 def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:

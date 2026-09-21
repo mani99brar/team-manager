@@ -148,6 +148,14 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             screenshots = list((self.directory / "verification").glob("**/screenshot-*"))
             self.assertGreaterEqual(len(screenshots), 2)  # Worker + combined candidate.
             self.assertTrue(all(path.read_bytes().startswith(b"\x89PNG") for path in screenshots))
+            # Lane temp directories must be short enough for Unix sockets (tsx IPC, Chromium)
+            # and must not linger after the lane, while all evidence stays inside the run.
+            from .checks import SOCKET_NAME_ALLOWANCE, SOCKET_PATH_LIMIT
+            for packet_path in (self.directory / "verification").glob("*/*/*/packet.json"):
+                tmpdir = Path(read_json(packet_path)["tmpdir"])
+                self.assertFalse(tmpdir.is_relative_to(self.directory))
+                self.assertLessEqual(len(str(tmpdir)) + SOCKET_NAME_ALLOWANCE, SOCKET_PATH_LIMIT)
+                self.assertFalse(tmpdir.exists())
 
     def test_failed_check_reuses_worker_and_successful_sibling(self):
         self.fail_marker.touch()

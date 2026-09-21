@@ -207,6 +207,12 @@ def advance_failed_checks(runtime, state) -> bool:
             attempt = runtime.attempt(phase, node)
             path = runtime.directory / "verification" / phase / node / str(attempt) / "packet.json"
             if path.exists() and read_json(path)["gate"]["status"] != "passed":
+                previous = runtime.directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
+                if attempt > 1 and previous.exists() and read_json(previous)["gate"]["reasons"] == read_json(path)["gate"]["reasons"]:
+                    # Retries rerun immutable code; two identical failures mean the cause is
+                    # deterministic (code or environment), and more attempts only burn time.
+                    raise RuntimeError(f"{phase}/{node} failed identically on attempts {attempt - 1} and {attempt}; "
+                                       f"not transient, inspect {path}")
                 stage_targets.append((phase, node))
         if not stage_targets:
             return False

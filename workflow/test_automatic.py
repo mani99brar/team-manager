@@ -105,6 +105,29 @@ class CompletionTests(unittest.TestCase):
         self.plan["automatic"] = automatic_settings(7200)
         validate_automatic(self.plan)
 
+    def test_identical_failures_are_not_retried(self):
+        from .automatic import advance_failed_checks
+        policy = {"max_verification_attempts": 3}
+        attempts = {"worker:adapter": 2}
+        bumped = []
+        runtime = SimpleNamespace(directory=self.root, policy=policy,
+                                  attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
+                                  retry_check=lambda phase, node: bumped.append((phase, node)))
+        state = SimpleNamespace(tasks=[SimpleNamespace(name="verify_adapter", error="blocked")])
+        reasons = ["backend-unit: exit 1", "backend-unit: no passing test evidence or failed tests"]
+        for attempt in (1, 2):
+            (self.root / "verification" / "worker" / "adapter" / str(attempt)).mkdir(parents=True)
+            save_json(self.root / "verification" / "worker" / "adapter" / str(attempt) / "packet.json",
+                      {"gate": {"status": "blocked", "reasons": list(reasons)}})
+        with self.assertRaisesRegex(RuntimeError, "failed identically on attempts 1 and 2"):
+            advance_failed_checks(runtime, state)
+        self.assertEqual(bumped, [])
+        # A different failure on the latest attempt is still retried within the cap.
+        save_json(self.root / "verification" / "worker" / "adapter" / "2" / "packet.json",
+                  {"gate": {"status": "blocked", "reasons": ["browser: Playwright reported global errors"]}})
+        self.assertTrue(advance_failed_checks(runtime, state))
+        self.assertEqual(bumped, [("worker", "adapter")])
+
     def test_main_and_unbounded_authority_rejected(self):
         self.plan["source_branch"] = "main"
         with self.assertRaises(ValueError):
