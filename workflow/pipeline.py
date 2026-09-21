@@ -77,6 +77,9 @@ class Pipeline:
     def __init__(self, directory: Path, sessions=None):
         self.directory = directory.resolve()
         self.plan = read_json(self.directory / "plan.json")
+        if "automatic" in self.plan:
+            from .automatic import validate_automatic
+            validate_automatic(self.plan)
         self.policy = validate_pipeline_policy(read_json(self.directory / "policy.json"))
         if self.plan.get("policy_sha256") != policy_digest(self.policy):
             raise ValueError("Pinned policy changed")
@@ -103,7 +106,7 @@ class Pipeline:
         except Exception as error:
             self.event(node, "blocked", str(error))
             raise
-        self.event(node, "interactive", "Awaiting explicit human handoff; idle is not acceptance")
+        self.event(node, "interactive", "Awaiting explicit completion signal; idle is not acceptance")
         return receipt
 
     def stop_workers(self):
@@ -347,7 +350,8 @@ def build_pipeline(checkpointer, runtime: Pipeline):
     def ui(_state): return {"ui": runtime.launch("ui")}
     def adapter(_state): return {"adapter": runtime.launch("adapter")}
     def handoff(_state):
-        decision = interrupt({"kind": "worker_handoff", "message": "Type in Claude terminals; provide both handoffs, then explicitly freeze."})
+        message = "Awaiting explicit completion signals and automatic freeze." if runtime.plan.get("automatic") else "Type in Claude terminals; provide both handoffs, then explicitly freeze."
+        decision = interrupt({"kind": "worker_handoff", "message": message})
         if decision != {"freeze": True}:
             raise ValueError("Explicit freeze required")
         return {"snapshots": runtime.freeze()}
@@ -356,16 +360,25 @@ def build_pipeline(checkpointer, runtime: Pipeline):
     def candidate(state): return {"bundle": runtime.candidate(state)}
     def review(_state):
         _, digest = runtime.validate_bundle()
-        decision = interrupt({"kind": "independent_review", "bundle_sha256": digest,
-                              "bundle_path": str(runtime.directory / "review-bundle.json")})
+        if runtime.plan.get("automatic"):
+            from .automatic import review_candidate
+            decision = review_candidate(runtime)
+        else:
+            decision = interrupt({"kind": "independent_review", "bundle_sha256": digest,
+                                  "bundle_path": str(runtime.directory / "review-bundle.json")})
         runtime.validate_review(decision)
         save_json(runtime.directory / "review.json", decision)
         runtime.event("review", "approved", decision["reviewer"])
         return {"review": decision}
     def approval(_state):
         _, digest = runtime.validate_bundle()
-        decision = interrupt({"kind": "integration_approval", "bundle_sha256": digest,
-                              "message": "Approve fast-forward of source branch; no push."})
+        if runtime.plan.get("automatic"):
+            from .automatic import validate_automatic
+            validate_automatic(runtime.plan)
+            decision = {"approve": digest}  # Explicit run-level authority: feature branch only.
+        else:
+            decision = interrupt({"kind": "integration_approval", "bundle_sha256": digest,
+                                  "message": "Approve fast-forward of source branch; no push."})
         if decision != {"approve": digest}:
             raise ValueError("Explicit exact-bundle approval required")
         return {"approved_bundle": digest}
@@ -390,8 +403,10 @@ def report(runtime: Pipeline, state) -> Path:
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
     packets = list((runtime.directory / "verification").glob("*/*/*/packet.json"))
+    flow = ("Launch workers → completion signals → isolated checks → combined checks → independent review → verified feature branch (no main merge or push)"
+            if runtime.plan.get("automatic") else "Launch workers → human handoff → isolated checks → combined checks → independent review → approval → integration")
     parts = ['<!doctype html><meta charset="utf-8"><title>Workflow report</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto;background:#151820;color:#eee}pre{white-space:pre-wrap}a{color:#8dcaff}img{max-width:100%}section{border:1px solid #555;padding:16px;margin:16px 0}</style>',
-             '<h1>Workflow report</h1><p>Launch workers → human handoff → isolated checks → combined checks → independent review → approval → integration</p>',
+             '<h1>Workflow report</h1><p>' + html.escape(flow) + '</p>',
              '<h2>Current state</h2><pre>' + html.escape(json.dumps({"next": state.next, "interrupts": [str(task.interrupts) for task in state.tasks if task.interrupts], "errors": [str(task.error) for task in state.tasks if task.error], "integrated_commit": state.values.get("integrated_commit")}, indent=2)) + '</pre>',
              '<h2>Timeline</h2><pre>' + html.escape(json.dumps(events, indent=2)) + '</pre>']
     positions = {"launch_ui": (90, 70), "launch_adapter": (90, 210), "handoff": (280, 140),
@@ -432,13 +447,14 @@ def report(runtime: Pipeline, state) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["preflight", "prepare", "start", "attach", "freeze", "retry", "reconcile", "review", "approve", "status"])
+    parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status"])
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
     parser.add_argument("--ui-task", type=Path)
     parser.add_argument("--adapter-task", type=Path)
     parser.add_argument("--live", action="store_true")
+    parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--ui-handoff", type=Path)
     parser.add_argument("--adapter-handoff", type=Path)
@@ -461,7 +477,10 @@ def main():
                 if not shutil.which(executable):
                     raise ValueError(f"Missing executable: {executable}")
             help_text = subprocess.check_output(["claude", "--help"], text=True, timeout=15)
-            if not all(flag in help_text for flag in ("--bg", "--safe-mode", "--tools", "--permission-mode")):
+            required_flags = ["--bg", "--safe-mode", "--tools", "--permission-mode"]
+            if args.automatic:
+                required_flags += ["--dangerously-skip-permissions", "--json-schema", "--print", "--permission-prompts", "--add-dir"]
+            if not all(flag in help_text for flag in required_flags):
                 raise ValueError("Installed Claude CLI lacks required flags")
             auth = json.loads(subprocess.check_output(["claude", "auth", "status"], text=True, timeout=15))
             if auth.get("loggedIn") is not True:
@@ -477,19 +496,39 @@ def main():
             policy = validate_pipeline_policy(read_json(args.policy))
             if {worker["node_id"] for worker in policy["workers"]} != set(NODES):
                 parser.error("This graph requires policy nodes ui and adapter")
+            if args.automatic and not git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD").startswith("feature/"):
+                raise ValueError("Automatic preparation requires a feature/ branch")
             tasks = {"ui": args.ui_task.read_text(), "adapter": args.adapter_task.read_text()}
             for worker in policy["workers"]:
                 tasks[worker["node_id"]] += "\nApproved ownership and checks:\n" + json.dumps(worker)
             plan = prepare(directory, args.repo, "HEAD", tasks, True)
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
+            if args.automatic:
+                from .automatic import DEFAULTS
+                plan["automatic"] = dict(DEFAULTS)
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             from types import SimpleNamespace
             export_state(Pipeline(directory), SimpleNamespace(values={}, next=("launch_ui", "launch_adapter"), tasks=[]))
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}")
             return
+        if args.action == "automatic":
+            if not args.live:
+                parser.error("automatic requires --live because it can launch an independent reviewer")
+            from .automatic import supervise
+            supervise(directory)
+            return
         with run_lock(directory):
             runtime = Pipeline(directory)
+            if args.action == "automatic-step":
+                if not args.live:
+                    parser.error("automatic requires --live because it can launch an independent reviewer")
+                from .automatic import drive
+                commit = drive(runtime, single_step=True)
+                if commit is None:
+                    parser.exit(75, "Checkpoint persisted; continuing in a new controller process.\n")
+                print(f"Verified feature branch: {runtime.plan['source_branch']} at {commit}. No main merge or push.")
+                return
             if args.action == "attach":
                 print(json.dumps(attach_panels(runtime.sessions), indent=2)); return
             with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:

@@ -106,14 +106,26 @@ class InteractiveSessions(ClaudeSessions):
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
         save_json(path, receipt)
+        automatic = bool(self.plan.get("automatic"))
+        if automatic:
+            from .automatic import validate_automatic
+            validate_automatic(self.plan)
         tools = "Read,Glob,Grep,Edit,Write" if self.plan["allow_edits"] else "Read,Glob,Grep"
+        if automatic:
+            tools += ",Bash"
         prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
                   "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
                   "Report changed files, checks actually executed, and open assumptions. "
-                  "Completion of a turn is not workflow approval. Shell tools are disabled in this initial slice.\n\n" + info["task"])
+                  "Completion of a turn is not workflow approval.\n\n" + info["task"])
+        if automatic:
+            from .automatic import completion_prompt
+            prompt += completion_prompt(self.directory, self.plan, node)
         command = [self.executable, "--bg", "--name", self.launch_name(node),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                   "--tools", tools, "--permission-mode", "manual", prompt]
+                   "--tools", tools, "--permission-mode", "bypassPermissions" if automatic else "manual"]
+        if automatic:
+            command.append("--dangerously-skip-permissions")
+        command.append(prompt)
         env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
         try:
             # This command creates Claude's own persistent terminal, then exits.

@@ -41,6 +41,24 @@ class InteractiveTests(unittest.TestCase):
             self.assertNotIn("bypassPermissions", command)
             self.assertFalse(any(key.startswith("HERDR_") for key in launch.call_args.kwargs["env"]))
 
+    def test_automatic_permission_bypass_is_run_scoped(self):
+        from .automatic import DEFAULTS
+        self.plan.update(automatic=dict(DEFAULTS), source_branch="feature/test")
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            self.sessions.run("ui")
+        command = launch.call_args.args[0]
+        self.assertIn("--dangerously-skip-permissions", command)
+        self.assertIn("bypassPermissions", command)
+        self.assertIn("Bash", command[command.index("--tools") + 1])
+        self.assertIn("ui.completion.json", command[-1])
+        self.assertIn(self.plan["nodes"]["ui"]["session_id"], command[-1])
+        self.assertNotIn("manual", command)
+
     def test_ambiguous_launch_never_retries_when_session_missing(self):
         with patch.object(self.sessions, "inventory", return_value=[]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 45)) as launch:
             with self.assertRaises(subprocess.TimeoutExpired):

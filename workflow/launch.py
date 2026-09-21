@@ -12,7 +12,7 @@ from .pipeline import validate_pipeline_policy
 from .sessions import read_json
 
 
-def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True) -> tuple[Path, list[list[str]]]:
+def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False) -> tuple[Path, list[list[str]]]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
     folder = repo / "features" / feature
@@ -34,13 +34,18 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         preflight.append("--herdr")
         start.append("--herdr")
     branch = f"{manifest['branch_prefix']}/{run_id}"
-    return run, [
+    commands = [
         preflight,
         ["git", "switch", "-c", branch],
         [*base, "prepare", str(run), "--repo", str(repo), "--policy", str(files["policy"]),
          "--ui-task", str(files["ui_task"]), "--adapter-task", str(files["adapter_task"])],
         start,
     ]
+    if automatic:
+        commands[0].append("--automatic")
+        commands[2].append("--automatic")
+        commands.append([*base, "automatic", str(run), "--live"])
+    return run, commands
 
 
 def main(argv=None):
@@ -48,13 +53,14 @@ def main(argv=None):
     parser.add_argument("feature", choices=["project-workflows"])
     parser.add_argument("--run-id", default="project-workflows-001")
     parser.add_argument("--run-root", type=Path, default=Path.home() / ".local/state/md-manager-workflows/project-workflows")
-    parser.add_argument("--live", action="store_true", help="Authorize two Claude sessions")
+    parser.add_argument("--live", action="store_true", help="Authorize Claude usage")
+    parser.add_argument("--automatic", action="store_true", help="Bypass worker permission prompts; run through independent review to a verified feature branch")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands only")
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     try:
-        run, commands = launch_commands(repo, args.feature, args.run_id, args.run_root.resolve(), not args.no_herdr)
+        run, commands = launch_commands(repo, args.feature, args.run_id, args.run_root.resolve(), not args.no_herdr, args.automatic)
         if args.dry_run:
             print(json.dumps({"run_directory": str(run), "commands": commands, "executes": False}, indent=2))
             return
@@ -64,6 +70,9 @@ def main(argv=None):
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
         for command in commands:
             subprocess.run(command, cwd=repo, check=True)
+        if args.automatic:
+            print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
+            return
         print(f"\nRun: {run}\nWorkers are in their dedicated Herdr tab (unless --no-herdr).")
         print("Watch/answer permission prompts. When both finish, return to Pi for handoffs and freeze.")
         print("The intentional adapter verification drill will block its first attempt; retry that check explicitly after restarting the controller.")

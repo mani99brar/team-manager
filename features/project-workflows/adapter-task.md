@@ -23,8 +23,8 @@ Create `server/projects.test.ts`, executed directly by the policy's tsx command.
 
 Use producer fixtures described in the feature README, not a newly invented storage format. Frontend candidate-mode browser tests will start your real API with that registry format. Your isolated worker checks do not depend on frontend changes; combined-candidate checks validate integration later.
 
-No new dependencies or permission bypasses are authorized. Shell tools are disabled in your worker session; the trusted verifier runs your unit/contract/build checks after handoff. Do not claim tests were executed if they were not.
+No new dependencies or changes to global permission settings are authorized. Manual mode disables shell tools; automatic mode explicitly grants run-scoped permission bypass and Bash access. The trusted verifier independently runs your unit/contract/build checks after handoff. Do not claim tests were executed if they were not.
 
 ## Finish
 
-Report a summary, all changed files, checks actually executed (or explicitly none), and open assumptions. Wait for the operator to freeze. Do not commit, push, merge, launch other agents or modify shared contracts/runtime.
+Report a summary, all changed files, checks actually executed (or explicitly none), and open assumptions. In manual mode wait for the operator to freeze. In automatic mode follow the appended completion-file protocol and finish your turn without waiting for a human. Do not commit, push, merge, launch other agents or modify shared contracts/runtime.

@@ -27,8 +27,8 @@ Create your own temporary roots/server ports for this config. Use `MD_MANAGER_AP
 
 Each required test title must include exactly one `[scenario:<id>]` marker and attach one PNG named `screenshot:<id>` using `testInfo.outputPath` and `testInfo.attach`. See `workflow/RUNBOOK.md`. Do not skip tests in candidate mode, weaken assertions, or substitute a screenshot for testing interactions. Exercise registration isolation and run selection through the real adapter in candidate mode.
 
-No new package dependencies are authorized. Existing React, d3-force, Zod and Playwright are available. Shell tools are disabled in your session; the trusted verifier will execute checks after handoff. Report checks as not executed if you could not execute them—never claim success from inspection.
+No new package dependencies are authorized. Existing React, d3-force, Zod and Playwright are available. Manual mode disables shell tools; automatic mode enables Bash as stated in your startup instructions. The trusted verifier independently executes checks after handoff regardless. Report checks as not executed if you could not execute them—never claim success from inspection.
 
 ## Finish
 
-Report a concise summary, complete changed-file list and open assumptions. Wait for the operator's explicit freeze. Do not commit, merge, push, spawn agents or write outside your own worktree. Do not edit shared verification fixtures/contracts to make tests pass.
+Report a concise summary, complete changed-file list and open assumptions. In manual mode wait for the operator's explicit freeze. In automatic mode follow the appended completion-file protocol and finish your turn without waiting for a human. Do not commit, merge, push, spawn agents or write outside your own worktree. Do not edit shared verification fixtures/contracts to make tests pass.

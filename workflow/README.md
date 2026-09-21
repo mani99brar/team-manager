@@ -1,6 +1,6 @@
 # LangGraph workflows
 
-**First feature is configured:** [Projects/workflow viewer](../features/project-workflows/README.md). Start it from Herdr with `.venv/bin/python -m workflow launch project-workflows --live`; use `--dry-run` to inspect without execution. Startup is one command, but handoff, review and integration remain supervised.
+**First feature is configured:** [Projects/workflow viewer](../features/project-workflows/README.md). Start it from Herdr with `.venv/bin/python -m workflow launch project-workflows --live --automatic`; use `--dry-run` to inspect without execution. Automatic mode grants run-scoped worker permission bypass and stops at an independently reviewed, verified feature branch—no main merge or push. Omit `--automatic` to retain manual handoff/review/approval gates.
 
 **Start with [RUNBOOK.md](RUNBOOK.md).** `python -m workflow` now runs the complete supervised pipeline: two interactive Claude workers in one Herdr tab, explicit freeze, immutable snapshots, isolated checks/screenshots, combined-candidate checks, independent review, approval and local fast-forward integration. `preflight`/`prepare` do not launch agents; `start --live` is explicitly required.
 

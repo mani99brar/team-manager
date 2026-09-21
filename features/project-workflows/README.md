@@ -2,7 +2,31 @@
 
 This directory is the committed assignment for the two workers, **not** an implementation of the Projects feature. The API contract is `contracts/projects/README.md`.
 
-## One command to start
+## Automatic mode: stop at a verified feature branch
+
+```bash
+.venv/bin/python -m workflow launch project-workflows --live --automatic
+```
+
+This is the user-approved unattended path. Keep the command running in Herdr. Both implementation workers retain their interactive terminals, but have **run-scoped permission bypass and Bash access**. Global Claude settings are untouched. Worktrees are not OS sandboxes: these workers have the account's shell privileges, so only use this mode in a trusted environment.
+
+Workers emit an explicit run/node/token-bound completion file. Idle alone is insufficient. The controller freezes completed work, executes the real isolated and combined checks, and invokes a fresh read-only Claude reviewer from the LangGraph review node. The review is bound to the exact candidate and evidence hash. Only a passing review permits fast-forwarding the newly created `feature/…` branch. **No merge to main and no push.**
+
+The automatic supervisor restarts the controller in a new Python process after a persisted step. The intentional first adapter verification failure is retried using the same SQLite thread; successful sibling work is reused. Controller PIDs are recorded in the event timeline. This is the existing LangGraph pipeline—not Pi subagent orchestration.
+
+Bounds: 60-minute worker deadlines while the supervisor is running (persisted launch times survive restart), a 15-minute reviewer process timeout, existing per-check timeouts, three check attempts per lane/phase and at most 45 controller-step processes per supervisor invocation. There is no token cap or billing/provider fallback. Ambiguous launches, missing completion signals, quota blocks, reviewer rejection, ownership violations and exhausted retries stop with retained evidence. Review/worker processes are not blindly relaunched. A stopped/crashed controller cannot enforce process deadlines while it is offline.
+
+These retries rerun verification of immutable code; they are **not** an automatic source-repair loop. Persistent code failures or review findings require intervention. Fully automatic means no routine approval prompts on the successful path, not a guarantee that every run succeeds.
+
+To resume an already-started automatic run after inspecting an interruption:
+
+```bash
+.venv/bin/python -m workflow automatic "$HOME/.local/state/md-manager-workflows/project-workflows/project-workflows-001" --live
+```
+
+Do not repeat `launch` for an existing run. Uncertain launches still require explicit reconciliation. New files include `ui.completion.json`, `adapter.completion.json`, `automatic-review.json`, `review.stdout.json`, `review.stderr.log`, `review.diff` and the isolated `review-worktree/`. The reviewer has Read/Glob/Grep only; no shell or edit tools. Synthetic tests of this path are not live Claude validation.
+
+## Manual mode (retained)
 
 From this repository in a Herdr pane, after installing the workflow environment:
 
@@ -81,7 +105,7 @@ Every scenario must assert behavior and attach its PNG using `[scenario:<id>]` a
 
 This feature uses verification policy v1.1.0. It intentionally blocks the adapter's **first worker-verification attempt**, after executing and preserving the real checks. The packet labels this as an injected gate failure, not a failing implementation test or a failed Claude worker. Genuine check failures remain visible too.
 
-The freeze command exits with a blocked result. Reopen the same run using:
+In manual mode the freeze command exits with a blocked result; reopen the same run using the command below. Automatic mode performs this recovery itself in a new controller process.
 
 ```bash
 .venv/bin/python -m workflow retry "$HOME/.local/state/md-manager-workflows/project-workflows/project-workflows-001" --phase worker --node adapter
@@ -90,11 +114,11 @@ The freeze command exits with a blocked result. Reopen the same run using:
 This is a new controller process using the same persisted LangGraph thread/checkpoint. Expected: no worker relaunch; successful UI verification reused; adapter verification attempt 2 runs. Record the actual evidence, not only this expectation. `failure-drill.json` preserves pre-retry native identities; `failure-report.json` and the review bundle record post-retry identities and check-attempt directories. Null native launch time/count fields mean unavailable evidence, not a guessed count. Out-of-band manual native restarts are not certified by this report.
 
 Hard bounds in this profile:
-- Two graph implementation workers; no nested agent/shell tools in Claude sessions.
+- Two graph implementation workers; no nested agent tool. Bash is enabled only in automatic mode.
 - One pipeline-issued initial launch per worker intent; ambiguous launches never auto-retry.
 - At most **three verification attempts per lane/phase**, including the first; retry beyond this is rejected.
 - Each setup/check has a real process timeout; Playwright has one worker and zero retries per invocation.
 
-Interactive Claude conversations do **not** have a hard turn/token/session-lifetime cap. The operator remains responsible for manual interaction and included-usage decisions. Size requests in task prompts are not resource caps. When usage runs out, preserve the run and choose an explicitly approved plan or wait—no silent billing/provider switch.
+Interactive Claude conversations have no hard turn/token cap. Manual mode also has no session-lifetime cap; automatic mode enforces the deadlines described above while its controller runs. The operator remains responsible for included-usage decisions. Size requests in task prompts are not resource caps. When usage runs out, preserve the run and choose an explicitly approved plan or wait—no silent billing/provider switch.
 
 During the long worker phase, do another independent task and write `$RUN/return-note.md` with the current run, task and next action. Herdr is the chosen substitute for the lab's literal macOS/cmux tool requirement.

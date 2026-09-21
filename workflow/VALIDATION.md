@@ -46,6 +46,12 @@ The Projects-viewer feature now has committed UI/adapter tasks, a versioned veri
 
 The new `run-state.json` producer seam is documented in `features/project-workflows/README.md`. UI worker checks can use explicit API fixtures; combined-candidate checks are assigned to exercise the real adapter. The implementation of the Projects viewer itself is the work to be performed by that future run, not something this preparation claims to have shipped.
 
+## Automatic feature-branch mode follow-up
+
+Automatic mode is implemented directly in the existing LangGraph runtime, not Pi subagent tooling. Local validation now passes **59 Python tests**, 10 contract tests and lint. Synthetic reviewer executables exercise the real read-only reviewer transport, exact-bundle binding, reviewer rejection, and duplicate-launch prevention. An end-to-end test uses three actual Python controller processes against the same SQLite checkpoint, real Git/unit/Chromium checks, an injected adapter gate failure, UI reuse and adapter attempt 2; the original source branch remains unchanged. Only the test feature branch advances.
+
+No real Claude workers or reviewer were launched for this validation. Actual live `--bg` permission-bypass behavior and model completion-protocol compliance still require the first owner-started live run. Worktrees are not security sandboxes. Automatic verification retries do not repair immutable source, and process deadlines require the controller to remain alive. No merge to main or push was performed for this implementation.
+
 ## Deliberate operator boundaries
 
 - Select the feature, ownership and actual acceptance tests before preparing a run; the example policy is illustrative.

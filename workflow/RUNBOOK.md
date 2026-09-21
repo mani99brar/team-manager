@@ -19,12 +19,12 @@ START ────────               ├─ handoff / freeze ─┬─ v
 The committed Projects-viewer assignment is in [features/project-workflows](../features/project-workflows/README.md). From a clean checkout in Herdr:
 
 ```bash
-.venv/bin/python -m workflow launch project-workflows --live
+.venv/bin/python -m workflow launch project-workflows --live --automatic
 ```
 
-This performs preflight, creates a feature branch (not main), prepares the worktrees and starts the two interactive workers. Use `--dry-run` instead of `--live` to inspect without executing anything. It returns at the handoff checkpoint; it does not remove permission prompts, freeze confirmation, independent review or integration approval.
+This performs preflight, creates a feature branch (not main), prepares worktrees, starts the two interactive workers with run-scoped permission bypass/Bash access, and supervises them through checks and independent automated review. The command remains running until it stops on a verified feature branch or a blocker. It never pushes or merges main. Use `--dry-run` instead of `--live` to inspect without execution. Omit `--automatic` for the original manual gates. See the feature README for completion signals, recovery and privilege boundaries.
 
-The profile includes a deliberate first adapter-verification gate failure and a hard limit of three verification attempts per lane/phase. Read the feature README for the exact retry and evidence procedure. Interactive worker turns/tokens/lifetime still have no hard cap; operator supervision remains required.
+The profile includes a deliberate first adapter-verification gate failure and a hard limit of three verification attempts per lane/phase. Read the feature README for the exact retry and evidence procedure. Automatic mode adds persisted 60-minute worker deadlines enforced by the running supervisor and a 15-minute reviewer process timeout. It does not impose token caps or automatically repair code. Manual mode retains operator-controlled worker lifetimes.
 
 ## Guarantees and boundaries
 
@@ -50,7 +50,7 @@ npx --no-install playwright install chromium
 
 .venv/bin/python -m unittest \
   workflow.test_graph workflow.test_sessions workflow.test_interactive \
-  workflow.test_verification workflow.test_pipeline workflow.test_feature_launch -v
+  workflow.test_verification workflow.test_pipeline workflow.test_feature_launch workflow.test_automatic -v
 npm run test:contracts
 ```
 

@@ -41,9 +41,9 @@ def save_json(path: Path, value: dict) -> None:
 
 
 @contextmanager
-def run_lock(directory: Path):
+def run_lock(directory: Path, lock_name: str = "controller.lock"):
     """Only the controller takes this lock. Observers need no lock or write access."""
-    with (directory / "controller.lock").open("a") as handle:
+    with (directory / lock_name).open("a") as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:

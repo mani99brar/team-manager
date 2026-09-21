@@ -24,6 +24,14 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertIn("--live", commands[3])
         self.assertIn("--herdr", commands[3])
 
+    def test_automatic_plan_keeps_launches_in_graph_and_adds_supervision(self):
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
+        self.assertIn("--automatic", commands[2])
+        self.assertEqual(commands[-1][3], "automatic")
+        self.assertIn("--live", commands[-1])
+        self.assertFalse(any("push" in command for command in commands))
+        self.assertFalse(any(command[0] == "claude" for command in commands))
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--dry-run"])
