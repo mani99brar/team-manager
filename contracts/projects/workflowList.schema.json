@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "workflows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "const": "1.0.0"
+          },
+          "project_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "workflow_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "definition_revision": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "nodes": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "node_id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "prepare",
+                    "worker",
+                    "verification",
+                    "review",
+                    "integration"
+                  ]
+                },
+                "depends_on": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                  }
+                }
+              },
+              "required": [
+                "node_id",
+                "label",
+                "kind",
+                "depends_on"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "contract_version",
+          "project_id",
+          "workflow_id",
+          "name",
+          "definition_revision",
+          "nodes"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "workflows"
+  ],
+  "additionalProperties": false
+}
