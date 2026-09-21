@@ -113,7 +113,7 @@ class CompletionTests(unittest.TestCase):
         runtime = SimpleNamespace(directory=self.root, policy=policy,
                                   attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
                                   retry_check=lambda phase, node: bumped.append((phase, node)))
-        state = SimpleNamespace(tasks=[SimpleNamespace(name="verify_adapter", error="blocked")])
+        state = SimpleNamespace(next=("verify_adapter",), tasks=[SimpleNamespace(name="verify_adapter", error="blocked")])
         reasons = ["backend-unit: exit 1", "backend-unit: no passing test evidence or failed tests"]
         for attempt in (1, 2):
             (self.root / "verification" / "worker" / "adapter" / str(attempt)).mkdir(parents=True)
@@ -125,6 +125,23 @@ class CompletionTests(unittest.TestCase):
         # A different failure on the latest attempt is still retried within the cap.
         save_json(self.root / "verification" / "worker" / "adapter" / "2" / "packet.json",
                   {"gate": {"status": "blocked", "reasons": ["browser: Playwright reported global errors"]}})
+        self.assertTrue(advance_failed_checks(runtime, state))
+        self.assertEqual(bumped, [("worker", "adapter")])
+
+    def test_stale_error_on_a_completed_sibling_does_not_block_retry(self):
+        from .automatic import advance_failed_checks
+        attempts = {}
+        bumped = []
+        runtime = SimpleNamespace(directory=self.root, policy={"max_verification_attempts": 3},
+                                  attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
+                                  retry_check=lambda phase, node: bumped.append((phase, node)))
+        for node, status, reasons in (("ui", "passed", []), ("adapter", "blocked", ["Intentional lab drill"])):
+            (self.root / "verification" / "worker" / node / "1").mkdir(parents=True)
+            save_json(self.root / "verification" / "worker" / node / "1" / "packet.json", {"gate": {"status": status, "reasons": reasons}})
+        # verify_ui carries an error from an earlier attempt but has since succeeded: it is not pending.
+        state = SimpleNamespace(next=("verify_adapter",),
+                                tasks=[SimpleNamespace(name="verify_ui", error="CalledProcessError(128, git worktree add)"),
+                                       SimpleNamespace(name="verify_adapter", error="blocked")])
         self.assertTrue(advance_failed_checks(runtime, state))
         self.assertEqual(bumped, [("worker", "adapter")])
 

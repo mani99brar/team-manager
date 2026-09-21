@@ -196,7 +196,10 @@ def review_candidate(runtime) -> dict:
 
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, never launches or review."""
-    failures = [task.name for task in state.tasks if task.error]
+    # A checkpoint can carry an error from an earlier attempt of a task that has since
+    # succeeded (its writes are applied and it is no longer pending). Only pending
+    # tasks with errors are failures to classify.
+    failures = [task.name for task in state.tasks if task.error and task.name in state.next]
     if not failures or any(name not in {"verify_ui", "verify_adapter", "candidate"} for name in failures):
         return False
     targets = []
