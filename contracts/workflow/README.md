@@ -61,6 +61,10 @@ Control request IDs are idempotency keys. The backend authenticates and authoriz
 
 Use a durable LangGraph checkpointer and explicit session/artifact tracking. A checkpoint does not preserve a Git worktree or make an external Claude launch exactly-once. On recovery reconcile existing session and artifact identity before relaunching. Preserve successful branch results only after checking they match this run's base, assignment and contract. Record forced failure and actual starts/reuse in events; do not assume Claude workflow relaunch and LangGraph node resume have the same replay semantics.
 
+## Verification policy extension
+
+The separately authored `verification.schema.json` accepts legacy policy v1.0.0 and policy v1.1.0. Only v1.1.0 may specify `max_verification_attempts` and the explicit first-attempt `failure_drill`. Workflow message envelopes and worker-result schemas remain v1.0.0. The configured Projects-viewer feature uses v1.1.0; see `features/project-workflows/README.md` for the launch and checkpoint drill.
+
 ## Versioning
 
 Every message carries an exact `contract_version`. Unknown versions and unknown fields are rejected. Keep v1 immutable once consumers depend on it; publish compatible/additional formats under an explicitly negotiated new version rather than silently changing existing payloads. Each run pins its contract through its base Git revision.

@@ -1,12 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Workflow verification policy v1",
+  "title": "Workflow verification policy v1 / v1.1",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "feature", "workers", "independent_review", "integration_approval"],
+  "allOf": [{
+    "if": {"properties": {"version": {"const": "1.0.0"}}},
+    "then": {"not": {"anyOf": [{"required": ["max_verification_attempts"]}, {"required": ["failure_drill"]}]}}
+  }],
   "properties": {
-    "version": {"const": "1.0.0"},
+    "version": {"enum": ["1.0.0", "1.1.0"]},
     "feature": {"type": "string", "minLength": 1},
+    "max_verification_attempts": {"type": "integer", "minimum": 1, "maximum": 10},
+    "failure_drill": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_id", "phase", "attempt"],
+      "properties": {
+        "node_id": {"enum": ["ui", "adapter"]},
+        "phase": {"const": "worker"},
+        "attempt": {"const": 1}
+      }
+    },
     "setup": {
       "type": "array",
       "items": {

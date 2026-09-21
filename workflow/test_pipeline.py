@@ -178,6 +178,40 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         with self.assertRaisesRegex(ValueError, "artifact"):
             self.runtime.validate_bundle()
 
+    def test_configured_failure_drill_reopens_checkpoint_and_enforces_attempt_cap(self):
+        self.policy.update(version="1.1.0", max_verification_attempts=2,
+                           failure_drill={"node_id": "adapter", "phase": "worker", "attempt": 1})
+        self.plan["policy_sha256"] = policy_digest(self.policy)
+        save_json(self.directory / "policy.json", self.policy)
+        save_json(self.directory / "plan.json", self.plan)
+        self.runtime = OfflinePipeline(self.directory, self.sessions)
+        with SqliteSaver.from_conn_string(str(self.directory / "graph.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": "run"}, self.config)
+            with self.assertRaisesRegex(RuntimeError, "adapter verification blocked"):
+                graph.invoke(Command(resume={"freeze": True}), self.config)
+            report(self.runtime, graph.get_state(self.config))
+            exported = read_json(self.directory / "run-state.json")
+            self.assertTrue(any(task["error"] for task in exported["tasks"]))
+            self.assertTrue(exported["verification_packets"])
+        ui_path = self.directory / "verification/worker/ui/1/packet.json"
+        original = digest_file(ui_path)
+        self.assertEqual(self.runtime.retry_check("worker", "adapter"), 2)
+        with SqliteSaver.from_conn_string(str(self.directory / "graph.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            outcome = graph.invoke(None, self.config)
+            self.assertEqual(outcome["__interrupt__"][0].value["kind"], "independent_review")
+            final_state = graph.get_state(self.config)
+        audit = read_json(self.directory / "failure-report.json")
+        self.assertIn("Checkpoint failure drill", report(self.runtime, final_state).read_text())
+        self.assertEqual(audit["workers_with_changed_launch_evidence"], [])
+        self.assertEqual(audit["verification_attempts"], {"ui": [1], "adapter": [1, 2]})
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])
+        self.assertEqual(digest_file(ui_path), original)
+        with self.assertRaisesRegex(ValueError, "limit reached"):
+            self.runtime.retry_check("worker", "adapter")
+        self.assertEqual(self.runtime.attempt("worker", "adapter"), 2)
+
     def test_wrong_role_mapping_cannot_disable_required_gate_categories(self):
         for role in ("backend", "frontend"):
             policy = copy.deepcopy(self.policy)

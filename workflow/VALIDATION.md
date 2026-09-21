@@ -40,6 +40,12 @@ Pi reviewer run `7182030a-c0fa-466e-8e0c-39839dc999da` found:
 
 Both were fixed and regression-tested. Focused follow-up run `6618fab6-31a9-4e44-8162-c78d8de8abd9` found no remaining issues in that fix scope and returned **Merge verdict: OK**. The reviewer inspected source/tests, not live sessions or command execution; executed-check evidence above is the parent's.
 
+## First-feature launch preparation follow-up
+
+The Projects-viewer feature now has committed UI/adapter tasks, a versioned verification policy, a one-command supervised launcher, a private atomic run-state export, a hard three-attempt verification limit, and an explicit first adapter-verification gate failure. Follow-up local validation covers 47 Python tests plus 10 contract tests, including dry-run/no-consent/duplicate-launch guards and the configured failure drill across checkpoint reopening. No real workers were launched by these tests. The stable repository `.venv` is installed from the dependency lock on this VPS; it is ignored by Git.
+
+The new `run-state.json` producer seam is documented in `features/project-workflows/README.md`. UI worker checks can use explicit API fixtures; combined-candidate checks are assigned to exercise the real adapter. The implementation of the Projects viewer itself is the work to be performed by that future run, not something this preparation claims to have shipped.
+
 ## Deliberate operator boundaries
 
 - Select the feature, ownership and actual acceptance tests before preparing a run; the example policy is illustrative.

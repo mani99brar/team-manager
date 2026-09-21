@@ -165,7 +165,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     if sys.platform == "linux":
         env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright"))
     env.update(PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
-               PYTHONDONTWRITEBYTECODE="1", NO_COLOR="1", FORCE_COLOR="0", CI="1")
+               PYTHONDONTWRITEBYTECODE="1", NO_COLOR="1", FORCE_COLOR="0", CI="1",
+               WORKFLOW_VERIFICATION_PHASE=phase)
     for name in ("TMPDIR", "XDG_CACHE_HOME", "npm_config_cache"):
         path = directory / name.lower()
         path.mkdir()

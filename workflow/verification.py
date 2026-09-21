@@ -66,6 +66,9 @@ def validate_policy(policy: dict) -> dict:
             unique(check["scenarios"], "id")
             if (check["kind"] == "browser") != bool(check["scenarios"]):
                 raise ValueError("Browser checks require named scenarios; other checks must not have scenarios")
+    drill = policy.get("failure_drill")
+    if drill and (drill["node_id"] not in workers or policy.get("max_verification_attempts", 3) < 2):
+        raise ValueError("Failure drill requires a configured worker and at least two allowed verification attempts")
     return policy
 
 

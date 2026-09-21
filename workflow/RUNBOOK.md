@@ -14,6 +14,18 @@ START ────────               ├─ handoff / freeze ─┬─ v
                                                              fast-forward source branch
 ```
 
+## One-command launch for the first feature
+
+The committed Projects-viewer assignment is in [features/project-workflows](../features/project-workflows/README.md). From a clean checkout in Herdr:
+
+```bash
+.venv/bin/python -m workflow launch project-workflows --live
+```
+
+This performs preflight, creates a feature branch (not main), prepares the worktrees and starts the two interactive workers. Use `--dry-run` instead of `--live` to inspect without executing anything. It returns at the handoff checkpoint; it does not remove permission prompts, freeze confirmation, independent review or integration approval.
+
+The profile includes a deliberate first adapter-verification gate failure and a hard limit of three verification attempts per lane/phase. Read the feature README for the exact retry and evidence procedure. Interactive worker turns/tokens/lifetime still have no hard cap; operator supervision remains required.
+
 ## Guarantees and boundaries
 
 - At most two implementation workers; each is a native interactive Claude background terminal in its own worktree. A dedicated Herdr tab attaches both terminals with keyboard input enabled.
@@ -38,7 +50,7 @@ npx --no-install playwright install chromium
 
 .venv/bin/python -m unittest \
   workflow.test_graph workflow.test_sessions workflow.test_interactive \
-  workflow.test_verification workflow.test_pipeline -v
+  workflow.test_verification workflow.test_pipeline workflow.test_feature_launch -v
 npm run test:contracts
 ```
 
@@ -143,6 +155,8 @@ Successful verification interrupts at `independent_review` and produces:
 - `verification/candidate/.../packet.json`: checks of the combined candidate. These are candidate-verification records, not per-worker ownership claims.
 - `candidate/`: clean candidate worktree for read-only inspection.
 - `report.html`: local visual graph, pending state/errors, timeline, checks and artifact/screenshot links.
+- `run-state.json`: atomic, versioned private state export for the upcoming read-only project adapter; created during preparation and updated at reporting boundaries.
+- `failure-drill.json` / `failure-report.json`: pre/post launch identities and observed verification attempts when the explicit lab drill is configured.
 
 Ask Pi to assign an independent read-only reviewer against these exact artifacts. If the reviewer needs to run commands, give it another isolated worktree; do not let it mutate the captured candidate/check worktrees. The review JSON is:
 
@@ -182,7 +196,7 @@ This explicitly authorizes a fast-forward of the original source branch. It chec
 
 Status refreshes `report.html`. It is a local snapshot viewer, not a live multi-user HTTP dashboard. Open it where its relative artifact files are accessible, or use your trusted SSH/local file-viewing setup; do not publish the run directory or logs. There are no unauthenticated HTTP execution controls.
 
-- **Failed verification:** inspect its packet/log. For a transient check/environment failure at the same immutable revision, explicitly retry only that lane:
+- **Failed verification:** inspect its packet/log. Attempts default to a hard limit of three per lane/phase; policy v1.1.0 can explicitly set `max_verification_attempts`. For a transient check/environment failure at the same immutable revision, explicitly retry only that lane:
   `python -m workflow retry "$RUN" --phase worker --node adapter`.
 - **Failed combined check:** use `--phase candidate --node ui` (or adapter). Already successful candidate checks are reused after artifact validation.
 - **Failure after stopping/snapshotting or integrating:** `retry "$RUN"` resumes only failed graph steps; it never launches a new Claude worker. Stop-intent recovery checks whether the prior stop already completed before issuing another native stop.

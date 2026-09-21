@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "name": "Project workflows and run viewer",
+  "branch_prefix": "feature/project-workflows",
+  "policy": "policy.json",
+  "ui_task": "ui-task.md",
+  "adapter_task": "adapter-task.md"
+}

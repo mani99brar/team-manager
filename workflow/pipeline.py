@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from .checks import now, recheck_packet, verify_revision
+from .export_state import export_state
 from .interactive import InteractiveSessions, attach_panels
 from .sessions import NODES, git, prepare, read_json, run_lock, save_json
 from .verification import owns, policy_digest, safe_path, validate_policy
@@ -191,7 +192,25 @@ class Pipeline:
 
     def attempt(self, phase: str, node: str) -> int:
         path = self.directory / "attempts.json"
-        return read_json(path).get(f"{phase}:{node}", 1) if path.exists() else 1
+        value = read_json(path).get(f"{phase}:{node}", 1) if path.exists() else 1
+        if type(value) is not int or value < 1 or value > self.policy.get("max_verification_attempts", 3):
+            raise ValueError("Verification attempt exceeds the run's hard limit")
+        return value
+
+    def retry_check(self, phase: str, node: str) -> int:
+        value = self.attempt(phase, node) + 1
+        if value > self.policy.get("max_verification_attempts", 3):
+            raise ValueError("Verification attempt limit reached; inspect evidence and create an explicitly revised run")
+        path = self.directory / "attempts.json"
+        attempts = read_json(path) if path.exists() else {}
+        attempts[f"{phase}:{node}"] = value
+        save_json(path, attempts)
+        return value
+
+    def native_evidence(self) -> dict:
+        return {node: {key: read_json(self.directory / f"{node}.interactive.json").get(key)
+                       for key in ("session_id", "background_id", "launcher_invocations", "native_started_at")}
+                for node in NODES}
 
     def verify(self, node: str, snapshots: dict) -> str:
         snap = snapshots[node]
@@ -199,6 +218,17 @@ class Pipeline:
         self.event(f"verify_{node}", "running", f"Attempt {attempt}; revision {snap['commit']}")
         packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"], attempt=attempt)
         path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
+        drill = self.policy.get("failure_drill")
+        if drill and drill["node_id"] == node and attempt == 1:
+            marker = "Intentional lab drill: verification branch failure, not a worker or test failure"
+            if marker not in packet["capture_errors"]:
+                packet["capture_errors"].append(marker)
+                packet["gate"]["reasons"].append(marker)
+            packet["gate"]["status"] = "blocked"
+            drill_path = self.directory / "failure-drill.json"
+            if not drill_path.exists():
+                save_json(drill_path, {"node_id": node, "phase": "worker", "attempt": 1,
+                                       "injected_at": now(), "native_before": self.native_evidence()})
         packet["result"]["summary"] = snap["summary"]
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
@@ -244,6 +274,16 @@ class Pipeline:
                   "snapshots": state["snapshots"],
                   "packets": [{"path": str(path), "sha256": digest_file(path)} for path in worker_paths + candidate_paths]}
         path = self.directory / "review-bundle.json"
+        drill_path = self.directory / "failure-drill.json"
+        if drill_path.exists():
+            before = read_json(drill_path)["native_before"]
+            after = self.native_evidence()
+            audit = {"run_id": self.plan["run_id"], "native_before": before, "native_after": after,
+                     "workers_with_changed_launch_evidence": [node for node in NODES if before[node] != after[node]],
+                     "verification_attempts": {node: sorted(int(item.name) for item in (self.directory / "verification" / "worker" / node).iterdir() if item.is_dir() and item.name.isdigit()) for node in NODES},
+                     "scope": "Pipeline-issued sessions; native launch times/counts are null when unavailable. Out-of-band manual restarts are not certified."}
+            save_json(self.directory / "failure-report.json", audit)
+            bundle["failure_drill"] = audit
         save_json(path, bundle)
         return str(path)
 
@@ -346,6 +386,7 @@ def build_pipeline(checkpointer, runtime: Pipeline):
 
 def report(runtime: Pipeline, state) -> Path:
     """Escaped local results viewer, generated on every CLI boundary; no server needed."""
+    export_state(runtime, state)
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
     packets = list((runtime.directory / "verification").glob("*/*/*/packet.json"))
@@ -381,6 +422,9 @@ def report(runtime: Pipeline, state) -> Path:
             if artifact["kind"] == "screenshot":
                 parts.append(f'<img alt="Browser scenario screenshot" src="{url}">')
         parts.append('</section>')
+    failure_report = runtime.directory / "failure-report.json"
+    if failure_report.exists():
+        parts.append('<h2>Checkpoint failure drill</h2><pre>' + html.escape(failure_report.read_text()) + '</pre>')
     destination = runtime.directory / "report.html"
     destination.write_text("\n".join(parts))
     return destination
@@ -437,9 +481,11 @@ def main():
             for worker in policy["workers"]:
                 tasks[worker["node_id"]] += "\nApproved ownership and checks:\n" + json.dumps(worker)
             plan = prepare(directory, args.repo, "HEAD", tasks, True)
-            plan.update(mode="interactive", policy_sha256=policy_digest(policy), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
+            plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
+            from types import SimpleNamespace
+            export_state(Pipeline(directory), SimpleNamespace(values={}, next=("launch_ui", "launch_adapter"), tasks=[]))
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}")
             return
         with run_lock(directory):
@@ -494,11 +540,7 @@ def main():
                         step = f"verify_{args.node}" if args.phase == "worker" else "candidate"
                         if step not in state.next:
                             parser.error("Selected check is not a failed/pending step")
-                        attempts_path = directory / "attempts.json"
-                        attempts = read_json(attempts_path) if attempts_path.exists() else {}
-                        key = f"{args.phase}:{args.node}"
-                        attempts[key] = attempts.get(key, 1) + 1
-                        save_json(attempts_path, attempts)
+                        runtime.retry_check(args.phase, args.node)
                     # No new agent launch is ever permitted during retry.
                     if any(step.startswith("launch_") for step in state.next):
                         parser.error("Launch failure requires explicit session reconciliation; do not blindly retry")

@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -90,7 +91,7 @@ class InteractiveSessions(ClaudeSessions):
             row = self.locate(node, self.inventory())
             if row is None:
                 raise RuntimeError("Existing launch cannot be reconciled; no automatic relaunch")
-            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"])
+            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"], native_started_at=row.get("startedAt"))
             receipt.pop("error", None)
             save_json(path, receipt)
             return receipt
@@ -102,7 +103,8 @@ class InteractiveSessions(ClaudeSessions):
             raise RuntimeError("Unowned session already exists with this launch name")
         receipt = {"node_id": node, "session_id": None, "launch_token": info["session_id"], "plan_digest": digest,
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"],
-                   "status": "launching", "attempt": 1}
+                   "status": "launching", "attempt": 1, "launcher_invocations": 1,
+                   "launch_requested_at": datetime.now(timezone.utc).isoformat()}
         save_json(path, receipt)
         tools = "Read,Glob,Grep,Edit,Write" if self.plan["allow_edits"] else "Read,Glob,Grep"
         prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
@@ -128,7 +130,7 @@ class InteractiveSessions(ClaudeSessions):
             row = self.locate(node, self.inventory())
             if row is None:
                 raise RuntimeError("No exact matching background session after launch")
-            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"])
+            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"], native_started_at=row.get("startedAt"))
         except BaseException as error:
             receipt.update(status="needs_reconciliation", error=str(error))
             raise
