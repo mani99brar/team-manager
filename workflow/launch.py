@@ -12,7 +12,8 @@ from .pipeline import validate_pipeline_policy
 from .sessions import read_json
 
 
-def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False) -> tuple[Path, list[list[str]]]:
+def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
+                    worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None) -> tuple[Path, list[list[str]]]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
     folder = repo / "features" / feature
@@ -42,9 +43,14 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         start,
     ]
     if automatic:
+        from .automatic import automatic_settings
+        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds)  # Reject bad deadlines before any command runs.
         commands[0].append("--automatic")
-        commands[2].append("--automatic")
+        commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
+                            "--review-timeout-seconds", str(settings["review_timeout_seconds"])])
         commands.append([*base, "automatic", str(run), "--live"])
+    elif worker_timeout_seconds is not None or review_timeout_seconds is not None:
+        raise ValueError("Timeouts apply to --automatic runs only")
     return run, commands
 
 
@@ -55,12 +61,15 @@ def main(argv=None):
     parser.add_argument("--run-root", type=Path, default=Path.home() / ".local/state/md-manager-workflows/project-workflows")
     parser.add_argument("--live", action="store_true", help="Authorize Claude usage")
     parser.add_argument("--automatic", action="store_true", help="Bypass worker permission prompts; run through independent review to a verified feature branch")
+    parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: per-worker deadline from launch to completion signal (default 4h, max 24h)")
+    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer process timeout (default 30m, max 24h)")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands only")
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     try:
-        run, commands = launch_commands(repo, args.feature, args.run_id, args.run_root.resolve(), not args.no_herdr, args.automatic)
+        run, commands = launch_commands(repo, args.feature, args.run_id, args.run_root.resolve(), not args.no_herdr, args.automatic,
+                                        args.worker_timeout_seconds, args.review_timeout_seconds)
         if args.dry_run:
             print(json.dumps({"run_directory": str(run), "commands": commands, "executes": False}, indent=2))
             return
@@ -68,8 +77,13 @@ def main(argv=None):
             parser.error("Use --live to authorize worker usage, or --dry-run to inspect without running anything")
         if run.exists():
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
-        for command in commands:
-            subprocess.run(command, cwd=repo, check=True)
+        try:
+            for command in commands:
+                subprocess.run(command, cwd=repo, check=True)
+        except KeyboardInterrupt:
+            parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
+                             f"inspect with: {sys.executable} -m workflow status {run}\n"
+                             + (f"resume with:  {sys.executable} -m workflow automatic {run} --live\n" if args.automatic else ""))
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
             return

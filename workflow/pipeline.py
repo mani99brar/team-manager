@@ -455,6 +455,8 @@ def main():
     parser.add_argument("--adapter-task", type=Path)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
+    parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
+    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer process timeout (default 30m)")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--ui-handoff", type=Path)
     parser.add_argument("--adapter-handoff", type=Path)
@@ -504,8 +506,10 @@ def main():
             plan = prepare(directory, args.repo, "HEAD", tasks, True)
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
             if args.automatic:
-                from .automatic import DEFAULTS
-                plan["automatic"] = dict(DEFAULTS)
+                from .automatic import automatic_settings
+                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds)
+            elif args.worker_timeout_seconds or args.review_timeout_seconds:
+                parser.error("Timeouts apply to --automatic runs only; manual runs have operator-controlled lifetimes")
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             from types import SimpleNamespace
@@ -517,6 +521,7 @@ def main():
                 parser.error("automatic requires --live because it can launch an independent reviewer")
             from .automatic import supervise
             supervise(directory)
+            print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             return
         with run_lock(directory):
             runtime = Pipeline(directory)

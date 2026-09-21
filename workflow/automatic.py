@@ -20,7 +20,18 @@ from langgraph.types import Command
 from .sessions import NODES, git, read_json, run_lock, save_json, terminate
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
-            "worker_timeout_seconds": 3600, "review_timeout_seconds": 900}
+            "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800}
+TIMEOUT_KEYS = ("worker_timeout_seconds", "review_timeout_seconds")
+
+
+def automatic_settings(worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None) -> dict:
+    """Run-scoped automatic configuration; deadlines are pinned into plan.json at prepare."""
+    settings = dict(DEFAULTS)
+    for key, value in (("worker_timeout_seconds", worker_timeout_seconds), ("review_timeout_seconds", review_timeout_seconds)):
+        if value is not None:
+            settings[key] = value
+    validate_automatic({"automatic": settings, "source_branch": "feature/validation-only"})
+    return settings
 
 
 def validate_automatic(plan: dict) -> None:
@@ -29,9 +40,9 @@ def validate_automatic(plan: dict) -> None:
         raise ValueError("Malformed automatic run configuration")
     if settings["finish"] != DEFAULTS["finish"] or settings["permission_mode"] != "bypassPermissions":
         raise ValueError("Unsupported automatic authority")
-    for key in ("worker_timeout_seconds", "review_timeout_seconds"):
+    for key in TIMEOUT_KEYS:
         if type(settings[key]) is not int or not 1 <= settings[key] <= 86400:
-            raise ValueError("Automatic timeouts must be bounded positive seconds")
+            raise ValueError("Automatic timeouts must be bounded positive seconds (at most 86400)")
     if not plan.get("source_branch", "").startswith("feature/"):
         raise ValueError("Automatic completion is restricted to a feature/ branch")
 
@@ -215,13 +226,20 @@ def supervise(directory: Path) -> None:
     validate_automatic(read_json(directory / "plan.json"))
     with run_lock(directory, "automatic-supervisor.lock"):
         for _ in range(45):
-            result = subprocess.run([sys.executable, "-m", "workflow", "automatic-step", str(directory), "--live"],
-                                    cwd=Path(__file__).resolve().parents[1])
+            try:
+                result = subprocess.run([sys.executable, "-m", "workflow", "automatic-step", str(directory), "--live"],
+                                        cwd=Path(__file__).resolve().parents[1])
+            except KeyboardInterrupt:
+                raise RuntimeError(RESUME_NOTE.format(directory=directory)) from None
             if result.returncode == 0:
                 return
             if result.returncode != 75:
                 raise RuntimeError(f"Automatic controller blocked (exit {result.returncode}); inspect retained run")
         raise RuntimeError("Automatic controller restart limit exhausted")
+
+
+RESUME_NOTE = ("Supervisor interrupted. Native workers were NOT stopped and keep running; "
+               "resume with: python -m workflow automatic {directory} --live")
 
 
 def drive(runtime, *, single_step=False) -> str | None:
@@ -251,7 +269,15 @@ def drive(runtime, *, single_step=False) -> str | None:
             if pending == ["worker_handoff"]:
                 try:
                     wait_handoffs(runtime)
+                except KeyboardInterrupt:
+                    # Operator/terminal interruption is not a worker failure: leave the
+                    # native sessions running so `automatic --live` can resume polling.
+                    runtime.event("controller", "interrupted", RESUME_NOTE.format(directory=runtime.directory))
+                    report(runtime, state)
+                    raise
                 except BaseException as error:
+                    # Deadline, quota block, missing/blocked completion: stop the workers so
+                    # no session keeps consuming usage for a run that cannot continue.
                     runtime.event("controller", "blocked", str(error))
                     try:
                         runtime.stop_workers()

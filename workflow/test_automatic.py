@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .automatic import DEFAULTS, drive, read_completion, validate_automatic, wait_handoffs, supervise
+from .automatic import DEFAULTS, automatic_settings, drive, read_completion, validate_automatic, wait_handoffs, supervise
 from .pipeline import build_pipeline
 from .sessions import git, read_json, save_json
 from .verification import policy_digest
@@ -34,7 +34,7 @@ class CompletionTests(unittest.TestCase):
                 "status": "completed", "summary": "Synthetic work", "open_assumptions": []}
 
     def test_idle_without_signal_times_out_not_completes(self):
-        ticks = iter([1, 1, 3601])
+        ticks = iter([1, 1, DEFAULTS["worker_timeout_seconds"] + 1])
         with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
             wait_handoffs(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
         self.assertFalse((self.root / "ui.handoff.json").exists())
@@ -61,7 +61,7 @@ class CompletionTests(unittest.TestCase):
         for node in self.plan["nodes"]:
             save_json(self.root / f"{node}.completion.json", self.completion(node))
         self.runtime.sessions.locate = lambda node, rows: {"state": "working"}
-        ticks = iter([1, 1, 3601])
+        ticks = iter([1, 1, DEFAULTS["worker_timeout_seconds"] + 1])
         with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
             wait_handoffs(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
         self.assertFalse((self.root / "ui.handoff.json").exists())
@@ -84,6 +84,26 @@ class CompletionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "controller blocked"):
                 supervise(self.root)
         self.assertEqual(run.call_count, 1)
+
+    def test_supervisor_interrupt_reports_resume_without_stopping_workers(self):
+        save_json(self.root / "plan.json", self.plan)
+        with patch("workflow.automatic.subprocess.run", side_effect=KeyboardInterrupt) as run:
+            with self.assertRaisesRegex(RuntimeError, "NOT stopped.*resume with"):
+                supervise(self.root)
+        self.assertEqual(run.call_count, 1)
+
+    def test_deadlines_are_configurable_and_bounded(self):
+        self.assertEqual(automatic_settings()["worker_timeout_seconds"], 4 * 3600)
+        custom = automatic_settings(7200, 600)
+        self.assertEqual((custom["worker_timeout_seconds"], custom["review_timeout_seconds"]), (7200, 600))
+        self.assertEqual(custom["permission_mode"], DEFAULTS["permission_mode"])
+        for bad in (0, -1, 86401):
+            with self.assertRaisesRegex(ValueError, "bounded"):
+                automatic_settings(worker_timeout_seconds=bad)
+        with self.assertRaises(ValueError):
+            automatic_settings(review_timeout_seconds=90000)
+        self.plan["automatic"] = automatic_settings(7200)
+        validate_automatic(self.plan)
 
     def test_main_and_unbounded_authority_rejected(self):
         self.plan["source_branch"] = "main"
@@ -177,6 +197,29 @@ sys.exit(0 if commit else 75)
         self.assertEqual(read_json(f.directory / "failure-report.json")["verification_attempts"], {"ui": [1], "adapter": [1, 2]})
         self.assertEqual(git(f.repo, "rev-parse", self.original_branch), f.plan["base_commit"])
         self.assertEqual(self.counter.read_text(), "1")
+
+    def test_interrupt_during_worker_wait_keeps_workers_and_resumes(self):
+        f = self.fixture
+        with patch("workflow.automatic.wait_handoffs", side_effect=KeyboardInterrupt), patch.object(f.runtime, "stop_workers") as stop:
+            with self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime)
+        stop.assert_not_called()
+        events = [json.loads(line) for line in (f.directory / "events.jsonl").read_text().splitlines()]
+        self.assertTrue(any(event["status"] == "interrupted" and "resume with" in event["message"] for event in events))
+        self.assertFalse((f.directory / "ui.stop.json").exists())
+        # The same run resumes from the persisted checkpoint without relaunching anything.
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(f.runtime)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(sorted(f.sessions.starts), ["adapter", "ui"])
+
+    def test_deadline_or_blocked_worker_stops_workers(self):
+        f = self.fixture
+        with patch("workflow.automatic.wait_handoffs", side_effect=RuntimeError("Worker ui deadline exhausted; no automatic relaunch")), \
+                patch.object(f.runtime, "stop_workers") as stop:
+            with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
+                drive(f.runtime)
+        stop.assert_called_once()
 
     def test_reviewer_block_preserves_branch_and_does_not_relaunch(self):
         f = self.fixture

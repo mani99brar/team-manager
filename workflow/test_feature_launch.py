@@ -32,6 +32,21 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertFalse(any("push" in command for command in commands))
         self.assertFalse(any(command[0] == "claude" for command in commands))
 
+    def test_automatic_deadlines_are_pinned_into_prepare(self):
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--worker-timeout-seconds") + 1], str(4 * 3600))
+        self.assertEqual(prepare[prepare.index("--review-timeout-seconds") + 1], "1800")
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True,
+                                      worker_timeout_seconds=7200, review_timeout_seconds=600)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--worker-timeout-seconds") + 1], "7200")
+        self.assertEqual(prepare[prepare.index("--review-timeout-seconds") + 1], "600")
+        with self.assertRaisesRegex(ValueError, "bounded"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, worker_timeout_seconds=0)
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), worker_timeout_seconds=7200)
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--dry-run"])

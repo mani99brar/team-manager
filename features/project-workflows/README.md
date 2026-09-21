@@ -14,11 +14,13 @@ Workers emit an explicit run/node/token-bound completion file. Idle alone is ins
 
 The automatic supervisor restarts the controller in a new Python process after a persisted step. The intentional first adapter verification failure is retried using the same SQLite thread; successful sibling work is reused. Controller PIDs are recorded in the event timeline. This is the existing LangGraph pipeline—not Pi subagent orchestration.
 
-Bounds: 60-minute worker deadlines while the supervisor is running (persisted launch times survive restart), a 15-minute reviewer process timeout, existing per-check timeouts, three check attempts per lane/phase and at most 45 controller-step processes per supervisor invocation. There is no token cap or billing/provider fallback. Ambiguous launches, missing completion signals, quota blocks, reviewer rejection, ownership violations and exhausted retries stop with retained evidence. Review/worker processes are not blindly relaunched. A stopped/crashed controller cannot enforce process deadlines while it is offline.
+Bounds: per-worker deadlines measured from launch to completion signal (default 4 hours, `--worker-timeout-seconds`, at most 24 hours; persisted launch times survive restart and are enforced only while the supervisor is running), a reviewer process timeout (default 30 minutes, `--review-timeout-seconds`), existing per-check timeouts, three check attempts per lane/phase and at most 45 controller-step processes per supervisor invocation. There is no token cap or billing/provider fallback. Ambiguous launches, missing completion signals, quota blocks, reviewer rejection, ownership violations and exhausted retries stop with retained evidence. Review/worker processes are not blindly relaunched. A stopped/crashed controller cannot enforce process deadlines while it is offline.
 
 These retries rerun verification of immutable code; they are **not** an automatic source-repair loop. Persistent code failures or review findings require intervention. Fully automatic means no routine approval prompts on the successful path, not a guarantee that every run succeeds.
 
-To resume an already-started automatic run after inspecting an interruption:
+Interrupting the supervisor (Ctrl-C, a closed terminal, a dropped SSH session) does **not** stop the workers: they keep running in their native terminals, the timeline records `interrupted`, and the deadline keeps counting from launch. Resume the same run with the command below. Deadline expiry, a worker reporting `blocked`, a native quota block or an invalid completion file **do** stop both workers; those runs are retained for inspection but cannot be resumed, so start a new `--run-id`.
+
+To resume an already-started automatic run after an interruption or after fixing a post-freeze blocker:
 
 ```bash
 .venv/bin/python -m workflow automatic "$HOME/.local/state/md-manager-workflows/project-workflows/project-workflows-001" --live
