@@ -10,6 +10,8 @@ import { useDocument } from './document/useDocument.ts'
 import { GraphCanvas, type GraphCanvasHandle, type View, type ViewRequest } from './graph/GraphCanvas.tsx'
 import { GraphLayout, type LayoutSnapshot } from './graph/layout.ts'
 import { Outline } from './graph/Outline.tsx'
+import { ProjectsView } from './projects/ProjectsView.tsx'
+import { parseProjectsPathname, projectsPathname } from './projects/routes.ts'
 import {
   buildIndex,
   childCounts,
@@ -179,12 +181,12 @@ function App() {
         requestView({ type: 'reveal', id: refId(current.ref) })
       }
       setData({ status: 'ready', index, refreshing: false, refreshError: null })
-      // While a document is open its own load/failure announcements take precedence.
-      if (current.kind !== 'file') setAnnouncement(`Loaded ${summary(index)}.`)
+      // While a document or the Projects root is open, their own load/failure announcements take precedence.
+      if (current.kind !== 'file' && current.kind !== 'projects') setAnnouncement(`Loaded ${summary(index)}.`)
     } catch (error) {
       if (signal?.aborted) return
       setData({ status: 'error', message: errorMessage(error) })
-      if (locationRef.current.kind !== 'file') setAnnouncement('Loading failed.')
+      if (locationRef.current.kind !== 'file' && locationRef.current.kind !== 'projects') setAnnouncement('Loading failed.')
     }
   }, [requestView])
 
@@ -370,6 +372,25 @@ function App() {
   const backToFolder = useCallback(() => guardLeave(leaveFile), [guardLeave, leaveFile])
   const navigateFromBreadcrumb = useCallback((ref: FolderRef | null) => guardLeave(() => navigate(ref, { reveal: true })), [guardLeave, navigate])
 
+  // ---- Projects root (read-only workflow runs; a separate domain from the skill sources) ----
+  const [projectsRefresh, setProjectsRefresh] = useState(0)
+  /** Navigates to any app pathname (Projects pages or Home) through history, keeping the unsaved-edit guards. */
+  const navigatePathname = useCallback((pathname: string) => {
+    guardLeave(() => {
+      if (window.location.pathname !== pathname) {
+        saveBrowsingRef.current()
+        writeHistory({}, pathname)
+      }
+      const next = parsePathname(pathname)
+      setLocation(next)
+      if (next.kind === 'home') requestView({ type: 'fit' })
+    })
+  }, [guardLeave, requestView, writeHistory])
+  const navigateToSource = useCallback((source: Source) => guardLeave(() => navigate({ source, locationId: null, path: '' }, { reveal: true })), [guardLeave, navigate])
+  const inProjects = location.kind === 'projects'
+  const projectsRoute = location.kind === 'projects' ? parseProjectsPathname(location.pathname) : null
+  const rootSource: Source | null = location.kind === 'folder' || location.kind === 'file' ? location.ref.source : location.kind === 'legacy' ? location.source : null
+
   // Focus the originating file action once the browsing view has rendered it again.
   const focusPending = useCallback(() => {
     const id = pendingFocus.current
@@ -544,7 +565,7 @@ function App() {
   const ready = data.status === 'ready'
   const refreshing = data.status === 'ready' && data.refreshing
   const graphControlsEnabled = ready && mode === 'graph'
-  const browsing = fileRef === null
+  const browsing = fileRef === null && !inProjects
   // Creation needs a real destination: a source (choose a location in the dialog), an available location or a folder.
   const canCreate = selectedExists && selectedLocation?.status !== 'unavailable'
   const isDirectory = selectedNode?.kind === 'directory'
@@ -559,6 +580,7 @@ function App() {
             <a href="/browse/Pi" onClick={event => { event.preventDefault(); navigate({ source: 'Pi', locationId: null, path: '' }, { reveal: true }) }}>Go to the Pi root</a>
             <a href="/browse/Claude" onClick={event => { event.preventDefault(); navigate({ source: 'Claude', locationId: null, path: '' }, { reveal: true }) }}>Go to the Claude root</a>
           </>}
+      <a href={projectsPathname()} onClick={event => { event.preventDefault(); navigatePathname(projectsPathname()) }}>Go to Projects</a>
       <a href="/" onClick={event => { event.preventDefault(); navigate(null) }}>Home</a>
     </>
   )
@@ -569,7 +591,7 @@ function App() {
     ? { source: location.ref.source, locationId: location.ref.locationId }
     : null
   if (index && location.kind === 'unknown-source') {
-    missingNotice = <>Source “{location.name}” does not exist. Only the Pi and Claude sources are available.</>
+    missingNotice = <>Source “{location.name}” does not exist. Only the Pi and Claude sources are available; workflow runs are under Projects.</>
     missingLinks = sourceLinks(null)
   } else if (index && location.kind === 'malformed') {
     missingNotice = <>This link is invalid and could not be read.</>
@@ -606,16 +628,28 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={inProjects ? 'app app-projects' : 'app'}>
       <header className="app-header">
         <div className="app-title">
           <h1>MD Manager</h1>
-          <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save.</p>
+          <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save. Projects shows workflow runs, read-only.</p>
         </div>
-        <button type="button" className="button" onClick={() => void refresh()} disabled={!ready || refreshing} aria-busy={refreshing}>
-          {refreshing ? 'Refreshing…' : 'Refresh'}
-        </button>
+        {inProjects ? (
+          <button type="button" className="button" onClick={() => setProjectsRefresh(previous => previous + 1)}>Refresh</button>
+        ) : (
+          <button type="button" className="button" onClick={() => void refresh()} disabled={!ready || refreshing} aria-busy={refreshing}>
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+        )}
       </header>
+
+      <nav className="roots" aria-label="Roots">
+        <ul>
+          <li><a href="/browse/Pi" aria-current={rootSource === 'Pi' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Pi') }}>Pi</a></li>
+          <li><a href="/browse/Claude" aria-current={rootSource === 'Claude' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Claude') }}>Claude</a></li>
+          <li><a href={projectsPathname()} aria-current={inProjects ? 'page' : undefined} onClick={event => { event.preventDefault(); navigatePathname(projectsPathname()) }}>Projects</a></li>
+        </ul>
+      </nav>
 
       <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
 
@@ -658,7 +692,11 @@ function App() {
         </div>
       )}
 
-      <div className="navigation">
+      {inProjects && (
+        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onNavigate={navigatePathname} onAnnounce={announce} />
+      )}
+
+      {!inProjects && <div className="navigation">
         <Breadcrumbs selected={selectedRef} file={fileRef} index={index} onNavigate={navigateFromBreadcrumb} />
         {fileRef ? null : missingNotice ? (
           <div className="missing" role="alert">
@@ -668,7 +706,7 @@ function App() {
         ) : (
           <p className="folder-info" data-testid="folder-info">{folderInfo}</p>
         )}
-      </div>
+      </div>}
 
       {browsing && (
         <div className="toolbars">
@@ -689,7 +727,7 @@ function App() {
         </div>
       )}
 
-      <main className={browsing ? 'workspace' : 'workspace workspace-document'} aria-busy={browsing && data.status === 'loading'}>
+      {!inProjects && <main className={browsing ? 'workspace' : 'workspace workspace-document'} aria-busy={browsing && data.status === 'loading'}>
         {fileRef && documentState && (
           <DocumentView
             fileRef={fileRef}
@@ -747,7 +785,7 @@ function App() {
             onToggleExpand={toggleExpand}
           />
         )}
-      </main>
+      </main>}
 
       {browsing && mode === 'graph' && (
         <footer className="legend" aria-label="Legend">

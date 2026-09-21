@@ -256,6 +256,7 @@ export function folderExists(index: TreeIndex, ref: FolderRef | null): boolean {
 
 const BROWSE_ROUTE = 'browse'
 const FILE_ROUTE = 'file'
+const PROJECTS_ROUTE = 'projects'
 
 /** Encodes the selected folder as `/browse/<source>[/<locationId>[/segments…]]`, encoding every segment. */
 export function folderToPathname(ref: FolderRef | null): string {
@@ -279,6 +280,8 @@ export type ParsedLocation =
   | { kind: 'file'; ref: FileRef }
   | { kind: 'unknown-source'; name: string }
   | { kind: 'malformed' }
+  /** The read-only Projects root (`/projects/…`), a separate domain parsed by `src/projects/routes.ts`. */
+  | { kind: 'projects'; pathname: string }
   /** A link from the fixture-only layout (`/<Source>/…`, `/file/<Source>/<name>.md`): explained, never resolved. */
   | { kind: 'legacy'; source: Source; pathname: string }
 
@@ -300,6 +303,7 @@ export function parsePathname(pathname: string): ParsedLocation {
   const raw = pathname.split('/').filter(segment => segment !== '')
   if (raw.length === 0) return { kind: 'home' }
   const [route, ...rest] = raw
+  if (route === PROJECTS_ROUTE) return { kind: 'projects', pathname }
   if (route === BROWSE_ROUTE) {
     if (rest.length === 0) return { kind: 'home' }
     const segments = decodeSegments(rest)
