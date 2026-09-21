@@ -1,0 +1,58 @@
+# LangGraph recovery lab (stub executors)
+
+This first graph proves independent branches, durable checkpoints, a join, and human approval. It does **not** launch Claude, create worktrees, run a browser, perform an agent review, merge commits, or publish UI events yet. Gate labels and results explicitly identify stub evidence. Approval completes only the simulation.
+
+```text
+START ─┬─ ui ────── browser_gate ─┐
+       └─ adapter ─ adapter_gate ─┴─ review ─ integrate (interrupt) ─ END
+```
+
+## Setup
+
+From the repository root (Python 3.12 recommended):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r workflow/requirements.txt
+.venv/bin/python -m unittest workflow.test_graph -v
+```
+
+## Forced-failure experiment
+
+Use a fresh run ID. Each invocation can be a separate process/SSH session:
+
+```bash
+.venv/bin/python -m workflow.demo start --run-id lab-001 --fail-adapter-once
+# Expected exit 1: adapter's first attempt fails.
+.venv/bin/python -m workflow.demo status --run-id lab-001
+.venv/bin/python -m workflow.demo resume --run-id lab-001
+# Expected: UI starts = 1, adapter starts = 2; approval interrupt.
+.venv/bin/python -m workflow.demo approve --run-id lab-001
+.venv/bin/python -m workflow.demo status --run-id lab-001
+```
+
+Omit `--fail-adapter-once` for a happy-path run. Runtime files live in ignored `.workflow-state/`, configurable with `--data-dir`. Keep the same data directory and run ID to resume. Only one controller process may operate on a given run at a time; distributed locking is not implemented.
+
+`checkpoints.sqlite` stores LangGraph checkpoints/pending writes. `attempts.sqlite` separately records actual worker starts even when the graph superstep fails. A new graph instance can reopen the databases and reuse the successful UI result. This is LangGraph recovery, not Claude workflow relaunch semantics. The ledger is diagnostic, not an exactly-once external-session manager.
+
+## Files
+
+- `graph.py`: state, graph wiring, synthetic workers, placeholder verification/review, approval interrupt, durable attempt ledger.
+- `demo.py`: start/resume/status/approve commands with a persistent thread ID.
+- `test_graph.py`: failure/recovery across graph recreation, successful sibling reuse, happy path, rejected approval.
+- `requirements.txt`: bounded Python dependencies, installed separately from the Node application.
+
+## Contract integration and next steps
+
+Stub worker payloads validate against `contracts/workflow/workerResult.schema.json`. They use the base revision as the output revision because no files change, and explicitly report no checks/artifacts. The demo reads repository HEAD; it does not establish real worker start-revision verification. Schema checks and the simple join are not full production acceptance.
+
+Before replacing stubs with independent Claude sessions:
+
+1. Accept and validate `runSpec`, implement all cross-field contract rules, create/verify isolated worktrees at the pinned contract revision, and enforce path ownership.
+2. Implement a runner adapter with durable session identity, reconnect/reconciliation and partial-result capture. Do not blindly relaunch an external agent after a checkpoint replay.
+3. Implement browser/test gates with preserved evidence and a fresh-context review session in an isolated worktree; reserve integration for Pi.
+4. Persist contract events/artifacts, expose snapshots and authorized controls, and enforce replay/idempotency rules for the UI.
+5. Add usage-exhaustion pause/approval policy, safe cancellation and return-note recording. Herdr can monitor sessions, but cannot replace persisted workflow state.
+6. Pin a fully resolved dependency lock before production deployment.
+
+The runtime is deliberately separate from the current app; no web server routes or UI behavior have changed.

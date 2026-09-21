@@ -24,3 +24,9 @@ playwright-report
 *.njsproj
 *.sln
 *.sw?
+
+# Python workflow runtime
+.venv/
+__pycache__/
+*.pyc
+.workflow-state/
