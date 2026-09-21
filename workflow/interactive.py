@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,6 +79,30 @@ class InteractiveSessions(ClaudeSessions):
             raise RuntimeError("Native process is unavailable; refusing implicit restart") from error
         return row
 
+    settle_seconds = 30.0
+
+    def settle(self, node: str) -> dict:
+        """Bind the row created by the launch we just issued.
+
+        `claude --bg` exits before the native session has fully registered: the
+        inventory row can appear without a PID for a moment. Poll for the exact
+        row until it is attachable; identity mismatches still fail immediately
+        and nothing is ever launched again from here.
+        """
+        deadline = time.monotonic() + self.settle_seconds
+        while True:
+            try:
+                row = self.locate(node, self.inventory())
+            except RuntimeError as error:
+                if "No live native PID" not in str(error) or time.monotonic() >= deadline:
+                    raise
+                row = None
+            if row is not None:
+                return row
+            if time.monotonic() >= deadline:
+                raise RuntimeError("No exact matching background session after launch")
+            time.sleep(1)
+
     def run(self, node: str) -> dict:
         if node not in NODES or self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive worker plan")
@@ -139,9 +164,7 @@ class InteractiveSessions(ClaudeSessions):
                     os.fsync(log.fileno())
             if result.returncode != 0:
                 raise RuntimeError(f"Claude background launch exited {result.returncode}; inspect launch log")
-            row = self.locate(node, self.inventory())
-            if row is None:
-                raise RuntimeError("No exact matching background session after launch")
+            row = self.settle(node)
             receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"], native_started_at=row.get("startedAt"))
         except BaseException as error:
             receipt.update(status="needs_reconciliation", error=str(error))

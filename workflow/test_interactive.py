@@ -41,6 +41,52 @@ class InteractiveTests(unittest.TestCase):
             self.assertNotIn("bypassPermissions", command)
             self.assertFalse(any(key.startswith("HERDR_") for key in launch.call_args.kwargs["env"]))
 
+    def test_launch_waits_for_native_pid_to_register(self):
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        unregistered = {key: value for key, value in self.row().items() if key != "pid"}
+        # Pre-launch name check, then: row absent, row without PID, row without PID, row ready.
+        inventories = [[], [], [unregistered], [unregistered], [self.row()]]
+        with patch.object(self.sessions, "inventory", side_effect=inventories) as inventory, \
+                patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started) as launch, \
+                patch("workflow.interactive.time.sleep") as sleep:
+            result = self.sessions.run("ui")
+        self.assertEqual(result["status"], "attached_session_available")
+        self.assertEqual(result["background_id"], self.row()["id"])
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(inventory.call_count, 5)
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_launch_gives_up_when_pid_never_registers_without_relaunch(self):
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        unregistered = {key: value for key, value in self.row().items() if key != "pid"}
+        self.sessions.settle_seconds = 0
+        with patch.object(self.sessions, "inventory", side_effect=[[], [unregistered]]), \
+                patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with self.assertRaisesRegex(RuntimeError, "No live native PID"):
+                self.sessions.run("ui")
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(read_json(self.directory / "ui.interactive.json")["status"], "needs_reconciliation")
+
+    def test_launch_identity_mismatch_fails_immediately(self):
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        wrong_cwd = self.row(cwd="/elsewhere")
+        with patch.object(self.sessions, "inventory", side_effect=[[], [wrong_cwd]]) as inventory, \
+                patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started), \
+                patch("workflow.interactive.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "identity/worktree mismatch"):
+                self.sessions.run("ui")
+        self.assertEqual(inventory.call_count, 2)
+        sleep.assert_not_called()
+
     def test_automatic_permission_bypass_is_run_scoped(self):
         from .automatic import DEFAULTS
         self.plan.update(automatic=dict(DEFAULTS), source_branch="feature/test")
