@@ -1,0 +1,34 @@
+{
+  "version": "1.0.0",
+  "feature": "Workflow viewer — illustrative policy, not an executable test suite",
+  "independent_review": true,
+  "integration_approval": true,
+  "workers": [
+    {
+      "node_id": "ui",
+      "role": "frontend",
+      "owned_paths": ["src/workflow", "tests/workflow"],
+      "checks": [
+        {"id": "frontend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []},
+        {
+          "id": "workflow-browser", "kind": "browser",
+          "argv": ["npx", "--no-install", "playwright", "test", "tests/workflow/viewer.spec.ts"],
+          "timeout_seconds": 300,
+          "scenarios": [
+            {"id": "failed-worker", "description": "A failed worker displays an actionable error"},
+            {"id": "worker-results", "description": "Selecting a worker shows checks and artifacts"}
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "adapter",
+      "role": "backend",
+      "owned_paths": ["workflow"],
+      "checks": [
+        {"id": "backend-unit", "kind": "unit", "argv": ["python", "-m", "unittest", "workflow.test_graph"], "timeout_seconds": 120, "scenarios": []},
+        {"id": "backend-contract", "kind": "contract", "argv": ["npm", "run", "test:contracts"], "timeout_seconds": 120, "scenarios": []}
+      ]
+    }
+  ]
+}

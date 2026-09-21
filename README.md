@@ -4,6 +4,10 @@ Graph explorer, document viewer and explicit-save Markdown editor for the Pi and
 
 Pi and Claude are the two top-level sources. Underneath each, one or more **configured locations** (personal skills, package or plugin skill directories, project skill directories) are browsed and edited in place: nothing is imported, mirrored or copied into this repository.
 
+## Agent workflow lab
+
+The separate [LangGraph workflow runbook](workflow/RUNBOOK.md) covers two interactive Claude workers, a dedicated Herdr tab, isolated verification, screenshots, independent review and explicit integration approval. It does not change the Markdown-manager application or start agents automatically.
+
 ## Start
 
 Requires **Linux with procfs mounted at `/proc`**, Node.js 22.12+ (tested with 24), and npm. The backend fails closed at startup without Linux/procfs descriptor access; macOS/Windows backends are not supported.

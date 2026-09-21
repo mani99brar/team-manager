@@ -1,4 +1,15 @@
-# LangGraph recovery lab (stub executors)
+# LangGraph workflows
+
+**Start with [RUNBOOK.md](RUNBOOK.md).** `python -m workflow` now runs the complete supervised pipeline: two interactive Claude workers in one Herdr tab, explicit freeze, immutable snapshots, isolated checks/screenshots, combined-candidate checks, independent review, approval and local fast-forward integration. `preflight`/`prepare` do not launch agents; `start --live` is explicitly required.
+
+`report.html` in each run directory provides a local graph/results viewer. The full pipeline is tested offline with fake workers, real Git/unit/Playwright checks, screenshot artifacts, approval gates and forced-check-failure recovery. No live feature run is needed to run the tests.
+
+The following are building-block/historical slice documentation; the runbook supersedes their statements about unfinished pipeline wiring:
+- [INTERACTIVE_SESSIONS.md](INTERACTIVE_SESSIONS.md): native interactive launcher/Herdr attachment.
+- [LIVE_SESSIONS.md](LIVE_SESSIONS.md): optional headless print-mode launcher/log panes.
+- [VERIFICATION.md](VERIFICATION.md): policy and evidence validation boundaries.
+
+## Original recovery lab (stub executors)
 
 This first graph proves independent branches, durable checkpoints, a join, and human approval. It does **not** launch Claude, create worktrees, run a browser, perform an agent review, merge commits, or publish UI events yet. Gate labels and results explicitly identify stub evidence. Approval completes only the simulation.
 

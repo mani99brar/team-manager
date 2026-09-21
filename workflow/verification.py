@@ -1,0 +1,169 @@
+"""Reusable policy/evidence gates. No agents, browsers, shells or graph launches.
+
+Inputs must come from a trusted verifier plus backend-owned artifact registry, not
+unchecked agent prose. Passing this evidence gate never authorizes integration.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import shlex
+from datetime import datetime
+from pathlib import Path
+
+from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
+
+CONTRACTS = Path(__file__).resolve().parents[1] / "contracts" / "workflow"
+
+
+def validate_schema(name: str, value: dict) -> None:
+    schema = json.loads((CONTRACTS / f"{name}.schema.json").read_text())
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
+
+
+def policy_digest(policy: dict) -> str:
+    """Canonical UTF-8 JSON: sorted keys, no whitespace, literal Unicode."""
+    return hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def safe_path(value: str) -> str:
+    normalized = value.rstrip("/")
+    if not normalized or normalized.startswith("/") or any(char in normalized for char in "\\:*?[]") or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        raise ValueError(f"Not an exact repository-relative path/prefix: {value}")
+    return normalized
+
+
+def owns(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def unique(items: list[dict], key: str) -> dict:
+    result = {item[key]: item for item in items}
+    if len(result) != len(items):
+        raise ValueError(f"Duplicate {key}")
+    return result
+
+
+def validate_policy(policy: dict) -> dict:
+    validate_schema("verification", policy)
+    workers = unique(policy["workers"], "node_id")
+    claimed = []
+    for worker in workers.values():
+        paths = [safe_path(path) for path in worker["owned_paths"]]
+        for other_node, other_path in claimed:
+            if any(owns(path, other_path) or owns(other_path, path) for path in paths):
+                raise ValueError(f"Overlapping ownership: {worker['node_id']} and {other_node}")
+        claimed.extend((worker["node_id"], path) for path in paths)
+        checks = unique(worker["checks"], "id")
+        if len({tuple(check["argv"]) for check in checks.values()}) != len(checks):
+            raise ValueError("Each check needs a distinct command")
+        kinds = {check["kind"] for check in checks.values()}
+        required = {"build", "browser"} if worker["role"] == "frontend" else {"unit"}
+        if not required <= kinds:
+            raise ValueError(f"{worker['role']} requires {sorted(required)} checks")
+        for check in checks.values():
+            unique(check["scenarios"], "id")
+            if (check["kind"] == "browser") != bool(check["scenarios"]):
+                raise ValueError("Browser checks require named scenarios; other checks must not have scenarios")
+    return policy
+
+
+def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dict,
+                    artifact_root: Path, artifact_paths: dict[str, Path], enforce_ownership: bool = True) -> dict:
+    """Fail closed on absent, stale or inconsistent evidence.
+
+    `expected` is backend-owned: run_id, node_id, attempt, base_commit,
+    output_commit and verification_cwd. Caller must freeze edits and independently
+    derive the full Git diff/commit before invoking; this function cannot prove
+    that an agent has reported all changed files.
+    """
+    reasons = []
+    try:
+        validate_policy(policy)
+        validate_schema("workerResult", result)
+        validate_schema("verificationEvidence", evidence)
+        workers = {worker["node_id"]: worker for worker in policy["workers"]}
+        worker = workers[expected["node_id"]]
+        for field in ("run_id", "node_id", "attempt", "base_commit", "output_commit"):
+            if result[field] != expected[field]:
+                raise ValueError(f"Worker result has stale/mismatched {field}")
+        for field in ("run_id", "node_id", "attempt", "output_commit"):
+            if evidence[field] != expected[field]:
+                raise ValueError(f"Verification evidence has stale/mismatched {field}")
+        if evidence["policy_sha256"] != policy_digest(policy):
+            raise ValueError("Verification policy changed after evidence capture")
+        if result["status"] != "succeeded" or result["output_commit"] is None or result["error"] is not None:
+            raise ValueError("Worker did not produce a successful durable result")
+        prefixes = [safe_path(path) for path in worker["owned_paths"]]
+        for changed in result["changed_files"]:
+            if enforce_ownership and not any(owns(safe_path(changed), prefix) for prefix in prefixes):
+                reasons.append(f"Changed file outside ownership: {changed}")
+        artifacts = unique(result["artifacts"], "artifact_id")
+        root = artifact_root.resolve(strict=True)
+        resolved = {}
+        for artifact_id, artifact in artifacts.items():
+            path = artifact_paths[artifact_id].resolve(strict=True)
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError(f"Artifact escapes registry root: {artifact_id}")
+            with path.open("rb") as handle:
+                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            if digest != artifact["sha256"]:
+                raise ValueError(f"Artifact hash mismatch: {artifact_id}")
+            resolved[artifact_id] = path
+        for check in result["checks"]:
+            if artifacts.get(check["log_artifact_id"], {}).get("kind") != "log":
+                reasons.append("Executed check is missing a log artifact")
+            if datetime.fromisoformat(check["finished_at"]) < datetime.fromisoformat(check["started_at"]):
+                reasons.append("Check finish precedes start")
+            if check["exit_code"] != 0:
+                reasons.append(f"Executed check failed: {check['command']}")
+        supplied = unique(evidence["checks"], "id")
+        required = {check["id"]: check for check in worker["checks"]}
+        if set(supplied) != set(required):
+            raise ValueError("Required check evidence missing or contains unknown check IDs")
+        indexes = [check["worker_check_index"] for check in supplied.values()]
+        if len(set(indexes)) != len(indexes):
+            raise ValueError("A command execution cannot satisfy multiple check IDs")
+        for check_id, requirement in required.items():
+            receipt = supplied[check_id]
+            execution = result["checks"][receipt["worker_check_index"]]
+            if execution["command"] != shlex.join(requirement["argv"]):
+                reasons.append(f"{check_id}: executed command differs from approved argv")
+            if Path(execution["cwd"]).resolve() != Path(expected["verification_cwd"]).resolve():
+                reasons.append(f"{check_id}: wrong verification worktree")
+            duration = (datetime.fromisoformat(execution["finished_at"]) - datetime.fromisoformat(execution["started_at"])).total_seconds()
+            if duration > requirement["timeout_seconds"]:
+                reasons.append(f"{check_id}: execution exceeded approved timeout")
+            if requirement["kind"] in {"unit", "browser", "integration", "contract"}:
+                tests = receipt["tests"]
+                if tests is None or tests["passed"] < 1 or tests["failed"] > 0:
+                    reasons.append(f"{check_id}: no passing test evidence or failed tests")
+            scenarios = unique(receipt["scenarios"], "id")
+            if requirement["kind"] == "browser" and receipt["tests"] is not None and receipt["tests"]["passed"] < len(requirement["scenarios"]):
+                reasons.append(f"{check_id}: fewer passing tests than required browser scenarios")
+            if set(scenarios) != {scenario["id"] for scenario in requirement["scenarios"]}:
+                reasons.append(f"{check_id}: missing/unknown browser scenarios")
+            screenshot_ids = []
+            for scenario in scenarios.values():
+                artifact_id = scenario["screenshot_artifact_id"]
+                if scenario["status"] != "passed":
+                    reasons.append(f"{check_id}/{scenario['id']}: browser scenario did not pass")
+                if artifact_id is None or artifacts.get(artifact_id, {}).get("kind") != "screenshot":
+                    reasons.append(f"{check_id}/{scenario['id']}: screenshot required")
+                    continue
+                screenshot_ids.append(artifact_id)
+                # Format sanity only, not proof of visual correctness/authenticity.
+                with resolved[artifact_id].open("rb") as image:
+                    header = image.read(24)
+                if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR" or int.from_bytes(header[16:20], "big") == 0 or int.from_bytes(header[20:24], "big") == 0:
+                    reasons.append(f"{check_id}/{scenario['id']}: expected a PNG screenshot")
+            if len(set(screenshot_ids)) != len(screenshot_ids):
+                reasons.append(f"{check_id}: each scenario needs a distinct screenshot artifact")
+    except (ValueError, KeyError, IndexError, TypeError, OSError) as error:
+        reasons.append(str(error))
+    except ValidationError as error:
+        reasons.append(error.message)
+    return {"status": "blocked" if reasons else "passed", "reasons": reasons,
+            "pending_gates": ["independent_review", "integration_approval"],
+            "integration_allowed": False}
