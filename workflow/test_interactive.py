@@ -134,7 +134,23 @@ class InteractiveTests(unittest.TestCase):
     def test_occupied_pane_is_never_sent_a_command(self):
         with patch("workflow.interactive.herdr", return_value={"result": {"process_info": {"shell_pid": 1, "foreground_processes": [{"pid": 2}]}}}):
             with self.assertRaisesRegex(RuntimeError, "occupied"):
-                require_shell("w1:p1")
+                require_shell("w1:p1", settle_seconds=0)
+
+    def test_freshly_created_pane_is_given_time_for_its_shell_to_start(self):
+        def info(**fields):
+            return {"result": {"process_info": {"pane_id": "w1:p1", **fields}}}
+        # Herdr reports the pane before its shell exists, then the shell while it runs
+        # startup files with a child in the foreground, then the idle shell.
+        states = [info(shell_pid=None, foreground_processes=[]),
+                  info(shell_pid=7, foreground_processes=[{"pid": 8, "name": "bash"}]),
+                  info(shell_pid=7, foreground_processes=[{"pid": 7, "name": "bash"}])]
+        with patch("workflow.interactive.herdr", side_effect=states) as query, patch("workflow.interactive.time.sleep") as sleep:
+            require_shell("w1:p1")
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        with patch("workflow.interactive.herdr", return_value=info(shell_pid=None, foreground_processes=[])), patch("workflow.interactive.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "occupied"):
+                require_shell("w1:p1", settle_seconds=0)
 
     def test_graph_launch_returns_human_handoff_not_verified_completion(self):
         with SqliteSaver.from_conn_string(str(self.directory / "interactive.sqlite")) as saver:

@@ -207,11 +207,23 @@ def build_interactive_graph(checkpointer, sessions: InteractiveSessions):
     return graph.compile(checkpointer=checkpointer)
 
 
-def require_shell(pane_id: str) -> None:
-    process = herdr("pane", "process-info", "--pane", pane_id)["result"]["process_info"]
-    foreground = process.get("foreground_processes", [])
-    if len(foreground) != 1 or foreground[0].get("pid") != process.get("shell_pid"):
-        raise RuntimeError(f"Pane {pane_id} is occupied; refusing to type an attach command into it")
+def require_shell(pane_id: str, settle_seconds: float = 10.0) -> None:
+    """Only type into a pane whose sole foreground process is its own idle shell.
+
+    A pane Herdr just created reports no shell, or a shell still running its
+    startup files, for a moment. Poll briefly for the idle-shell state; a pane
+    that is still occupied at the deadline is refused, never typed into.
+    """
+    deadline = time.monotonic() + settle_seconds
+    while True:
+        process = herdr("pane", "process-info", "--pane", pane_id)["result"]["process_info"]
+        foreground = process.get("foreground_processes", [])
+        shell_pid = process.get("shell_pid")
+        if shell_pid and len(foreground) == 1 and foreground[0].get("pid") == shell_pid:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Pane {pane_id} is occupied; refusing to type an attach command into it")
+        time.sleep(0.5)
 
 
 def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = None) -> dict:
