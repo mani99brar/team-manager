@@ -1,15 +1,26 @@
-import Fastify from 'fastify'
+import Fastify, { type FastifyReply } from 'fastify'
 import type { LocationConfig } from './config.ts'
 import { RequestError, readMarkdownFile, writeMarkdownFile, type ReadFile } from './files.ts'
 import { parseMutationBody, performMutation } from './mutations.ts'
 import { LocationRegistry } from './registry.ts'
+import { PROJECTS_PREFIX, projectRoutes } from './projectRoutes.ts'
+import { RunStore, type RunStoreOptions } from './projects.ts'
+import { EMPTY_PROJECTS, assertProjectsConfig, type ProjectsConfig } from './projectsConfig.ts'
 
 export type { Source } from './config.ts'
 export type { Entry, EntryKind, Listing, LocationStatus } from './registry.ts'
+export type { ProjectsConfig } from './projectsConfig.ts'
 
 export type AppOptions = {
   /** Injectable for tests that simulate a filesystem read failure deterministically. */
   readFile?: ReadFile
+  /**
+   * The project registry (see projectsConfig.ts). Omitted means an empty Projects root: /api/projects lists
+   * nothing and every scoped route is a 404. Validated again here so a caller cannot bypass the registry rules.
+   */
+  projects?: ProjectsConfig
+  /** Read limits for persisted run files; tests lower them to prove reads are bounded. */
+  runStore?: Pick<RunStoreOptions, 'exportByteLimit' | 'packetByteLimit' | 'artifactByteLimit'>
 }
 
 function singleString(value: unknown): string | null {
@@ -44,7 +55,20 @@ function parseWriteBody(body: unknown): WriteBody {
  * stack traces.
  */
 export function createApp(locations: readonly LocationConfig[], options: AppOptions = {}) {
-  const app = Fastify({ logger: true, bodyLimit: REQUEST_BODY_LIMIT })
+  // Project IDs may be 128 characters; Fastify's default 100-character parameter cap would reject them as 414.
+  // Router-level failures (bad URL encoding, over-long segments) never reach route handlers, so they are shaped
+  // here: the contract error body under the Projects root, Fastify's default body everywhere else.
+  const app = Fastify({
+    logger: true, bodyLimit: REQUEST_BODY_LIMIT, maxParamLength: 256,
+    frameworkErrors: (error, request, untyped) => {
+      const reply = untyped as FastifyReply
+      const status = typeof error.statusCode === 'number' ? error.statusCode : 500
+      if (request.url.startsWith(`${PROJECTS_PREFIX}/`) && status >= 400 && status < 500) {
+        return reply.code(400).send({ error: { code: 'INVALID_ID', message: 'A path segment is not a valid ID.' } })
+      }
+      return reply.code(status).send({ error: status >= 500 ? 'Internal Server Error' : 'Bad Request', code: error.code, message: error.message, statusCode: status })
+    },
+  })
   const registry = new LocationRegistry(locations, {
     // Log only the error code and location id: messages can carry absolute paths.
     warn: (error, location) => app.log.error({ id: location.id, code: (error as NodeJS.ErrnoException)?.code }, 'Location listing failed'),
@@ -60,6 +84,12 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
   })
   app.addHook('onReady', async () => { await registry.open() })
   app.addHook('onClose', async () => { await registry.close() })
+  // The Projects root is a separate, read-only surface with its own error shape; it never touches skill locations.
+  const store = new RunStore(assertProjectsConfig(options.projects ?? EMPTY_PROJECTS), {
+    ...options.runStore,
+    warn: (message, details) => app.log.warn(details, message),
+  })
+  app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })
   app.get('/api/entries', async (_request, reply) => {
     try {
       return await registry.list()

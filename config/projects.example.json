@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "project_id": "md-manager",
+      "name": "MD Manager",
+      "repository": "/home/you/dev/md-manager",
+      "workflows": [
+        {
+          "workflow_id": "feature-implementation",
+          "runs_root": "/home/you/.local/state/md-manager-workflows/project-workflows",
+          "definition": {
+            "name": "Feature implementation",
+            "nodes": [
+              { "node_id": "launch_ui", "label": "Launch UI worker", "kind": "worker", "depends_on": [] },
+              { "node_id": "launch_adapter", "label": "Launch adapter worker", "kind": "worker", "depends_on": [] },
+              { "node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": ["launch_ui", "launch_adapter"] },
+              { "node_id": "verify_ui", "label": "Verify UI", "kind": "verification", "depends_on": ["handoff"] },
+              { "node_id": "verify_adapter", "label": "Verify adapter", "kind": "verification", "depends_on": ["handoff"] },
+              { "node_id": "candidate", "label": "Verify combined candidate", "kind": "verification", "depends_on": ["verify_ui", "verify_adapter"] },
+              { "node_id": "review", "label": "Independent review", "kind": "review", "depends_on": ["candidate"] },
+              { "node_id": "approval", "label": "Integration approval", "kind": "integration", "depends_on": ["review"] },
+              { "node_id": "integrate", "label": "Integrate candidate", "kind": "integration", "depends_on": ["approval"] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
