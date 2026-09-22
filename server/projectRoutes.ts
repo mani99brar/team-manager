@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
-import { schemas } from '../contracts/projects/v1.ts'
+import { schemas, validateReviewResult, validateRunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, workerResultSchema } from '../contracts/workflow/v1.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 import { DEFAULT_RUN_LIMIT, MAX_RUN_LIMIT, ProjectApiError, RunStore, compareRuns, decodeCursor, encodeCursor } from './projects.ts'
@@ -67,6 +67,16 @@ function conform<T>(schema: z.ZodType<T>, payload: unknown, log: FastifyInstance
   return result.data
 }
 
+/** Applies a contract's cross-field validator to an outgoing payload; a violation is a backend failure, never a partial payload. */
+function crossChecked<T>(validate: () => T, log: FastifyInstance['log']): T {
+  try {
+    return validate()
+  } catch (error) {
+    log.error({ message: (error as Error)?.message }, 'Project API payload violates a contract cross-field rule')
+    throw new ProjectApiError(500, 'RESPONSE_INVALID', 'The persisted run data could not be projected onto the API contract.')
+  }
+}
+
 export type ProjectRoutesOptions = { store: RunStore }
 
 export async function projectRoutes(scope: FastifyInstance, options: ProjectRoutesOptions): Promise<void> {
@@ -97,6 +107,8 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     events: '/:project_id/workflows/:workflow_id/runs/:run_id/events',
     result: '/:project_id/workflows/:workflow_id/runs/:run_id/results/:node_id/:attempt',
     artifact: '/:project_id/workflows/:workflow_id/runs/:run_id/artifacts/:artifact_id',
+    review: '/:project_id/workflows/:workflow_id/runs/:run_id/reviews/:attempt',
+    inputs: '/:project_id/workflows/:workflow_id/runs/:run_id/inputs',
   }
   for (const url of Object.values(paths)) {
     scope.route({
@@ -150,6 +162,21 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const nodeId = requireId(params.node_id, 'node')
     const attempt = parseAttempt(params.attempt)
     return conform(workerResultSchema, await store.workerResult(runScope, runId, nodeId, attempt), log)
+  })
+
+  scope.get(paths.review, async request => {
+    const params = request.params as Params
+    const runScope = scopeOf(params)
+    const runId = requireId(params.run_id, 'run')
+    const attempt = parseAttempt(params.attempt)
+    const review = await store.reviewResult(runScope, runId, attempt)
+    return conform(schemas.reviewResult, crossChecked(() => validateReviewResult(review), log), log)
+  })
+
+  scope.get(paths.inputs, async request => {
+    const params = request.params as Params
+    const inputs = await store.runInputs(scopeOf(params), requireId(params.run_id, 'run'))
+    return conform(schemas.runInputs, crossChecked(() => validateRunInputs(inputs), log), log)
   })
 
   scope.get(paths.artifact, async (request, reply) => {

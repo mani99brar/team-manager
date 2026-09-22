@@ -1,13 +1,15 @@
 /**
  * Worker-phase mocks for the not-yet-present projects backend. Only `/api/projects` and its nested routes
  * are intercepted; every other request (Pi/Claude listing, documents, mutations) reaches the real isolated
- * API. Responses are the explicit contract fixtures from `fixtures.ts`, plus contract-shaped 404s.
+ * API. Responses are the explicit contract fixtures from `fixtures.ts`, plus contract-shaped 404s. Review
+ * results and run inputs answer with the contract's `REVIEW_NOT_FOUND` / `INPUTS_NOT_FOUND` codes when a
+ * run has none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, PROJECT, projectList, runDetails, runEvents, runList, workerResults, workflowLists, WORKFLOW_ID, EMPTY_WORKFLOW_ID } from './fixtures.ts'
+import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runList, workerResults, workflowLists, WORKFLOW_ID, EMPTY_WORKFLOW_ID } from './fixtures.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
-const notFound = (message: string) => json({ error: { code: 'not_found', message } }, 404)
+const notFound = (message: string, code = 'not_found') => json({ error: { code, message } }, 404)
 
 export function isProjectsRequest(url: URL): boolean {
   return url.pathname === '/api/projects' || url.pathname.startsWith('/api/projects/')
@@ -40,6 +42,16 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (kind === 'results' && tail.length === 2) {
     const result = workerResults[runId][`${tail[0]}/${tail[1]}`]
     return result ? json(result) : notFound(`No result for ${tail[0]} attempt ${tail[1]}.`)
+  }
+  if (kind === 'reviews' && tail.length === 1) {
+    const review = reviewResults[runId]
+    return review && tail[0] === String(review.attempt)
+      ? json(review)
+      : notFound('No review is recorded for that attempt: either the review has not happened or the run export predates review results.', 'REVIEW_NOT_FOUND')
+  }
+  if (kind === 'inputs' && tail.length === 0) {
+    const inputs = runInputs[runId]
+    return inputs ? json(inputs) : notFound('No inputs are recorded for this run: its export predates run inputs.', 'INPUTS_NOT_FOUND')
   }
   if (kind === 'artifacts' && tail.length === 1) {
     const artifact = artifactFiles[runId].find(file => file.artifact_id === tail[0])

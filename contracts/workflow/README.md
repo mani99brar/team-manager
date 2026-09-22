@@ -8,6 +8,8 @@ Reusable data boundary for a LangGraph backend, independent Claude sessions, and
 - `*.schema.json`: generated JSON Schema (2020-12) for Python and other consumers.
 - `examples.ts`: synthetic fixtures for every message (not execution evidence).
 - `contract.test.ts`: positive/negative validation and schema-drift tests.
+- `verification.schema.json`: the separately authored verification policy (see below).
+- `reviewCompletion.schema.json`: the completion file a native reviewer session writes to `<run>/review.completion.json` (version 1.0.0, hand-written, not generated from `v1.ts`). The Python controller validates it with `workflow.verification.validate_schema("reviewCompletion", ...)` and additionally binds `run_id`, `node_id`, `launch_token`, `bundle_sha256` and `candidate_commit` to the run before accepting a verdict; findings carry `worker` and `requirement` for the viewer's finding-to-task links.
 
 Run `npm run contracts:export` after editing schemas, and `npm run test:contracts` to validate. Non-TypeScript consumers must implement the cross-field and runtime invariants below in addition to JSON Schema validation.
 

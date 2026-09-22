@@ -3,7 +3,7 @@
  * "this workflow is complete": only a `succeeded` run is complete, and a worker node's success only means
  * its native session launched and ended its turn.
  */
-import type { RunDetail } from './api.ts'
+import { isBlockingFinding, type ReviewResult, type RunDetail } from './api.ts'
 
 export type RunStatus = RunDetail['summary']['status']
 export type NodeKind = RunDetail['definition']['nodes'][number]['kind']
@@ -63,4 +63,35 @@ export function formatTime(iso: string): string {
   const time = Date.parse(iso)
   if (Number.isNaN(time)) return iso
   return new Date(time).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')
+}
+
+/** Compact duration for deadlines and timeouts: 14400 → "4h", 5400 → "1h30m", 45 → "45s". */
+export function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const rest = seconds % 60
+  const parts: string[] = []
+  if (hours > 0) parts.push(`${hours}h`)
+  if (minutes > 0) parts.push(`${minutes}m`)
+  if (rest > 0 || parts.length === 0) parts.push(`${rest}s`)
+  return parts.join('')
+}
+
+/** The automatic profile's deadlines as one phrase, e.g. "worker 4h · review 30m". */
+export function deadlinesLabel(automatic: { worker_timeout_seconds: number; review_timeout_seconds: number }): string {
+  return `worker ${formatDuration(automatic.worker_timeout_seconds)} · review ${formatDuration(automatic.review_timeout_seconds)}`
+}
+
+const DISPOSITIONS = ['open', 'resolved', 'accepted'] as const
+
+/** One line for a recorded review: verdict, finding counts by disposition and how many block integration (unresolved P0/P1). */
+export function reviewSummary(review: ReviewResult): string {
+  const { verdict, findings } = review
+  if (findings.length === 0) return `${verdict} with no findings`
+  const counts = DISPOSITIONS
+    .map(disposition => [disposition, findings.filter(finding => finding.disposition === disposition).length] as const)
+    .filter(([, count]) => count > 0)
+    .map(([disposition, count]) => `${count} ${disposition}`)
+  const blocking = findings.filter(isBlockingFinding).length
+  return `${verdict} with ${findings.length} ${findings.length === 1 ? 'finding' : 'findings'}: ${counts.join(', ')}, ${blocking === 0 ? 'none blocking' : `${blocking} blocking`}`
 }

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,10 +48,53 @@ class FeatureLaunchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "automatic runs only"):
             launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), worker_timeout_seconds=7200)
 
+    def test_reviewer_transport_is_pinned_into_prepare(self):
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "native")
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True,
+                                      reviewer_transport="print")
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "print")
+        with self.assertRaisesRegex(ValueError, "reviewer transport"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, reviewer_transport="stdio")
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), reviewer_transport="print")
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["project-workflows", "--dry-run", "--automatic", "--reviewer-transport", "print"])
+        command.assert_not_called()
+        printed = json.loads(output.getvalue())
+        self.assertIn("print", printed["commands"][2])
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--dry-run"])
         command.assert_not_called()
+
+    def test_review_result_and_run_inputs_features_validate_and_plan(self):
+        from .sessions import read_json
+        base_scenarios = {scenario["id"] for check in read_json(REPO / "features/project-workflows/policy.json")["workers"][0]["checks"]
+                          for scenario in check["scenarios"]}
+        expected = {"review-result": base_scenarios | {"review-verdict", "review-blocked", "review-legacy", "paths-redacted"}}
+        expected["run-inputs"] = expected["review-result"] | {"run-assignment", "worker-inputs", "finding-to-task", "inputs-legacy", "inputs-paths-redacted"}
+        for feature, scenarios in expected.items():
+            with self.subTest(feature):
+                run, commands = launch_commands(REPO, feature, f"{feature}-001", Path("/tmp/workflow-launch-tests"), automatic=True)
+                self.assertEqual(run.name, f"{feature}-001")
+                self.assertEqual(commands[1], ["git", "switch", "-c", f"feature/{feature}/{feature}-001"])
+                self.assertIn(str(REPO / "features" / feature / "policy.json"), commands[2])
+                policy = read_json(REPO / "features" / feature / "policy.json")
+                self.assertEqual((policy["version"], policy["max_verification_attempts"], policy.get("failure_drill")), ("1.1.0", 3, None))
+                self.assertEqual(policy["setup"], [{"argv": ["npm", "ci"], "timeout_seconds": 600}])
+                browser = next(check for check in policy["workers"][0]["checks"] if check["kind"] == "browser")
+                self.assertEqual({scenario["id"] for scenario in browser["scenarios"]}, scenarios)
+                with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+                    main([feature, "--dry-run", "--automatic"])
+                command.assert_not_called()
+                printed = json.loads(output.getvalue())
+                self.assertTrue(printed["run_directory"].endswith(f"md-manager-workflows/{feature}/{feature}-001"))
+                self.assertFalse(printed["executes"])
+                self.assertEqual(printed["commands"][-1][3], "automatic")
 
     def test_missing_live_consent_never_runs_commands(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()):

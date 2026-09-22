@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateDefinition, validateRunDetail, type RunDetail } from '../contracts/projects/v1.ts'
+import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, type RunDetail } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult } from '../contracts/workflow/v1.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
@@ -73,6 +73,14 @@ type RunSpec = {
   skipPlan?: boolean
   registrations?: (registrations: Registration[]) => Registration[]
   stateText?: string
+  /** Export version; defaults to 1.2.0 when a section is given and 1.0.0 otherwise. */
+  version?: string
+  /** The export's `review` section as persisted (undefined leaves the key out; null is an explicit null). */
+  review?: unknown
+  /** The export's `inputs` section as persisted (undefined leaves the key out; null is an explicit null). */
+  inputs?: unknown
+  /** Content written to `<run>/review.diff`, the diff the reviewer saw. */
+  diffFile?: Buffer | string
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -80,6 +88,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
   const dir = join(root, spec.runId)
   await mkdir(dir, { recursive: true })
   const runId = spec.exportRunId ?? spec.runId
+  if (spec.diffFile !== undefined) await writeFile(join(dir, 'review.diff'), spec.diffFile)
   const registrations: Registration[] = []
   for (const packetSpec of spec.packets ?? []) {
     const phase = packetSpec.phase ?? 'worker'
@@ -133,13 +142,86 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     const text = typeof spec.eventsFile === 'string' ? spec.eventsFile : events.map(event => JSON.stringify(event) + '\n').join('')
     if (text.length > 0) await writeFile(join(dir, 'events.jsonl'), text)
   }
+  const sections = spec.review !== undefined || spec.inputs !== undefined
   const state = {
-    version: '1.0.0', run_id: runId, base_commit: BASE, created_at: created, definition: spec.definition ?? DEFINITION,
+    version: spec.version ?? (sections ? '1.2.0' : '1.0.0'), run_id: runId, base_commit: BASE, created_at: created, definition: spec.definition ?? DEFINITION,
     values: { run_id: runId, ...(spec.values ?? {}) }, next: spec.next ?? [], tasks: spec.tasks ?? [], events,
     verification_packets: spec.registrations ? spec.registrations(registrations) : registrations, updated_at: spec.updated ?? T1,
+    ...(spec.review !== undefined ? { review: spec.review } : {}), ...(spec.inputs !== undefined ? { inputs: spec.inputs } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
+}
+
+// ---- Review and inputs sections exactly as workflow/export_state.py 1.2.0 writes them ---------------------------
+
+const REVIEWER = 'dd7bdcd1-adec-4efe-bcd4-bbadc3525d95'
+const BUNDLE = 'f'.repeat(64)
+const DIFF = 'diff --git a/src/ui.ts b/src/ui.ts\n--- a/src/ui.ts\n+++ b/src/ui.ts\n@@ -1 +1,2 @@\n line\n+added <script>alert(1)</script>\n'
+const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Show every finding with severity and disposition.\n\nApproved ownership and checks:\n{"node_id": "ui", "owned_paths": ["src/projects"]}'
+const ADAPTER_TASK = '# Adapter worker\n\nServe the review route from the export section.\n\nApproved ownership and checks:\n{"node_id": "adapter", "owned_paths": ["server"]}'
+const TEXT_LIMIT = 65536
+
+type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: 'ui' | 'adapter' | 'both' | 'none' | null; requirement: string | null }
+type ReviewSection = {
+  attempt: number; transport: 'native' | 'print' | 'manual'; reviewer_session_id: string; independent: true; bundle_sha256: string; candidate_commit: string
+  verdict: 'approved' | 'blocked'; findings: Finding[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
+}
+type WorkerInput = {
+  role: string; task: string; prompt: string | null; owned_paths: string[]
+  checks: { id: string; kind: string; argv: string[]; command: string; timeout_seconds: number; scenarios: { id: string; description: string }[] }[]
+  launch: { session_id: string | null; launch_token: string; launch_requested_at: string; native_started_at: number | null; observed_state: string | null; status: string; launcher_invocations: number; background_id: string | null } | null
+  completion: { status: string; summary: string; open_assumptions: string[] } | null
+  handoff: { summary: string; open_assumptions: string[] } | null
+  stop: { stopped: boolean; confirmed_at: string | null } | null
+}
+type InputsSection = {
+  feature: string; policy_version: string; base_commit: string; source_branch: string | null; mode: string
+  automatic: { finish: string; permission_mode: string; worker_timeout_seconds: number; review_timeout_seconds: number; reviewer_transport: string | null } | null
+  setup: { argv: string[]; command: string; timeout_seconds: number }[]; max_verification_attempts: number
+  failure_drill: { node_id: string; phase: string; attempt: number } | null
+  workers: Record<string, WorkerInput>
+}
+
+const diffRegistration = (content: Buffer | string) => ({ path: 'review.diff', sha256: sha256(content), bytes: Buffer.byteLength(content) })
+const finding = (overrides: Partial<Finding> = {}): Finding => ({ severity: 'P2', message: 'Finding', disposition: 'open', worker: 'ui', requirement: null, ...overrides })
+
+function reviewSection(overrides: Partial<ReviewSection> = {}): ReviewSection {
+  return {
+    attempt: 1, transport: 'native', reviewer_session_id: REVIEWER, independent: true, bundle_sha256: BUNDLE, candidate_commit: OUTPUT, verdict: 'approved',
+    findings: [finding({ message: 'The findings table omits the disposition column.', requirement: 'Show every finding with severity and disposition.' })],
+    reviewed_at: T2, diff: diffRegistration(DIFF), ...overrides,
+  }
+}
+
+function workerInput(lane: 'ui' | 'adapter', overrides: Partial<WorkerInput> = {}): WorkerInput {
+  return {
+    role: lane === 'ui' ? 'frontend' : 'backend',
+    task: lane === 'ui' ? UI_TASK : ADAPTER_TASK,
+    prompt: lane === 'ui' ? `You are a workflow worker in your own worktree.\n\n${UI_TASK}` : null,
+    owned_paths: lane === 'ui' ? ['src/projects', 'tests/project-workflows'] : ['server', 'config/projects.example.json'],
+    checks: lane === 'ui'
+      ? [{ id: 'frontend-build', kind: 'build', argv: ['npm', 'run', 'build'], command: 'npm run build', timeout_seconds: 180, scenarios: [] },
+        { id: 'project-workflows-browser', kind: 'browser', argv: ['npx', '--no-install', 'playwright', 'test', '--config=tests/project-workflows/playwright.config.ts'],
+          command: 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts', timeout_seconds: 300, scenarios: [{ id: 'review-verdict', description: 'The review node shows the verdict' }] }]
+      : [{ id: 'backend-unit', kind: 'unit', argv: ['npx', '--no-install', 'tsx', '--test', 'server/projects.test.ts'], command: 'npx --no-install tsx --test server/projects.test.ts', timeout_seconds: 180, scenarios: [] }],
+    launch: { session_id: `${lane}-session-0001`, launch_token: '00000000-0000-4000-8000-000000000000', launch_requested_at: '2026-03-01T10:00:00.331982+00:00',
+      native_started_at: Date.parse('2026-03-01T10:00:02.771Z'), observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1, background_id: `bg-${lane}` },
+    completion: { status: 'completed', summary: `${lane} done`, open_assumptions: [`${lane} assumption`] },
+    handoff: { summary: `${lane} done`, open_assumptions: [`${lane} assumption`] },
+    stop: { stopped: true, confirmed_at: '2026-03-01T10:20:00+00:00' },
+    ...overrides,
+  }
+}
+
+function inputsSection(overrides: Partial<InputsSection> = {}, workers: { ui?: Partial<WorkerInput>; adapter?: Partial<WorkerInput> } = {}): InputsSection {
+  return {
+    feature: 'Review verdict and findings in the viewer', policy_version: '1.1.0', base_commit: BASE, source_branch: 'feature/synthetic', mode: 'automatic',
+    automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' },
+    setup: [{ argv: ['npm', 'ci'], command: 'npm ci', timeout_seconds: 600 }], max_verification_attempts: 3, failure_drill: null,
+    workers: { ui: workerInput('ui', workers.ui), adapter: workerInput('adapter', workers.adapter) },
+    ...overrides,
+  }
 }
 
 const receipt = (node: 'ui' | 'adapter') => ({
@@ -156,7 +238,17 @@ const launchEvents: RawEvent[] = [
   { sequence: 4, time: T1, node: 'ui', status: 'interactive', message: 'Awaiting explicit completion signal; idle is not acceptance' },
 ]
 
-type Harness = { root: string; app: ReturnType<typeof createApp>; runsRoot: (project: string, workflow: string) => string }
+/** Persisted state of a run that reached the review: both workers launched, snapshots frozen, packets passed, bundle built. */
+const reviewedValues = (extra: Record<string, unknown> = {}) => ({ ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/x', adapter_packet: '/y', bundle: '/synthetic/review-bundle.json', ...extra })
+const reviewedEvents: RawEvent[] = [...launchEvents,
+  { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+  { sequence: 6, time: T1, node: 'verify_ui', status: 'passed', message: 'Required tests and artifacts passed' },
+  { sequence: 7, time: T1, node: 'verify_adapter', status: 'passed', message: 'Required tests and artifacts passed' },
+  { sequence: 8, time: T1, node: 'candidate_ui', status: 'passed', message: `Combined revision ${OUTPUT}` },
+  { sequence: 9, time: T1, node: 'candidate_adapter', status: 'passed', message: `Combined revision ${OUTPUT}` }]
+const reviewedPackets: PacketSpec[] = [{ node: 'ui' }, { node: 'adapter' }, { node: 'ui', phase: 'candidate' }, { node: 'adapter', phase: 'candidate' }]
+
+type Harness ={ root: string; app: ReturnType<typeof createApp>; runsRoot: (project: string, workflow: string) => string }
 
 function registry(root: string, projects: { id: string; name?: string; workflows: { id: string; definition?: unknown; runsRoot?: string }[] }[]) {
   return {
@@ -305,9 +397,12 @@ test('the project API is read-only: writes are 405 with Allow, HEAD works, and n
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'run-001', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
       packets: [{ node: 'ui', artifacts: [{ id: 'log-0-abc', kind: 'log', content: 'ok\n' }] }] })
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'run-002', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets,
+      review: reviewSection(), inputs: inputsSection(), diffFile: DIFF })
     const before = await snapshotTree(runsRoot('alpha', 'main'))
     const routes = ['/api/projects', url('alpha'), url('alpha', 'main'), url('alpha', 'main', 'run-001'), url('alpha', 'main', 'run-001', '/events'),
-      url('alpha', 'main', 'run-001', '/results/ui/1'), url('alpha', 'main', 'run-001', '/artifacts/log-0-abc')]
+      url('alpha', 'main', 'run-001', '/results/ui/1'), url('alpha', 'main', 'run-001', '/artifacts/log-0-abc'),
+      url('alpha', 'main', 'run-002', '/reviews/1'), url('alpha', 'main', 'run-002', '/inputs'), url('alpha', 'main', 'run-002', `/artifacts/patch-review-${sha256(DIFF).slice(0, 12)}`)]
     for (const route of routes) {
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
         const response = await app.inject({ method, url: route, payload: method === 'OPTIONS' ? undefined : { approve: true } })
@@ -831,6 +926,341 @@ test('the same artifact ID registered twice is served only when both registratio
   })
 })
 
+// ---------------------------------------------------------------------------------------------------------------
+// Review results and run inputs (export sections 1.1.0 / 1.2.0)
+
+test('a recorded review is served with its reviewer, redacted text, verbatim-only task links and the diff artifact; the review node links to it', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const leak = `${root}/runs/alpha/main/reviewed/worktree-ui/tests/harness.ts`
+    const uiTask = `${UI_TASK}\n\nWrite the harness to ${leak} before anything else.`
+    const findings: Finding[] = [
+      finding({ message: `The findings table omits the disposition column; see ${leak} for the fixture.`, worker: 'ui', requirement: 'Show every finding with severity and disposition.' }),
+      finding({ message: 'Paraphrased quotes are never matched.', worker: 'ui', requirement: 'Show all findings with their severity and disposition.' }),
+      finding({ message: 'Cross-cutting policy finding.', disposition: 'accepted', worker: 'none', requirement: null }),
+      finding({ message: 'Quotes are matched against the raw task text, then redacted.', worker: 'ui', requirement: `Write the harness to ${leak} before anything else.` }),
+      finding({ message: 'A redacted spelling is not the raw text.', worker: 'ui', requirement: 'Write the harness to <path> before anything else.' }),
+      finding({ message: 'The adapter task is searched too.', disposition: 'resolved', worker: 'both', requirement: 'Serve the review route from the export section.' }),
+      finding({ message: 'Recorded before the reviewer prompt asked for links.', worker: null, requirement: null }),
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'reviewed', values: reviewedValues({ review: { verdict: 'approved', findings: 'never trusted' } }), next: ['approval'], events: reviewedEvents,
+      packets: reviewedPackets, review: reviewSection({ findings }), inputs: inputsSection({}, { ui: { task: uiTask } }), diffFile: DIFF })
+    const response = await get(app, url('alpha', 'main', 'reviewed', '/reviews/1'))
+    assert.equal(response.status, 200, response.body)
+    assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
+    const review = validateReviewResult(response.json())
+    assert.equal(review.contract_version, '1.2.0')
+    assert.deepEqual([review.run_id, review.node_id, review.attempt, review.verdict], ['reviewed', 'review', 1, 'approved'])
+    assert.deepEqual(review.reviewer, { session_id: REVIEWER, transport: 'native', independent: true })
+    assert.deepEqual([review.bundle_sha256, review.candidate_commit, review.reviewed_at], [BUNDLE, OUTPUT, T2])
+    assert.equal(review.findings.length, 7)
+    assert.equal(review.findings[0].message, 'The findings table omits the disposition column; see <path> for the fixture.')
+    assert.deepEqual(review.findings.map(item => item.requirement_found_in), [['ui'], [], [], ['ui'], [], ['adapter'], []])
+    assert.equal(review.findings[3].requirement, 'Write the harness to <path> before anything else.')
+    assert.deepEqual(review.findings.map(item => item.worker), ['ui', 'ui', 'none', 'ui', 'ui', 'both', null])
+    const artifactId = `patch-review-${sha256(DIFF).slice(0, 12)}`
+    assert.deepEqual(review.diff, { artifact_id: artifactId, kind: 'patch', uri: `/api/projects/alpha/workflows/main/runs/reviewed/artifacts/${artifactId}`, sha256: sha256(DIFF) })
+    // The review node carries the reviewer session and a scoped link to the result; nothing in `values` is consulted.
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'reviewed'))).json())
+    const node = detail.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([node.status, node.attempt, node.session_id, node.result_uri], ['succeeded', 1, REVIEWER, '/api/projects/alpha/workflows/main/runs/reviewed/reviews/1'])
+    assert.equal(detail.summary.status, 'running')
+    assertError(await get(app, url('alpha', 'main', 'reviewed', '/reviews/2')), 404, 'REVIEW_NOT_FOUND', root)
+    assertError(await get(app, url('alpha', 'main', 'reviewed', '/reviews/0')), 400, 'INVALID_ATTEMPT', root)
+    assertError(await get(app, url('alpha', 'main', 'reviewed', '/reviews/one')), 400, 'INVALID_ATTEMPT', root)
+    assertError(await get(app, url('alpha', 'main', 'missing', '/reviews/1')), 404, 'RUN_NOT_FOUND', root)
+    assertError(await get(app, url('alpha', 'main', 'missing', '/inputs')), 404, 'RUN_NOT_FOUND', root)
+    // The inputs the quotes were matched against are served redacted; the raw task never leaves the server.
+    const inputs = validateRunInputs((await get(app, url('alpha', 'main', 'reviewed', '/inputs'))).json())
+    assert.ok(inputs.workers[0].task.text.includes('Write the harness to <path> before anything else.'))
+    assert.ok(!JSON.stringify(inputs).includes(root))
+  })
+})
+
+test('the review diff is served as a bounded, hash- and size-checked patch artifact beside packet artifacts', async () => {
+  const outside = await mkdtemp(join(tmpdir(), 'md-manager-projects-secret-'))
+  await writeFile(join(outside, 'secret.diff'), 'top secret')
+  try {
+    await harness(async ({ app, runsRoot, root }) => {
+      const rootDir = runsRoot('alpha', 'main')
+      const id = (content: Buffer | string) => `patch-review-${sha256(content).slice(0, 12)}`
+      const base = { values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents }
+      await writeRun(rootDir, { ...base, runId: 'served', packets: [{ node: 'ui', artifacts: [{ id: 'log-0-abc', kind: 'log', content: 'ok\n' }] }], review: reviewSection(), inputs: inputsSection(), diffFile: DIFF })
+      await writeRun(rootDir, { ...base, runId: 'tampered', review: reviewSection({ diff: { ...diffRegistration(DIFF), sha256: 'e'.repeat(64) } }), diffFile: DIFF })
+      await writeRun(rootDir, { ...base, runId: 'shorter', review: reviewSection({ diff: { ...diffRegistration(DIFF), bytes: DIFF.length - 1 } }), diffFile: DIFF })
+      await writeRun(rootDir, { ...base, runId: 'missing', review: reviewSection() })
+      await writeRun(rootDir, { ...base, runId: 'linked', review: reviewSection({ diff: diffRegistration('top secret') }) })
+      await symlink(join(outside, 'secret.diff'), join(rootDir, 'linked', 'review.diff'))
+      const big = 'y'.repeat(600)
+      await writeRun(rootDir, { ...base, runId: 'big', review: reviewSection({ diff: diffRegistration(big) }), diffFile: big })
+      await writeRun(rootDir, { ...base, runId: 'none', review: reviewSection({ diff: null }), diffFile: DIFF })
+      const artifact = (run: string, artifactId: string) => get(app, url('alpha', 'main', run, `/artifacts/${artifactId}`))
+
+      const served = await artifact('served', id(DIFF))
+      assert.equal(served.status, 200, served.body)
+      assert.equal(served.headers['content-type'], 'text/plain; charset=utf-8')
+      assert.equal(served.headers['x-content-type-options'], 'nosniff')
+      assert.equal(served.headers['content-security-policy'], "default-src 'none'; sandbox")
+      assert.equal(served.headers['content-disposition'], `inline; filename="${id(DIFF)}"`)
+      assert.equal(served.body, DIFF)
+      assert.equal((await artifact('served', 'log-0-abc')).status, 200, 'packet artifacts stay reachable beside the review diff')
+      assertError(await artifact('served', `patch-review-${'0'.repeat(12)}`), 404, 'ARTIFACT_NOT_FOUND', root)
+      assertError(await artifact('served', 'review.diff'), 404, 'ARTIFACT_NOT_FOUND', root)
+      assertError(await artifact('tampered', id(DIFF)), 404, 'ARTIFACT_NOT_FOUND', root)
+      assertError(await artifact('tampered', `patch-review-${'e'.repeat(12)}`), 500, 'ARTIFACT_HASH_MISMATCH', root)
+      assertError(await artifact('shorter', id(DIFF)), 500, 'ARTIFACT_HASH_MISMATCH', root)
+      assertError(await artifact('missing', id(DIFF)), 500, 'ARTIFACT_UNAVAILABLE', root)
+      const linked = await artifact('linked', id('top secret'))
+      assertError(linked, 500, 'ARTIFACT_UNAVAILABLE', root)
+      assert.ok(!linked.body.includes('top secret'))
+      assertError(await artifact('big', id(big)), 500, 'ARTIFACT_TOO_LARGE', root)
+      assertError(await artifact('none', id(DIFF)), 404, 'ARTIFACT_NOT_FOUND', root)
+      const none = validateReviewResult((await get(app, url('alpha', 'main', 'none', '/reviews/1'))).json())
+      assert.equal(none.diff, null)
+      // Registration problems never surface through the review payload as a fabricated link: the link is only to the registry.
+      const tampered = validateReviewResult((await get(app, url('alpha', 'main', 'tampered', '/reviews/1'))).json())
+      assert.equal(tampered.diff!.artifact_id, `patch-review-${'e'.repeat(12)}`)
+    }, undefined, { runStore: { artifactByteLimit: 512 } })
+  } finally { await rm(outside, { recursive: true, force: true }) }
+})
+
+test('a blocked review is served with its verdict while the review node projects failed from the task error and the run fails', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const findings: Finding[] = [
+      finding({ severity: 'P1', message: 'The inputs route serves absolute paths.', disposition: 'open', worker: 'adapter', requirement: 'Serve the review route from the export section.' }),
+      finding({ severity: 'P2', message: 'Minor naming.', disposition: 'resolved', worker: 'ui', requirement: null }),
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'blocked', values: reviewedValues(), next: [], events: [...reviewedEvents, { sequence: 10, time: T2, node: 'review', status: 'blocked', message: 'Independent reviewer blocked the candidate' }],
+      tasks: [{ node_id: 'review', error: `Independent reviewer blocked the candidate; see ${root}/runs/alpha/main/blocked/review.json`, interrupts: [], result: null }],
+      packets: reviewedPackets, review: reviewSection({ transport: 'print', verdict: 'blocked', findings, reviewed_at: T2 }), inputs: inputsSection(), diffFile: DIFF, updated: T2 })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'blocked'))).json())
+    assert.equal(detail.summary.status, 'failed')
+    const node = detail.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([node.status, node.attempt, node.session_id, node.result_uri], ['failed', 1, REVIEWER, '/api/projects/alpha/workflows/main/runs/blocked/reviews/1'])
+    const response = await get(app, url('alpha', 'main', 'blocked', '/reviews/1'))
+    assert.equal(response.status, 200, response.body)
+    const review = validateReviewResult(response.json())
+    assert.equal(review.verdict, 'blocked')
+    assert.equal(review.reviewer.transport, 'print')
+    assert.deepEqual(review.findings.map(item => [item.severity, item.disposition, item.requirement_found_in]), [['P1', 'open', ['adapter']], ['P2', 'resolved', []]])
+    assert.ok(!response.body.includes(root))
+  })
+})
+
+test('exports without a section are served without it: 1.0.0 has neither, 1.1.0 has the review only, explicit nulls mean not recorded', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const integrated = { values: reviewedValues({ review: { reviewer: REVIEWER, verdict: 'approved' }, approved_bundle: 'e'.repeat(64), integrated_commit: OUTPUT }), next: [], packets: reviewedPackets,
+      events: [...reviewedEvents, { sequence: 10, time: T2, node: 'review', status: 'approved', message: REVIEWER }, { sequence: 11, time: T2, node: 'integrate', status: 'succeeded', message: `Fast-forwarded to ${OUTPUT}` }] }
+    await writeRun(rootDir, { ...integrated, runId: 'legacy', version: '1.0.0' })
+    const manual = reviewSection({ transport: 'manual', reviewer_session_id: 'operator@example', diff: null,
+      findings: [finding({ message: 'Recorded by hand.', worker: null, requirement: null }), finding({ message: 'Quoted but unmatched without inputs.', worker: 'ui', requirement: 'Show every finding with severity and disposition.' })] })
+    await writeRun(rootDir, { ...integrated, runId: 'partial', version: '1.1.0', review: manual })
+    await writeRun(rootDir, { ...integrated, runId: 'nulls', version: '1.2.0', review: null, inputs: null })
+
+    const legacy = validateRunDetail((await get(app, url('alpha', 'main', 'legacy'))).json())
+    assert.equal(legacy.summary.status, 'succeeded')
+    const legacyNode = legacy.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([legacyNode.status, legacyNode.attempt, legacyNode.session_id, legacyNode.result_uri], ['succeeded', 1, null, null], 'values.review is never projected as a result')
+    assertError(await get(app, url('alpha', 'main', 'legacy', '/reviews/1')), 404, 'REVIEW_NOT_FOUND', root)
+    assertError(await get(app, url('alpha', 'main', 'legacy', '/inputs')), 404, 'INPUTS_NOT_FOUND', root)
+
+    const partial = validateRunDetail((await get(app, url('alpha', 'main', 'partial'))).json())
+    const partialNode = partial.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([partialNode.status, partialNode.session_id, partialNode.result_uri], ['succeeded', 'operator@example', '/api/projects/alpha/workflows/main/runs/partial/reviews/1'])
+    const review = validateReviewResult((await get(app, url('alpha', 'main', 'partial', '/reviews/1'))).json())
+    assert.deepEqual(review.reviewer, { session_id: 'operator@example', transport: 'manual', independent: true })
+    assert.equal(review.diff, null)
+    assert.deepEqual(review.findings.map(item => [item.worker, item.requirement_found_in]), [[null, []], ['ui', []]], 'without inputs no quote can be matched')
+    assertError(await get(app, url('alpha', 'main', 'partial', '/inputs')), 404, 'INPUTS_NOT_FOUND', root)
+
+    const nulls = validateRunDetail((await get(app, url('alpha', 'main', 'nulls'))).json())
+    assert.deepEqual([nulls.snapshot.nodes.find(item => item.node_id === 'review')!.session_id, nulls.snapshot.nodes.find(item => item.node_id === 'review')!.result_uri], [null, null])
+    assertError(await get(app, url('alpha', 'main', 'nulls', '/reviews/1')), 404, 'REVIEW_NOT_FOUND', root)
+    assertError(await get(app, url('alpha', 'main', 'nulls', '/inputs')), 404, 'INPUTS_NOT_FOUND', root)
+    const runs = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(runs.runs.map(run => run.run_id), ['legacy', 'nulls', 'partial'])
+  })
+})
+
+test('run inputs are projected in policy order with redaction, truncation, Z timestamps, launch-node mapping and receipt passthrough', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const leak = `${root}/runs/alpha/main/inputs/worktree-ui`
+    const longTask = `${UI_TASK}\n\nWorktree: ${leak}\n\n${'x'.repeat(TEXT_LIMIT)}`
+    const redactedLength = longTask.length - leak.length + '<path>'.length
+    const section = inputsSection({ failure_drill: { node_id: 'adapter', phase: 'worker', attempt: 1 } }, {
+      ui: { task: longTask, prompt: `You are a workflow worker in ${leak}\n\n${longTask}`, completion: { status: 'blocked', summary: `Blocked on ${leak}/src`, open_assumptions: ['Mock routes only', '  '] } },
+      adapter: { prompt: null, launch: { ...workerInput('adapter').launch!, session_id: null, native_started_at: null, observed_state: null, status: 'launching', launcher_invocations: 0 },
+        completion: null, handoff: null, stop: { stopped: false, confirmed_at: null } },
+    })
+    // Policy order is the export's worker order, whatever the lane names sort to.
+    section.workers = { adapter: section.workers.adapter, ui: section.workers.ui }
+    await writeRun(rootDir, { runId: 'inputs', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets, inputs: section })
+    const response = await get(app, url('alpha', 'main', 'inputs', '/inputs'))
+    assert.equal(response.status, 200, response.body)
+    assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
+    const inputs = validateRunInputs(response.json())
+    assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.2.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
+    assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' })
+    assert.deepEqual(inputs.setup, [{ command: 'npm ci', timeout_seconds: 600 }])
+    assert.equal(inputs.max_verification_attempts, 3)
+    assert.ok(!('failure_drill' in inputs) && !('policy_version' in inputs))
+    assert.deepEqual(inputs.workers.map(worker => [worker.node_id, worker.launch_node_id, worker.role]), [['adapter', 'launch_adapter', 'backend'], ['ui', 'launch_ui', 'frontend']])
+    const [adapter, ui] = inputs.workers
+    // Text is redacted, then truncated with a marker that counts what was cut.
+    assert.equal(ui.task.truncated, true)
+    const marker = `\n\n[… truncated by the viewer API: ${redactedLength - TEXT_LIMIT} more characters]`
+    assert.ok(ui.task.text.endsWith(marker), ui.task.text.slice(-120))
+    assert.equal(ui.task.text.length, TEXT_LIMIT + marker.length)
+    assert.ok(ui.task.text.includes(`Worktree: <path>\n`))
+    assert.equal(ui.prompt!.truncated, true)
+    assert.ok(ui.prompt!.text.startsWith('You are a workflow worker in <path>\n'))
+    assert.deepEqual(adapter.task, { text: ADAPTER_TASK, truncated: false })
+    assert.equal(adapter.prompt, null)
+    assert.deepEqual(ui.owned_paths, ['src/projects', 'tests/project-workflows'])
+    assert.deepEqual(ui.checks.map(check => [check.id, check.kind, check.command, check.timeout_seconds, check.scenarios.length]),
+      [['frontend-build', 'build', 'npm run build', 180, 0], ['project-workflows-browser', 'browser', 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts', 300, 1]])
+    assert.ok(ui.checks.every(check => !('argv' in check)))
+    // Receipts: offsets become Z, epoch milliseconds become timestamps, tokens and background IDs stay private.
+    assert.deepEqual(ui.launch, { session_id: 'ui-session-0001', launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: '2026-03-01T10:00:02.771Z', observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1 })
+    assert.deepEqual(adapter.launch, { session_id: null, launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: null, observed_state: null, status: 'launching', launcher_invocations: 0 })
+    assert.deepEqual(ui.completion, { status: 'blocked', summary: 'Blocked on <path>', open_assumptions: ['Mock routes only'] })
+    assert.deepEqual(ui.handoff, { summary: 'ui done', open_assumptions: ['ui assumption'] })
+    assert.deepEqual(ui.stop, { stopped: true, confirmed_at: '2026-03-01T10:20:00Z' })
+    assert.deepEqual([adapter.completion, adapter.handoff, adapter.stop], [null, null, { stopped: false, confirmed_at: null }])
+    // A manual run without automatic settings, and a graph without launch_* nodes, map onto the contract as well.
+    const flat = { name: 'Flat graph', nodes: [{ node_id: 'ui', label: 'UI', kind: 'worker', depends_on: [] }, { node_id: 'adapter', label: 'Adapter', kind: 'worker', depends_on: [] }, { node_id: 'review', label: 'Review', kind: 'review', depends_on: ['ui', 'adapter'] }] }
+    await writeRun(rootDir, { runId: 'manual', definition: flat, next: ['ui', 'adapter'], inputs: inputsSection({ mode: 'manual', automatic: null, source_branch: null }, { ui: { launch: null, completion: null, handoff: null, stop: null } }) })
+    const manual = validateRunInputs((await get(app, url('alpha', 'main', 'manual', '/inputs'))).json())
+    assert.deepEqual([manual.mode, manual.automatic, manual.source_branch], ['manual', null, null])
+    assert.deepEqual(manual.workers.map(worker => [worker.node_id, worker.launch_node_id]), [['ui', 'ui'], ['adapter', 'adapter']])
+    assert.deepEqual([manual.workers[0].launch, manual.workers[0].completion, manual.workers[0].handoff, manual.workers[0].stop], [null, null, null, null])
+  })
+})
+
+test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVALID for detail and lists, naming only the run', async () => {
+  const base = { values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, diffFile: DIFF }
+  const withReview = (mutate: (section: ReviewSection) => void, runId: string): RunSpec => {
+    const section = reviewSection()
+    mutate(section)
+    return { ...base, runId, review: section, inputs: inputsSection() }
+  }
+  const withInputs = (mutate: (section: InputsSection) => void, runId: string): RunSpec => {
+    const section = inputsSection()
+    mutate(section)
+    return { ...base, runId, review: reviewSection(), inputs: section }
+  }
+  const cases: RunSpec[] = [
+    { ...base, runId: 'unknown-version', version: '1.3.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'review-string', review: 'approved' },
+    { ...base, runId: 'inputs-array', inputs: [] },
+    withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
+    withReview(section => { (section as Record<string, unknown>).verdict = 'maybe' }, 'review-verdict'),
+    withReview(section => { section.bundle_sha256 = 'f'.repeat(63) }, 'review-bundle'),
+    withReview(section => { (section as Record<string, unknown>).independent = false }, 'review-dependent'),
+    withReview(section => { section.attempt = 0 }, 'review-attempt'),
+    withReview(section => { section.reviewed_at = 'yesterday' }, 'review-time'),
+    withReview(section => { section.findings = [finding({ severity: 'P1', disposition: 'open' })] }, 'review-approved-with-blocker'),
+    withReview(section => { (section.findings[0] as Record<string, unknown>).worker = 'tester' }, 'review-worker'),
+    withReview(section => { section.findings[0].requirement = '' }, 'review-empty-quote'),
+    withReview(section => { (section.findings[0] as Record<string, unknown>).line = 12 }, 'review-finding-key'),
+    withReview(section => { section.diff = { path: 'plan.json', sha256: sha256(DIFF), bytes: DIFF.length } }, 'review-diff-path'),
+    withReview(section => { section.diff = { path: '../other/review.diff', sha256: sha256(DIFF), bytes: DIFF.length } }, 'review-diff-traversal'),
+    withInputs(section => { section.automatic = null }, 'inputs-automatic-missing'),
+    withInputs(section => { section.mode = 'manual' }, 'inputs-manual-with-settings'),
+    withInputs(section => { section.workers.reviewer = workerInput('ui') }, 'inputs-foreign-lane'),
+    withInputs(section => { section.workers = {} }, 'inputs-no-workers'),
+    withInputs(section => { section.workers.ui.owned_paths = ['/etc/passwd'] }, 'inputs-absolute-owned-path'),
+    withInputs(section => { section.workers.ui.owned_paths = ['src/../..'] }, 'inputs-traversal-owned-path'),
+    withInputs(section => { section.workers.ui.checks[0].id = section.workers.ui.checks[1].id }, 'inputs-duplicate-check'),
+    withInputs(section => { section.workers.ui.checks[1].scenarios = [] }, 'inputs-browser-without-scenarios'),
+    withInputs(section => { section.workers.ui.launch!.launch_requested_at = 'noon' }, 'inputs-launch-time'),
+    withInputs(section => { section.workers.ui.stop = { stopped: false, confirmed_at: T2 } }, 'inputs-unconfirmed-stop-time'),
+    withInputs(section => { section.workers.ui.completion = { status: 'done', summary: 'x', open_assumptions: [] } }, 'inputs-completion-status'),
+    withInputs(section => { (section.workers.ui as Record<string, unknown>).worktree = '/home/someone/worktree' }, 'inputs-worker-key'),
+    withInputs(section => { (section as Record<string, unknown>).repository = '/home/someone/repo' }, 'inputs-extra-key'),
+  ]
+  for (const spec of cases) {
+    await harness(async ({ app, runsRoot, root }) => {
+      await writeRun(runsRoot('alpha', 'main'), spec)
+      assertError(await get(app, url('alpha', 'main', spec.runId)), 500, 'RUN_STORAGE_INVALID', root)
+      assertError(await get(app, url('alpha', 'main', spec.runId, '/reviews/1')), 500, 'RUN_STORAGE_INVALID', root)
+      assertError(await get(app, url('alpha', 'main', spec.runId, '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+      const list = await get(app, url('alpha', 'main'))
+      assertError(list, 500, 'RUN_STORAGE_INVALID', root)
+      assert.ok(list.body.includes(spec.runId), `${spec.runId}: the run directory name is the only locator given`)
+      assert.ok(!list.body.includes('/home/someone') && !list.body.includes('/etc/passwd'), `${spec.runId}: ${list.body}`)
+    })
+  }
+})
+
+test('redaction covers paths next to Markdown punctuation and file URIs; links respect the served text; policy labels and unpinned transports pass', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const leak = `${root}/runs/alpha/main/spelled/worktree-ui`
+    // Every spelling an operator's Markdown might use around a path, plus a file URI, must come back as <path>.
+    const uiTask = `${UI_TASK}\n\nRead [${leak}/x](${leak}/x) and |${leak}/x| and file://${leak}/x and <${leak}/x> and *${leak}/x* and **${leak}/x** first.`
+    const beyond = 'Render the verdict pill on the review node.'
+    const longTask = `${ADAPTER_TASK}\n\n${'y'.repeat(TEXT_LIMIT)}\n\n${beyond}`
+    const findings: Finding[] = [
+      finding({ message: `Screenshots were written beside [${leak}/shots] instead of below it.`, worker: 'ui', requirement: `Read [${leak}/x](${leak}/x) and |${leak}/x|` }),
+      finding({ message: 'Quoted from beyond the served cut.', worker: 'adapter', requirement: beyond }),
+    ]
+    const section = inputsSection({ automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: null } },
+      { ui: { task: uiTask, checks: [{ id: 'test:unit', kind: 'unit', argv: ['npm', 'run', 'test:unit'], command: 'npm run test:unit', timeout_seconds: 180, scenarios: [] },
+        { id: 'e2e/smoke', kind: 'browser', argv: ['npx', 'playwright', 'test'], command: 'npx playwright test', timeout_seconds: 300, scenarios: [{ id: 'review verdict / narrow', description: 'narrow layout' }] }] },
+        adapter: { task: longTask } })
+    await writeRun(rootDir, { runId: 'spelled', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets,
+      review: reviewSection({ findings }), inputs: section, diffFile: DIFF })
+    const inputsResponse = await get(app, url('alpha', 'main', 'spelled', '/inputs'))
+    assert.equal(inputsResponse.status, 200, inputsResponse.body)
+    assert.ok(!inputsResponse.body.includes(root), `a path leaked: ${inputsResponse.body.slice(0, 400)}`)
+    const inputs = validateRunInputs(inputsResponse.json())
+    const ui = inputs.workers.find(worker => worker.node_id === 'ui')!
+    assert.ok(ui.task.text.endsWith('Read [<path>](<path>) and |<path>| and <path> and <<path>> and *<path>* and **<path>** first.'), ui.task.text.slice(-160))
+    assert.deepEqual(ui.checks.map(check => check.id), ['test:unit', 'e2e/smoke'])
+    assert.deepEqual(ui.checks[1].scenarios.map(scenario => scenario.id), ['review verdict / narrow'])
+    assert.equal(inputs.automatic?.reviewer_transport, null)
+    const reviewResponse = await get(app, url('alpha', 'main', 'spelled', '/reviews/1'))
+    assert.equal(reviewResponse.status, 200, reviewResponse.body)
+    assert.ok(!reviewResponse.body.includes(root), `a path leaked: ${reviewResponse.body.slice(0, 400)}`)
+    const review = validateReviewResult(reviewResponse.json())
+    assert.equal(review.findings[0].message, 'Screenshots were written beside [<path>] instead of below it.')
+    assert.equal(review.findings[0].requirement, 'Read [<path>](<path>) and |<path>|')
+    assert.deepEqual(review.findings[0].requirement_found_in, ['ui'], 'a redacted quote still links when it survives in the served text')
+    // The adapter quote is verbatim in the raw task but past the 64 KiB cut of the served text: no link is claimed.
+    const adapter = inputs.workers.find(worker => worker.node_id === 'adapter')!
+    assert.equal(adapter.task.truncated, true)
+    assert.ok(!adapter.task.text.includes(beyond))
+    assert.deepEqual(review.findings[1].requirement_found_in, [])
+    // A sibling run keeps the workflow list healthy: free-form policy labels are not malformed storage.
+    assert.equal((await get(app, url('alpha', 'main'))).status, 200)
+  })
+})
+
+test('an interrupted native review projects the review node as paused, not pending, until the controller resumes', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const events: RawEvent[] = [...reviewedEvents,
+      { sequence: 10, time: T2, node: 'review', status: 'running', message: 'Launching the native reviewer session' },
+      { sequence: 11, time: T2, node: 'review', status: 'interactive', message: `Reviewer session ${REVIEWER} launched; awaiting review.completion.json` },
+      { sequence: 12, time: T2, node: 'review', status: 'running', message: 'Reviewer pane attached' },
+      { sequence: 13, time: T2, node: 'review', status: 'interrupted', message: 'Supervisor interrupted. The reviewer session keeps running; resume with: python -m workflow automatic <path> --live' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'interrupted', values: reviewedValues(), next: ['review'], events, packets: reviewedPackets, review: null, inputs: inputsSection() })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'interrupted'))).json())
+    const node = detail.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([node.status, node.attempt, node.session_id, node.result_uri], ['paused', 1, null, null])
+    assert.equal(detail.summary.status, 'paused')
+    const timeline = (await get(app, url('alpha', 'main', 'interrupted', '/events'))).json() as { events: { sequence: number; status: string | null; type: string }[] }
+    assert.deepEqual(timeline.events.at(-1), { ...timeline.events.at(-1), sequence: 13, status: 'paused', type: 'status_changed' })
+    // A stop record after an accepted review is a plain note: it never hides the node's evidence-based state.
+    const stopped: RawEvent[] = [...events.slice(0, -1), { sequence: 13, time: T2, node: 'review', status: 'stopped', message: 'Reviewer session stopped; its transcript stays resumable' },
+      { sequence: 14, time: T2, node: 'review', status: 'approved', message: REVIEWER }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'stopped', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: stopped, packets: reviewedPackets, review: reviewSection(), inputs: inputsSection(), diffFile: DIFF })
+    const done = validateRunDetail((await get(app, url('alpha', 'main', 'stopped'))).json())
+    assert.equal(done.snapshot.nodes.find(item => item.node_id === 'review')!.status, 'succeeded')
+  })
+})
+
 test('every successful payload conforms to the committed contract schemas', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'conform', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/x' }, next: ['verify_adapter'], events: launchEvents,
@@ -845,6 +1275,14 @@ test('every successful payload conforms to the committed contract schemas', asyn
     const events = (await get(app, url('alpha', 'main', 'conform', '/events'))).json() as { events: unknown[] }
     events.events.forEach(event => eventSchema.parse(event))
     validateWorkerResult((await get(app, url('alpha', 'main', 'conform', '/results/ui/1'))).json())
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'conform-review', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets,
+      review: reviewSection(), inputs: inputsSection(), diffFile: DIFF })
+    const review = (await get(app, url('alpha', 'main', 'conform-review', '/reviews/1'))).json()
+    validateReviewResult(projectSchemas.reviewResult.parse(review))
+    const inputs = (await get(app, url('alpha', 'main', 'conform-review', '/inputs'))).json()
+    validateRunInputs(projectSchemas.runInputs.parse(inputs))
+    const reviewed = validateRunDetail((await get(app, url('alpha', 'main', 'conform-review'))).json())
+    assert.equal(reviewed.snapshot.nodes.find(node => node.node_id === 'review')!.result_uri, '/api/projects/alpha/workflows/main/runs/conform-review/reviews/1')
     // A packet whose result cannot satisfy the worker-result contract is a 500, not a partial payload.
     await writeRun(runsRoot('alpha', 'main'), { runId: 'broken', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_ui'], events: launchEvents,
       packets: [{ node: 'ui', mutate: packet => { (packet.result as Record<string, unknown>).changed_files = ['/absolute/leak.ts'] } }] })

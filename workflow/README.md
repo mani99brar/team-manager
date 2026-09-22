@@ -6,6 +6,8 @@
 
 `report.html` in each run directory provides a local graph/results viewer. The full pipeline is tested offline with fake workers, real Git/unit/Playwright checks, screenshot artifacts, approval gates and forced-check-failure recovery. No live feature run is needed to run the tests.
 
+In automatic mode the independent reviewer is a third native Claude session (`workflow-<run>-reviewer`, read-only tools, its own `Claude: reviewer` pane) that reports its verdict only through a completion file bound to the run, launch token, bundle hash and candidate commit; the controller validates it against `contracts/workflow/reviewCompletion.schema.json`, stops the reviewer with an identity re-check, and never launches a second one. `--reviewer-transport print` keeps the headless fallback. `run-state.json` is exported at version 1.2.0 with `review` and `inputs` sections for the Projects viewer, and `python -m workflow export <run>` re-exports older runs without launching anything. Details: [RUNBOOK.md](RUNBOOK.md) ("Automatic mode: the review step") and [features/project-workflows/README.md](../features/project-workflows/README.md). Later features: [review-result](../features/review-result/README.md) and [run-inputs](../features/run-inputs/README.md).
+
 The following are building-block/historical slice documentation; the runbook supersedes their statements about unfinished pipeline wiring:
 - [INTERACTIVE_SESSIONS.md](INTERACTIVE_SESSIONS.md): native interactive launcher/Herdr attachment.
 - [LIVE_SESSIONS.md](LIVE_SESSIONS.md): optional headless print-mode launcher/log panes.

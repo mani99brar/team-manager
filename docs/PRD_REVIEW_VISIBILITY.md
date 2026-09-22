@@ -1,6 +1,6 @@
 # PRD: Review Visibility and Run Inputs (umbrella)
 
-Status: Draft for approval — split into three vertical slices on 2026-09-21 after the first live automatic run (project-workflows-001). Each slice has its own PRD and ships on its own.
+Status: Implemented 2026-09-21 on branch `ultra` (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)). Split into three vertical slices on 2026-09-21 after the first live automatic run (project-workflows-001); each slice has its own PRD. All three were implemented directly in one change set rather than as two feature runs.
 
 ## 1. Problem
 
@@ -33,6 +33,10 @@ Order: A, then B's run, then C's run. Two runs cost two rounds of `npm ci` and t
 - [x] Findings carry `worker` and `requirement` from slice A onward; the link is built in slice C
 - [x] `workflow export <run>` re-exports old runs so project-workflows-001 shows its own data (slice B)
 - [x] Issues #4, #5, #7, #8 stay out of all three slices
-- [ ] Task display: exact prompt (proposed) or authored file (slice C)
-- [ ] Three-pane layout: same tab at review start (proposed) or separate tab (slice A)
+- [x] Task display: both, decided 2026-09-21 during implementation. The Task panel shows the task pinned in `plan.json` (authored file plus the appended ownership/checks JSON) rendered as Markdown with a Source toggle; the exact prompt the session received (`<worker>.prompt.txt`, recorded from this slice on) is shown in a collapsible "Exact prompt" section when present (slice C)
+- [x] Three-pane layout: same tab, decided 2026-09-21. The `Claude: reviewer` pane is split to the right of the adapter pane when the review node launches the reviewer; a missing pane never fails the review (slice A)
 - [x] Issues #3 and #6 stay out of slice B by default; either rides along only if it blocks a named acceptance scenario, and none currently does
+- [x] Completion file binding: launch token in the file, session UUID verified from the launch receipt at acceptance, decided 2026-09-21 (slice A)
+- [x] Reviewer write permission: Read, Glob, Grep plus exactly one allowed write, the completion file, via `--permission-mode dontAsk --allowedTools "Edit(//<run>/review.completion.json)"`; measured live that `Write(...)` rules never match and `acceptEdits` allows every write (slice A)
+- [x] Findings view: grouped by disposition with a Worker column, plus a Group-by-worker toggle (slices B and C)
+- [x] `reviewer_transport` in run inputs is null for runs pinned before the setting that never reviewed; never defaulted (slice C)

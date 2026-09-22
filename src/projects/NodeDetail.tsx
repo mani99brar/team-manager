@@ -5,13 +5,16 @@ import {
   paths,
   scopedResultPath,
   type RunDetail,
+  type RunInputs,
   type RunScope,
   type WorkerResult,
   type WorkflowEvent,
 } from './api.ts'
 import { ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
+import { ReviewPanel } from './ReviewDetail.tsx'
 import { formatTime, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
 import { useResource, type Resource } from './useResource.ts'
+import { LaunchReceipt, StopLine, TaskPanel, WorkerSignals } from './WorkerInputs.tsx'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
@@ -19,10 +22,20 @@ type SnapshotNode = RunDetail['snapshot']['nodes'][number]
 type Props = {
   scope: RunScope
   definition: DefinitionNode
+  /** Every node of the pinned definition, so review findings can link to the lanes' launch nodes. */
+  definitionNodes: DefinitionNode[]
   node: SnapshotNode
   events: Resource<WorkflowEvent[]>
   onRetryEvents: () => void
+  /** The run's inputs (null once loaded when the export predates them), shared by every node of the run. */
+  inputs: Resource<RunInputs | null>
+  onRetryInputs: () => void
   refreshToken: number
+  onNavigate: (pathname: string) => void
+  /** A requirement quote to highlight in this node's task, handed over by a review finding link. */
+  highlight: string | null
+  onHighlightApplied: () => void
+  onOpenRequirement: (nodeId: string, quote: string) => void
 }
 
 function shortSha(value: string | null): string {
@@ -96,7 +109,7 @@ function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: Work
             {result.checks.map((check, index) => {
               const log = artifactsById.get(check.log_artifact_id)
               return (
-                <li key={`${check.log_artifact_id}-${index}`} className={check.exit_code === 0 ? 'check check-passed' : 'check check-failed'} data-exit-code={check.exit_code}>
+                <li key={`${check.log_artifact_id}-${index}`} id={`check-${index}`} tabIndex={-1} className={check.exit_code === 0 ? 'check check-passed' : 'check check-failed'} data-exit-code={check.exit_code}>
                   <div className="check-head">
                     <code className="check-command">{check.command}</code>
                     <span className="check-exit">{check.exit_code === 0 ? 'exit 0' : `exit ${check.exit_code} (failed)`}</span>
@@ -174,15 +187,25 @@ function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: Work
   )
 }
 
-/** Everything known about one node of a run: state, reuse evidence, result and events. Absent evidence is stated. */
-export function NodeDetail({ scope, definition, node, events, onRetryEvents, refreshToken }: Props) {
-  const resultPath = node.result_uri === null ? null : scopedResultPath(scope, node.result_uri)
+/**
+ * Everything known about one node of a run: state, reuse evidence, result and events. Absent evidence is
+ * stated. A worker node also shows what it was asked to do (task, receipts, completion) when the run's inputs
+ * are recorded; a review node's Result is the recorded review verdict.
+ */
+export function NodeDetail({ scope, definition, definitionNodes, node, events, onRetryEvents, inputs, onRetryInputs, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement }: Props) {
+  const resultPath = node.result_uri === null || definition.kind === 'review' ? null : scopedResultPath(scope, node.result_uri)
   const loadResult = useCallback((signal: AbortSignal) => fetchWorkerResult(scope, resultPath!, signal), [scope, resultPath])
   const { state: result, reload: reloadResult } = useResource(resultPath, loadResult, refreshToken)
 
   const nodeEvents = events.status === 'ready' ? events.data.filter(event => event.node_id === node.node_id) : []
   const reuse = nodeEvents.filter(event => event.type === 'result_reused')
   const approvals = nodeEvents.filter(event => event.type === 'approval_requested')
+
+  const isWorker = definition.kind === 'worker'
+  const isReview = definition.kind === 'review'
+  const recordedInputs = inputs.status === 'ready' ? inputs.data : null
+  const worker = isWorker && recordedInputs !== null ? recordedInputs.workers.find(candidate => candidate.launch_node_id === node.node_id) ?? null : null
+  const receiptSession = worker?.launch?.session_id ?? null
 
   return (
     <section className="node-detail" aria-labelledby="node-detail-title" data-testid="node-detail" data-node-id={node.node_id}>
@@ -191,7 +214,16 @@ export function NodeDetail({ scope, definition, node, events, onRetryEvents, ref
         <div><dt>Kind</dt><dd>{KIND_LABEL[definition.kind]}</dd></div>
         <div><dt>Status</dt><dd><StatusBadge status={node.status} /> <span data-testid="node-status-meaning">{nodeStatusMeaning(definition.kind, node.status)}</span></dd></div>
         <div><dt>Graph attempt</dt><dd data-testid="node-attempt">{node.attempt === 0 ? '0 (not started)' : node.attempt}</dd></div>
-        <div><dt>Session</dt><dd>{node.session_id ? <code>{node.session_id}</code> : 'No session recorded'}</dd></div>
+        <div>
+          <dt>Session</dt>
+          <dd>
+            {node.session_id
+              ? <code>{node.session_id}</code>
+              : receiptSession
+                ? <><code>{receiptSession}</code> <span className="projects-muted">(from the launch receipt)</span></>
+                : 'No session recorded'}
+          </dd>
+        </div>
         <div><dt>Depends on</dt><dd>{definition.depends_on.length ? definition.depends_on.join(', ') : 'nothing'}</dd></div>
       </dl>
 
@@ -204,6 +236,24 @@ export function NodeDetail({ scope, definition, node, events, onRetryEvents, ref
             </ul>
           )}
         </div>
+      )}
+
+      {isWorker && (inputs.status === 'loading' || inputs.status === 'idle') && <LoadingPanel>Loading the run inputs…</LoadingPanel>}
+      {isWorker && inputs.status === 'error' && <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />}
+      {isWorker && inputs.status === 'ready' && recordedInputs === null && (
+        <p className="projects-muted" data-testid="worker-inputs-none">
+          Inputs not recorded for this run (the export predates run inputs; re-export it with the workflow CLI), so the task, launch receipt and completion signal cannot be shown.
+        </p>
+      )}
+      {isWorker && recordedInputs !== null && worker === null && (
+        <p className="projects-muted" data-testid="worker-inputs-unmatched">The run inputs list no worker launched by this node.</p>
+      )}
+      {worker !== null && (
+        <>
+          <TaskPanel worker={worker} result={result} highlight={highlight} onHighlightApplied={onHighlightApplied} />
+          <LaunchReceipt launch={worker.launch} />
+          <WorkerSignals completion={worker.completion} handoff={worker.handoff} />
+        </>
       )}
 
       <section className="evidence-section" aria-labelledby="node-reuse">
@@ -224,16 +274,22 @@ export function NodeDetail({ scope, definition, node, events, onRetryEvents, ref
       </section>
 
       <section className="evidence-section" aria-labelledby="node-result">
-        <h4 id="node-result">Result</h4>
-        {node.result_uri === null && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
-        {node.result_uri !== null && resultPath === null && (
-          <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
-            The result link <code>{node.result_uri}</code> is outside this run's results route and was not fetched.
-          </p>
+        <h4 id="node-result">{isReview ? 'Review result' : 'Result'}</h4>
+        {isReview ? (
+          <ReviewPanel scope={scope} node={node} definitionNodes={definitionNodes} inputs={inputs} refreshToken={refreshToken} onNavigate={onNavigate} onOpenRequirement={onOpenRequirement} />
+        ) : (
+          <>
+            {node.result_uri === null && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
+            {node.result_uri !== null && resultPath === null && (
+              <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
+                The result link <code>{node.result_uri}</code> is outside this run's results route and was not fetched.
+              </p>
+            )}
+            {resultPath !== null && result.status === 'loading' && <LoadingPanel>Loading the result…</LoadingPanel>}
+            {resultPath !== null && result.status === 'error' && <ErrorPanel error={result.error} what="The node result" onRetry={reloadResult} />}
+            {resultPath !== null && result.status === 'ready' && <WorkerEvidence scope={scope} result={result.data} node={node} />}
+          </>
         )}
-        {resultPath !== null && result.status === 'loading' && <LoadingPanel>Loading the result…</LoadingPanel>}
-        {resultPath !== null && result.status === 'error' && <ErrorPanel error={result.error} what="The node result" onRetry={reloadResult} />}
-        {resultPath !== null && result.status === 'ready' && <WorkerEvidence scope={scope} result={result.data} node={node} />}
       </section>
 
       <section className="evidence-section" aria-labelledby="node-timeline">
@@ -256,6 +312,7 @@ export function NodeDetail({ scope, definition, node, events, onRetryEvents, ref
             ))}
           </ol>
         ))}
+        {worker !== null && <StopLine stop={worker.stop} />}
       </section>
       <p className="projects-muted node-detail-footnote">Status labels here are historical observations; “{STATUS_LABEL.succeeded}” on a worker node is not workflow completion.</p>
     </section>
