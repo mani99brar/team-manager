@@ -1,6 +1,6 @@
 # PRD: Run inputs and finding-to-task links in the viewer (slice C)
 
-Status: Implemented 2026-09-21 on branch `ultra` directly in the checkout rather than as a feature run (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)); the `run-inputs` feature directory and launch choice exist for a later run. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
+Status: Implemented 2026-09-21 on branch `ultra` directly in the checkout rather than as a feature run (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)); the `run-inputs` feature directory and launch choice were removed before merge because the work is already in the tree. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
 
 ## 1. Goal
 

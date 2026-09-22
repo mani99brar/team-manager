@@ -12,7 +12,7 @@ from .pipeline import validate_pipeline_policy
 from .sessions import read_json
 
 
-FEATURES = ("project-workflows", "review-result", "run-inputs")
+FEATURES = ("project-workflows",)
 
 
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,

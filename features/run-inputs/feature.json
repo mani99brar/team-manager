@@ -1,8 +1,0 @@
-{
-  "version": "1.0.0",
-  "name": "Run inputs and finding-to-task links in the viewer",
-  "branch_prefix": "feature/run-inputs",
-  "policy": "policy.json",
-  "ui_task": "ui-task.md",
-  "adapter_task": "adapter-task.md"
-}
