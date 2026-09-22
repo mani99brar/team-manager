@@ -18,11 +18,18 @@ from langgraph.types import interrupt
 
 from .live import SessionState
 from .observer import herdr
-from .sessions import ClaudeSessions, NODES, git, plan_digest, prepare, read_json, run_lock, save_json
+from .sessions import ClaudeSessions, NODES, REVIEWER, file_prefix, git, plan_digest, prepare, read_json, run_lock, save_json
 
 
 class InteractiveSessions(ClaudeSessions):
     """Native Claude background sessions, not print-mode jobs or Herdr-owned agents."""
+
+    def worktree(self, node: str) -> Path:
+        """The reviewer's worktree is created by the review node, not by prepare."""
+        return self.directory / "review-worktree" if node == REVIEWER else Path(self.plan["nodes"][node]["worktree"])
+
+    def receipt_path(self, node: str) -> Path:
+        return self.directory / f"{file_prefix(node)}.interactive.json"
 
     def inventory(self) -> list[dict]:
         response = subprocess.run([self.executable, "agents", "--json"],
@@ -36,8 +43,7 @@ class InteractiveSessions(ClaudeSessions):
         return f"workflow-{self.plan['run_id']}-{node}"
 
     def locate(self, node: str, rows: list[dict]) -> dict | None:
-        info = self.plan["nodes"][node]
-        path = self.directory / f"{node}.interactive.json"
+        path = self.receipt_path(node)
         if not path.exists():
             return None
         receipt = read_json(path)
@@ -45,7 +51,7 @@ class InteractiveSessions(ClaudeSessions):
             raise RuntimeError("Plan changed; cannot reconcile session")
         background_id = receipt.get("background_id")
         if not background_id:
-            log = self.directory / f"{node}.launch.log"
+            log = self.directory / f"{file_prefix(node)}.launch.log"
             if not log.exists():
                 return None
             # --bg assigns its own UUID. Bind the ID printed by this launch;
@@ -60,7 +66,7 @@ class InteractiveSessions(ClaudeSessions):
         if len(matches) != 1:
             raise RuntimeError("Ambiguous Claude session identity")
         row = matches[0]
-        if row.get("kind") != "background" or Path(row.get("cwd", "")).resolve() != Path(info["worktree"]).resolve() or row.get("name") != self.launch_name(node):
+        if row.get("kind") != "background" or Path(row.get("cwd", "")).resolve() != self.worktree(node).resolve() or row.get("name") != self.launch_name(node):
             raise RuntimeError("Claude session identity/worktree mismatch")
         if receipt.get("background_id") and row.get("sessionId") != receipt.get("session_id"):
             raise RuntimeError("Native Claude UUID changed; refusing attachment")
@@ -107,7 +113,7 @@ class InteractiveSessions(ClaudeSessions):
         if node not in NODES or self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive worker plan")
         info = self.plan["nodes"][node]
-        path = self.directory / f"{node}.interactive.json"
+        path = self.receipt_path(node)
         digest = plan_digest(self.plan)
         if path.exists():
             receipt = read_json(path)
@@ -166,6 +172,66 @@ class InteractiveSessions(ClaudeSessions):
                 raise RuntimeError(f"Claude background launch exited {result.returncode}; inspect launch log")
             row = self.settle(node)
             receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"], observed_state=row["state"], native_started_at=row.get("startedAt"))
+        except BaseException as error:
+            receipt.update(status="needs_reconciliation", error=str(error))
+            raise
+        finally:
+            save_json(path, receipt)
+        return receipt
+
+    # Analysis tools plus the single completion file the protocol requires. The
+    # reviewer never edits the candidate: its worktree is re-checked clean afterwards.
+    reviewer_tools = "Read,Glob,Grep,Write"
+    reviewer_permission_mode = "dontAsk"
+
+    def run_reviewer(self, prompt: str, launch_token: str, commit: str) -> dict:
+        """The reviewer is a native session with a worker's lifecycle and read-only reach."""
+        if self.plan.get("mode") != "interactive" or not self.plan.get("automatic"):
+            raise ValueError("A native reviewer belongs to an automatic interactive run")
+        from .automatic import validate_automatic
+        validate_automatic(self.plan)
+        path = self.receipt_path(REVIEWER)
+        digest = plan_digest(self.plan)
+        cwd = self.worktree(REVIEWER)
+        if path.exists():
+            receipt = read_json(path)
+            if receipt["plan_digest"] != digest or receipt["launch_token"] != launch_token:
+                raise RuntimeError("Reviewer launch intent changed; refusing session reuse")
+            row = self.locate(REVIEWER, self.inventory())
+            if row is None:
+                raise RuntimeError("Existing reviewer launch cannot be reconciled; no automatic relaunch")
+            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"],
+                           observed_state=row["state"], native_started_at=row.get("startedAt"))
+            receipt.pop("error", None)
+            save_json(path, receipt)
+            return receipt
+        if git(cwd, "rev-parse", "HEAD") != commit or git(cwd, "status", "--porcelain"):
+            raise RuntimeError("Reviewer worktree is not the clean reviewed candidate")
+        if any(row.get("name") == self.launch_name(REVIEWER) for row in self.inventory()):
+            raise RuntimeError("Unowned session already exists with this launch name")
+        receipt = {"node_id": "review", "session_id": None, "launch_token": launch_token, "plan_digest": digest,
+                   "worktree": str(cwd), "candidate_commit": commit,
+                   "status": "launching", "attempt": 1, "launcher_invocations": 1,
+                   "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        save_json(path, receipt)
+        command = [self.executable, "--bg", "--name", self.launch_name(REVIEWER),
+                   "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                   "--tools", self.reviewer_tools, "--permission-mode", self.reviewer_permission_mode,
+                   "--add-dir", str(self.directory), prompt]
+        env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+        try:
+            with (self.directory / f"{file_prefix(REVIEWER)}.launch.log").open("w") as log:
+                try:
+                    result = subprocess.run(command, cwd=cwd, env=env, stdout=log,
+                                            stderr=subprocess.STDOUT, text=True, timeout=self.timeout)
+                finally:
+                    log.flush()
+                    os.fsync(log.fileno())
+            if result.returncode != 0:
+                raise RuntimeError(f"Claude background launch exited {result.returncode}; inspect launch log")
+            row = self.settle(REVIEWER)
+            receipt.update(status="attached_session_available", background_id=row["id"], session_id=row["sessionId"],
+                           observed_state=row["state"], native_started_at=row.get("startedAt"))
         except BaseException as error:
             receipt.update(status="needs_reconciliation", error=str(error))
             raise
@@ -267,15 +333,51 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
         split = herdr("pane", "split", "--pane", mapping["ui"]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
         mapping["adapter"] = {"pane_id": split["pane"]["pane_id"], "tab_id": created["tab"]["tab_id"], "mode": "allocated"}
         save_json(mapping_path, mapping)
-    for node, entry in mapping.items():
-        require_shell(entry["pane_id"])
-        herdr("pane", "rename", entry["pane_id"], f"Claude: {node}")
-        # Re-check identity in the actual attachment process immediately before exec.
-        command = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(directory), "--node", node])
-        command = f"cd {shlex.quote(str(source))} && {command}"
-        entry.update(mode="attach_requested", session_id=sessions.locate(node, rows)["sessionId"])
-        save_json(mapping_path, mapping)
-        herdr("pane", "run", entry["pane_id"], command)
+    for node in list(mapping):
+        attach_pane(sessions, node, mapping, mapping_path, rows)
+    return mapping
+
+
+def attach_pane(sessions: InteractiveSessions, node: str, mapping: dict, mapping_path: Path, rows: list[dict]) -> None:
+    """Type one attach command into a pane whose own shell is idle."""
+    entry = mapping[node]
+    source = Path(__file__).resolve().parents[1]
+    require_shell(entry["pane_id"])
+    herdr("pane", "rename", entry["pane_id"], f"Claude: {node}")
+    # Re-check identity in the actual attachment process immediately before exec.
+    command = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(sessions.directory), "--node", node])
+    command = f"cd {shlex.quote(str(source))} && {command}"
+    entry.update(mode="attach_requested", session_id=sessions.locate(node, rows)["sessionId"])
+    save_json(mapping_path, mapping)
+    herdr("pane", "run", entry["pane_id"], command)
+
+
+def attach_reviewer_pane(sessions: InteractiveSessions) -> dict:
+    """Third pane in the workers' own tab, created when the review node starts.
+
+    The reviewer session does not exist at `start`, so this runs later. It only
+    ever adds a pane to the tab the workers already share, and re-attaching an
+    existing reviewer pane is a no-op rather than a second allocation.
+    """
+    directory = sessions.directory
+    mapping_path = directory / "terminals.json"
+    if not mapping_path.exists():
+        raise RuntimeError("No workflow tab exists; attach the workers before the reviewer")
+    mapping = read_json(mapping_path)
+    if REVIEWER in mapping:
+        return mapping
+    tabs = {mapping[node]["tab_id"] for node in NODES if node in mapping}
+    if len(tabs) != 1 or not set(NODES) <= set(mapping):
+        raise RuntimeError("Workers do not share one dedicated workflow tab")
+    rows = sessions.inventory()
+    if sessions.locate(REVIEWER, rows) is None:
+        raise RuntimeError("Cannot attach an unverified/missing reviewer session")
+    source = Path(__file__).resolve().parents[1]
+    split = herdr("pane", "split", "--pane", mapping["adapter"]["pane_id"], "--direction", "down",
+                  "--cwd", str(source), "--no-focus")["result"]
+    mapping[REVIEWER] = {"pane_id": split["pane"]["pane_id"], "tab_id": tabs.pop(), "mode": "allocated"}
+    save_json(mapping_path, mapping)
+    attach_pane(sessions, REVIEWER, mapping, mapping_path, rows)
     return mapping
 
 
@@ -291,7 +393,7 @@ def main():
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--reuse-observers", type=Path)
-    parser.add_argument("--node", choices=NODES)
+    parser.add_argument("--node", choices=[*NODES, REVIEWER])
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -313,13 +415,13 @@ def main():
         if args.action == "attach-one":
             if not args.node or not sys.stdin.isatty():
                 parser.error("attach-one requires --node and an interactive terminal")
-            receipt = read_json(directory / f"{args.node}.interactive.json")
+            receipt = read_json(sessions.receipt_path(args.node))
             if receipt["plan_digest"] != plan_digest(sessions.plan):
                 raise RuntimeError("Plan changed; cannot attach")
             row = sessions.locate(args.node, sessions.inventory())
             if row is None:
                 raise RuntimeError("Session unavailable; refusing implicit restart")
-            os.chdir(sessions.plan["nodes"][args.node]["worktree"])
+            os.chdir(sessions.worktree(args.node))
             os.execvp(sessions.executable, [sessions.executable, "attach", row["id"]])
         with run_lock(directory):
             if args.action == "attach":

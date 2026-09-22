@@ -14,7 +14,7 @@ The first live run reached a verified feature branch, but the Projects viewer ca
 
 | Slice | PRD | Kind of work | Ships as | Depends on |
 | --- | --- | --- | --- | --- |
-| A. Reviewer as an attachable native session | [PRD_REVIEWER_PANE.md](PRD_REVIEWER_PANE.md) | controller (`workflow/`) + completion schema (`contracts/workflow/`) + docs | ordinary commit with offline tests and a controlled live smoke test | nothing |
+| A. Reviewer as an attachable native session | [PRD_REVIEWER_PANE.md](PRD_REVIEWER_PANE.md) | controller (`workflow/`) + completion schema (`contracts/workflow/`) + docs | ordinary commit with offline tests and a controlled live smoke test | nothing — **offline work done 2026-09-21 ([handoff](HANDOFF_REVIEWER_PANE.md)); live smoke test outstanding** |
 | B. Review verdict and findings in the viewer | [PRD_REVIEW_RESULT.md](PRD_REVIEW_RESULT.md) | contract 1.1.0 + export + feature run `review-result` | feature run | A on `main` by choice: B's run then exercises the reviewer pane live. Displaying persisted review results does not technically require A |
 | C. Run inputs and finding-to-task links | [PRD_RUN_INPUTS.md](PRD_RUN_INPUTS.md) | contract 1.2.0 + export + feature run `run-inputs` | feature run | B merged |
 
@@ -34,5 +34,5 @@ Order: A, then B's run, then C's run. Two runs cost two rounds of `npm ci` and t
 - [x] `workflow export <run>` re-exports old runs so project-workflows-001 shows its own data (slice B)
 - [x] Issues #4, #5, #7, #8 stay out of all three slices
 - [ ] Task display: exact prompt (proposed) or authored file (slice C)
-- [ ] Three-pane layout: same tab at review start (proposed) or separate tab (slice A)
+- [x] Three-pane layout: same tab, created when the review node starts (slice A, implemented)
 - [x] Issues #3 and #6 stay out of slice B by default; either rides along only if it blocks a named acceptance scenario, and none currently does

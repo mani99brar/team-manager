@@ -17,7 +17,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 NODES = ("ui", "adapter")
+REVIEWER = "reviewer"
 TERMINAL = {"succeeded", "failed", "blocked"}
+
+
+def file_prefix(node: str) -> str:
+    """Worker files are named after the worker; the reviewer's after its graph node."""
+    return "review" if node == REVIEWER else node
 
 
 def read_json(path: Path) -> dict:

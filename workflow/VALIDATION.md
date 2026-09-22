@@ -52,6 +52,12 @@ Automatic mode is implemented directly in the existing LangGraph runtime, not Pi
 
 No real Claude workers or reviewer were launched for this validation. Actual live `--bg` permission-bypass behavior and model completion-protocol compliance still require the first owner-started live run. Worktrees are not security sandboxes. Automatic verification retries do not repair immutable source, and process deadlines require the controller to remain alive. No merge to main or push was performed for this implementation.
 
+## Reviewer as a native session (slice A)
+
+The reviewer now runs as `claude --bg` in `review-worktree/` with a `Claude: reviewer` pane in the run's tab, a run/bundle/candidate/token-bound `review.completion.json`, the same automatic wait as the workers, an identity-re-checked stop and a resumable transcript. Local validation passes **94 Python tests**, 13 contract tests, `tsc -b` and lint. Offline coverage: the completion file's bindings and cross-field rules, a foreign or oversized file, an idle reviewer that never writes one, the launch command's read-only tool set, reviewer reconciliation without relaunch, the third pane's allocation and idempotence, and four real controller processes in which the review is interrupted and then resumed into the same reviewer session without launching a second one. `--reviewer-transport print` keeps its own end-to-end coverage.
+
+No real Claude reviewer session was launched for this validation: `--bg` with `--tools Read,Glob,Grep,Write --permission-mode dontAsk` writing one file into an `--add-dir` path is exercised only by fakes here, and remains the purpose of the controlled live smoke test in `docs/PRD_REVIEWER_PANE.md` section 5.
+
 ## Deliberate operator boundaries
 
 - Select the feature, ownership and actual acceptance tests before preparing a run; the example policy is illustrative.

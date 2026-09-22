@@ -47,6 +47,18 @@ class FeatureLaunchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "automatic runs only"):
             launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), worker_timeout_seconds=7200)
 
+    def test_reviewer_transport_is_pinned_into_prepare(self):
+        run_root = Path("/tmp/workflow-launch-tests")
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", run_root, automatic=True)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "native")
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", run_root, automatic=True, reviewer_transport="print")
+        self.assertEqual(commands[2][commands[2].index("--reviewer-transport") + 1], "print")
+        with self.assertRaises(ValueError):
+            launch_commands(REPO, "project-workflows", "auto-test", run_root, automatic=True, reviewer_transport="herdr")
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(REPO, "project-workflows", "auto-test", run_root, reviewer_transport="print")
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--dry-run"])

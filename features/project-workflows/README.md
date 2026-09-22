@@ -26,7 +26,11 @@ To resume an already-started automatic run after an interruption or after fixing
 .venv/bin/python -m workflow automatic "$HOME/.local/state/md-manager-workflows/project-workflows/project-workflows-001" --live
 ```
 
-Do not repeat `launch` for an existing run. Uncertain launches still require explicit reconciliation. New files include `ui.completion.json`, `adapter.completion.json`, `automatic-review.json`, `review.stdout.json`, `review.stderr.log`, `review.diff` and the isolated `review-worktree/`. The reviewer has Read/Glob/Grep only; no shell or edit tools. Synthetic tests of this path are not live Claude validation.
+Do not repeat `launch` for an existing run. Uncertain launches still require explicit reconciliation. New files include `ui.completion.json`, `adapter.completion.json`, `automatic-review.json`, `review.interactive.json`, `review.completion.json`, `review.stop.json`, `review.launch.log`, `review.diff` and the isolated `review-worktree/`. Synthetic tests of this path are not live Claude validation.
+
+## The reviewer pane
+
+The reviewer is a native session with the same lifecycle as a worker. When the review node starts, a third pane named `Claude: reviewer` is split into the run's existing workflow tab, and you can answer a question the reviewer asks there; an unattended run finishes without anyone typing. Its tools are Read, Glob, Grep and Write, with no Bash, no agents and no MCP servers: the single file it is allowed to write is `review.completion.json`, and its worktree is re-checked clean at the reviewed candidate before the verdict counts. The transcript is the record; only the completion file is the verdict, and it is bound to this run, this bundle hash, this candidate and this launch token. One review per bundle — a blocked verdict, a deadline with no file, or a file bound to anything else stops the run with the evidence retained, and no second reviewer is started. Interrupting the supervisor during the review leaves the reviewer running and `workflow automatic … --live` re-enters the same session. Reattach a closed pane with `python -m workflow.interactive attach-one "$RUN" --node reviewer`. `--reviewer-transport print` selects the older one-shot `claude --print` reviewer (no pane, no human input) for hosts without Herdr, and writes `review.stdout.json` and `review.stderr.log` instead.
 
 ## Manual mode (retained)
 

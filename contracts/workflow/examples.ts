@@ -1,4 +1,4 @@
-import type { RunSpec, WorkerResult, RunSnapshot, WorkflowEvent, ControlRequest } from './v1.js'
+import type { RunSpec, WorkerResult, RunSnapshot, WorkflowEvent, ControlRequest, ReviewCompletion } from './v1.js'
 
 // Demonstration SHAs only; replace with observed Git revisions before execution.
 const base = 'a'.repeat(40)
@@ -34,4 +34,13 @@ export const event: WorkflowEvent = {
 export const controlRequest: ControlRequest = {
   contract_version: '1.0.0', run_id: 'demo-001', request_id: 'request-1',
   expected_sequence: 1, action: 'pause', node_id: null, reason: 'Review remaining included usage',
+}
+export const reviewCompletion: ReviewCompletion = {
+  contract_version: '1.0.0', run_id: 'demo-001', node_id: 'review',
+  launch_token: 'd3b07384-d113-4f95-a2c8-2f9b2f1a4c01', bundle_sha256: 'e'.repeat(64),
+  candidate_commit: 'b'.repeat(40), verdict: 'approved',
+  findings: [
+    { severity: 'P2', message: 'Empty-state copy differs from the task text', disposition: 'open', worker: 'ui', requirement: 'Distinguish no workflows from no runs' },
+    { severity: 'P1', message: 'Absolute run paths reached the response body', disposition: 'resolved', worker: 'adapter', requirement: null },
+  ],
 }

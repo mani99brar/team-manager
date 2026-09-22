@@ -31,7 +31,7 @@ Source repository must be clean and the shared contract must exist at the pinned
 
 ## Use the panels
 
-A dedicated `Workflow: <run-name>` tab contains `Claude: ui` and `Claude: adapter`. Your original tab is not split and focus is preserved. Select either worker pane and type at Claude's normal prompt.
+A dedicated `Workflow: <run-name>` tab contains `Claude: ui` and `Claude: adapter`. Your original tab is not split and focus is preserved. Select either worker pane and type at Claude's normal prompt. In a full automatic run (`python -m workflow`, see [RUNBOOK.md](RUNBOOK.md)) a third pane, `Claude: reviewer`, is added to the same tab when the review node starts, and behaves the same way.
 
 - **Ctrl+Z** detaches to the pane's shell; Claude documents that the background session keeps running.
 - Closing the attachment pane does not intentionally stop the worker. A client/SSH disconnect should leave the native background session available to reattach; recovery still verifies its identity.

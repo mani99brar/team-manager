@@ -1,6 +1,6 @@
 # PRD: Reviewer as an attachable native session (slice A)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
+Status: Implemented offline on 2026-09-21; the controlled live smoke test in section 5 has **not** been run. Handoff: [HANDOFF_REVIEWER_PANE.md](HANDOFF_REVIEWER_PANE.md). Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
 
 This slice is controller work plus the completion schema and docs: `workflow/`, `contracts/workflow/reviewCompletion.schema.json`, `workflow/RUNBOOK.md` and the feature README. None of it is worker-owned, so it ships as an ordinary commit with offline tests and a controlled live smoke test (section 5), and needs no feature run. Its first live exercise inside a full run is the review step of the next feature run (slice B).
 
@@ -66,5 +66,9 @@ Offline tests (work item 5) gate the commit. Before merging, run one controlled 
 
 ## 6. Open questions
 
-- Three-pane layout: create the reviewer pane in the same tab when the review node starts (proposed), or in a separate tab.
-- Whether to fail earlier than the timeout when the reviewer is idle without a file for ten minutes. Same question exists for workers; decide once for both.
+- [x] Three-pane layout: the reviewer pane is created in the same tab when the review node starts. Because the session does not exist at `start`, this is `attach_reviewer_pane`, called by the review node, rather than a third pane in `attach_panels`.
+- [ ] Whether to fail earlier than the timeout when the reviewer is idle without a file for ten minutes. Same question exists for workers; decide once for both.
+
+## 7. Implementation note
+
+The reviewer's tool set is `Read, Glob, Grep, Write`. A reviewer with no write tool cannot produce the completion file this slice defines, so the read-only intent is enforced by everything else instead: no Bash, no agents, no MCP servers, and a verdict is accepted only while the reviewer's worktree is still the clean candidate commit and the bundle and diff hashes are unchanged.

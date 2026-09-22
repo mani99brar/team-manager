@@ -22,8 +22,8 @@ from langgraph.types import Command, interrupt
 
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
-from .interactive import InteractiveSessions, attach_panels
-from .sessions import NODES, git, prepare, read_json, run_lock, save_json
+from .interactive import InteractiveSessions, attach_panels, attach_reviewer_pane
+from .sessions import NODES, REVIEWER, file_prefix, git, prepare, read_json, run_lock, save_json
 from .verification import owns, policy_digest, safe_path, validate_policy
 
 
@@ -109,38 +109,66 @@ class Pipeline:
         self.event(node, "interactive", "Awaiting explicit completion signal; idle is not acceptance")
         return receipt
 
-    def stop_workers(self):
+    def stop_session(self, node: str) -> dict:
         """Persist native identity before stopping. Never signal guessed/reused PIDs."""
+        marker = self.directory / f"{file_prefix(node)}.stop.json"
+        if marker.exists():
+            intent = read_json(marker)
+        else:
+            row = self.sessions.locate(node, self.sessions.inventory())
+            if row is None:
+                raise RuntimeError(f"Native {node} session missing before stop; reconcile before continuing")
+            intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
+            save_json(marker, intent)
+        if not intent["stopped"]:
+            rows = self.sessions.inventory()
+            matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
+            if matching:
+                row = self.sessions.locate(node, rows)
+                if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
+                    raise RuntimeError("Native session identity changed after stop intent; reconcile manually")
+                result = subprocess.run([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
+            # Recover stop-before-receipt without issuing another stop command.
+            rows = self.sessions.inventory()
+            if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):
+                raise RuntimeError(f"{node} termination is not established; retry after reconciliation")
+            intent["stopped"] = True
+            save_json(marker, intent)
+        return intent
+
+    def stop_workers(self):
         for node in NODES:
-            marker = self.directory / f"{node}.stop.json"
-            if marker.exists():
-                intent = read_json(marker)
-            else:
-                row = self.sessions.locate(node, self.sessions.inventory())
-                if row is None:
-                    raise RuntimeError("Worker missing before freeze; reconcile before snapshotting")
-                intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
-                save_json(marker, intent)
-            if not intent["stopped"]:
-                rows = self.sessions.inventory()
-                matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
-                if matching:
-                    row = self.sessions.locate(node, rows)
-                    if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
-                        raise RuntimeError("Native worker identity changed after stop intent; reconcile manually")
-                    result = subprocess.run([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
-                    if result.returncode != 0:
-                        raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
-                # Recover stop-before-receipt without issuing another stop command.
-                rows = self.sessions.inventory()
-                if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):
-                    raise RuntimeError("Worker termination is not established; retry freeze after reconciliation")
-                intent["stopped"] = True
-                save_json(marker, intent)
+            self.stop_session(node)
         stopped_ids = {read_json(self.directory / f"{node}.stop.json")["session_id"] for node in NODES}
         if any(row.get("sessionId") in stopped_ids and row.get("pid") for row in self.sessions.inventory()):
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")
         self.event("freeze", "stopped", "Both native workers stopped before snapshot capture")
+
+    def stop_reviewer(self):
+        """Stops only the reviewer, after its verdict is accepted. Nothing is deleted."""
+        intent = self.stop_session(REVIEWER)
+        if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in self.sessions.inventory()):
+            raise RuntimeError("A stopped reviewer was restarted; reconcile before accepting the review")
+        self.event("review", "stopped", f"Reviewer session {intent['session_id']} stopped; transcript retained and resumable")
+
+    def launch_reviewer(self, prompt: str, launch_token: str, commit: str) -> dict:
+        """The review node's own native session, recorded like a worker's launch."""
+        self.event("review", "running", "Launching or reconciling the exact native reviewer session")
+        try:
+            receipt = self.sessions.run_reviewer(prompt, launch_token, commit)
+        except Exception as error:
+            self.event("review", "blocked", str(error))
+            raise
+        self.event("review", "interactive", f"Reviewer session {receipt['session_id']} in {receipt['worktree']}; "
+                                            "awaiting its completion file, idle is not a verdict")
+        try:
+            attach_reviewer_pane(self.sessions)
+        except Exception as error:
+            # An unattended run without a Herdr tab still reviews; it just has no pane.
+            self.event("review", "detached", f"No reviewer pane: {error}")
+        return receipt
 
     def freeze(self) -> dict:
         record = self.directory / "snapshots.json"
@@ -315,8 +343,16 @@ class Pipeline:
         if review["verdict"] != "approved" or not isinstance(review["findings"], list):
             raise ValueError("Review is not approved")
         for finding in review["findings"]:
-            if not isinstance(finding, dict) or set(finding) != {"severity", "message", "disposition"} or finding["severity"] not in {"P0", "P1", "P2"} or finding["disposition"] not in {"open", "resolved", "accepted"} or not isinstance(finding["message"], str) or not finding["message"].strip():
+            # `worker` and `requirement` are optional so that reviews recorded before
+            # the reviewer became a native session still validate.
+            keys = set(finding) if isinstance(finding, dict) else set()
+            if not {"severity", "message", "disposition"} <= keys <= {"severity", "message", "disposition", "worker", "requirement"} or finding["severity"] not in {"P0", "P1", "P2"} or finding["disposition"] not in {"open", "resolved", "accepted"} or not isinstance(finding["message"], str) or not finding["message"].strip():
                 raise ValueError("Malformed review finding")
+            if finding.get("worker", "none") not in {"ui", "adapter", "both", "none"}:
+                raise ValueError("Review finding names an unknown worker")
+            requirement = finding.get("requirement")
+            if requirement is not None and (not isinstance(requirement, str) or not requirement.strip()):
+                raise ValueError("Review finding requirement must be a quote or null")
             if finding["severity"] in {"P0", "P1"} and finding["disposition"] != "resolved":
                 raise ValueError("Unresolved blocking review finding")
 
@@ -457,6 +493,8 @@ def main():
     parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer process timeout (default 30m)")
+    parser.add_argument("--reviewer-transport", choices=["native", "print"],
+                        help="Automatic mode: reviewer as an attachable native session (default) or a print-mode process")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--ui-handoff", type=Path)
     parser.add_argument("--adapter-handoff", type=Path)
@@ -507,9 +545,9 @@ def main():
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
             if args.automatic:
                 from .automatic import automatic_settings
-                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds)
-            elif args.worker_timeout_seconds or args.review_timeout_seconds:
-                parser.error("Timeouts apply to --automatic runs only; manual runs have operator-controlled lifetimes")
+                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
+            elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
+                parser.error("Automatic timeouts and reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes")
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             from types import SimpleNamespace
