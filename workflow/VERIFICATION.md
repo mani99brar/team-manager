@@ -36,6 +36,8 @@ The sidecar binds the policy SHA-256, run ID, worker ID, attempt and output comm
 
 Test check receipts require parsed counts of passed/failed/skipped tests. Browser receipts additionally require exact scenario IDs, passed status, and a screenshot artifact for each. No-test runs, failed/skipped required scenarios, missing logs/screenshots, stale revisions, duplicate IDs and modified artifact bytes block the gate. Build/typecheck checks do not require test counts.
 
+Phases gate differently. The **worker phase** verifies one lane's snapshot in isolation, so a lane's `build` and `browser` checks (which compile against contracts and a server that another lane of the same run may be changing) are executed and recorded there but do not gate; the packet's `gate.deferred_checks` lists them and the verify event says "recorded for the candidate gate". Lane-local kinds (`unit`, `contract`, `integration`) gate in both phases, and every check's argv, worktree and timeout are verified in both. The **candidate phase** runs every lane's checks on the combined revision and gates on all of them, so nothing reaches review or integration with a failing build or browser suite.
+
 All artifact paths are resolved through a **backend-owned registry**, constrained to its root and hash-checked. Agent-provided URI strings are not fetched or treated as arbitrary paths. PNG header checks are format sanity only, not image decoding or proof that an image came from a browser.
 
 ## Boundary and remaining implementation

@@ -313,7 +313,10 @@ class Pipeline:
         packet["result"]["summary"] = snap["summary"]
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
-        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or "Required tests and artifacts passed")
+        passed = "Required tests and artifacts passed"
+        if packet["gate"].get("deferred_checks"):
+            passed += "; recorded for the candidate gate: " + ", ".join(packet["gate"]["deferred_checks"])
+        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed)
         if packet["gate"]["status"] != "passed":
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
