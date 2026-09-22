@@ -25,6 +25,9 @@ playwright-report
 *.sln
 *.sw?
 
+# Pi subagent runtime (schedules, missions, run receipts)
+.pi/
+
 # Python workflow runtime
 .venv/
 __pycache__/
