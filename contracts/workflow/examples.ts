@@ -23,7 +23,9 @@ export const workerResult: WorkerResult = {
 }
 export const runSnapshot: RunSnapshot = {
   contract_version: '1.0.0', run_id: 'demo-001', status: 'running', last_sequence: 1,
-  nodes: [{ node_id: 'ui', kind: 'worker', depends_on: [], status: 'succeeded', attempt: 1, session_id: 'claude-ui-001', result_uri: 'artifact://demo-001/ui/1/result.json' }],
+  nodes: [{ node_id: 'ui', kind: 'worker', depends_on: [], status: 'succeeded', attempt: 1, session_id: 'claude-ui-001', result_uri: 'artifact://demo-001/ui/1/result.json', lane_results: [] },
+    { node_id: 'candidate', kind: 'verification', depends_on: ['ui'], status: 'succeeded', attempt: 1, session_id: null, result_uri: null,
+      lane_results: [{ worker: 'ui', attempt: 1, result_uri: 'artifact://demo-001/candidate_ui/1/result.json' }] }],
 }
 export const event: WorkflowEvent = {
   contract_version: '1.0.0', run_id: 'demo-001', event_id: 'event-1', sequence: 1,

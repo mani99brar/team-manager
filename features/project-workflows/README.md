@@ -118,7 +118,7 @@ When `WORKFLOW_VERIFICATION_PHASE=candidate`, the same scenarios must exercise t
 
 Both configs must leave existing Pi/Claude browsing usable via temporary skills fixtures. Do not use live skills or reuse a developer's server. The UI owns its dedicated test configuration under `tests/project-workflows/`; the root Playwright config is not shared worker ownership.
 
-Every scenario must assert behavior and attach its PNG using `[scenario:<id>]` and `screenshot:<id>`. Six IDs are pinned in `policy.json`. The verifier enforces their presence and successful assertions, and records whether it checked the worker or the combined candidate.
+Every scenario must assert behavior and attach its PNG using `[scenario:<id>]` and `screenshot:<id>`. Eight IDs are pinned in `policy.json` (`candidate-evidence` and `deferred-checks` cover the combined candidate's per-lane results and deferred worker-phase checks). The verifier enforces their presence and successful assertions, and records whether it checked the worker or the combined candidate.
 
 ## Failure/checkpoint exercise and limits
 

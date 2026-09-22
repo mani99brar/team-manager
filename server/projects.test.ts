@@ -1378,7 +1378,11 @@ test('a one-lane 1.3.0 export is a complete run over that lane; the excluded lan
     await writeRun(runsRoot('alpha', 'main'), { runId: 'reexported', version: '1.3.0', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets, review: reviewSection(), inputs: inputsSection({ selected_workers: ['ui', 'adapter'], excluded_workers: [] }), diffFile: DIFF })
     const old = validateRunDetail((await get(app, url('alpha', 'main', 'old'))).json())
     const reexported = validateRunDetail((await get(app, url('alpha', 'main', 'reexported'))).json())
-    assert.deepEqual(reexported.snapshot.nodes.map(node => ({ ...node, result_uri: node.result_uri?.replace('/runs/reexported/', '/runs/old/') ?? null })), old.snapshot.nodes)
+    const asOld = (uri: string) => uri.replace('/runs/reexported/', '/runs/old/')
+    assert.deepEqual(reexported.snapshot.nodes.map(node => ({
+      ...node, result_uri: node.result_uri === null ? null : asOld(node.result_uri),
+      lane_results: node.lane_results.map(lane => ({ ...lane, result_uri: asOld(lane.result_uri) })),
+    })), old.snapshot.nodes)
     assert.deepEqual(old.snapshot.nodes.filter(node => node.node_id.startsWith('launch_')).map(node => node.status), ['succeeded', 'succeeded'])
   })
 })
@@ -1411,5 +1415,57 @@ test('every successful payload conforms to the committed contract schemas', asyn
     const broken = await get(app, url('alpha', 'main', 'broken', '/results/ui/1'))
     assertError(broken, 500, 'RESULT_INVALID')
     assert.ok(!broken.body.includes('/absolute/leak.ts'))
+  })
+})
+
+test('the candidate node links every lane\'s combined result in lane order; no other node carries lane results', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    await writeRun(rootDir, { runId: 'reviewed', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json',
+      bundle: '/synthetic/review-bundle.json', review: { reviewer: 'claude-reviewer', decision: 'approve' } },
+      next: ['approval'], events: reviewedEvents, updated: T2,
+      packets: [{ node: 'ui' }, { node: 'adapter' }, { node: 'ui', phase: 'candidate' }, { node: 'adapter', phase: 'candidate' }, { node: 'adapter', phase: 'candidate', attempt: 2 }] })
+    await writeRun(rootDir, { runId: 'verifying', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json' },
+      next: ['candidate'], events: reviewedEvents.slice(0, 7), packets: [{ node: 'ui' }, { node: 'adapter' }] })
+    const reviewed = validateRunDetail((await get(app, url('alpha', 'main', 'reviewed'))).json())
+    const candidate = reviewed.snapshot.nodes.find(node => node.node_id === 'candidate')!
+    assert.equal(candidate.status, 'succeeded')
+    assert.deepEqual(candidate.lane_results, [
+      { worker: 'ui', attempt: 1, result_uri: '/api/projects/alpha/workflows/main/runs/reviewed/results/candidate_ui/1' },
+      { worker: 'adapter', attempt: 2, result_uri: '/api/projects/alpha/workflows/main/runs/reviewed/results/candidate_adapter/2' },
+    ], 'one link per lane, in lane order, at the latest candidate attempt')
+    assert.ok(reviewed.snapshot.nodes.filter(node => node.node_id !== 'candidate').every(node => node.lane_results.length === 0))
+    // Each link serves that lane's combined result under the candidate route.
+    const served = await get(app, candidate.lane_results[0].result_uri)
+    assert.equal(served.status, 200, served.body)
+    assert.equal(validateWorkerResult(served.json()).node_id, 'candidate_ui')
+    // Before the candidate phase ran there is nothing to link.
+    const verifying = validateRunDetail((await get(app, url('alpha', 'main', 'verifying'))).json())
+    assert.deepEqual(verifying.snapshot.nodes.find(node => node.node_id === 'candidate')!.lane_results, [])
+  })
+})
+
+test('a served worker result names the checks its gate deferred to the candidate, by executed index; nothing else changes', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const deferred = (packet: Record<string, unknown>) => {
+      const result = packet.result as { checks: { exit_code: number }[] }
+      result.checks[0].exit_code = 2
+      ;(packet.gate as Record<string, unknown>).deferred_checks = ['frontend-build']
+      ;(packet.evidence as Record<string, unknown>).checks = [{ id: 'frontend-build', worker_check_index: 0, tests: null, scenarios: [] }, { id: 'frontend-unit', worker_check_index: 1, tests: { passed: 3, failed: 0, skipped: 0 }, scenarios: [] }]
+    }
+    await writeRun(rootDir, { runId: 'reviewed', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json',
+      bundle: '/synthetic/review-bundle.json', review: { reviewer: 'claude-reviewer', decision: 'approve' } },
+      next: ['approval'], events: reviewedEvents, updated: T2,
+      packets: [{ node: 'ui', artifacts: [{ id: 'log-0-ui', kind: 'log', content: 'build log\n' }, { id: 'log-1-ui', kind: 'log', content: 'unit log\n' }], mutate: deferred },
+        { node: 'adapter' }, { node: 'ui', phase: 'candidate' }, { node: 'adapter', phase: 'candidate' }] })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'reviewed'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'verify_ui')!.status, 'succeeded', 'the gate passed: deferred checks do not gate the worker phase')
+    const worker = validateWorkerResult((await get(app, url('alpha', 'main', 'reviewed', '/results/ui/1'))).json())
+    assert.deepEqual(worker.deferred_checks, [{ id: 'frontend-build', check_index: 0 }])
+    assert.equal(worker.checks[0].exit_code, 2, 'the executed exit code is served as captured')
+    assert.equal(worker.status, 'succeeded')
+    const combined = validateWorkerResult((await get(app, url('alpha', 'main', 'reviewed', '/results/candidate_ui/1'))).json())
+    assert.equal(combined.deferred_checks, undefined, 'a gate without deferred checks serves no field at all')
   })
 })

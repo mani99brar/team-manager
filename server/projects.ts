@@ -207,8 +207,13 @@ const planSchema = z.object({ run_id: id, base_commit: sha })
 const packetSchema = z.object({
   phase: z.enum(['worker', 'candidate']),
   result: z.record(z.string(), z.unknown()),
-  gate: z.object({ status: z.string(), reasons: z.array(z.string()) }),
+  gate: z.object({ status: z.string(), reasons: z.array(z.string()), deferred_checks: z.array(z.string()).optional() }),
+  /** Evidence receipts map check IDs to `result.checks` entries; read only to name deferred checks. */
+  evidence: z.object({ checks: z.array(z.object({ id: z.string(), worker_check_index: z.number().int().nonnegative() })) }).optional(),
 })
+
+/** A check the gate recorded but did not gate on in the packet's phase, by its executed `result.checks` index. */
+type DeferredCheck = { id: string; check_index: number }
 
 type RunExport = z.infer<typeof exportSchema>
 type RawEvent = z.infer<typeof rawEventSchema>
@@ -218,7 +223,7 @@ type InputsSection = z.infer<typeof inputsSectionSchema>
 
 /** A registered packet after loading: either verified content or the reason it cannot be trusted. */
 type LoadedPacket = PacketRegistration & (
-  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown> }
+  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[] }
   | { ok: false; reason: string }
 )
 
@@ -830,7 +835,9 @@ export class RunStore {
       const packet = packetSchema.safeParse(parsed)
       if (!packet.success) { packets.push({ ...registration, ok: false, reason: `packet ${issueText(packet.error)}` }); continue }
       if (packet.data.phase !== registration.phase) { packets.push({ ...registration, ok: false, reason: 'packet phase differs from its registration' }); continue }
-      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result })
+      const deferredIds = new Set(packet.data.gate.deferred_checks ?? [])
+      const deferred = (packet.data.evidence?.checks ?? []).filter(check => deferredIds.has(check.id)).map(check => ({ id: check.id, check_index: check.worker_check_index }))
+      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred })
     }
     return packets
   }
@@ -985,7 +992,14 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     else status = 'pending'
     if (status !== 'pending' && attempt === 0) attempt = 1
     if (status === 'pending') { attempt = 0; session_id = null; result_uri = null }
-    return { node_id: node.node_id, kind: node.kind, depends_on: [...node.depends_on], status, attempt, session_id, result_uri }
+    // The combined candidate holds one verified result per lane; link each so its evidence (screenshots included) is reachable.
+    const lane_results = node.node_id === 'candidate' && status !== 'pending'
+      ? map.lanes.flatMap(lane => {
+        const packet = latestPacket('candidate', lane)
+        return packet ? [{ worker: lane, attempt: packet.attempt, result_uri: resultRoute(scope, state.run_id, 'candidate', lane, packet.attempt) }] : []
+      })
+      : []
+    return { node_id: node.node_id, kind: node.kind, depends_on: [...node.depends_on], status, attempt, session_id, result_uri, lane_results }
   })
   const statuses = new Set(nodes.map(node => node.status))
   const integrated = hasEvidence(state, 'integrate', map)
@@ -1017,6 +1031,7 @@ function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet
     contract_version: '1.0.0', run_id: runId, node_id: nodeId, attempt: packet.attempt, session_id: raw.session_id,
     status: passed ? raw.status : 'failed', base_commit: raw.base_commit, output_commit: raw.output_commit,
     changed_files: raw.changed_files, checks, open_assumptions: assumptions, artifacts,
+    ...(packet.deferred.length > 0 ? { deferred_checks: packet.deferred } : {}),
     summary: typeof raw.summary === 'string' ? redactPaths(raw.summary) : raw.summary,
     error: passed ? raw.error : { code: 'VERIFICATION_BLOCKED', message: redactPaths(packet.gate.reasons.join('; ')) || 'Verification did not pass.', retryable: true },
   }

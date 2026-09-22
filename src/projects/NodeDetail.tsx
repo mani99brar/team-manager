@@ -77,14 +77,16 @@ function ScreenshotArtifact({ scope, artifactId }: { scope: RunScope; artifactId
   )
 }
 
-function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: WorkerResult; node: SnapshotNode }) {
+function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { scope: RunScope; result: WorkerResult; node: SnapshotNode; testId?: string }) {
   const artifactsById = new Map(result.artifacts.map(artifact => [artifact.artifact_id, artifact]))
   const checkLogs = new Set(result.checks.map(check => check.log_artifact_id))
   const screenshots = result.artifacts.filter(artifact => artifact.kind === 'screenshot')
   // Check logs are shown with their check; everything else that is not a screenshot is listed here.
   const others = result.artifacts.filter(artifact => artifact.kind !== 'screenshot' && !checkLogs.has(artifact.artifact_id))
+  // Checks the gate recorded on this isolated snapshot but gates only at the combined candidate (build, browser).
+  const deferred = new Map((result.deferred_checks ?? []).map(entry => [entry.check_index, entry.id]))
   return (
-    <div className="worker-evidence" data-testid="worker-result">
+    <div className="worker-evidence" data-testid={testId}>
       <dl className="projects-facts">
         <div><dt>Result status</dt><dd><StatusBadge status={result.status} /></dd></div>
         <div><dt>Result attempt</dt><dd>{result.attempt}{result.attempt !== node.attempt ? ` (graph node attempt is ${node.attempt})` : ''}</dd></div>
@@ -102,17 +104,24 @@ function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: Work
 
       <section className="evidence-section" aria-labelledby="evidence-checks">
         <h4 id="evidence-checks">Checks actually executed</h4>
+        {deferred.size > 0 && (
+          <p className="projects-notice-inline" data-testid="deferred-checks">
+            Deferred checks: {[...deferred.values()].join(', ')} — executed and recorded on this isolated lane snapshot, but gated only at the combined candidate, which verifies the whole application.
+          </p>
+        )}
         {result.checks.length === 0 ? (
           <p className="projects-muted" data-testid="checks-empty">No checks were recorded for this result.</p>
         ) : (
           <ul className="evidence-list" data-testid="checks-list">
             {result.checks.map((check, index) => {
               const log = artifactsById.get(check.log_artifact_id)
+              const isDeferred = deferred.has(index)
+              const exitText = check.exit_code === 0 ? 'exit 0' : `exit ${check.exit_code}`
               return (
-                <li key={`${check.log_artifact_id}-${index}`} id={`check-${index}`} tabIndex={-1} className={check.exit_code === 0 ? 'check check-passed' : 'check check-failed'} data-exit-code={check.exit_code}>
+                <li key={`${check.log_artifact_id}-${index}`} id={`check-${index}`} tabIndex={-1} className={isDeferred ? 'check check-deferred' : check.exit_code === 0 ? 'check check-passed' : 'check check-failed'} data-exit-code={check.exit_code} data-deferred={isDeferred ? 'true' : undefined}>
                   <div className="check-head">
                     <code className="check-command">{check.command}</code>
-                    <span className="check-exit">{check.exit_code === 0 ? 'exit 0' : `exit ${check.exit_code} (failed)`}</span>
+                    <span className="check-exit">{isDeferred ? `${exitText} · recorded, gated at the combined candidate` : check.exit_code === 0 ? exitText : `${exitText} (failed)`}</span>
                   </div>
                   <p className="projects-muted check-meta">
                     {formatTime(check.started_at)} → {formatTime(check.finished_at)} · cwd <code>{check.cwd}</code>
@@ -152,7 +161,9 @@ function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: Work
 
       <section className="evidence-section" aria-labelledby="evidence-screenshots">
         <h4 id="evidence-screenshots">Screenshots</h4>
-        {screenshots.length === 0 ? (
+        {screenshots.length === 0 && deferred.size > 0 ? (
+          <p className="projects-muted" data-testid="screenshots-deferred">No screenshot artifacts were published for this isolated lane run; browser evidence is gated and shown at the combined candidate.</p>
+        ) : screenshots.length === 0 ? (
           <p className="projects-muted" data-testid="screenshots-empty">No screenshot artifacts were published.</p>
         ) : (
           <ul className="evidence-list evidence-screenshots" data-testid="screenshots">
@@ -184,6 +195,24 @@ function WorkerEvidence({ scope, result, node }: { scope: RunScope; result: Work
         )}
       </section>
     </div>
+  )
+}
+
+/** One lane's result of the combined candidate, fetched through the run's scoped results route like any worker result. */
+function LaneResult({ scope, node, lane, refreshToken }: { scope: RunScope; node: SnapshotNode; lane: SnapshotNode['lane_results'][number]; refreshToken: number }) {
+  const resultPath = scopedResultPath(scope, lane.result_uri)
+  const load = useCallback((signal: AbortSignal) => fetchWorkerResult(scope, resultPath!, signal), [scope, resultPath])
+  const { state, reload } = useResource(resultPath, load, refreshToken)
+  return (
+    <section className="lane-result" aria-label={`Lane ${lane.worker}`} data-testid={`lane-result:${lane.worker}`}>
+      <h5>Lane {lane.worker} <span className="projects-muted">· candidate attempt {lane.attempt}</span></h5>
+      {resultPath === null && (
+        <p className="projects-error-inline" role="alert">The result link <code>{lane.result_uri}</code> is outside this run's results route and was not fetched.</p>
+      )}
+      {resultPath !== null && state.status === 'loading' && <LoadingPanel>Loading the {lane.worker} lane result…</LoadingPanel>}
+      {resultPath !== null && state.status === 'error' && <ErrorPanel error={state.error} what={`The ${lane.worker} lane result`} onRetry={reload} />}
+      {resultPath !== null && state.status === 'ready' && <WorkerEvidence scope={scope} result={state.data} node={node} testId={`lane-result-evidence:${lane.worker}`} />}
+    </section>
   )
 }
 
@@ -279,7 +308,13 @@ export function NodeDetail({ scope, definition, definitionNodes, node, events, o
           <ReviewPanel scope={scope} node={node} definitionNodes={definitionNodes} inputs={inputs} refreshToken={refreshToken} onNavigate={onNavigate} onOpenRequirement={onOpenRequirement} />
         ) : (
           <>
-            {node.result_uri === null && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
+            {node.lane_results.length > 0 && (
+              <div className="lane-results" data-testid="lane-results">
+                <p className="projects-muted">The combined candidate verified every lane on one revision; each lane's result, with its checks and screenshots, is shown below.</p>
+                {node.lane_results.map(lane => <LaneResult key={lane.worker} scope={scope} node={node} lane={lane} refreshToken={refreshToken} />)}
+              </div>
+            )}
+            {node.result_uri === null && node.lane_results.length === 0 && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
             {node.result_uri !== null && resultPath === null && (
               <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
                 The result link <code>{node.result_uri}</code> is outside this run's results route and was not fetched.

@@ -45,6 +45,12 @@ Cross-field validation requires unique artifact IDs, a referenced log artifact f
 
 The join additionally verifies run/node/attempt identity, matching base revision, file ownership, complete diff against base, output commit availability, artifact hashes and required gate outcomes. References are not evidence until resolved and verified. Artifacts must be immutable and retained across process restarts. `artifact://` is an opaque example locator; the backend resolves it to authorized content, not an arbitrary browser-fetchable URL.
 
+### Phases, deferred checks and the candidate's lane results
+
+The controller verifies each lane's snapshot in isolation (the worker phase) and then every lane on one combined revision (the candidate phase). A lane's `build` and `browser` checks need the whole application, so on the isolated snapshot they are executed and recorded but do not gate; the packet gate lists them in `deferred_checks`, and the adapter serves them on that `workerResult` as `deferred_checks[] = {id, check_index}` (`check_index` names the entry of `checks` that ran). The field is absent when nothing was deferred, and the immutable capture itself never carries it. The candidate phase gates on every check.
+
+Because the combined candidate holds one verified result per lane, its `runSnapshot` node carries `lane_results[] = {worker, attempt, result_uri}` in lane order at the latest candidate attempt, each served under `results/candidate_<lane>/<attempt>`; every other node has an empty `lane_results`.
+
 ## Events, controls and recovery
 
 The backend persists events with a unique event ID and strictly increasing per-run `sequence`. Deliveries may repeat: consumers deduplicate by event ID. Fetch a snapshot at `last_sequence`, then replay events after that cursor; preserve replay across reconnects. The transport (SSE/WebSocket/HTTP) is deliberately not fixed yet.

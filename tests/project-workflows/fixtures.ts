@@ -258,6 +258,22 @@ export function uiResult(runId: string): WorkerResult {
   })
 }
 
+/**
+ * The ui lane verified in isolation while the adapter lane changes the contract it builds against: the build
+ * failed and the browser suite could not load, so there are no screenshots. Both checks are recorded and gated
+ * at the combined candidate; the unit check still gates here.
+ */
+export function uiDeferredResult(runId: string): WorkerResult {
+  const base = uiResult(runId)
+  return validateWorkerResult({
+    ...base,
+    checks: base.checks.map((check, index) => index === 0 ? { ...check, exit_code: 2 } : index === 2 ? { ...check, exit_code: 1 } : check),
+    artifacts: base.artifacts.filter(artifact => artifact.kind !== 'screenshot'),
+    deferred_checks: [{ id: 'frontend-build', check_index: 0 }, { id: 'project-workflows-browser', check_index: 2 }],
+    summary: 'Trusted worker check capture of the isolated UI worktree; the build and browser checks are gated at the combined candidate.',
+  })
+}
+
 export function adapterResult(runId: string, failed: boolean): WorkerResult {
   return validateWorkerResult({
     contract_version: '1.0.0', run_id: runId, node_id: 'adapter', attempt: 1, session_id: ADAPTER_SESSION,
@@ -298,7 +314,7 @@ export function laneResult(lane: string, runId: string): WorkerResult {
 
 // ---- Runs ----------------------------------------------------------------------------------------------
 
-type NodeState = { status: RunDetail['snapshot']['nodes'][number]['status']; attempt: number; session?: string | null; result?: string | null; review?: number }
+type NodeState = { status: RunDetail['snapshot']['nodes'][number]['status']; attempt: number; session?: string | null; result?: string | null; review?: number; lanes?: { worker: string; attempt: number }[] }
 
 function runDetail(runId: string, status: RunDetail['summary']['status'], pinned: WorkflowDefinition, createdAt: string, updatedAt: string, states: Record<string, NodeState>, lastSequence: number): RunDetail {
   const resultPath = (node: string, attempt: number) => `${apiRunPath(runId, pinned.workflow_id)}/results/${node}/${attempt}`
@@ -316,6 +332,7 @@ function runDetail(runId: string, status: RunDetail['summary']['status'], pinned
           node_id: node.node_id, kind: node.kind, depends_on: node.depends_on, status: state.status, attempt: state.attempt,
           session_id: state.session ?? null,
           result_uri: state.review ? `${apiRunPath(runId, pinned.workflow_id)}/reviews/${state.review}` : state.result ? resultPath(state.result, state.attempt) : null,
+          lane_results: (state.lanes ?? []).map(lane => ({ worker: lane.worker, attempt: lane.attempt, result_uri: resultPath(`candidate_${lane.worker}`, lane.attempt) })),
         }
       }),
     },
@@ -325,13 +342,15 @@ function runDetail(runId: string, status: RunDetail['summary']['status'], pinned
 const done = (session?: string, result?: string): NodeState => ({ status: 'succeeded', attempt: 1, session: session ?? null, result: result ?? null })
 /** Both launch nodes finished and, like the real adapter, link to the worker's verified result. */
 const launched = { launch_ui: done(UI_SESSION, 'ui'), launch_adapter: done(ADAPTER_SESSION, 'adapter'), handoff: done() }
-const verified = { ...launched, verify_ui: done(undefined, 'ui'), verify_adapter: done(undefined, 'adapter'), candidate: done() }
+/** The candidate node links every lane's combined result, like the real adapter. */
+const candidateOf = (lanes: readonly string[]): NodeState => ({ ...done(), lanes: lanes.map(lane => ({ worker: lane, attempt: 1 })) })
+const verified = { ...launched, verify_ui: done(undefined, 'ui'), verify_adapter: done(undefined, 'adapter'), candidate: candidateOf(['ui', 'adapter']) }
 /** Every selected lane launched, froze and verified, then the candidate passed: the per-lane node states of a configured run. */
 const lanesVerified = (lanes: readonly string[]): Record<string, NodeState> => ({
   ...Object.fromEntries(lanes.map(lane => [`launch_${lane}`, done(LANE_SESSIONS[lane], lane)])),
   handoff: done(),
   ...Object.fromEntries(lanes.map(lane => [`verify_${lane}`, done(undefined, lane)])),
-  candidate: done(),
+  candidate: candidateOf(lanes),
 })
 
 export const runDetails: Record<string, RunDetail> = {
@@ -367,14 +386,17 @@ export const runLists: Record<string, { runs: RunDetail['summary'][]; next_curso
   next_cursor: null,
 }]))
 
+/** The combined candidate's per-lane results, served under `results/candidate_<lane>/<attempt>` like the real adapter. */
+const candidateResults = (runId: string, lanes: readonly string[]) => Object.fromEntries(lanes.map(lane => [`candidate_${lane}/1`, laneResult(lane, runId)]))
+
 export const workerResults: Record<string, Record<string, WorkerResult>> = {
-  [RUN_SUCCEEDED]: { 'ui/1': uiResult(RUN_SUCCEEDED), 'adapter/1': adapterResult(RUN_SUCCEEDED, false) },
+  [RUN_SUCCEEDED]: { 'ui/1': uiResult(RUN_SUCCEEDED), 'adapter/1': adapterResult(RUN_SUCCEEDED, false), ...candidateResults(RUN_SUCCEEDED, ['ui', 'adapter']) },
   [RUN_FAILED]: { 'ui/1': uiResult(RUN_FAILED), 'ui/2': { ...uiResult(RUN_FAILED), attempt: 2 }, 'adapter/1': adapterResult(RUN_FAILED, true) },
-  [RUN_AWAITING]: { 'ui/1': uiResult(RUN_AWAITING), 'adapter/1': adapterResult(RUN_AWAITING, false) },
-  [RUN_BLOCKED]: { 'ui/1': uiResult(RUN_BLOCKED), 'adapter/1': adapterResult(RUN_BLOCKED, false) },
-  [RUN_LEGACY]: { 'ui/1': uiResult(RUN_LEGACY), 'adapter/1': adapterResult(RUN_LEGACY, false) },
-  [RUN_THREE_LANES]: Object.fromEntries(THREE_LANES.map(lane => [`${lane}/1`, laneResult(lane, RUN_THREE_LANES)])),
-  [RUN_ONE_LANE]: Object.fromEntries(ONE_LANE.map(lane => [`${lane}/1`, laneResult(lane, RUN_ONE_LANE)])),
+  [RUN_AWAITING]: { 'ui/1': uiResult(RUN_AWAITING), 'adapter/1': adapterResult(RUN_AWAITING, false), ...candidateResults(RUN_AWAITING, ['ui', 'adapter']) },
+  [RUN_BLOCKED]: { 'ui/1': uiDeferredResult(RUN_BLOCKED), 'adapter/1': adapterResult(RUN_BLOCKED, false), ...candidateResults(RUN_BLOCKED, ['ui', 'adapter']) },
+  [RUN_LEGACY]: { 'ui/1': uiResult(RUN_LEGACY), 'adapter/1': adapterResult(RUN_LEGACY, false), ...candidateResults(RUN_LEGACY, ['ui', 'adapter']) },
+  [RUN_THREE_LANES]: { ...Object.fromEntries(THREE_LANES.map(lane => [`${lane}/1`, laneResult(lane, RUN_THREE_LANES)])), ...candidateResults(RUN_THREE_LANES, THREE_LANES) },
+  [RUN_ONE_LANE]: { ...Object.fromEntries(ONE_LANE.map(lane => [`${lane}/1`, laneResult(lane, RUN_ONE_LANE)])), ...candidateResults(RUN_ONE_LANE, ONE_LANE) },
 }
 
 function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {

@@ -43,7 +43,9 @@ def three_lane_policy(fail_marker: Path | None = None, drill: dict | None = None
     docs_check = ("import pathlib, sys\n"
                   f"marker = pathlib.Path({str(fail_marker or '/nonexistent/marker')!r})\n"
                   "if marker.exists():\n    marker.unlink()\n    sys.exit(1)\n"
-                  "assert pathlib.Path('docs/docs.md').exists()")
+                  "assert pathlib.Path('docs/docs.md').exists()\n"
+                  # A lane-local (unit) kind: build kinds are recorded but gated only at the candidate.
+                  "print('Ran 1 test in 0.001s\\n\\nOK')")
     policy = {"version": "1.2.0", "feature": "Three configured lanes", "independent_review": True, "integration_approval": True,
               "max_verification_attempts": 3,
               "workers": [
@@ -51,8 +53,8 @@ def three_lane_policy(fail_marker: Path | None = None, drill: dict | None = None
                       {"id": "ui-build", "kind": "build", "argv": ["python", "-c", "from pathlib import Path; assert Path('ui.txt').read_text() == 'after'"], "timeout_seconds": 10, "scenarios": []}]},
                   {"node_id": "adapter", "role": "backend", "required_check_kinds": ["unit"], "owned_paths": ["backend.py"], "checks": [
                       {"id": "unit", "kind": "unit", "argv": ["python", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], "timeout_seconds": 10, "scenarios": []}]},
-                  {"node_id": "docs", "role": "technical writer", "required_check_kinds": ["build"], "owned_paths": ["docs"], "checks": [
-                      {"id": "docs-build", "kind": "build", "argv": ["python", "-c", docs_check], "timeout_seconds": 10, "scenarios": []}]},
+                  {"node_id": "docs", "role": "technical writer", "required_check_kinds": ["unit"], "owned_paths": ["docs"], "checks": [
+                      {"id": "docs-unit", "kind": "unit", "argv": ["python", "-c", docs_check], "timeout_seconds": 10, "scenarios": []}]},
               ]}
     if drill:
         policy["failure_drill"] = drill
@@ -170,7 +172,7 @@ class ThreeLaneRun(LaneRun):
         self.assertEqual(sorted(exported["values"]["packets"]), sorted(LANES))
         self.assertEqual((exported["inputs"]["selected_workers"], exported["inputs"]["excluded_workers"]), (LANES, []))
         self.assertEqual([(lane, worker["role"], worker["required_check_kinds"]) for lane, worker in exported["inputs"]["workers"].items()],
-                         [("ui", "frontend", ["build"]), ("adapter", "backend", ["unit"]), ("docs", "technical writer", ["build"])])
+                         [("ui", "frontend", ["build"]), ("adapter", "backend", ["unit"]), ("docs", "technical writer", ["unit"])])
         self.assertEqual(exported["next"], [])
         html = (self.directory / "report.html").read_text()
         for node in LANES:

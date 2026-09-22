@@ -58,6 +58,7 @@ import {
   rawInputsSection,
   rawReviewSection,
   sha256,
+  uiDeferredResult,
   uiResult,
   uiTask,
   type ArtifactFile,
@@ -83,7 +84,7 @@ function receipt(node: string, runDir: string, sessionId: string, requestedAt: s
 }
 
 /** One verification packet in the `workflow/checks.py` layout; returns its registry entry. */
-function writePacket(runDir: string, phase: 'worker' | 'candidate', node: string, attempt: number, result: WorkerResult, files: ArtifactFile[], gate: { status: string; reasons: string[] }) {
+function writePacket(runDir: string, phase: 'worker' | 'candidate', node: string, attempt: number, result: WorkerResult, files: ArtifactFile[], gate: { status: string; reasons: string[]; deferred_checks?: string[] }) {
   const directory = join(runDir, 'verification', phase, node, String(attempt))
   const artifactsDir = join(directory, 'artifacts')
   mkdirSync(artifactsDir, { recursive: true })
@@ -95,9 +96,12 @@ function writePacket(runDir: string, phase: 'worker' | 'candidate', node: string
   }
   const worktree = join(directory, 'worktree')
   const expected = { run_id: result.run_id, node_id: node, attempt, base_commit: BASE_COMMIT, output_commit: result.output_commit ?? BASE_COMMIT, verification_cwd: worktree }
+  // The immutable capture never carries `deferred_checks`; the adapter derives them from the gate when serving.
+  const capture: Omit<WorkerResult, 'deferred_checks'> & { deferred_checks?: unknown } = { ...result }
+  delete capture.deferred_checks
   const packet = {
     phase, expected,
-    result: { ...result, checks: result.checks.map(check => ({ ...check, cwd: worktree })) },
+    result: { ...capture, checks: capture.checks.map(check => ({ ...check, cwd: worktree })) },
     evidence: {
       version: '1.0.0', policy_sha256: 'e'.repeat(64), run_id: result.run_id, node_id: node, attempt, output_commit: expected.output_commit,
       checks: result.checks.map((_check, index) => ({ id: `check-${index}`, worker_check_index: index, tests: null, scenarios: [] })),
@@ -175,7 +179,9 @@ export function seedCandidate(root: string): string {
 
   const packetSet = (runDir: string, phases: { phase: 'worker' | 'candidate'; node: string; attempt: number; result: WorkerResult; blocked?: string }[]) =>
     phases.map(entry => writePacket(runDir, entry.phase, entry.node, entry.attempt, entry.result, LANE_ARTIFACTS[entry.node],
-      entry.blocked ? { status: 'blocked', reasons: [entry.blocked] } : { status: 'passed', reasons: [] }))
+      entry.blocked ? { status: 'blocked', reasons: [entry.blocked] }
+        // Seeded evidence receipts are `check-<index>`, so a deferred check is named by its executed index.
+        : { status: 'passed', reasons: [], ...(entry.result.deferred_checks ? { deferred_checks: entry.result.deferred_checks.map(check => `check-${check.check_index}`) } : {}) }))
   const fullPackets = (runId: string, runDir: string) => packetSet(runDir, [
     { phase: 'worker', node: 'ui', attempt: 1, result: uiResult(runId) },
     { phase: 'worker', node: 'adapter', attempt: 1, result: adapterResult(runId, false) },
@@ -269,7 +275,12 @@ export function seedCandidate(root: string): string {
       internalEvent(7, T3, 'review', 'running', 'Launching the print-mode reviewer'),
       internalEvent(8, T3, 'review', 'blocked', BLOCKED_MESSAGE),
     ],
-    packets: runDir => fullPackets(RUN_BLOCKED, runDir),
+    packets: runDir => packetSet(runDir, [
+      { phase: 'worker', node: 'ui', attempt: 1, result: uiDeferredResult(RUN_BLOCKED) },
+      { phase: 'worker', node: 'adapter', attempt: 1, result: adapterResult(RUN_BLOCKED, false) },
+      { phase: 'candidate', node: 'ui', attempt: 1, result: uiResult(RUN_BLOCKED) },
+      { phase: 'candidate', node: 'adapter', attempt: 1, result: adapterResult(RUN_BLOCKED, false) },
+    ]),
     review: rawReviewSection(RUN_BLOCKED, leakFor(runsRoot, RUN_BLOCKED)),
     inputs: rawInputsSection(RUN_BLOCKED, leakFor(runsRoot, RUN_BLOCKED)),
   })

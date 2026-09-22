@@ -131,7 +131,7 @@ class ExportSectionTests(unittest.TestCase):
         self.assertEqual(ui["owned_paths"], policy["workers"][0]["owned_paths"])
         browser = next(check for check in ui["checks"] if check["kind"] == "browser")
         self.assertEqual(browser["command"], "npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts")
-        self.assertEqual(len(browser["scenarios"]), 6)
+        self.assertEqual(len(browser["scenarios"]), len(next(check for check in policy["workers"][0]["checks"] if check["kind"] == "browser")["scenarios"]))
         self.assertEqual(ui["launch"], {"session_id": "uuuuuuuu-1111-4111-8111-111111111111", "launch_token": plan["nodes"]["ui"]["session_id"],
                                         "launch_requested_at": "2026-09-21T14:33:25.331982Z", "native_started_at": 1790001207771,
                                         "observed_state": "working", "status": "attached_session_available", "launcher_invocations": 1, "background_id": "uuuuuuuu"})
