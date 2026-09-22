@@ -1,41 +1,167 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "feature": "Project-scoped workflow graph and run viewer",
   "independent_review": true,
   "integration_approval": true,
   "max_verification_attempts": 3,
-  "failure_drill": {"node_id": "adapter", "phase": "worker", "attempt": 1},
-  "setup": [{"argv": ["npm", "ci"], "timeout_seconds": 600}],
+  "failure_drill": {
+    "node_id": "adapter",
+    "phase": "worker",
+    "attempt": 1
+  },
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
   "workers": [
     {
-      "node_id": "ui", "role": "frontend",
-      "owned_paths": ["src/App.tsx", "src/App.css", "src/graph", "src/projects", "src/index.css", "tests/project-workflows"],
+      "node_id": "ui",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/App.tsx",
+        "src/App.css",
+        "src/graph",
+        "src/projects",
+        "src/index.css",
+        "tests/project-workflows"
+      ],
       "checks": [
-        {"id": "frontend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []},
-        {"id": "frontend-unit-regression", "kind": "unit", "argv": ["npm", "run", "test:unit"], "timeout_seconds": 180, "scenarios": []},
         {
-          "id": "project-workflows-browser", "kind": "browser",
-          "argv": ["npx", "--no-install", "playwright", "test", "--config=tests/project-workflows/playwright.config.ts"],
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
           "timeout_seconds": 300,
           "scenarios": [
-            {"id": "projects-navigation", "description": "Pi and Claude remain usable and Projects opens registered projects"},
-            {"id": "workflow-run-graph", "description": "Select a project, workflow and run and inspect the pinned graph"},
-            {"id": "run-evidence", "description": "Inspect worker checks, changed files, assumptions, logs and screenshot evidence"},
-            {"id": "empty-states", "description": "Distinguish no workflows from no runs"},
-            {"id": "failed-and-paused", "description": "Show failure and awaiting-approval state without implying completion"},
-            {"id": "request-errors", "description": "Show an actionable API error rather than silently substituting fixtures"}
+            {
+              "id": "projects-navigation",
+              "description": "Pi and Claude remain usable and Projects opens registered projects"
+            },
+            {
+              "id": "workflow-run-graph",
+              "description": "Select a project, workflow and run and inspect the pinned graph"
+            },
+            {
+              "id": "run-evidence",
+              "description": "Inspect worker checks, changed files, assumptions, logs and screenshot evidence"
+            },
+            {
+              "id": "empty-states",
+              "description": "Distinguish no workflows from no runs"
+            },
+            {
+              "id": "failed-and-paused",
+              "description": "Show failure and awaiting-approval state without implying completion"
+            },
+            {
+              "id": "request-errors",
+              "description": "Show an actionable API error rather than silently substituting fixtures"
+            },
+            {
+              "id": "candidate-evidence",
+              "description": "The combined candidate node shows every lane's verified result with its checks and screenshots"
+            },
+            {
+              "id": "deferred-checks",
+              "description": "A lane verified in isolation shows its deferred build and browser checks as gated at the combined candidate, not as failures"
+            }
           ]
         }
       ]
     },
     {
-      "node_id": "adapter", "role": "backend",
-      "owned_paths": ["server", "config/projects.example.json"],
+      "node_id": "adapter",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit"
+      ],
+      "owned_paths": [
+        "server",
+        "config/projects.example.json"
+      ],
       "checks": [
-        {"id": "backend-unit", "kind": "unit", "argv": ["npx", "--no-install", "tsx", "--test", "server/projects.test.ts"], "timeout_seconds": 180, "scenarios": []},
-        {"id": "backend-regression", "kind": "unit", "argv": ["npm", "run", "test:unit"], "timeout_seconds": 180, "scenarios": []},
-        {"id": "shared-contract", "kind": "contract", "argv": ["npm", "run", "test:contracts"], "timeout_seconds": 120, "scenarios": []},
-        {"id": "backend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []}
+        {
+          "id": "backend-unit",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "backend-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "backend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
       ]
     }
   ]

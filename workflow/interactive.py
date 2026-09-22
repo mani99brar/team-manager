@@ -11,14 +11,14 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from .live import SessionState
 from .observer import herdr
-from .sessions import ClaudeSessions, NODES, git, plan_digest, prepare, read_json, run_lock, save_json
+from .sessions import ClaudeSessions, SessionState, git, plan_digest, prepare, read_json, run_lock, save_json
 
 REVIEW = "review"
 
@@ -147,7 +147,7 @@ class InteractiveSessions(ClaudeSessions):
         return receipt
 
     def run(self, node: str) -> dict:
-        if node not in NODES or self.plan.get("mode") != "interactive":
+        if node not in self.workers or self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive worker plan")
         info = self.plan["nodes"][node]
         path = self.directory / f"{node}.interactive.json"
@@ -229,7 +229,7 @@ class InteractiveSessions(ClaudeSessions):
     def status(self) -> dict:
         rows = self.inventory()
         result = {}
-        nodes = NODES + ((REVIEW,) if (self.directory / "review.interactive.json").exists() else ())
+        nodes = [*self.workers] + ([REVIEW] if (self.directory / "review.interactive.json").exists() else [])
         for node in nodes:
             path = self.directory / f"{node}.interactive.json"
             row = self.locate(node, rows)
@@ -243,25 +243,32 @@ def write_private(path: Path, text: str) -> None:
     os.chmod(path, 0o600)
 
 
-def build_interactive_graph(checkpointer, sessions: InteractiveSessions):
-    def ui(_state: SessionState):
-        return {"ui": sessions.run("ui")}
+def merge_lanes(left: dict | None, right: dict | None) -> dict:
+    return {**(left or {}), **(right or {})}
 
-    def adapter(_state: SessionState):
-        return {"adapter": sessions.run("adapter")}
+
+def build_interactive_graph(checkpointer, sessions: InteractiveSessions):
+    """Launch-only graph: one `launch_<lane>` node per lane of the plan, then a human handoff interrupt."""
+    def launcher(node):
+        return lambda _state: {"lanes": {node: sessions.run(node)}}
 
     def handoff(state: SessionState):
         interrupt({"kind": "interactive_workers_active", "run_id": state["run_id"],
                    "message": "Type directly in the Claude panels. Idle is not completion. Explicit evidence/review handoff is still required."})
         raise RuntimeError("Verification/integration handoff is not implemented yet")
 
-    graph = StateGraph(SessionState)
-    graph.add_node("launch_ui", ui)
-    graph.add_node("launch_adapter", adapter)
+    class LaunchState(TypedDict, total=False):
+        run_id: str
+        lanes: Annotated[dict, merge_lanes]
+
+    graph = StateGraph(LaunchState)
+    launches = [f"launch_{node}" for node in sessions.workers]
+    for node, name in zip(sessions.workers, launches):
+        graph.add_node(name, launcher(node))
     graph.add_node("human_handoff", handoff)
-    graph.add_edge(START, "launch_ui")
-    graph.add_edge(START, "launch_adapter")
-    graph.add_edge(["launch_ui", "launch_adapter"], "human_handoff")
+    for name in launches:
+        graph.add_edge(START, name)
+    graph.add_edge(launches, "human_handoff")
     graph.add_edge("human_handoff", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -288,14 +295,15 @@ def require_shell(pane_id: str, settle_seconds: float = 10.0) -> None:
 def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = None) -> dict:
     directory = sessions.directory
     mapping_path = directory / "terminals.json"
+    workers = list(sessions.workers)
     if mapping_path.exists():
         mapping = read_json(mapping_path)
-        if set(NODES) <= set(mapping) and REVIEW not in mapping and (directory / "review.interactive.json").exists():
+        if set(workers) <= set(mapping) and REVIEW not in mapping and (directory / "review.interactive.json").exists():
             # The workers' tab exists and the reviewer appeared after it: add only the reviewer pane.
             return attach_reviewer_panel(sessions)
         raise RuntimeError("Terminal mappings already exist; use attach-one inside an available terminal to reconnect")
     rows = sessions.inventory()
-    for node in NODES:
+    for node in workers:
         receipt = read_json(directory / f"{node}.interactive.json")
         if receipt["plan_digest"] != plan_digest(sessions.plan) or sessions.locate(node, rows) is None:
             raise RuntimeError("Cannot attach an unverified/missing session")
@@ -303,9 +311,9 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
     source = Path(__file__).resolve().parents[1]
     if reuse_observers:
         mapping = read_json(reuse_observers)
-        if set(mapping) != set(NODES) or any(value.get("mode") != "read-only-observer" for value in mapping.values()):
+        if set(mapping) != set(workers) or any(value.get("mode") != "read-only-observer" for value in mapping.values()):
             raise RuntimeError("Can only replace explicitly identified read-only observer panels")
-        if len({value["pane_id"] for value in mapping.values()}) != len(NODES):
+        if len({value["pane_id"] for value in mapping.values()}) != len(workers):
             raise RuntimeError("Observer pane identities must be distinct")
         tabs = set()
         for entry in mapping.values():
@@ -323,26 +331,31 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
         save_json(mapping_path, mapping)
         herdr("tab", "rename", next(iter(tabs)), f"Workflow: {directory.name}")
     else:
+        # The first lane takes the tab's root pane; each following lane splits right of the previous one.
         created = herdr("tab", "create", "--workspace", caller["workspace_id"], "--cwd", str(source),
                         "--label", f"Workflow: {directory.name}", "--no-focus")["result"]
-        mapping = {"ui": {"pane_id": created["root_pane"]["pane_id"], "tab_id": created["tab"]["tab_id"], "mode": "allocated"}}
+        tab_id = created["tab"]["tab_id"]
+        mapping = {workers[0]: {"pane_id": created["root_pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}}
         save_json(mapping_path, mapping)
-        split = herdr("pane", "split", "--pane", mapping["ui"]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
-        mapping["adapter"] = {"pane_id": split["pane"]["pane_id"], "tab_id": created["tab"]["tab_id"], "mode": "allocated"}
-        save_json(mapping_path, mapping)
+        for previous, node in zip(workers, workers[1:]):
+            split = herdr("pane", "split", "--pane", mapping[previous]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
+            mapping[node] = {"pane_id": split["pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}
+            save_json(mapping_path, mapping)
     # A reviewer that already exists (attach after the review node started) gets its pane now;
     # otherwise the review node adds it through attach_reviewer_panel when it launches.
     if (directory / "review.interactive.json").exists() and sessions.locate(REVIEW, rows) is not None:
-        allocate_reviewer_pane(mapping, mapping_path)
+        allocate_reviewer_pane(sessions, mapping, mapping_path)
     for node, entry in mapping.items():
         attach_pane(sessions, mapping, mapping_path, node, sessions.locate(node, rows)["sessionId"])
     return mapping
 
 
-def allocate_reviewer_pane(mapping: dict, mapping_path: Path) -> None:
+def allocate_reviewer_pane(sessions: InteractiveSessions, mapping: dict, mapping_path: Path) -> None:
+    """The reviewer pane splits right of the last lane's pane."""
     source = Path(__file__).resolve().parents[1]
-    split = herdr("pane", "split", "--pane", mapping["adapter"]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
-    mapping[REVIEW] = {"pane_id": split["pane"]["pane_id"], "tab_id": mapping["adapter"]["tab_id"], "mode": "allocated"}
+    last = mapping[sessions.workers[-1]]
+    split = herdr("pane", "split", "--pane", last["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
+    mapping[REVIEW] = {"pane_id": split["pane"]["pane_id"], "tab_id": last["tab_id"], "mode": "allocated"}
     save_json(mapping_path, mapping)
 
 
@@ -366,7 +379,7 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
     if not mapping_path.exists():
         raise RuntimeError("No terminal mappings; attach the worker panes before the reviewer pane")
     mapping = read_json(mapping_path)
-    if not set(NODES) <= set(mapping):
+    if not set(sessions.workers) <= set(mapping):
         raise RuntimeError("Terminal mappings lack the worker panes; refusing to add a reviewer pane")
     if REVIEW in mapping:
         raise RuntimeError("Reviewer pane already allocated; use attach-one --node review inside an available terminal to reconnect")
@@ -379,7 +392,7 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
     row = sessions.locate(REVIEW, rows)
     if row is None:
         raise RuntimeError("Cannot attach an unverified/missing reviewer session")
-    allocate_reviewer_pane(mapping, mapping_path)
+    allocate_reviewer_pane(sessions, mapping, mapping_path)
     attach_pane(sessions, mapping, mapping_path, REVIEW, row["sessionId"])
     return mapping
 
@@ -390,21 +403,21 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--base", default="HEAD")
-    parser.add_argument("--ui-task", type=Path)
-    parser.add_argument("--adapter-task", type=Path)
+    parser.add_argument("--task", action="append", metavar="LANE=PATH", help="prepare: task file for one lane; repeat once per lane")
     parser.add_argument("--allow-edits", action="store_true")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--reuse-observers", type=Path)
-    parser.add_argument("--node", choices=NODES + (REVIEW,))
+    parser.add_argument("--node", help="attach-one: a worker lane of the run, or review")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
         if args.action == "prepare":
-            if not args.ui_task or not args.adapter_task:
-                parser.error("prepare requires both task files")
-            plan = prepare(directory, args.repo, args.base,
-                           {"ui": args.ui_task.read_text(), "adapter": args.adapter_task.read_text()}, args.allow_edits)
+            from .pipeline import parse_lane_files
+            task_files = parse_lane_files(args.task, "--task")
+            if not task_files:
+                parser.error("prepare requires --task <lane>=<path> for every lane")
+            plan = prepare(directory, args.repo, args.base, {node: path.read_text() for node, path in task_files.items()}, args.allow_edits)
             plan["mode"] = "interactive"
             save_json(directory / "plan.json", plan)
             print(json.dumps(plan, indent=2))
@@ -418,6 +431,8 @@ def main():
         if args.action == "attach-one":
             if not args.node or not sys.stdin.isatty():
                 parser.error("attach-one requires --node and an interactive terminal")
+            if args.node not in sessions.workers and args.node != REVIEW:
+                parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or review")
             receipt = read_json(directory / f"{args.node}.interactive.json")
             if receipt["plan_digest"] != plan_digest(sessions.plan):
                 raise RuntimeError("Plan changed; cannot attach")
@@ -434,7 +449,7 @@ def main():
                 parser.error("run requires --live (consumes Claude usage)")
             with SqliteSaver.from_conn_string(str(directory / "interactive-checkpoints.sqlite")) as saver:
                 graph = build_interactive_graph(saver, sessions)
-                config = {"configurable": {"thread_id": sessions.plan["run_id"]}, "max_concurrency": 2}
+                config = {"configurable": {"thread_id": sessions.plan["run_id"]}, "max_concurrency": max(2, len(sessions.workers))}
                 snapshot = graph.get_state(config)
                 if any(task.interrupts for task in snapshot.tasks):
                     print("Interactive handoff pending; no agents relaunched.")

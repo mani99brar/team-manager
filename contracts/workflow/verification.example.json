@@ -1,33 +1,116 @@
 {
-  "version": "1.0.0",
-  "feature": "Workflow viewer — illustrative policy, not an executable test suite",
+  "version": "1.2.0",
+  "feature": "Workflow viewer \u2014 illustrative policy, not an executable test suite",
   "independent_review": true,
   "integration_approval": true,
   "workers": [
     {
       "node_id": "ui",
       "role": "frontend",
-      "owned_paths": ["src/workflow", "tests/workflow"],
+      "owned_paths": [
+        "src/workflow",
+        "tests/workflow"
+      ],
       "checks": [
-        {"id": "frontend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []},
         {
-          "id": "workflow-browser", "kind": "browser",
-          "argv": ["npx", "--no-install", "playwright", "test", "tests/workflow/viewer.spec.ts"],
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "workflow-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "tests/workflow/viewer.spec.ts"
+          ],
           "timeout_seconds": 300,
           "scenarios": [
-            {"id": "failed-worker", "description": "A failed worker displays an actionable error"},
-            {"id": "worker-results", "description": "Selecting a worker shows checks and artifacts"}
+            {
+              "id": "failed-worker",
+              "description": "A failed worker displays an actionable error"
+            },
+            {
+              "id": "worker-results",
+              "description": "Selecting a worker shows checks and artifacts"
+            }
           ]
         }
+      ],
+      "required_check_kinds": [
+        "build",
+        "browser"
       ]
     },
     {
       "node_id": "adapter",
       "role": "backend",
-      "owned_paths": ["workflow"],
+      "owned_paths": [
+        "workflow"
+      ],
       "checks": [
-        {"id": "backend-unit", "kind": "unit", "argv": ["python", "-m", "unittest", "workflow.test_graph"], "timeout_seconds": 120, "scenarios": []},
-        {"id": "backend-contract", "kind": "contract", "argv": ["npm", "run", "test:contracts"], "timeout_seconds": 120, "scenarios": []}
+        {
+          "id": "backend-unit",
+          "kind": "unit",
+          "argv": [
+            "python",
+            "-m",
+            "unittest",
+            "workflow.test_verification"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "backend-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        }
+      ],
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ]
+    },
+    {
+      "node_id": "docs",
+      "role": "technical writer",
+      "required_check_kinds": [
+        "contract"
+      ],
+      "owned_paths": [
+        "docs/workflow"
+      ],
+      "checks": [
+        {
+          "id": "docs-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts",
+            "--",
+            "--grep",
+            "docs"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        }
       ]
     }
   ]

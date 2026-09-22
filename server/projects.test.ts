@@ -28,6 +28,18 @@ const GRAPH_NODES = [
   { node_id: 'integrate', label: 'Integrate candidate', kind: 'integration', depends_on: ['approval'] },
 ]
 const DEFINITION = { name: 'Feature implementation', nodes: GRAPH_NODES }
+/** The definition workflow/export_state.py builds for a run with the given lanes (export 1.3.0). */
+function graphNodes(lanes: string[]) {
+  return [
+    ...lanes.map(lane => ({ node_id: `launch_${lane}`, label: `Launch ${lane} worker`, kind: 'worker', depends_on: [] })),
+    { node_id: 'handoff', label: 'Freeze worker handoffs', kind: 'prepare', depends_on: lanes.map(lane => `launch_${lane}`) },
+    ...lanes.map(lane => ({ node_id: `verify_${lane}`, label: `Verify ${lane}`, kind: 'verification', depends_on: ['handoff'] })),
+    { node_id: 'candidate', label: 'Verify combined candidate', kind: 'verification', depends_on: lanes.map(lane => `verify_${lane}`) },
+    { node_id: 'review', label: 'Independent review', kind: 'review', depends_on: ['candidate'] },
+    { node_id: 'approval', label: 'Integration approval', kind: 'integration', depends_on: ['review'] },
+    { node_id: 'integrate', label: 'Integrate candidate', kind: 'integration', depends_on: ['approval'] },
+  ]
+}
 const BASE = 'a'.repeat(40)
 const OUTPUT = 'b'.repeat(40)
 const T0 = '2026-03-01T10:00:00.000000Z'
@@ -43,7 +55,7 @@ type Registration = { phase: 'worker' | 'candidate'; node_id: string; attempt: n
 
 type PacketSpec = {
   phase?: 'worker' | 'candidate'
-  node: 'ui' | 'adapter'
+  node: string
   attempt?: number
   gate?: { status: 'passed' | 'blocked'; reasons: string[] }
   artifacts?: { id: string; kind: 'log' | 'screenshot' | 'test_report' | 'patch' | 'other'; content: Buffer | string; uri?: string; registeredSha?: string; skipWrite?: boolean }[]
@@ -162,13 +174,13 @@ const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Sh
 const ADAPTER_TASK = '# Adapter worker\n\nServe the review route from the export section.\n\nApproved ownership and checks:\n{"node_id": "adapter", "owned_paths": ["server"]}'
 const TEXT_LIMIT = 65536
 
-type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: 'ui' | 'adapter' | 'both' | 'none' | null; requirement: string | null }
+type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null }
 type ReviewSection = {
   attempt: number; transport: 'native' | 'print' | 'manual'; reviewer_session_id: string; independent: true; bundle_sha256: string; candidate_commit: string
   verdict: 'approved' | 'blocked'; findings: Finding[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
 }
 type WorkerInput = {
-  role: string; task: string; prompt: string | null; owned_paths: string[]
+  role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
   checks: { id: string; kind: string; argv: string[]; command: string; timeout_seconds: number; scenarios: { id: string; description: string }[] }[]
   launch: { session_id: string | null; launch_token: string; launch_requested_at: string; native_started_at: number | null; observed_state: string | null; status: string; launcher_invocations: number; background_id: string | null } | null
   completion: { status: string; summary: string; open_assumptions: string[] } | null
@@ -180,6 +192,8 @@ type InputsSection = {
   automatic: { finish: string; permission_mode: string; worker_timeout_seconds: number; review_timeout_seconds: number; reviewer_transport: string | null } | null
   setup: { argv: string[]; command: string; timeout_seconds: number }[]; max_verification_attempts: number
   failure_drill: { node_id: string; phase: string; attempt: number } | null
+  selected_workers?: string[]
+  excluded_workers?: string[]
   workers: Record<string, WorkerInput>
 }
 
@@ -224,7 +238,7 @@ function inputsSection(overrides: Partial<InputsSection> = {}, workers: { ui?: P
   }
 }
 
-const receipt = (node: 'ui' | 'adapter') => ({
+const receipt = (node: string) => ({
   node_id: node, session_id: `${node}-session-0001`, launch_token: '00000000-0000-4000-8000-000000000000', plan_digest: 'd'.repeat(64),
   worktree: `/synthetic/run/worktree-${node}`, base_commit: BASE, status: 'attached_session_available', attempt: 1, launcher_invocations: 1,
   launch_requested_at: T0, background_id: `bg-${node}`, observed_state: 'working', native_started_at: 1_700_000_000,
@@ -948,7 +962,7 @@ test('a recorded review is served with its reviewer, redacted text, verbatim-onl
     assert.equal(response.status, 200, response.body)
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const review = validateReviewResult(response.json())
-    assert.equal(review.contract_version, '1.2.0')
+    assert.equal(review.contract_version, '1.3.0')
     assert.deepEqual([review.run_id, review.node_id, review.attempt, review.verdict], ['reviewed', 'review', 1, 'approved'])
     assert.deepEqual(review.reviewer, { session_id: REVIEWER, transport: 'native', independent: true })
     assert.deepEqual([review.bundle_sha256, review.candidate_commit, review.reviewed_at], [BUNDLE, OUTPUT, T2])
@@ -1100,12 +1114,15 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.equal(response.status, 200, response.body)
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const inputs = validateRunInputs(response.json())
-    assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.2.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
+    assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.3.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
     assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' })
     assert.deepEqual(inputs.setup, [{ command: 'npm ci', timeout_seconds: 600 }])
     assert.equal(inputs.max_verification_attempts, 3)
     assert.ok(!('failure_drill' in inputs) && !('policy_version' in inputs))
     assert.deepEqual(inputs.workers.map(worker => [worker.node_id, worker.launch_node_id, worker.role]), [['adapter', 'launch_adapter', 'backend'], ['ui', 'launch_ui', 'frontend']])
+    // A 1.2.0 export declares no required kinds and no selection: the kinds the controller derived from the role, every lane selected, nothing excluded.
+    assert.deepEqual(inputs.workers.map(worker => worker.required_check_kinds), [['unit'], ['build', 'browser']])
+    assert.deepEqual([inputs.selected_workers, inputs.excluded_workers], [['adapter', 'ui'], []])
     const [adapter, ui] = inputs.workers
     // Text is redacted, then truncated with a marker that counts what was cut.
     assert.equal(ui.task.truncated, true)
@@ -1151,7 +1168,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.3.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.4.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -1161,14 +1178,22 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     withReview(section => { section.attempt = 0 }, 'review-attempt'),
     withReview(section => { section.reviewed_at = 'yesterday' }, 'review-time'),
     withReview(section => { section.findings = [finding({ severity: 'P1', disposition: 'open' })] }, 'review-approved-with-blocker'),
-    withReview(section => { (section.findings[0] as Record<string, unknown>).worker = 'tester' }, 'review-worker'),
+    withReview(section => { (section.findings[0] as Record<string, unknown>).worker = 'tester' }, 'review-worker-not-a-lane-of-this-run'),
+    withReview(section => { (section.findings[0] as Record<string, unknown>).worker = 'Tester' }, 'review-worker-pattern'),
     withReview(section => { section.findings[0].requirement = '' }, 'review-empty-quote'),
     withReview(section => { (section.findings[0] as Record<string, unknown>).line = 12 }, 'review-finding-key'),
     withReview(section => { section.diff = { path: 'plan.json', sha256: sha256(DIFF), bytes: DIFF.length } }, 'review-diff-path'),
     withReview(section => { section.diff = { path: '../other/review.diff', sha256: sha256(DIFF), bytes: DIFF.length } }, 'review-diff-traversal'),
     withInputs(section => { section.automatic = null }, 'inputs-automatic-missing'),
     withInputs(section => { section.mode = 'manual' }, 'inputs-manual-with-settings'),
-    withInputs(section => { section.workers.reviewer = workerInput('ui') }, 'inputs-foreign-lane'),
+    withInputs(section => { section.workers.review = workerInput('ui') }, 'inputs-reserved-lane'),
+    withInputs(section => { section.workers['launch_docs'] = workerInput('ui') }, 'inputs-prefixed-lane'),
+    withInputs(section => { section.workers.Docs = workerInput('ui') }, 'inputs-lane-pattern'),
+    withInputs(section => { section.selected_workers = ['ui'] }, 'inputs-selection-disagrees-with-workers'),
+    withInputs(section => { section.selected_workers = ['ui', 'adapter']; section.excluded_workers = ['ui'] }, 'inputs-excluded-and-selected'),
+    withInputs(section => { section.workers.ui.required_check_kinds = ['contract'] }, 'inputs-required-kind-without-check'),
+    withInputs(section => { section.workers.ui.role = '' }, 'inputs-blank-role'),
+    { ...base, runId: 'definition-lane-not-described', definition: { name: 'Three lanes', nodes: graphNodes(['ui', 'adapter', 'docs']) }, review: reviewSection(), inputs: inputsSection() },
     withInputs(section => { section.workers = {} }, 'inputs-no-workers'),
     withInputs(section => { section.workers.ui.owned_paths = ['/etc/passwd'] }, 'inputs-absolute-owned-path'),
     withInputs(section => { section.workers.ui.owned_paths = ['src/../..'] }, 'inputs-traversal-owned-path'),
@@ -1206,11 +1231,12 @@ test('redaction covers paths next to Markdown punctuation and file URIs; links r
       finding({ message: `Screenshots were written beside [${leak}/shots] instead of below it.`, worker: 'ui', requirement: `Read [${leak}/x](${leak}/x) and |${leak}/x|` }),
       finding({ message: 'Quoted from beyond the served cut.', worker: 'adapter', requirement: beyond }),
     ]
-    const section = inputsSection({ automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: null } },
-      { ui: { task: uiTask, checks: [{ id: 'test:unit', kind: 'unit', argv: ['npm', 'run', 'test:unit'], command: 'npm run test:unit', timeout_seconds: 180, scenarios: [] },
+    const section = inputsSection({ policy_version: '1.2.0', selected_workers: ['ui', 'adapter'], excluded_workers: [],
+      automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: null } },
+      { ui: { task: uiTask, required_check_kinds: ['unit', 'browser'], checks: [{ id: 'test:unit', kind: 'unit', argv: ['npm', 'run', 'test:unit'], command: 'npm run test:unit', timeout_seconds: 180, scenarios: [] },
         { id: 'e2e/smoke', kind: 'browser', argv: ['npx', 'playwright', 'test'], command: 'npx playwright test', timeout_seconds: 300, scenarios: [{ id: 'review verdict / narrow', description: 'narrow layout' }] }] },
-        adapter: { task: longTask } })
-    await writeRun(rootDir, { runId: 'spelled', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets,
+        adapter: { task: longTask, required_check_kinds: ['unit'] } })
+    await writeRun(rootDir, { runId: 'spelled', version: '1.3.0', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets,
       review: reviewSection({ findings }), inputs: section, diffFile: DIFF })
     const inputsResponse = await get(app, url('alpha', 'main', 'spelled', '/inputs'))
     assert.equal(inputsResponse.status, 200, inputsResponse.body)
@@ -1261,6 +1287,106 @@ test('an interrupted native review projects the review node as paused, not pendi
   })
 })
 
+// Export 1.3.0: worker lanes from configuration ------------------------------------------------------------------
+
+/** A lane's inputs entry as export 1.3.0 writes it: a free role label and its own required check kinds. */
+function laneInput(lane: string, role: string, kinds: string[], checks: WorkerInput['checks'], task: string): WorkerInput {
+  return { ...workerInput('adapter'), role, required_check_kinds: kinds, task, prompt: `You are a workflow worker in your own worktree.\n\n${task}`, owned_paths: [lane], checks,
+    launch: { ...workerInput('adapter').launch!, session_id: `${lane}-session-0001`, background_id: `bg-${lane}` }, completion: { status: 'completed', summary: `${lane} done`, open_assumptions: [] }, handoff: { summary: `${lane} done`, open_assumptions: [] } }
+}
+const DOCS_TASK = '# Docs worker\n\nDocument every lane the run declares.\n\nApproved ownership and checks:\n{"node_id": "docs"}'
+const contractCheck = { id: 'docs-contract', kind: 'contract', argv: ['npm', 'run', 'test:contracts'], command: 'npm run test:contracts', timeout_seconds: 120, scenarios: [] }
+
+/** Persisted 1.3.0 state of a run over `lanes` that reached the review: per-lane receipts and packets live under `lanes` and `packets`. */
+function lanesRun(lanes: string[], extra: Record<string, unknown> = {}) {
+  const values = {
+    lanes: Object.fromEntries(lanes.map(lane => [lane, receipt(lane)])),
+    snapshots: Object.fromEntries(lanes.map(lane => [lane, { commit: OUTPUT, changed_files: [`${lane}/file`], session_id: `${lane}-session-0001`, summary: `${lane} done`, open_assumptions: [] }])),
+    packets: Object.fromEntries(lanes.map(lane => [lane, `/packets/${lane}`])), bundle: '/synthetic/review-bundle.json', ...extra,
+  }
+  let sequence = 0
+  const events: RawEvent[] = [
+    ...lanes.map(lane => ({ sequence: ++sequence, time: T0, node: lane, status: 'running', message: 'Launching or reconciling the exact native session' })),
+    ...lanes.map(lane => ({ sequence: ++sequence, time: T1, node: lane, status: 'interactive', message: 'Awaiting explicit completion signal; idle is not acceptance' })),
+    { sequence: ++sequence, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+    ...lanes.map(lane => ({ sequence: ++sequence, time: T1, node: `verify_${lane}`, status: 'passed', message: 'Required tests and artifacts passed' })),
+    ...lanes.map(lane => ({ sequence: ++sequence, time: T1, node: `candidate_${lane}`, status: 'passed', message: `Combined revision ${OUTPUT}` })),
+  ]
+  const packets: PacketSpec[] = [...lanes.map(lane => ({ node: lane })), ...lanes.map(lane => ({ node: lane, phase: 'candidate' as const }))]
+  return { definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, values, events, packets }
+}
+
+test('a three-lane 1.3.0 export projects one launch and verify node per lane, lane-attributed events and findings, and three workers', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const lanes = ['ui', 'adapter', 'docs']
+    const run = lanesRun(lanes, { review: { verdict: 'approved' } })
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = {
+      ui: { ...workerInput('ui'), required_check_kinds: ['build', 'browser'] },
+      adapter: { ...workerInput('adapter'), required_check_kinds: ['unit'] },
+      docs: laneInput('docs', 'technical writer', ['contract'], [contractCheck], DOCS_TASK),
+    }
+    const findings: Finding[] = [
+      finding({ message: 'The docs lane omits the excluded lanes.', worker: 'docs', requirement: 'Document every lane the run declares.' }),
+      finding({ message: 'Two lanes spell the lane list differently.', disposition: 'resolved', worker: 'multiple', requirement: null }),
+      finding({ message: 'Cross-cutting.', disposition: 'accepted', worker: 'none', requirement: null }),
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { ...run, runId: 'three', version: '1.3.0', next: ['approval'], review: reviewSection({ findings }), inputs, diffFile: DIFF })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'three'))).json())
+    assert.deepEqual(detail.definition.nodes.map(node => node.node_id), ['launch_ui', 'launch_adapter', 'launch_docs', 'handoff', 'verify_ui', 'verify_adapter', 'verify_docs', 'candidate', 'review', 'approval', 'integrate'])
+    const byId = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
+    for (const lane of lanes) {
+      assert.deepEqual([byId.get(`launch_${lane}`)!.status, byId.get(`launch_${lane}`)!.session_id], ['succeeded', `${lane}-session-0001`], lane)
+      assert.deepEqual([byId.get(`verify_${lane}`)!.status, byId.get(`verify_${lane}`)!.attempt, byId.get(`verify_${lane}`)!.result_uri], ['succeeded', 1, `/api/projects/alpha/workflows/main/runs/three/results/${lane}/1`], lane)
+    }
+    assert.deepEqual([byId.get('handoff')!.status, byId.get('candidate')!.status, byId.get('review')!.status, byId.get('approval')!.status], ['succeeded', 'succeeded', 'succeeded', 'pending'])
+    assert.equal(detail.summary.status, 'running')
+    validateWorkerResult((await get(app, url('alpha', 'main', 'three', '/results/docs/1'))).json())
+    validateWorkerResult((await get(app, url('alpha', 'main', 'three', '/results/candidate_docs/1'))).json())
+    const events = (await get(app, url('alpha', 'main', 'three', '/events'))).json() as { events: { node_id: string | null; sequence: number }[] }
+    assert.deepEqual(events.events.filter(event => event.sequence <= 3).map(event => event.node_id), ['launch_ui', 'launch_adapter', 'launch_docs'])
+    assert.ok(events.events.some(event => event.node_id === 'verify_docs'))
+    assert.equal(events.events.filter(event => event.node_id === 'candidate').length, 3)
+    const served = validateRunInputs((await get(app, url('alpha', 'main', 'three', '/inputs'))).json())
+    assert.deepEqual(served.workers.map(worker => [worker.node_id, worker.launch_node_id, worker.role, worker.required_check_kinds]),
+      [['ui', 'launch_ui', 'frontend', ['build', 'browser']], ['adapter', 'launch_adapter', 'backend', ['unit']], ['docs', 'launch_docs', 'technical writer', ['contract']]])
+    assert.deepEqual([served.selected_workers, served.excluded_workers], [lanes, []])
+    assert.ok(!JSON.stringify(served).includes(root))
+    const review = validateReviewResult((await get(app, url('alpha', 'main', 'three', '/reviews/1'))).json())
+    assert.deepEqual(review.findings.map(item => [item.worker, item.requirement_found_in]), [['docs', ['docs']], ['multiple', []], ['none', []]])
+  })
+})
+
+test('a one-lane 1.3.0 export is a complete run over that lane; the excluded lanes have no node, receipt or result', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const run = lanesRun(['adapter'], { review: { verdict: 'approved' }, approved_bundle: BUNDLE, integrated_commit: OUTPUT })
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: ['adapter'], excluded_workers: ['ui', 'docs'] })
+    inputs.workers = { adapter: { ...workerInput('adapter'), required_check_kinds: ['unit'] } }
+    await writeRun(runsRoot('alpha', 'main'), { ...run, runId: 'one', version: '1.3.0', next: [], review: reviewSection({ findings: [finding({ worker: 'adapter', requirement: 'Serve the review route from the export section.' })] }), inputs, diffFile: DIFF })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'one'))).json())
+    assert.deepEqual(detail.definition.nodes.map(node => node.node_id), ['launch_adapter', 'handoff', 'verify_adapter', 'candidate', 'review', 'approval', 'integrate'])
+    assert.equal(detail.summary.status, 'succeeded')
+    assert.ok(detail.snapshot.nodes.every(node => node.status === 'succeeded'))
+    const served = validateRunInputs((await get(app, url('alpha', 'main', 'one', '/inputs'))).json())
+    assert.deepEqual(served.workers.map(worker => worker.node_id), ['adapter'])
+    assert.deepEqual([served.selected_workers, served.excluded_workers], [['adapter'], ['ui', 'docs']])
+    assertError(await get(app, url('alpha', 'main', 'one', '/results/ui/1')), 404, 'RESULT_NOT_FOUND')
+    const review = validateReviewResult((await get(app, url('alpha', 'main', 'one', '/reviews/1'))).json())
+    assert.deepEqual(review.findings.map(item => [item.worker, item.requirement_found_in]), [['adapter', ['adapter']]])
+    // The same two-lane run recorded under 1.2.0 (flat `ui`/`ui_packet` keys, no selection) still loads, as does a 1.3.0 re-export of it.
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'old', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets, review: reviewSection(), inputs: inputsSection(), diffFile: DIFF })
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'reexported', version: '1.3.0', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, packets: reviewedPackets, review: reviewSection(), inputs: inputsSection({ selected_workers: ['ui', 'adapter'], excluded_workers: [] }), diffFile: DIFF })
+    const old = validateRunDetail((await get(app, url('alpha', 'main', 'old'))).json())
+    const reexported = validateRunDetail((await get(app, url('alpha', 'main', 'reexported'))).json())
+    const asOld = (uri: string) => uri.replace('/runs/reexported/', '/runs/old/')
+    assert.deepEqual(reexported.snapshot.nodes.map(node => ({
+      ...node, result_uri: node.result_uri === null ? null : asOld(node.result_uri),
+      lane_results: node.lane_results.map(lane => ({ ...lane, result_uri: asOld(lane.result_uri) })),
+    })), old.snapshot.nodes)
+    assert.deepEqual(old.snapshot.nodes.filter(node => node.node_id.startsWith('launch_')).map(node => node.status), ['succeeded', 'succeeded'])
+  })
+})
+
 test('every successful payload conforms to the committed contract schemas', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'conform', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/x' }, next: ['verify_adapter'], events: launchEvents,
@@ -1289,5 +1415,57 @@ test('every successful payload conforms to the committed contract schemas', asyn
     const broken = await get(app, url('alpha', 'main', 'broken', '/results/ui/1'))
     assertError(broken, 500, 'RESULT_INVALID')
     assert.ok(!broken.body.includes('/absolute/leak.ts'))
+  })
+})
+
+test('the candidate node links every lane\'s combined result in lane order; no other node carries lane results', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    await writeRun(rootDir, { runId: 'reviewed', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json',
+      bundle: '/synthetic/review-bundle.json', review: { reviewer: 'claude-reviewer', decision: 'approve' } },
+      next: ['approval'], events: reviewedEvents, updated: T2,
+      packets: [{ node: 'ui' }, { node: 'adapter' }, { node: 'ui', phase: 'candidate' }, { node: 'adapter', phase: 'candidate' }, { node: 'adapter', phase: 'candidate', attempt: 2 }] })
+    await writeRun(rootDir, { runId: 'verifying', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json' },
+      next: ['candidate'], events: reviewedEvents.slice(0, 7), packets: [{ node: 'ui' }, { node: 'adapter' }] })
+    const reviewed = validateRunDetail((await get(app, url('alpha', 'main', 'reviewed'))).json())
+    const candidate = reviewed.snapshot.nodes.find(node => node.node_id === 'candidate')!
+    assert.equal(candidate.status, 'succeeded')
+    assert.deepEqual(candidate.lane_results, [
+      { worker: 'ui', attempt: 1, result_uri: '/api/projects/alpha/workflows/main/runs/reviewed/results/candidate_ui/1' },
+      { worker: 'adapter', attempt: 2, result_uri: '/api/projects/alpha/workflows/main/runs/reviewed/results/candidate_adapter/2' },
+    ], 'one link per lane, in lane order, at the latest candidate attempt')
+    assert.ok(reviewed.snapshot.nodes.filter(node => node.node_id !== 'candidate').every(node => node.lane_results.length === 0))
+    // Each link serves that lane's combined result under the candidate route.
+    const served = await get(app, candidate.lane_results[0].result_uri)
+    assert.equal(served.status, 200, served.body)
+    assert.equal(validateWorkerResult(served.json()).node_id, 'candidate_ui')
+    // Before the candidate phase ran there is nothing to link.
+    const verifying = validateRunDetail((await get(app, url('alpha', 'main', 'verifying'))).json())
+    assert.deepEqual(verifying.snapshot.nodes.find(node => node.node_id === 'candidate')!.lane_results, [])
+  })
+})
+
+test('a served worker result names the checks its gate deferred to the candidate, by executed index; nothing else changes', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const deferred = (packet: Record<string, unknown>) => {
+      const result = packet.result as { checks: { exit_code: number }[] }
+      result.checks[0].exit_code = 2
+      ;(packet.gate as Record<string, unknown>).deferred_checks = ['frontend-build']
+      ;(packet.evidence as Record<string, unknown>).checks = [{ id: 'frontend-build', worker_check_index: 0, tests: null, scenarios: [] }, { id: 'frontend-unit', worker_check_index: 1, tests: { passed: 3, failed: 0, skipped: 0 }, scenarios: [] }]
+    }
+    await writeRun(rootDir, { runId: 'reviewed', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots, ui_packet: '/synthetic/ui/packet.json', adapter_packet: '/synthetic/adapter/packet.json',
+      bundle: '/synthetic/review-bundle.json', review: { reviewer: 'claude-reviewer', decision: 'approve' } },
+      next: ['approval'], events: reviewedEvents, updated: T2,
+      packets: [{ node: 'ui', artifacts: [{ id: 'log-0-ui', kind: 'log', content: 'build log\n' }, { id: 'log-1-ui', kind: 'log', content: 'unit log\n' }], mutate: deferred },
+        { node: 'adapter' }, { node: 'ui', phase: 'candidate' }, { node: 'adapter', phase: 'candidate' }] })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'reviewed'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'verify_ui')!.status, 'succeeded', 'the gate passed: deferred checks do not gate the worker phase')
+    const worker = validateWorkerResult((await get(app, url('alpha', 'main', 'reviewed', '/results/ui/1'))).json())
+    assert.deepEqual(worker.deferred_checks, [{ id: 'frontend-build', check_index: 0 }])
+    assert.equal(worker.checks[0].exit_code, 2, 'the executed exit code is served as captured')
+    assert.equal(worker.status, 'succeeded')
+    const combined = validateWorkerResult((await get(app, url('alpha', 'main', 'reviewed', '/results/candidate_ui/1'))).json())
+    assert.equal(combined.deferred_checks, undefined, 'a gate without deferred checks serves no field at all')
   })
 })

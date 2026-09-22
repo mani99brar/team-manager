@@ -77,6 +77,18 @@ test('review results: legacy findings without links, blocked verdicts, and the b
   validateReviewResult(resolved)
 })
 
+test('review findings name any configured lane, multiple, none or the legacy both', () => {
+  for (const worker of ['docs', 'contracts-lane', 'multiple', 'none', 'both', null]) {
+    const result = structuredClone(examples.reviewResult)
+    result.findings[1].worker = worker
+    assert.equal(validateReviewResult(result).findings[1].worker, worker)
+  }
+  const linked = structuredClone(examples.reviewResult)
+  linked.findings[0].worker = 'docs'
+  linked.findings[0].requirement_found_in = ['docs', 'ui']
+  validateReviewResult(linked)
+})
+
 test('review results reject unknown fields, non-patch diffs, foreign lanes and links without a quote', () => {
   const cases: [string, (result: typeof examples.reviewResult) => void][] = [
     ['unknown field', result => { (result as Record<string, unknown>).summary = 'x' }],
@@ -88,10 +100,12 @@ test('review results reject unknown fields, non-patch diffs, foreign lanes and l
     ['diff is a log', result => { result.diff!.kind = 'log' }],
     ['link without a quote', result => { result.findings[1].requirement_found_in = ['ui'] }],
     ['duplicate link lanes', result => { result.findings[0].requirement_found_in = ['ui', 'ui'] }],
-    ['unknown lane', result => { (result.findings[0] as Record<string, unknown>).requirement_found_in = ['reviewer'] }],
-    ['unknown worker', result => { (result.findings[0] as Record<string, unknown>).worker = 'tester' }],
+    ['lane that is not a lane id', result => { (result.findings[0] as Record<string, unknown>).requirement_found_in = ['Reviewer'] }],
+    ['attribution as a matched lane', result => { result.findings[0].requirement_found_in = ['multiple'] }],
+    ['worker that is not a lane id', result => { (result.findings[0] as Record<string, unknown>).worker = 'Tester' }],
+    ['worker with a path', result => { (result.findings[0] as Record<string, unknown>).worker = 'src/ui' }],
     ['empty quote', result => { result.findings[0].requirement = '' }],
-    ['old contract version', result => { (result as Record<string, unknown>).contract_version = '1.0.0' }],
+    ['old contract version', result => { (result as Record<string, unknown>).contract_version = '1.2.0' }],
   ]
   for (const [label, mutate] of cases) {
     const result = structuredClone(examples.reviewResult)
@@ -117,12 +131,42 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
   older.workers[0].checks[0].id = 'test:unit'
   older.workers[0].checks[1].scenarios[0].id = 'review verdict / narrow'
   validateRunInputs(older)
+  // Any number of lanes with free role labels and their own required kinds; one lane is a valid run.
+  const three = structuredClone(examples.runInputs)
+  three.selected_workers = ['ui', 'adapter', 'docs']
+  three.excluded_workers = []
+  three.workers.push({
+    node_id: 'docs', launch_node_id: 'launch_docs', role: 'technical writer', required_check_kinds: ['contract'],
+    task: { text: '# Docs worker\n\nDocument the lanes.', truncated: false }, prompt: null, owned_paths: ['docs'],
+    checks: [{ id: 'docs-contract', kind: 'contract', command: 'npm run test:contracts', timeout_seconds: 120, scenarios: [] }],
+    launch: null, completion: null, handoff: null, stop: null,
+  })
+  assert.equal(validateRunInputs(three).workers.length, 3)
+  const one = structuredClone(examples.runInputs)
+  one.selected_workers = ['adapter']
+  one.excluded_workers = ['ui', 'docs']
+  one.workers = [one.workers[1]]
+  assert.equal(validateRunInputs(one).workers.length, 1)
   const cases: [string, (inputs: typeof examples.runInputs) => void][] = [
     ['automatic without settings', inputs => { inputs.automatic = null }],
+    ['selected workers out of order', inputs => { inputs.selected_workers = ['adapter', 'ui'] }],
+    ['selected worker without a description', inputs => { inputs.selected_workers = ['ui', 'adapter', 'docs'] }],
+    ['described worker not selected', inputs => { inputs.selected_workers = ['ui'] }],
+    ['no selected workers', inputs => { inputs.selected_workers = []; inputs.workers = [] }],
+    ['lane both selected and excluded', inputs => { inputs.excluded_workers = ['ui'] }],
+    ['duplicate excluded lane', inputs => { inputs.excluded_workers = ['docs', 'docs'] }],
+    ['attribution as a lane', inputs => { inputs.excluded_workers = ['none'] }],
+    ['lane id with upper case', inputs => { (inputs.workers[0] as Record<string, unknown>).node_id = 'UI'; inputs.selected_workers = ['UI', 'adapter'] }],
+    ['blank role', inputs => { inputs.workers[0].role = '' }],
+    ['role over 40 characters', inputs => { inputs.workers[0].role = 'r'.repeat(41) }],
+    ['required kind not declared as a check', inputs => { inputs.workers[1].required_check_kinds = ['browser'] }],
+    ['no required kinds', inputs => { inputs.workers[1].required_check_kinds = [] }],
+    ['duplicate required kinds', inputs => { inputs.workers[0].required_check_kinds = ['build', 'build'] }],
+    ['unknown required kind', inputs => { (inputs.workers[0] as Record<string, unknown>).required_check_kinds = ['lint'] }],
     ['manual with settings', inputs => { inputs.mode = 'manual' }],
     ['unknown field', inputs => { (inputs as Record<string, unknown>).repository = '/home/x' }],
     ['duplicate worker', inputs => { inputs.workers[1].node_id = 'ui' }],
-    ['duplicate launch node', inputs => { inputs.workers[1].launch_node_id = 'ui' }],
+    ['duplicate launch node', inputs => { inputs.workers[1].launch_node_id = 'launch_ui' }],
     ['duplicate check', inputs => { inputs.workers[0].checks[1].id = 'frontend-build' }],
     ['browser check without scenarios', inputs => { inputs.workers[0].checks[1].scenarios = [] }],
     ['unit check with scenarios', inputs => { inputs.workers[1].checks[0].scenarios = [{ id: 'x', description: 'y' }] }],

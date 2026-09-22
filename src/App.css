@@ -361,6 +361,10 @@
 .check { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; list-style: none; margin-left: -20px; }
 .check-passed { border-left: 4px solid var(--node-location-stroke); }
 .check-failed { border-left: 4px solid var(--danger-text); }
+.check-deferred { border-left: 4px solid #b8860b; }
+.check-deferred .check-exit { color: #8a6508; }
+.lane-result { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border, #ccc); }
+.lane-result h5 { margin: 0 0 8px; font-size: 1rem; }
 .check-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
 .check-exit { font-size: 0.85rem; font-weight: 600; }
 .check-failed .check-exit { color: var(--danger-text); }

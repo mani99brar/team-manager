@@ -111,7 +111,7 @@ class CompletionTests(unittest.TestCase):
         policy = {"max_verification_attempts": 3}
         attempts = {"worker:adapter": 2}
         bumped = []
-        runtime = SimpleNamespace(directory=self.root, policy=policy,
+        runtime = SimpleNamespace(directory=self.root, policy=policy, workers=["ui", "adapter"],
                                   attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
                                   retry_check=lambda phase, node: bumped.append((phase, node)))
         state = SimpleNamespace(next=("verify_adapter",), tasks=[SimpleNamespace(name="verify_adapter", error="blocked")])
@@ -133,7 +133,7 @@ class CompletionTests(unittest.TestCase):
         from .automatic import advance_failed_checks
         attempts = {}
         bumped = []
-        runtime = SimpleNamespace(directory=self.root, policy={"max_verification_attempts": 3},
+        runtime = SimpleNamespace(directory=self.root, policy={"max_verification_attempts": 3}, workers=["ui", "adapter"],
                                   attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
                                   retry_check=lambda phase, node: bumped.append((phase, node)))
         for node, status, reasons in (("ui", "passed", []), ("adapter", "blocked", ["Intentional lab drill"])):
@@ -201,7 +201,7 @@ class ReviewCompletionTests(unittest.TestCase):
         save_json(self.root / "review.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00"})
 
     def completion(self, **updates):
-        item = {"version": "1.0.0", "run_id": "test", "node_id": "review", "launch_token": self.TOKEN, "bundle_sha256": self.digest,
+        item = {"version": "1.1.0", "run_id": "test", "node_id": "review", "launch_token": self.TOKEN, "bundle_sha256": self.digest,
                 "candidate_commit": "c" * 40, "verdict": "approved",
                 "findings": [{"severity": "P2", "message": "Finding", "disposition": "open", "worker": "ui", "requirement": "Read UI"}]}
         item.update(updates)
@@ -212,7 +212,7 @@ class ReviewCompletionTests(unittest.TestCase):
         # rejected; the prompt must name every allowed value rather than rely on one example.
         from .automatic import completion_protocol_prompt
         prompt = completion_protocol_prompt(self.runtime, self.TOKEN, self.digest, "c" * 40)
-        for value in ("P0, P1 or P2", "no P3", "open, resolved or accepted", "ui, adapter, both or none", "approved or blocked", "no other keys"):
+        for value in ("P0, P1 or P2", "no P3", "open, resolved or accepted", "ui, adapter, multiple or none", "never both", "approved or blocked", "no other keys"):
             self.assertIn(value, prompt)
         self.assertIn(self.TOKEN, prompt)
         self.assertIn(self.digest, prompt)
@@ -227,7 +227,9 @@ class ReviewCompletionTests(unittest.TestCase):
         cases = {"wrong bundle": {"bundle_sha256": "0" * 64}, "wrong token": {"launch_token": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
                  "wrong candidate": {"candidate_commit": "d" * 40}, "wrong run": {"run_id": "other"}, "wrong node": {"node_id": "ui"},
                  "wrong version": {"version": "2.0.0"}, "extra key": {"extra": True}, "bad verdict": {"verdict": "maybe"},
-                 "bad worker": {"findings": [{"severity": "P2", "message": "x", "disposition": "open", "worker": "reviewer", "requirement": None}]},
+                 "bad worker": {"findings": [{"severity": "P2", "message": "x", "disposition": "open", "worker": "Reviewer", "requirement": None}]},
+                 "lane not in this run": {"findings": [{"severity": "P2", "message": "x", "disposition": "open", "worker": "docs", "requirement": None}]},
+                 "legacy both": {"findings": [{"severity": "P2", "message": "x", "disposition": "open", "worker": "both", "requirement": None}]},
                  "missing finding link": {"findings": [{"severity": "P2", "message": "x", "disposition": "open"}]},
                  "empty requirement": {"findings": [{"severity": "P2", "message": "x", "disposition": "open", "worker": "ui", "requirement": ""}]}}
         for name, updates in cases.items():

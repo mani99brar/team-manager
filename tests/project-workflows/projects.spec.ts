@@ -387,3 +387,43 @@ test(`[scenario:request-errors] Show an actionable API error rather than silentl
   await expect(page.getByRole('alert')).toContainText('This Projects link is invalid')
   await expect(page.getByTestId('run-view')).toHaveCount(0)
 })
+
+test(`[scenario:candidate-evidence] The combined candidate node shows every lane's verified result with its checks and screenshots (${phase})`, async ({ page }, testInfo) => {
+  await page.goto(runUrl(RUN_SUCCEEDED, 'candidate'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'candidate')
+  // The candidate has one verified result per lane, so it never claims to have no result.
+  await expect(page.getByTestId('result-none')).toHaveCount(0)
+  const lanes = page.getByTestId('lane-results')
+  await expect(lanes).toBeVisible()
+  await expect(lanes.locator('[data-testid^="lane-result:"]')).toHaveCount(2)
+  const ui = page.getByTestId('lane-result:ui')
+  await expect(ui).toContainText('Lane ui')
+  await expect(page.getByTestId('lane-result:adapter')).toContainText('Lane adapter')
+  await expect(ui.getByTestId('lane-result-evidence:ui')).toBeVisible()
+  await expect(ui.getByTestId('checks-list').locator('.check')).toHaveCount(3)
+  await expect(ui.getByTestId('checks-list').locator('.check-failed')).toHaveCount(0)
+  // The browser evidence of the combined tree is reachable from here, as real images.
+  const screenshot = ui.getByTestId('screenshots').locator('img').first()
+  await expect(screenshot).toBeVisible()
+  await expect.poll(() => screenshot.evaluate(image => (image as unknown as { naturalWidth: number }).naturalWidth)).toBeGreaterThan(0)
+  await attach(page, testInfo, 'candidate-evidence')
+  await expectNoExecutionControls(page)
+})
+
+test(`[scenario:deferred-checks] A lane verified in isolation shows its deferred build and browser checks as gated at the combined candidate, not as failures (${phase})`, async ({ page }, testInfo) => {
+  await page.goto(runUrl(RUN_BLOCKED, 'verify_ui'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_ui')
+  await expect(page.getByTestId('worker-result')).toBeVisible()
+  await expect(page.getByTestId('deferred-checks')).toContainText('gated only at the combined candidate')
+  const checks = page.getByTestId('checks-list')
+  await expect(checks.locator('.check')).toHaveCount(3)
+  await expect(checks.locator('.check-deferred')).toHaveCount(2)
+  await expect(checks.locator('.check-failed')).toHaveCount(0)
+  await expect(checks.locator('.check').first().locator('.check-exit')).toContainText('exit 2 · recorded, gated at the combined candidate')
+  await expect(checks.locator('.check').nth(1)).toHaveClass(/check-passed/)
+  // No screenshots exist on the isolated snapshot; the panel says where the browser evidence lives instead of reporting a failure.
+  await expect(page.getByTestId('screenshots-deferred')).toContainText('shown at the combined candidate')
+  await expect(page.getByTestId('screenshots')).toHaveCount(0)
+  await attach(page, testInfo, 'deferred-checks')
+  await expectNoExecutionControls(page)
+})

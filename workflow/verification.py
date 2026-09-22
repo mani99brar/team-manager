@@ -17,6 +17,14 @@ from jsonschema.exceptions import ValidationError
 CONTRACTS = Path(__file__).resolve().parents[1] / "contracts" / "workflow"
 
 
+# Check kinds that only mean something on the whole application: a lane's build and browser
+# suite compile against contracts and a server that another lane of the same run may be
+# changing. The worker phase still runs and records them on the lane's isolated snapshot,
+# but only the candidate phase, where every lane's work is combined, gates on them.
+# Lane-local kinds (unit, contract, integration) gate in both phases.
+DEFERRED_WORKER_KINDS = frozenset({"build", "browser"})
+
+
 def validate_schema(name: str, value: dict) -> None:
     schema = json.loads((CONTRACTS / f"{name}.schema.json").read_text())
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
@@ -45,6 +53,19 @@ def unique(items: list[dict], key: str) -> dict:
     return result
 
 
+# Policies before 1.2.0 derived the required check kinds from the role; the export of an old run keeps them.
+ROLE_REQUIRED_KINDS = {"frontend": ("build", "browser"), "backend": ("unit",)}
+
+
+def required_kinds(policy: dict, worker: dict) -> list[str]:
+    """The check kinds a lane must pass: declared from policy 1.2.0, derived from the role before."""
+    if "required_check_kinds" in worker:
+        return list(worker["required_check_kinds"])
+    if policy.get("version") in {"1.0.0", "1.1.0"} and worker.get("role") in ROLE_REQUIRED_KINDS:
+        return list(ROLE_REQUIRED_KINDS[worker["role"]])
+    raise ValueError(f"{worker.get('node_id')} declares no required_check_kinds")
+
+
 def validate_policy(policy: dict) -> dict:
     validate_schema("verification", policy)
     workers = unique(policy["workers"], "node_id")
@@ -59,9 +80,9 @@ def validate_policy(policy: dict) -> dict:
         if len({tuple(check["argv"]) for check in checks.values()}) != len(checks):
             raise ValueError("Each check needs a distinct command")
         kinds = {check["kind"] for check in checks.values()}
-        required = {"build", "browser"} if worker["role"] == "frontend" else {"unit"}
+        required = set(required_kinds(policy, worker))
         if not required <= kinds:
-            raise ValueError(f"{worker['role']} requires {sorted(required)} checks")
+            raise ValueError(f"{worker['node_id']} requires {sorted(required)} checks; missing {sorted(required - kinds)}")
         for check in checks.values():
             unique(check["scenarios"], "id")
             if (check["kind"] == "browser") != bool(check["scenarios"]):
@@ -73,15 +94,21 @@ def validate_policy(policy: dict) -> dict:
 
 
 def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dict,
-                    artifact_root: Path, artifact_paths: dict[str, Path], enforce_ownership: bool = True) -> dict:
+                    artifact_root: Path, artifact_paths: dict[str, Path], enforce_ownership: bool = True,
+                    phase: str = "candidate") -> dict:
     """Fail closed on absent, stale or inconsistent evidence.
 
     `expected` is backend-owned: run_id, node_id, attempt, base_commit,
     output_commit and verification_cwd. Caller must freeze edits and independently
     derive the full Git diff/commit before invoking; this function cannot prove
     that an agent has reported all changed files.
+
+    In the `worker` phase, checks of a DEFERRED_WORKER_KINDS kind are verified for
+    integrity (approved argv, worktree, timeout) and recorded, but their outcome does
+    not gate; the returned `deferred_checks` names them. Every other phase gates on all.
     """
     reasons = []
+    deferred = []
     try:
         validate_policy(policy)
         validate_schema("workerResult", result)
@@ -114,13 +141,6 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
             if digest != artifact["sha256"]:
                 raise ValueError(f"Artifact hash mismatch: {artifact_id}")
             resolved[artifact_id] = path
-        for check in result["checks"]:
-            if artifacts.get(check["log_artifact_id"], {}).get("kind") != "log":
-                reasons.append("Executed check is missing a log artifact")
-            if datetime.fromisoformat(check["finished_at"]) < datetime.fromisoformat(check["started_at"]):
-                reasons.append("Check finish precedes start")
-            if check["exit_code"] != 0:
-                reasons.append(f"Executed check failed: {check['command']}")
         supplied = unique(evidence["checks"], "id")
         required = {check["id"]: check for check in worker["checks"]}
         if set(supplied) != set(required):
@@ -128,6 +148,16 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
         indexes = [check["worker_check_index"] for check in supplied.values()]
         if len(set(indexes)) != len(indexes):
             raise ValueError("A command execution cannot satisfy multiple check IDs")
+        if phase == "worker":
+            deferred = sorted(check_id for check_id, check in required.items() if check["kind"] in DEFERRED_WORKER_KINDS)
+        deferred_indexes = {supplied[check_id]["worker_check_index"] for check_id in deferred}
+        for index, check in enumerate(result["checks"]):
+            if artifacts.get(check["log_artifact_id"], {}).get("kind") != "log":
+                reasons.append("Executed check is missing a log artifact")
+            if datetime.fromisoformat(check["finished_at"]) < datetime.fromisoformat(check["started_at"]):
+                reasons.append("Check finish precedes start")
+            if check["exit_code"] != 0 and index not in deferred_indexes:
+                reasons.append(f"Executed check failed: {check['command']}")
         for check_id, requirement in required.items():
             receipt = supplied[check_id]
             execution = result["checks"][receipt["worker_check_index"]]
@@ -138,6 +168,8 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
             duration = (datetime.fromisoformat(execution["finished_at"]) - datetime.fromisoformat(execution["started_at"])).total_seconds()
             if duration > requirement["timeout_seconds"]:
                 reasons.append(f"{check_id}: execution exceeded approved timeout")
+            if check_id in deferred:
+                continue  # Executed and recorded; the candidate phase gates on the outcome.
             if requirement["kind"] in {"unit", "browser", "integration", "contract"}:
                 tests = receipt["tests"]
                 if tests is None or tests["passed"] < 1 or tests["failed"] > 0:
@@ -167,6 +199,6 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
         reasons.append(str(error))
     except ValidationError as error:
         reasons.append(error.message)
-    return {"status": "blocked" if reasons else "passed", "reasons": reasons,
+    return {"status": "blocked" if reasons else "passed", "reasons": reasons, "deferred_checks": deferred,
             "pending_gates": ["independent_review", "integration_approval"],
             "integration_allowed": False}

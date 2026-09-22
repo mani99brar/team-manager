@@ -14,7 +14,7 @@ export const phase = verificationPhase()
 export const projectsUrl = '/projects'
 export const projectUrl = (projectId: string) => `/projects/${encodeURIComponent(projectId)}`
 export const workflowUrl = (projectId: string, workflowId: string) => `${projectUrl(projectId)}/workflows/${encodeURIComponent(workflowId)}`
-export const runUrl = (runId: string, nodeId?: string) => `${workflowUrl(PROJECT.project_id, WORKFLOW_ID)}/runs/${encodeURIComponent(runId)}${nodeId ? `/nodes/${encodeURIComponent(nodeId)}` : ''}`
+export const runUrl = (runId: string, nodeId?: string, workflowId: string = WORKFLOW_ID) => `${workflowUrl(PROJECT.project_id, workflowId)}/runs/${encodeURIComponent(runId)}${nodeId ? `/nodes/${encodeURIComponent(nodeId)}` : ''}`
 export const apiRun = apiRunPath
 
 export const workspace = (page: Page) => page.getByTestId('projects-workspace')

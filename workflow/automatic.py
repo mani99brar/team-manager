@@ -18,7 +18,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from .checks import now
-from .sessions import NODES, git, read_json, run_lock, save_json, terminate
+from .sessions import git, plan_workers, read_json, run_lock, save_json, terminate
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
             "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native"}
@@ -94,19 +94,25 @@ def read_completion(runtime, node: str) -> dict:
     return {"summary": item["summary"], "open_assumptions": item["open_assumptions"]}
 
 
+def lanes(runtime) -> list[str]:
+    """The run's selected lanes, from the runtime when it resolved them or from its plan."""
+    return list(getattr(runtime, "workers", None) or plan_workers(runtime.plan))
+
+
 def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     """Idle alone never means completion. Deadlines survive controller restart."""
     validate_automatic(runtime.plan)
-    if any((runtime.directory / f"{node}.stop.json").exists() for node in NODES):
+    workers = lanes(runtime)
+    if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
         # Recover a controller crash after durable handoffs/stop intent, before snapshot.
-        for node in NODES:
+        for node in workers:
             if read_completion(runtime, node) != read_json(runtime.directory / f"{node}.handoff.json"):
                 raise RuntimeError("Handoff changed after stop intent")
         return
     while True:
         rows = runtime.sessions.inventory()
         handoffs = {}
-        for node in NODES:
+        for node in workers:
             receipt = read_json(runtime.directory / f"{node}.interactive.json")
             started = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
             if clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"]:
@@ -119,25 +125,53 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             path = runtime.directory / f"{node}.completion.json"
             if row["state"] in {"idle", "done"} and path.exists():
                 handoffs[node] = read_completion(runtime, node)
-        if set(handoffs) == set(NODES):
+        if set(handoffs) == set(workers):
             for node, value in handoffs.items():
                 save_json(runtime.directory / f"{node}.handoff.json", value)
             return
         sleep(2)
 
 
-REVIEW_SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["verdict", "findings"],
-    "properties": {
-        "verdict": {"enum": ["approved", "blocked"]},
-        "findings": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["severity", "message", "disposition", "worker", "requirement"],
-            "properties": {"severity": {"enum": ["P0", "P1", "P2"]}, "message": {"type": "string", "minLength": 1},
-                           "disposition": {"enum": ["open", "resolved", "accepted"]},
-                           "worker": {"enum": ["ui", "adapter", "both", "none"]},
-                           "requirement": {"type": ["string", "null"], "minLength": 1}}}}}
-}
+# Finding attributions that name no single lane; the run's lane ids complete the vocabulary.
+FINDING_ATTRIBUTIONS = ("multiple", "none")
+
+
+def finding_workers(runtime) -> list[str]:
+    """The `worker` vocabulary of this run's findings: its lane ids, then multiple and none."""
+    return [*lanes(runtime), *FINDING_ATTRIBUTIONS]
+
+
+def worker_vocabulary(runtime) -> str:
+    """How the prompts spell the vocabulary: `ui, adapter, multiple or none`."""
+    words = finding_workers(runtime)
+    return ", ".join(words[:-1]) + " or " + words[-1]
+
+
+def review_schema(runtime) -> dict:
+    """The structured-output schema of the print-mode reviewer, generated from the run's lanes."""
+    return {
+        "type": "object", "additionalProperties": False, "required": ["verdict", "findings"],
+        "properties": {
+            "verdict": {"enum": ["approved", "blocked"]},
+            "findings": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["severity", "message", "disposition", "worker", "requirement"],
+                "properties": {"severity": {"enum": ["P0", "P1", "P2"]}, "message": {"type": "string", "minLength": 1},
+                               "disposition": {"enum": ["open", "resolved", "accepted"]},
+                               "worker": {"enum": finding_workers(runtime)},
+                               "requirement": {"type": ["string", "null"], "minLength": 1}}}}}
+    }
+
+
+def check_finding_lanes(runtime, findings: list) -> None:
+    """A finding's `worker` is one of this run's selected lanes, `multiple` or `none`; anything else is refused."""
+    allowed = set(finding_workers(runtime))
+    for finding in findings:
+        worker = finding.get("worker") if isinstance(finding, dict) else None
+        if worker not in allowed:
+            raise RuntimeError(f"Review finding names worker {worker!r}, which is not a lane of this run ({worker_vocabulary(runtime)})")
+
+
 REVIEW_COMPLETION_LIMIT = 262144
 REVIEW_RESUME_NOTE = ("Controller interrupted while waiting for the reviewer. The native reviewer session was NOT stopped "
                       "and keeps running; resume with: python -m workflow automatic {directory} --live")
@@ -152,25 +186,26 @@ def review_prompt(runtime, patch: Path) -> str:
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
             f"Requirements: each worker's task text pinned in {runtime.directory / 'plan.json'} under nodes.<worker>.task, "
             "and the feature/contract READMEs those tasks cite (for this repository, features/<feature>/README.md and contracts/projects/README.md). "
-            "For every finding name the worker it concerns (ui, adapter, both or none for cross-cutting/policy findings) and, as "
-            "`requirement`, a verbatim quote from that worker's task text that the finding relates to, or null when no single "
-            "requirement applies. Never paraphrase a quote.")
+            f"This run's worker lanes are: {', '.join(lanes(runtime))}. "
+            f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
+            "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
+            "finding relates to, or null when no single requirement applies. Never paraphrase a quote.")
 
 
 def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidate_commit: str) -> str:
     """The native reviewer reports its verdict only through a bound completion file."""
     completion = runtime.directory / "review.completion.json"
-    example = {"version": "1.0.0", "run_id": runtime.plan["run_id"], "node_id": "review", "launch_token": launch_token,
+    example = {"version": "1.1.0", "run_id": runtime.plan["run_id"], "node_id": "review", "launch_token": launch_token,
                "bundle_sha256": digest, "candidate_commit": candidate_commit, "verdict": "approved",
                "findings": [{"severity": "P2", "message": "Describe the concrete defect and where it is", "disposition": "open",
-                             "worker": "ui", "requirement": "a verbatim quote from that worker's task text, or null"}]}
+                             "worker": lanes(runtime)[0], "requirement": "a verbatim quote from that worker's task text, or null"}]}
     return ("\n\nREVIEW COMPLETION PROTOCOL: you run as a native session. A human may type in this terminal; the transcript "
             f"is the record, but your verdict is only the file {completion}. Write exactly this JSON shape there "
             "(schema: contracts/workflow/reviewCompletion.schema.json in this checkout when present):\n" + json.dumps(example) + "\n"
             "Keep version, run_id, node_id, launch_token, bundle_sha256 and candidate_commit exactly as shown; the controller "
             "rejects any other binding without launching another reviewer. verdict is approved or blocked. Each finding "
             "has severity P0, P1 or P2 (P2 is the lowest; there is no P3, use P2 for minor items), disposition open, "
-            "resolved or accepted, worker (ui, adapter, both or none) and requirement (a verbatim quote from that "
+            f"resolved or accepted, worker ({worker_vocabulary(runtime)}; never both) and requirement (a verbatim quote from that "
             "worker's task text in plan.json under nodes.<worker>.task, or null); no other keys. A file that does not "
             "match this shape exactly is rejected as a whole. This completion file is the only write you are allowed. It cannot "
             "be written under a temporary name and renamed, so write it once, complete, as your last action, then end your "
@@ -198,6 +233,7 @@ def read_review_completion(runtime) -> dict:
     if (item["run_id"] != runtime.plan["run_id"] or item["node_id"] != "review" or item["launch_token"] != receipt.get("launch_token")
             or item["bundle_sha256"] != digest or item["candidate_commit"] != bundle["candidate_commit"]):
         raise RuntimeError("Stale or foreign review completion signal")
+    check_finding_lanes(runtime, item["findings"])
     return {"verdict": item["verdict"], "findings": item["findings"]}
 
 
@@ -376,7 +412,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path, re
     command = [runtime.sessions.executable, "--print", "--output-format", "json", "--session-id", session_id,
                "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none",
-               "--add-dir", str(runtime.directory), "--json-schema", json.dumps(REVIEW_SCHEMA)]
+               "--add-dir", str(runtime.directory), "--json-schema", json.dumps(review_schema(runtime))]
     env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
     process = None
     try:
@@ -390,7 +426,8 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path, re
         if process.returncode != 0 or result.get("session_id") != session_id or result.get("is_error") is not False or result.get("subtype") != "success":
             raise RuntimeError("Reviewer did not succeed; inspect retained output. No automatic retry/provider switch.")
         decision = result.get("structured_output")
-        validate(decision, REVIEW_SCHEMA)
+        validate(decision, review_schema(runtime))
+        check_finding_lanes(runtime, decision["findings"])
         if git(cwd, "rev-parse", "HEAD") != bundle["candidate_commit"] or git(cwd, "status", "--porcelain"):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != receipt["patch_sha256"]:
@@ -410,14 +447,16 @@ def advance_failed_checks(runtime, state) -> bool:
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
     # tasks with errors are failures to classify.
+    workers = lanes(runtime)
+    retryable = {f"verify_{node}" for node in workers} | {"candidate"}
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]
-    if not failures or any(name not in {"verify_ui", "verify_adapter", "candidate"} for name in failures):
+    if not failures or any(name not in retryable for name in failures):
         return False
     targets = []
     for name in failures:
         phase = "candidate" if name == "candidate" else "worker"
         stage_targets = []
-        for node in NODES if phase == "candidate" else (name.removeprefix("verify_"),):
+        for node in workers if phase == "candidate" else (name.removeprefix("verify_"),):
             attempt = runtime.attempt(phase, node)
             path = runtime.directory / "verification" / phase / node / str(attempt) / "packet.json"
             if path.exists() and read_json(path)["gate"]["status"] != "passed":
@@ -481,12 +520,12 @@ def reviewer_stop_pending(runtime, state) -> bool:
 
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
-    from .pipeline import build_pipeline, report
+    from .pipeline import build_pipeline, graph_config, report
     validate_automatic(runtime.plan)
     if git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD") != runtime.plan["source_branch"]:
         raise RuntimeError("Source feature branch changed; no automatic continuation")
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
-    config = {"configurable": {"thread_id": runtime.plan["run_id"]}, "max_concurrency": 2}
+    config = graph_config(runtime)
     while True:
         with SqliteSaver.from_conn_string(str(runtime.directory / "pipeline.sqlite")) as saver:
             graph = build_pipeline(saver, runtime)

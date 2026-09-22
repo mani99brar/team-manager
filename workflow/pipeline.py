@@ -1,6 +1,10 @@
 """Complete operator-driven graph: launch → freeze → verify → review → approve → integrate.
 
 No agent starts without `start --live`. Operator controls are local CLI-only.
+
+The worker lanes come from the run's plan (`plan.workers`, pinned at prepare from the policy
+and an optional `--workers` selection): one `launch_<lane>` and one `verify_<lane>` node per
+selected lane around the fixed tail. Excluded lanes keep their owned paths off-limits.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -23,20 +27,57 @@ from langgraph.types import Command, interrupt
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_reviewer_panel
-from .sessions import NODES, git, prepare, read_json, run_lock, save_json
+from .sessions import git, plan_excluded, plan_workers, prepare, read_json, run_lock, save_json, validate_node_id
 from .verification import owns, policy_digest, safe_path, validate_policy
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 FINDING_KEYS = frozenset({"severity", "message", "disposition"})
 FINDING_LINK_KEYS = frozenset({"worker", "requirement"})
-FINDING_WORKERS = frozenset({"ui", "adapter", "both", "none"})
+# A finding names one lane of the run, several (`multiple`) or none. `both` is the legacy spelling of
+# `multiple` from two-lane runs; only reviews recorded before configured lanes may still carry it.
+FINDING_ATTRIBUTIONS = frozenset({"multiple", "none"})
+LEGACY_FINDING_ATTRIBUTIONS = FINDING_ATTRIBUTIONS | {"both"}
 
 
 def validate_pipeline_policy(policy: dict) -> dict:
+    """The policy's own rules (schema, ownership, required check kinds) plus the lane-id rules the graph needs."""
     validate_policy(policy)
-    if {worker["node_id"]: worker["role"] for worker in policy["workers"]} != {"ui": "frontend", "adapter": "backend"}:
-        raise ValueError("This graph requires ui/frontend and adapter/backend policies")
+    for worker in policy["workers"]:
+        validate_node_id(worker["node_id"])
     return policy
+
+
+def policy_workers(policy: dict) -> list[str]:
+    return [worker["node_id"] for worker in policy["workers"]]
+
+
+def parse_lane_selection(value: str | None, declared: list[str]) -> list[str]:
+    """`--workers a,b`: a non-empty subset of the declared lanes, without duplicates, in declared order."""
+    if value is None:
+        return list(declared)
+    selected = [item.strip() for item in value.split(",")]
+    if not selected or any(not item for item in selected):
+        raise ValueError("--workers needs a comma-separated list of lane ids")
+    if len(set(selected)) != len(selected):
+        raise ValueError(f"--workers lists a lane twice: {value}")
+    unknown = [item for item in selected if item not in declared]
+    if unknown:
+        raise ValueError(f"--workers names lanes the policy does not declare: {', '.join(unknown)} (declared: {', '.join(declared)})")
+    return [node for node in declared if node in selected]
+
+
+def parse_lane_files(values: list[str] | None, flag: str) -> dict[str, Path]:
+    """`--task id=path` / `--handoff id=path`, once per lane."""
+    result = {}
+    for item in values or []:
+        node, separator, path = item.partition("=")
+        if not separator or not node or not path:
+            raise ValueError(f"{flag} expects <lane>=<path>, got {item!r}")
+        validate_node_id(node)
+        if node in result:
+            raise ValueError(f"{flag} given twice for lane {node}")
+        result[node] = Path(path)
+    return result
 
 
 def blocking_findings(findings: list) -> list:
@@ -44,8 +85,11 @@ def blocking_findings(findings: list) -> list:
     return [finding for finding in findings if finding.get("severity") in {"P0", "P1"} and finding.get("disposition") != "resolved"]
 
 
-def check_review(review: dict, bundle: dict, digest: str, *, require_approved: bool = True) -> None:
-    """Shape and identity of a persisted review against its exact bundle; approval is checked only when required."""
+def check_review(review: dict, bundle: dict, digest: str, *, require_approved: bool = True, allow_legacy: bool = False) -> None:
+    """Shape and identity of a persisted review against its exact bundle; approval is checked only when required.
+
+    `allow_legacy` accepts the two-lane `both` attribution of reviews recorded before configured lanes (export only).
+    """
     if (not isinstance(review, dict) or set(review) != REVIEW_KEYS or review["run_id"] != bundle["run_id"]
             or review["bundle_sha256"] != digest or review["candidate_commit"] != bundle["candidate_commit"]):
         raise ValueError("Review must reference this exact run, bundle hash and candidate")
@@ -56,13 +100,15 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
         raise ValueError("Malformed review verdict or findings")
     if require_approved and review["verdict"] != "approved":
         raise ValueError("Review is not approved")
+    # The bundle's snapshots are exactly the run's selected lanes.
+    workers = set(bundle["snapshots"]) | (LEGACY_FINDING_ATTRIBUTIONS if allow_legacy else FINDING_ATTRIBUTIONS)
     for finding in review["findings"]:
         if (not isinstance(finding, dict) or not FINDING_KEYS <= set(finding) <= FINDING_KEYS | FINDING_LINK_KEYS
                 or finding["severity"] not in {"P0", "P1", "P2"} or finding["disposition"] not in {"open", "resolved", "accepted"}
                 or not isinstance(finding["message"], str) or not finding["message"].strip()):
             raise ValueError("Malformed review finding")
-        if "worker" in finding and finding["worker"] not in FINDING_WORKERS:
-            raise ValueError("Malformed review finding worker")
+        if "worker" in finding and finding["worker"] not in workers:
+            raise ValueError(f"Malformed review finding worker: expected one of {', '.join(sorted(workers))}, got {finding['worker']!r}")
         requirement = finding.get("requirement")
         if requirement is not None and (not isinstance(requirement, str) or not requirement.strip()):
             raise ValueError("Malformed review finding requirement")
@@ -96,17 +142,36 @@ def changed_files(cwd: Path, base: str) -> list[str]:
     return sorted(set(filter(None, tracked + untracked)))
 
 
+def merge_lanes(left: dict | None, right: dict | None) -> dict:
+    """Parallel lane nodes each write their own key; the channel keeps every lane."""
+    return {**(left or {}), **(right or {})}
+
+
 class PipelineState(TypedDict, total=False):
     run_id: str
-    ui: dict
-    adapter: dict
+    lanes: Annotated[dict, merge_lanes]      # launch receipts by lane id
     snapshots: dict
-    ui_packet: str
-    adapter_packet: str
+    packets: Annotated[dict, merge_lanes]    # worker verification packet paths by lane id
     bundle: str
     review: dict
     approved_bundle: str
     integrated_commit: str
+
+
+def lane_positions(workers: list[str]) -> tuple[dict, list, int, int]:
+    """Report layout: one row per lane for the fan-outs, the fixed tail centred on them."""
+    rows = [70 + 140 * index for index in range(len(workers))]
+    centre = (rows[0] + rows[-1]) // 2
+    positions = {}
+    for node, y in zip(workers, rows):
+        positions[f"launch_{node}"] = (90, y)
+    positions["handoff"] = (280, centre)
+    for node, y in zip(workers, rows):
+        positions[f"verify_{node}"] = (470, y)
+    positions.update(candidate=(660, centre), review=(850, centre), approval=(1040, centre), integrate=(1230, centre))
+    edges = [(f"launch_{node}", "handoff") for node in workers] + [("handoff", f"verify_{node}") for node in workers] \
+        + [(f"verify_{node}", "candidate") for node in workers] + [("candidate", "review"), ("review", "approval"), ("approval", "integrate")]
+    return positions, edges, 1330, rows[-1] + 70
 
 
 class Pipeline:
@@ -119,10 +184,16 @@ class Pipeline:
         self.policy = validate_pipeline_policy(read_json(self.directory / "policy.json"))
         if self.plan.get("policy_sha256") != policy_digest(self.policy):
             raise ValueError("Pinned policy changed")
-        if {worker["node_id"] for worker in self.policy["workers"]} != set(NODES):
-            raise ValueError("This small graph requires policy nodes ui and adapter")
+        self.workers, self.excluded = lanes_of(self.plan, self.policy)
         self.sessions = sessions or InteractiveSessions(self.directory, timeout=45)
         self._events_lock = threading.Lock()
+
+    def worker_policy(self, node: str) -> dict:
+        return next(item for item in self.policy["workers"] if item["node_id"] == node)
+
+    def failure_drill(self) -> dict | None:
+        """The pinned drill: null when prepare skipped it for an excluded lane; the policy's for plans pinned before."""
+        return self.plan["failure_drill"] if "failure_drill" in self.plan else self.policy.get("failure_drill")
 
     def event(self, node: str, status: str, message: str):
         with self._events_lock:
@@ -209,12 +280,12 @@ class Pipeline:
             save_json(marker, intent)
 
     def stop_workers(self):
-        for node in NODES:
+        for node in self.workers:
             self.stop_session(node)
-        stopped_ids = {read_json(self.directory / f"{node}.stop.json")["session_id"] for node in NODES}
+        stopped_ids = {read_json(self.directory / f"{node}.stop.json")["session_id"] for node in self.workers}
         if any(row.get("sessionId") in stopped_ids and row.get("pid") for row in self.sessions.inventory()):
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")
-        self.event("freeze", "stopped", "Both native workers stopped before snapshot capture")
+        self.event("freeze", "stopped", f"Native workers stopped before snapshot capture: {', '.join(self.workers)}")
 
     def stop_reviewer(self):
         self.stop_session(REVIEW)
@@ -225,7 +296,7 @@ class Pipeline:
         if record.exists():
             return read_json(record)
         handoffs = {}
-        for node in NODES:
+        for node in self.workers:
             handoff_path = self.directory / f"{node}.handoff.json"
             if not handoff_path.exists():
                 raise ValueError(f"Missing {node} handoff: summary and open_assumptions are required")
@@ -234,15 +305,20 @@ class Pipeline:
                 raise ValueError("Malformed worker handoff")
             handoffs[node] = handoff
         self.stop_workers()
+        # Ownership is enforced from the full declared policy: an excluded lane's paths are off-limits to every selected lane.
+        excluded_paths = [(other, safe_path(prefix)) for other in self.excluded for prefix in self.worker_policy(other)["owned_paths"]]
         snapshots = {}
-        for node in NODES:
-            worker = next(item for item in self.policy["workers"] if item["node_id"] == node)
+        for node in self.workers:
+            worker = self.worker_policy(node)
             cwd = Path(self.plan["nodes"][node]["worktree"])
             if git(cwd, "rev-parse", "HEAD") != self.plan["base_commit"]:
                 raise ValueError("Worker changed HEAD; reconcile commits rather than silently accepting them")
             changed = changed_files(cwd, self.plan["base_commit"])
             for name in changed:
                 safe_path(name)
+                for other, prefix in excluded_paths:
+                    if owns(name, prefix):
+                        raise ValueError(f"Ownership violation: {node} edited {name}, owned by excluded lane {other}")
                 if not any(owns(name, safe_path(prefix)) for prefix in worker["owned_paths"]):
                     raise ValueError(f"{node} edited unowned path: {name}")
                 if (cwd / name).is_symlink():
@@ -291,7 +367,7 @@ class Pipeline:
     def native_evidence(self) -> dict:
         return {node: {key: read_json(self.directory / f"{node}.interactive.json").get(key)
                        for key in ("session_id", "background_id", "launcher_invocations", "native_started_at")}
-                for node in NODES}
+                for node in self.workers}
 
     def verify(self, node: str, snapshots: dict) -> str:
         snap = snapshots[node]
@@ -299,7 +375,7 @@ class Pipeline:
         self.event(f"verify_{node}", "running", f"Attempt {attempt}; revision {snap['commit']}")
         packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"], attempt=attempt)
         path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
-        drill = self.policy.get("failure_drill")
+        drill = self.failure_drill()
         if drill and drill["node_id"] == node and attempt == 1:
             marker = "Intentional lab drill: verification branch failure, not a worker or test failure"
             if marker not in packet["capture_errors"]:
@@ -313,14 +389,17 @@ class Pipeline:
         packet["result"]["summary"] = snap["summary"]
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
-        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or "Required tests and artifacts passed")
+        passed = "Required tests and artifacts passed"
+        if packet["gate"].get("deferred_checks"):
+            passed += "; recorded for the candidate gate: " + ", ".join(packet["gate"]["deferred_checks"])
+        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed)
         if packet["gate"]["status"] != "passed":
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
 
     def candidate(self, state: PipelineState) -> str:
         # Validate branch evidence again before combining anything.
-        worker_paths = [Path(state[f"{node}_packet"]) for node in NODES]
+        worker_paths = [Path(state["packets"][node]) for node in self.workers]
         for path in worker_paths:
             packet = recheck_packet(read_json(path), self.policy, self.directory)
             if packet["gate"]["status"] != "passed":
@@ -333,14 +412,14 @@ class Pipeline:
             if cwd.exists():
                 raise ValueError("Partial candidate worktree exists; inspect before recovery")
             subprocess.run(["git", "-C", self.plan["repository"], "worktree", "add", "--detach", str(cwd), self.plan["base_commit"]], check=True, capture_output=True)
-            for node in NODES:
+            for node in self.workers:  # Declared order, selected lanes only.
                 commit = state["snapshots"][node]["commit"]
                 if commit != self.plan["base_commit"]:
                     subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", commit], env=commit_env(), check=True, capture_output=True)
             candidate = {"commit": git(cwd, "rev-parse", "HEAD"), "worktree": str(cwd)}
             save_json(saved, candidate)
         candidate_paths = []
-        for node in NODES:
+        for node in self.workers:
             attempt = self.attempt("candidate", node)
             packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
                                      changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
@@ -360,8 +439,8 @@ class Pipeline:
             before = read_json(drill_path)["native_before"]
             after = self.native_evidence()
             audit = {"run_id": self.plan["run_id"], "native_before": before, "native_after": after,
-                     "workers_with_changed_launch_evidence": [node for node in NODES if before[node] != after[node]],
-                     "verification_attempts": {node: sorted(int(item.name) for item in (self.directory / "verification" / "worker" / node).iterdir() if item.is_dir() and item.name.isdigit()) for node in NODES},
+                     "workers_with_changed_launch_evidence": [node for node in self.workers if before.get(node) != after.get(node)],
+                     "verification_attempts": {node: sorted(int(item.name) for item in (self.directory / "verification" / "worker" / node).iterdir() if item.is_dir() and item.name.isdigit()) for node in self.workers},
                      "scope": "Pipeline-issued sessions; native launch times/counts are null when unavailable. Out-of-band manual restarts are not certified."}
             save_json(self.directory / "failure-report.json", audit)
             bundle["failure_drill"] = audit
@@ -431,13 +510,62 @@ class ExportRuntime:
             self.policy = validate_pipeline_policy(read_json(policy_path))
             if self.plan.get("policy_sha256") != policy_digest(self.policy):
                 raise ValueError("Pinned policy changed")
+        self.workers, self.excluded = lanes_of(self.plan, self.policy)
         review_path = self.directory / "review.json"
         if review_path.exists():
             bundle_path = self.directory / "review-bundle.json"
             if not bundle_path.exists():
                 raise ValueError("review.json exists without review-bundle.json; contradictory run directory")
-            # Packet hashes are not rechecked here; the adapter re-verifies packets itself.
-            check_review(read_json(review_path), read_json(bundle_path), digest_file(bundle_path), require_approved=False)
+            # Packet hashes are not rechecked here; the adapter re-verifies packets itself. Reviews recorded
+            # before configured lanes may attribute a finding to `both`; the viewer renders it as several lanes.
+            check_review(read_json(review_path), read_json(bundle_path), digest_file(bundle_path), require_approved=False,
+                         allow_legacy="workers" not in self.plan)
+
+
+def lanes_of(plan: dict, policy: dict | None) -> tuple[list[str], list[str]]:
+    """The run's selected and excluded lanes, checked against the pinned policy when it is present."""
+    workers, excluded = plan_workers(plan), plan_excluded(plan)
+    if policy is not None:
+        declared = policy_workers(policy)
+        if not set(workers) <= set(declared) or not set(excluded) <= set(declared):
+            raise ValueError("Plan names lanes the pinned policy does not declare")
+        if "workers" in plan and set(workers) | set(excluded) != set(declared):
+            raise ValueError("Plan does not account for every declared lane")
+    if set(plan.get("nodes", {})) != set(workers):
+        raise ValueError("Plan nodes do not match the selected lanes; inspect retained allocation state")
+    return workers, excluded
+
+
+def carry_legacy_lanes(runtime: ExportRuntime, state, saver: SqliteSaver | None = None):
+    """Carry a pre-lane checkpoint's per-lane evidence into the lane state shape.
+
+    A checkpoint written before configured lanes stored each lane under `<lane>` and
+    `<lane>_packet`; the graph no longer has those channels, so `get_state` drops them.
+    Read them from the raw checkpoint and carry them under `lanes`/`packets` so the launch
+    evidence survives every export, whether from `export` or from the report written at
+    each CLI boundary. Runs with configured lanes are returned unchanged.
+    """
+    from types import SimpleNamespace
+    database = runtime.directory / "pipeline.sqlite"
+    if "workers" in runtime.plan or not database.exists():
+        return state
+    config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
+
+    def carry(saver: SqliteSaver):
+        stored = saver.get_tuple(config)
+        raw = stored.checkpoint.get("channel_values", {}) if stored else {}
+        values = dict(state.values)
+        for node in runtime.workers:
+            if node in raw:
+                values.setdefault("lanes", {}).setdefault(node, raw[node])
+            if f"{node}_packet" in raw:
+                values.setdefault("packets", {}).setdefault(node, raw[f"{node}_packet"])
+        return SimpleNamespace(values=values, next=state.next, tasks=state.tasks)
+
+    if saver is not None:
+        return carry(saver)
+    with SqliteSaver.from_conn_string(str(database)) as own:
+        return carry(own)
 
 
 def export_run(runtime: ExportRuntime) -> dict:
@@ -445,24 +573,28 @@ def export_run(runtime: ExportRuntime) -> dict:
     from types import SimpleNamespace
     database = runtime.directory / "pipeline.sqlite"
     if database.exists():
+        config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
         with SqliteSaver.from_conn_string(str(database)) as saver:
-            state = build_pipeline(saver, runtime).get_state({"configurable": {"thread_id": runtime.plan["run_id"]}})
+            state = carry_legacy_lanes(runtime, build_pipeline(saver, runtime).get_state(config), saver)
     else:
-        state = SimpleNamespace(values={}, next=("launch_ui", "launch_adapter"), tasks=[])  # Prepared, never started.
+        state = SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in runtime.workers), tasks=[])  # Prepared, never started.
     return export_state(runtime, state)
 
 
-def build_pipeline(checkpointer, runtime: Pipeline):
-    def ui(_state): return {"ui": runtime.launch("ui")}
-    def adapter(_state): return {"adapter": runtime.launch("adapter")}
+def build_pipeline(checkpointer, runtime):
+    """The graph over the runtime's plan: `launch_<lane>` and `verify_<lane>` per selected lane, then the fixed tail."""
+    workers = list(runtime.workers)
+    def launcher(node):
+        return lambda _state: {"lanes": {node: runtime.launch(node)}}
+    def verifier(node):
+        return lambda state: {"packets": {node: runtime.verify(node, state["snapshots"])}}
     def handoff(_state):
-        message = "Awaiting explicit completion signals and automatic freeze." if runtime.plan.get("automatic") else "Type in Claude terminals; provide both handoffs, then explicitly freeze."
+        message = ("Awaiting explicit completion signals and automatic freeze." if runtime.plan.get("automatic")
+                   else f"Type in Claude terminals; provide a handoff for every lane ({', '.join(workers)}), then explicitly freeze.")
         decision = interrupt({"kind": "worker_handoff", "message": message})
         if decision != {"freeze": True}:
             raise ValueError("Explicit freeze required")
         return {"snapshots": runtime.freeze()}
-    def verify_ui(state): return {"ui_packet": runtime.verify("ui", state["snapshots"])}
-    def verify_adapter(state): return {"adapter_packet": runtime.verify("adapter", state["snapshots"])}
     def candidate(state): return {"bundle": runtime.candidate(state)}
     def review(_state):
         _, digest = runtime.validate_bundle()
@@ -490,21 +622,33 @@ def build_pipeline(checkpointer, runtime: Pipeline):
         return {"approved_bundle": digest}
     def integrate(state): return {"integrated_commit": runtime.integrate(state["approved_bundle"])}
     graph = StateGraph(PipelineState)
-    for name, function in (("launch_ui", ui), ("launch_adapter", adapter), ("handoff", handoff),
-                           ("verify_ui", verify_ui), ("verify_adapter", verify_adapter), ("candidate", candidate),
-                           ("review", review), ("approval", approval), ("integrate", integrate)):
+    launches = [f"launch_{node}" for node in workers]
+    verifies = [f"verify_{node}" for node in workers]
+    for node, name in zip(workers, launches):
+        graph.add_node(name, launcher(node))
+    for node, name in zip(workers, verifies):
+        graph.add_node(name, verifier(node))
+    for name, function in (("handoff", handoff), ("candidate", candidate), ("review", review), ("approval", approval), ("integrate", integrate)):
         graph.add_node(name, function)
-    graph.add_edge(START, "launch_ui"); graph.add_edge(START, "launch_adapter")
-    graph.add_edge(["launch_ui", "launch_adapter"], "handoff")
-    graph.add_edge("handoff", "verify_ui"); graph.add_edge("handoff", "verify_adapter")
-    graph.add_edge(["verify_ui", "verify_adapter"], "candidate")
+    for name in launches:
+        graph.add_edge(START, name)
+    graph.add_edge(launches, "handoff")
+    for name in verifies:
+        graph.add_edge("handoff", name)
+    graph.add_edge(verifies, "candidate")
     graph.add_edge("candidate", "review"); graph.add_edge("review", "approval")
     graph.add_edge("approval", "integrate"); graph.add_edge("integrate", END)
     return graph.compile(checkpointer=checkpointer)
 
 
+def graph_config(runtime) -> dict:
+    """One LangGraph thread per run; every lane's fan-out step may run concurrently."""
+    return {"configurable": {"thread_id": runtime.plan["run_id"]}, "max_concurrency": max(2, len(runtime.workers))}
+
+
 def report(runtime: Pipeline, state) -> Path:
     """Escaped local results viewer, generated on every CLI boundary; no server needed."""
+    state = carry_legacy_lanes(runtime, state)  # `status` on a legacy run must export the same evidence as `export`.
     export_state(runtime, state)
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
@@ -515,20 +659,16 @@ def report(runtime: Pipeline, state) -> Path:
              '<h1>Workflow report</h1><p>' + html.escape(flow) + '</p>',
              '<h2>Current state</h2><pre>' + html.escape(json.dumps({"next": state.next, "interrupts": [str(task.interrupts) for task in state.tasks if task.interrupts], "errors": [str(task.error) for task in state.tasks if task.error], "integrated_commit": state.values.get("integrated_commit")}, indent=2)) + '</pre>',
              '<h2>Timeline</h2><pre>' + html.escape(json.dumps(events, indent=2)) + '</pre>']
-    positions = {"launch_ui": (90, 70), "launch_adapter": (90, 210), "handoff": (280, 140),
-                 "verify_ui": (470, 70), "verify_adapter": (470, 210), "candidate": (660, 140),
-                 "review": (850, 140), "approval": (1040, 140), "integrate": (1230, 140)}
-    edges = [("launch_ui", "handoff"), ("launch_adapter", "handoff"), ("handoff", "verify_ui"),
-             ("handoff", "verify_adapter"), ("verify_ui", "candidate"), ("verify_adapter", "candidate"),
-             ("candidate", "review"), ("review", "approval"), ("approval", "integrate")]
-    svg = ['<h2>Execution graph</h2><svg role="img" aria-label="Workflow execution graph" viewBox="0 0 1330 280">']
+    positions, edges, width, height = lane_positions(list(runtime.workers))
+    svg = [f'<h2>Execution graph</h2><svg role="img" aria-label="Workflow execution graph" viewBox="0 0 {width} {height}">']
     for left, right in edges:
         x1, y1 = positions[left]; x2, y2 = positions[right]
         svg.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="#9aa"/>')
     for name, (x, y) in positions.items():
         color = '#665000' if name in state.next else '#263747'
-        svg.append(f'<rect x="{x-75}" y="{y-23}" width="150" height="46" rx="8" fill="{color}" stroke="#9aa"/><text x="{x}" y="{y+5}" text-anchor="middle" fill="white" font-size="14">{name}</text>')
-    svg.append('</svg><p>Highlighted nodes are pending. A completed launch is not a completed worker task.</p>')
+        svg.append(f'<rect x="{x-75}" y="{y-23}" width="150" height="46" rx="8" fill="{color}" stroke="#9aa"/><text x="{x}" y="{y+5}" text-anchor="middle" fill="white" font-size="14">{html.escape(name)}</text>')
+    lanes = ", ".join(runtime.workers) + (f" (excluded: {', '.join(runtime.excluded)})" if runtime.excluded else "")
+    svg.append(f'</svg><p>Lanes: {html.escape(lanes)}. Highlighted nodes are pending. A completed launch is not a completed worker task.</p>')
     parts[2:2] = svg
     from urllib.parse import quote
     for path in packets:
@@ -557,19 +697,18 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
-    parser.add_argument("--ui-task", type=Path)
-    parser.add_argument("--adapter-task", type=Path)
+    parser.add_argument("--workers", help="prepare: comma-separated subset of the policy's lanes to launch (default: every declared lane)")
+    parser.add_argument("--task", action="append", metavar="LANE=PATH", help="prepare: task file for one selected lane; repeat once per lane")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--herdr", action="store_true")
-    parser.add_argument("--ui-handoff", type=Path)
-    parser.add_argument("--adapter-handoff", type=Path)
+    parser.add_argument("--handoff", action="append", metavar="LANE=PATH", help="freeze: handoff file for one selected lane; repeat once per lane")
     parser.add_argument("--review-file", type=Path)
     parser.add_argument("--bundle-sha256")
-    parser.add_argument("--node", choices=NODES)
+    parser.add_argument("--node", help="retry: the lane whose failed check reruns (validated against the run's lanes)")
     parser.add_argument("--phase", choices=["worker", "candidate"], default="worker")
     args = parser.parse_args()
     directory = args.directory.resolve()
@@ -578,8 +717,6 @@ def main():
             if not args.policy:
                 parser.error("preflight requires --policy")
             policy = validate_pipeline_policy(read_json(args.policy))
-            if {worker["node_id"] for worker in policy["workers"]} != set(NODES):
-                parser.error("Policy must name ui and adapter")
             if git(args.repo.resolve(), "status", "--porcelain"):
                 raise ValueError("Source must be clean before prepare")
             for executable in ("git", "claude", "node"):
@@ -602,18 +739,26 @@ def main():
                               "policy_sha256": policy_digest(policy), "note": "No agents launched. Actual dependency/test availability is checked in isolated verification worktrees."}, indent=2))
             return
         if args.action == "prepare":
-            if not all((args.policy, args.ui_task, args.adapter_task)):
-                parser.error("prepare requires --policy and both task files")
+            if not args.policy or not args.task:
+                parser.error("prepare requires --policy and --task <lane>=<path> for every selected lane")
             policy = validate_pipeline_policy(read_json(args.policy))
-            if {worker["node_id"] for worker in policy["workers"]} != set(NODES):
-                parser.error("This graph requires policy nodes ui and adapter")
+            declared = policy_workers(policy)
+            selected = parse_lane_selection(args.workers, declared)
+            task_files = parse_lane_files(args.task, "--task")
+            if set(task_files) != set(selected):
+                parser.error(f"--task must be given exactly once for each selected lane ({', '.join(selected)}); got {', '.join(task_files) or 'none'}")
             if args.automatic and not git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD").startswith("feature/"):
                 raise ValueError("Automatic preparation requires a feature/ branch")
-            tasks = {"ui": args.ui_task.read_text(), "adapter": args.adapter_task.read_text()}
+            tasks = {}
             for worker in policy["workers"]:
-                tasks[worker["node_id"]] += "\nApproved ownership and checks:\n" + json.dumps(worker)
-            plan = prepare(directory, args.repo, "HEAD", tasks, True)
-            plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
+                node = worker["node_id"]
+                if node in selected:
+                    tasks[node] = task_files[node].read_text() + "\nApproved ownership and checks:\n" + json.dumps(worker)
+            plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
+            drill = policy.get("failure_drill")
+            drill_skipped = bool(drill) and drill["node_id"] not in selected
+            plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
+                        failure_drill=None if drill_skipped else drill)
             if args.automatic:
                 from .automatic import automatic_settings
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
@@ -622,8 +767,12 @@ def main():
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             from types import SimpleNamespace
-            export_state(Pipeline(directory), SimpleNamespace(values={}, next=("launch_ui", "launch_adapter"), tasks=[]))
-            print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}")
+            runtime = Pipeline(directory)
+            if drill_skipped:
+                runtime.event("controller", "running", f"Failure drill skipped: its lane {drill['node_id']} is not selected for this run")
+            export_state(runtime, SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in selected), tasks=[]))
+            print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}. Lanes: {', '.join(selected)}"
+                  + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else ""))
             return
         if args.action == "automatic":
             if not args.live:
@@ -653,7 +802,7 @@ def main():
                 print(json.dumps(attach_panels(runtime.sessions), indent=2)); return
             with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
                 graph = build_pipeline(saver, runtime)
-                config = {"configurable": {"thread_id": runtime.plan["run_id"]}, "max_concurrency": 2}
+                config = graph_config(runtime)
                 state = graph.get_state(config)
                 pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
                 value = None
@@ -666,9 +815,11 @@ def main():
                 elif args.action == "freeze":
                     if pending != ["worker_handoff"]:
                         parser.error("Run is not waiting for worker handoff")
-                    for node, handoff_path in (("ui", args.ui_handoff), ("adapter", args.adapter_handoff)):
-                        if handoff_path:
-                            save_json(directory / f"{node}.handoff.json", read_json(handoff_path))
+                    handoffs = parse_lane_files(args.handoff, "--handoff")
+                    if set(handoffs) != set(runtime.workers):
+                        parser.error(f"freeze requires --handoff <lane>=<path> once for each lane of this run ({', '.join(runtime.workers)})")
+                    for node, handoff_path in handoffs.items():
+                        save_json(directory / f"{node}.handoff.json", read_json(handoff_path))
                     value = Command(resume={"freeze": True})
                 elif args.action == "review":
                     if pending != ["independent_review"] or not args.review_file:
@@ -696,6 +847,8 @@ def main():
                     if not state.values or pending or not state.next:
                         parser.error("Retry requires a failed graph step, not an interrupt/completed run")
                     if args.node:
+                        if args.node not in runtime.workers:
+                            parser.error(f"--node must be a lane of this run ({', '.join(runtime.workers)}), got {args.node!r}")
                         step = f"verify_{args.node}" if args.phase == "worker" else "candidate"
                         if step not in state.next:
                             parser.error("Selected check is not a failed/pending step")
@@ -711,7 +864,8 @@ def main():
                     if args.action == "start" and args.herdr:
                         print(json.dumps(attach_panels(runtime.sessions), indent=2))
                 else:
-                    print(json.dumps({"next": state.next, "pending": pending, "errors": [str(task.error) for task in state.tasks if task.error]}, indent=2))
+                    print(json.dumps({"workers": runtime.workers, "excluded_workers": runtime.excluded, "next": state.next, "pending": pending,
+                                      "errors": [str(task.error) for task in state.tasks if task.error]}, indent=2))
                     print(f"Report: {report(runtime, state)}")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")

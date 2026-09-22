@@ -25,7 +25,11 @@ def legacy_run(root: Path, *, with_policy: bool = True, automatic: bool = True) 
     """A finished run directory shaped like the first live 1.0.0 run, whose worktrees no longer exist."""
     directory = root / "legacy-001"
     directory.mkdir()
+    # The committed policy is 1.2.0 now; the first live run pinned its 1.1.0 predecessor (roles, no required kinds).
     policy = read_json(REPO / "features/project-workflows/policy.json")
+    policy["version"] = "1.1.0"
+    for worker in policy["workers"]:
+        worker.pop("required_check_kinds", None)
     plan = {"run_id": "legacy-001", "repository": str(root / "gone-repo"), "base_commit": "c" * 40, "allow_edits": True,
             "nodes": {node: {"worktree": str(directory / f"worktree-{node}"), "task": f"# {node} task\n\nDo the {node} work.\n\nApproved ownership and checks:\n{{}}",
                              "session_id": f"{node[0] * 8}-0000-4000-8000-000000000000", "observed_start_commit": "c" * 40} for node in ("ui", "adapter")},
@@ -118,13 +122,16 @@ class ExportSectionTests(unittest.TestCase):
         self.assertEqual(section["setup"], [{"argv": ["npm", "ci"], "command": "npm ci", "timeout_seconds": 600}])
         self.assertEqual((section["max_verification_attempts"], section["failure_drill"]), (3, {"node_id": "adapter", "phase": "worker", "attempt": 1}))
         self.assertEqual(list(section["workers"]), ["ui", "adapter"])
+        # A plan pinned before configured lanes: both lanes selected, nothing excluded, kinds derived from the 1.1.0 roles.
+        self.assertEqual((section["selected_workers"], section["excluded_workers"]), (["ui", "adapter"], []))
+        self.assertEqual([worker["required_check_kinds"] for worker in section["workers"].values()], [["build", "browser"], ["unit"]])
         ui = section["workers"]["ui"]
         self.assertEqual((ui["role"], ui["task"], ui["prompt"]), ("frontend", plan["nodes"]["ui"]["task"], "You are a workflow worker.\n\n# ui task"))
         self.assertIsNone(section["workers"]["adapter"]["prompt"])
         self.assertEqual(ui["owned_paths"], policy["workers"][0]["owned_paths"])
         browser = next(check for check in ui["checks"] if check["kind"] == "browser")
         self.assertEqual(browser["command"], "npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts")
-        self.assertEqual(len(browser["scenarios"]), 6)
+        self.assertEqual(len(browser["scenarios"]), len(next(check for check in policy["workers"][0]["checks"] if check["kind"] == "browser")["scenarios"]))
         self.assertEqual(ui["launch"], {"session_id": "uuuuuuuu-1111-4111-8111-111111111111", "launch_token": plan["nodes"]["ui"]["session_id"],
                                         "launch_requested_at": "2026-09-21T14:33:25.331982Z", "native_started_at": 1790001207771,
                                         "observed_state": "working", "status": "attached_session_available", "launcher_invocations": 1, "background_id": "uuuuuuuu"})
@@ -195,7 +202,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.2.0")
+        self.assertEqual(exported["version"], "1.3.0")
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -260,10 +267,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.2.0", result.stdout)
+        self.assertIn("version 1.3.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.2.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.3.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")

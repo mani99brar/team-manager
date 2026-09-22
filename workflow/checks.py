@@ -261,8 +261,10 @@ def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
         raise ValueError("Artifact root outside run")
     gate = evaluate_worker(policy, packet["result"], packet["evidence"], expected=packet["expected"],
                            artifact_root=root, artifact_paths={key: Path(value) for key, value in packet["artifact_paths"].items()},
-                           enforce_ownership=packet["phase"] == "worker")
-    gate["reasons"].extend(packet["capture_errors"])
+                           enforce_ownership=packet["phase"] == "worker", phase=packet["phase"])
+    # Capture errors are prefixed with their check id; a deferred check's errors are evidence, not a gate.
+    deferred_prefixes = tuple(f"{check_id}{separator}" for check_id in gate["deferred_checks"] for separator in (":", "/"))
+    gate["reasons"].extend(error for error in packet["capture_errors"] if not error.startswith(deferred_prefixes))
     if gate["reasons"]:
         gate["status"] = "blocked"
     packet["gate"] = gate

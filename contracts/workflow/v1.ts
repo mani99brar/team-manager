@@ -24,6 +24,13 @@ export const checkSchema = z.strictObject({
   log_artifact_id: id,
 })
 
+/**
+ * A check the gate executed and recorded but did not gate on in the phase that served this result. A lane's
+ * build and browser checks need the whole application, so on the lane's isolated worker-phase snapshot they
+ * are only recorded; the combined candidate gates on them. `check_index` names the entry of `checks` that ran.
+ */
+export const deferredCheckSchema = z.strictObject({ id, check_index: z.number().int().nonnegative() })
+
 export const workerResultSchema = z.strictObject({
   ...envelope,
   node_id: id,
@@ -38,6 +45,8 @@ export const workerResultSchema = z.strictObject({
   artifacts: z.array(artifactSchema),
   summary: z.string().min(1),
   error: z.strictObject({ code: id, message: z.string().min(1), retryable: z.boolean() }).nullable(),
+  /** Set by the serving adapter from the packet's gate; absent from the immutable capture and when nothing was deferred. */
+  deferred_checks: z.array(deferredCheckSchema).optional(),
 })
 
 export const runSpecSchema = z.strictObject({
@@ -73,6 +82,8 @@ export const runSnapshotSchema = z.strictObject({
     attempt: z.number().int().nonnegative(),
     session_id: id.nullable(),
     result_uri: z.string().min(1).nullable(),
+    /** The combined candidate verifies every lane on one revision; each lane's result is linked here. Empty for every other node. */
+    lane_results: z.array(z.strictObject({ worker: id, attempt: z.number().int().positive(), result_uri: z.string().min(1) })),
   })),
 })
 

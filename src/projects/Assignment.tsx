@@ -40,6 +40,16 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
             </>
           )}
           <div><dt>Attempt cap</dt><dd>{data.max_verification_attempts} per lane and phase</dd></div>
+          <div>
+            <dt>Lanes</dt>
+            <dd data-testid="assignment-lanes">
+              <span data-testid="assignment-selected-workers">{data.selected_workers.length === 0 ? 'none recorded' : data.selected_workers.join(', ')}</span>
+              {' '}<span className="projects-muted">({data.selected_workers.length} {data.selected_workers.length === 1 ? 'worker lane' : 'worker lanes'} in this run)</span>
+              {data.excluded_workers.length > 0 && (
+                <> · <span className="projects-muted">declared but not selected: </span><span data-testid="assignment-excluded-workers">{data.excluded_workers.join(', ')}</span></>
+              )}
+            </dd>
+          </div>
         </dl>
 
         <h4 id="assignment-setup-title">Setup commands</h4>
@@ -68,6 +78,9 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
               </ul>
             )}
             <h5 id={`assignment-checks-${worker.node_id}`}>Required checks</h5>
+            <p className="projects-muted" data-testid="assignment-required-kinds">
+              Required check kinds: {worker.required_check_kinds.length === 0 ? 'none pinned' : worker.required_check_kinds.join(', ')}
+            </p>
             {worker.checks.length === 0 ? <p className="projects-muted">No checks were required.</p> : (
               <ul className="evidence-list" aria-labelledby={`assignment-checks-${worker.node_id}`}>
                 {worker.checks.map(check => (
