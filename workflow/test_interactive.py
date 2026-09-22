@@ -5,8 +5,9 @@ from unittest.mock import patch
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .interactive import InteractiveSessions, attach_panels, build_interactive_graph, require_shell
-from .sessions import read_json, save_json
+from .interactive import (InteractiveSessions, attach_panels, attach_reviewer_pane,
+                          build_interactive_graph, require_shell)
+from .sessions import REVIEWER, plan_digest, read_json, save_json
 
 
 class InteractiveTests(unittest.TestCase):
@@ -151,6 +152,120 @@ class InteractiveTests(unittest.TestCase):
         with patch("workflow.interactive.herdr", return_value=info(shell_pid=None, foreground_processes=[])), patch("workflow.interactive.time.sleep"):
             with self.assertRaisesRegex(RuntimeError, "occupied"):
                 require_shell("w1:p1", settle_seconds=0)
+
+    def automatic(self):
+        """An automatic run whose review node is about to launch its reviewer."""
+        from .automatic import automatic_settings
+        self.plan.update(automatic=automatic_settings(), source_branch="feature/test")
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+        (self.directory / "review-worktree").mkdir()
+        return "c" * 40
+
+    def reviewer_row(self, **updates):
+        native = "33333333-3333-4333-8333-333333333333"
+        return {"sessionId": native, "id": native[:8], "name": self.sessions.launch_name(REVIEWER),
+                "kind": "background", "cwd": str(self.directory / "review-worktree"),
+                "state": "idle", "pid": os.getpid(), **updates}
+
+    def test_reviewer_launches_read_only_in_the_candidate_worktree(self):
+        commit = self.automatic()
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.reviewer_row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), \
+                patch("workflow.interactive.git", side_effect=[commit, ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            receipt = self.sessions.run_reviewer("Review this candidate", "token-1", commit)
+        command = launch.call_args.args[0]
+        self.assertEqual(receipt["session_id"], self.reviewer_row()["sessionId"])
+        self.assertEqual(receipt["node_id"], "review")
+        self.assertEqual(launch.call_args.kwargs["cwd"], self.directory / "review-worktree")
+        self.assertIn("--bg", command)
+        self.assertEqual(command[command.index("--name") + 1], f"workflow-{self.plan['run_id']}-reviewer")
+        self.assertNotIn("Edit", command[command.index("--tools") + 1])
+        self.assertNotIn("Bash", command[command.index("--tools") + 1])
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(command[command.index("--add-dir") + 1], str(self.directory))
+        self.assertNotIn("--dangerously-skip-permissions", command)
+        self.assertNotIn("bypassPermissions", command)
+        self.assertFalse(any(key.startswith("HERDR_") for key in launch.call_args.kwargs["env"]))
+
+    def test_reviewer_reconciles_its_own_session_and_never_launches_twice(self):
+        commit = self.automatic()
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.reviewer_row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.sessions, "inventory", return_value=[self.reviewer_row()]), \
+                patch("workflow.interactive.git", side_effect=[commit, ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]):
+                self.sessions.run_reviewer("Review", "token-1", commit)
+            self.assertEqual(self.sessions.run_reviewer("Review", "token-1", commit)["status"], "attached_session_available")
+            self.assertEqual(launch.call_count, 1)
+            # A different launch intent is a reconciliation problem, never a relaunch.
+            with self.assertRaisesRegex(RuntimeError, "launch intent changed"):
+                self.sessions.run_reviewer("Review", "token-2", commit)
+            self.assertEqual(launch.call_count, 1)
+
+    def test_reviewer_refuses_a_worktree_that_is_not_the_reviewed_candidate(self):
+        commit = self.automatic()
+        with patch.object(self.sessions, "inventory", return_value=[]), \
+                patch("workflow.interactive.git", side_effect=[commit, "?? scratch.md"]), \
+                patch("workflow.interactive.subprocess.run") as launch:
+            with self.assertRaisesRegex(RuntimeError, "clean reviewed candidate"):
+                self.sessions.run_reviewer("Review", "token-1", commit)
+        launch.assert_not_called()
+
+    def pane_mapping(self):
+        for node in ("ui", "adapter"):
+            save_json(self.directory / f"{node}.interactive.json",
+                      {"plan_digest": plan_digest(self.plan), "background_id": self.row(node)["id"],
+                       "session_id": self.row(node)["sessionId"]})
+        save_json(self.directory / "terminals.json",
+                  {"ui": {"pane_id": "w1:p2", "tab_id": "w1:t2", "mode": "attach_requested"},
+                   "adapter": {"pane_id": "w1:p3", "tab_id": "w1:t2", "mode": "attach_requested"}})
+
+    def test_reviewer_pane_joins_the_workers_tab_once(self):
+        commit = self.automatic()
+        self.pane_mapping()
+        save_json(self.directory / "review.interactive.json",
+                  {"plan_digest": plan_digest(self.plan), "background_id": self.reviewer_row()["id"],
+                   "session_id": self.reviewer_row()["sessionId"], "launch_token": "token-1",
+                   "candidate_commit": commit})
+        calls = []
+        def fake_herdr(*args):
+            calls.append(args)
+            if args[:2] == ("pane", "split"):
+                return {"result": {"pane": {"pane_id": "w1:p4"}}}
+            if args[:2] == ("pane", "process-info"):
+                return {"result": {"process_info": {"shell_pid": 1, "foreground_processes": [{"pid": 1}]}}}
+            return {}
+        with patch.object(self.sessions, "inventory", return_value=[self.reviewer_row()]), \
+                patch("workflow.interactive.herdr", side_effect=fake_herdr):
+            mapping = attach_reviewer_pane(self.sessions)
+            self.assertEqual(mapping[REVIEWER]["tab_id"], "w1:t2")
+            self.assertEqual(mapping[REVIEWER]["pane_id"], "w1:p4")
+            self.assertEqual(mapping[REVIEWER]["session_id"], self.reviewer_row()["sessionId"])
+            self.assertEqual([call for call in calls if call[:2] == ("pane", "rename")][0][3], "Claude: reviewer")
+            run = next(call for call in calls if call[:2] == ("pane", "run"))
+            self.assertIn("attach-one", run[3])
+            self.assertIn("--node reviewer", run[3])
+            # A second call re-attaches nothing: panes are never allocated twice.
+            before = len(calls)
+            attach_reviewer_pane(self.sessions)
+            self.assertEqual(len(calls), before)
+        self.assertEqual({entry["tab_id"] for entry in read_json(self.directory / "terminals.json").values()}, {"w1:t2"})
+
+    def test_reviewer_pane_needs_a_verified_session_and_a_workers_tab(self):
+        self.automatic()
+        with patch("workflow.interactive.herdr", side_effect=AssertionError("No Herdr call before verification")):
+            with self.assertRaisesRegex(RuntimeError, "No workflow tab"):
+                attach_reviewer_pane(self.sessions)
+            self.pane_mapping()
+            with patch.object(self.sessions, "inventory", return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, "unverified/missing reviewer"):
+                    attach_reviewer_pane(self.sessions)
 
     def test_graph_launch_returns_human_handoff_not_verified_completion(self):
         with SqliteSaver.from_conn_string(str(self.directory / "interactive.sqlite")) as saver:

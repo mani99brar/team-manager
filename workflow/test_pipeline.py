@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,14 +16,24 @@ from langgraph.types import Command
 
 from .checks import execute
 from .pipeline import Pipeline, build_pipeline, digest_file, report, validate_pipeline_policy
-from .sessions import git, prepare, read_json, save_json
+from .sessions import REVIEWER, file_prefix, git, prepare, read_json, save_json
 from .verification import CONTRACTS, policy_digest
 
 
 class FakeSessions:
+    """No Claude process, but the controller's own identity, completion-file and
+    deadline paths run unchanged; the reviewer row survives controller restarts."""
+
     def __init__(self, directory, plan):
         self.directory, self.plan = directory, plan
         self.starts = []
+        self.executable = "claude"
+        self.reviewer_launches = []
+        self.reviewer_state = "idle"
+        self.reviewer_verdict = {"verdict": "approved", "findings": [
+            {"severity": "P2", "message": "Synthetic non-blocking observation", "disposition": "open",
+             "worker": "ui", "requirement": "UI"}]}
+        self.reviewer_writes_completion = True
 
     def run(self, node):
         self.starts.append(node)
@@ -33,10 +44,57 @@ class FakeSessions:
         save_json(self.directory / f"{node}.handoff.json", {"summary": "Synthetic implementation for offline test", "open_assumptions": []})
         return receipt
 
+    def receipt_path(self, node):
+        return self.directory / f"{file_prefix(node)}.interactive.json"
+
+    def worktree(self, node):
+        return self.directory / "review-worktree" if node == REVIEWER else Path(self.plan["nodes"][node]["worktree"])
+
+    def launch_name(self, node):
+        return f"workflow-{self.plan['run_id']}-{node}"
+
+    def inventory(self):
+        path = self.receipt_path(REVIEWER)
+        if not path.exists() or (self.directory / "review.stop.json").exists():
+            return []
+        receipt = read_json(path)
+        return [{"id": receipt["background_id"], "sessionId": receipt["session_id"], "kind": "background",
+                 "cwd": receipt["worktree"], "name": self.launch_name(REVIEWER),
+                 "state": self.reviewer_state, "pid": os.getpid()}]
+
+    def locate(self, node, rows):
+        return next((row for row in rows if row.get("name") == self.launch_name(node)), None)
+
+    def run_reviewer(self, prompt, launch_token, commit):
+        path = self.receipt_path(REVIEWER)
+        if path.exists():  # Reconciliation never starts a second reviewer.
+            receipt = read_json(path)
+            if receipt["launch_token"] != launch_token:
+                raise RuntimeError("Reviewer launch intent changed; refusing session reuse")
+            return receipt
+        self.reviewer_launches.append(launch_token)
+        receipt = {"node_id": "review", "session_id": "9f1b7c2e-0000-4000-8000-00000000fake",
+                   "background_id": "id-reviewer", "launch_token": launch_token,
+                   "worktree": str(self.worktree(REVIEWER)), "candidate_commit": commit,
+                   "status": "attached_session_available",
+                   "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        save_json(path, receipt)
+        if self.reviewer_writes_completion:
+            save_json(self.directory / "review.completion.json",
+                      {"contract_version": "1.0.0", "run_id": self.plan["run_id"], "node_id": "review",
+                       "launch_token": launch_token, "bundle_sha256": digest_file(self.directory / "review-bundle.json"),
+                       "candidate_commit": commit, **self.reviewer_verdict})
+        return receipt
+
 
 class OfflinePipeline(Pipeline):
     def stop_workers(self):
         self.event("freeze", "stopped", "Fake workers have no background processes")
+
+    def stop_reviewer(self):
+        # Native stop/identity re-checks are tested directly against Pipeline.
+        save_json(self.directory / "review.stop.json", {"stopped": True, "session_id": "fake"})
+        self.event("review", "stopped", "Fake reviewer session stopped; transcript retained")
 
 
 class PipelineTests(unittest.TestCase):
@@ -270,6 +328,38 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         with patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 0)), patch("workflow.pipeline.pid_alive", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "termination"):
                 Pipeline.stop_workers(self.runtime)
+
+    def reviewer_row(self):
+        return {"id": "id-reviewer", "sessionId": "session-reviewer", "pid": 90002}
+
+    def test_reviewer_stop_is_identity_checked_idempotent_and_recorded(self):
+        live = {"reviewer": self.reviewer_row()}
+        self.set_native(live)
+        def stop(argv, **_kwargs):
+            live.pop(argv[-1].removeprefix("id-"))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch("workflow.pipeline.subprocess.run", side_effect=stop) as command, patch("workflow.pipeline.pid_alive", return_value=False):
+            Pipeline.stop_reviewer(self.runtime)
+            self.assertEqual(command.call_count, 1)
+            Pipeline.stop_reviewer(self.runtime)  # A recorded stop is never issued twice.
+            self.assertEqual(command.call_count, 1)
+        intent = read_json(self.directory / "review.stop.json")
+        self.assertEqual((intent["stopped"], intent["session_id"]), (True, "session-reviewer"))
+        self.assertFalse((self.directory / "reviewer.stop.json").exists())
+        events = [json.loads(line) for line in (self.directory / "events.jsonl").read_text().splitlines()]
+        self.assertTrue(any(event["node"] == "review" and event["status"] == "stopped"
+                            and "resumable" in event["message"] for event in events))
+
+    def test_a_reviewer_whose_termination_is_unproven_blocks_acceptance(self):
+        self.set_native({"reviewer": self.reviewer_row()})
+        with patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 1)):
+            with self.assertRaisesRegex(RuntimeError, "Stop failed"):
+                Pipeline.stop_reviewer(self.runtime)
+        with patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 0)), \
+                patch("workflow.pipeline.pid_alive", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "termination is not established"):
+                Pipeline.stop_reviewer(self.runtime)
+        self.assertFalse(read_json(self.directory / "review.stop.json")["stopped"])
 
     def test_missing_handoff_does_not_stop_workers(self):
         with patch.object(self.runtime, "stop_workers") as stop:

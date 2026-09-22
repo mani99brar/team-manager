@@ -20,6 +20,7 @@ Run `npm run contracts:export` after editing schemas, and `npm run test:contract
 | `runSnapshot` | Current run/node projection, dependency edges, latest attempt/session and replay cursor |
 | `event` | Append-only status/log/artifact/result/reuse/approval/return-note timeline |
 | `controlRequest` | Idempotent request for an authorized backend action; not proof that it was accepted |
+| `reviewCompletion` | The reviewer's own completion file: the verdict and findings, bound to one run, bundle hash and candidate |
 
 Task-specific application types and APIs belong in their own contract. This workflow envelope does not replace them.
 
@@ -35,6 +36,8 @@ Task-specific application types and APIs belong in their own contract. This work
 ## Results and join rules
 
 Attempts start at 1; 0 in snapshots/events means not started or run-scoped. A new actual execution increments the attempt, including retry after failure. Record external session identity before allowing duplicate launches.
+
+A `reviewCompletion` is written by the reviewer itself, so schema validity proves nothing about authority: the controller must also check that `run_id`, `launch_token`, `bundle_sha256` and `candidate_commit` match the review it actually launched, that the reviewing session is not either worker, and that the evidence did not change while the review ran. A blocked verdict must name its findings, and an approval cannot leave a P0/P1 finding unresolved. `worker` and `requirement` attribute a finding to one worker's task text so that a viewer can link them; `requirement` is a verbatim quote or null, never a paraphrase.
 
 Required result arrays may be empty, but must be present. Empty `checks` means **no checks executed**, not a pass. `succeeded` means the worker completed its assignment, not that integration is approved. The join applies task-specific required checks and assumptions policy. Browser verification is a separate gate; repeat an integration smoke test against the real adapter.
 

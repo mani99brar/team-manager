@@ -91,6 +91,22 @@ export const eventSchema = z.strictObject({
   reused_from_attempt: z.number().int().positive().nullable(),
 })
 
+export const reviewCompletionSchema = z.strictObject({
+  ...envelope,
+  node_id: z.literal('review'),
+  launch_token: id,
+  bundle_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  candidate_commit: sha,
+  verdict: z.enum(['approved', 'blocked']),
+  findings: z.array(z.strictObject({
+    severity: z.enum(['P0', 'P1', 'P2']),
+    message: z.string().min(1),
+    disposition: z.enum(['open', 'resolved', 'accepted']),
+    worker: z.enum(['ui', 'adapter', 'both', 'none']),
+    requirement: z.string().min(1).nullable(),
+  })),
+})
+
 export const controlRequestSchema = z.strictObject({
   ...envelope,
   request_id: id,
@@ -106,6 +122,7 @@ export const schemas = {
   runSnapshot: runSnapshotSchema,
   event: eventSchema,
   controlRequest: controlRequestSchema,
+  reviewCompletion: reviewCompletionSchema,
 }
 
 export type RunSpec = z.infer<typeof runSpecSchema>
@@ -113,6 +130,7 @@ export type WorkerResult = z.infer<typeof workerResultSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
 export type WorkflowEvent = z.infer<typeof eventSchema>
 export type ControlRequest = z.infer<typeof controlRequestSchema>
+export type ReviewCompletion = z.infer<typeof reviewCompletionSchema>
 
 // Cross-field rules must also be implemented by non-TypeScript consumers.
 export function validateRunSpec(input: unknown): RunSpec {
@@ -143,4 +161,15 @@ export function validateWorkerResult(input: unknown): WorkerResult {
   if (result.status === 'succeeded' && result.output_commit === null)
     throw new Error('Successful workers require a durable output commit')
   return result
+}
+
+// The reviewer writes this file itself; the controller binds it to the exact run,
+// bundle and candidate before it is trusted. Schema validity is not acceptance.
+export function validateReviewCompletion(input: unknown): ReviewCompletion {
+  const completion = reviewCompletionSchema.parse(input)
+  if (completion.verdict === 'blocked' && completion.findings.length === 0)
+    throw new Error('A blocked verdict must name the findings that caused it')
+  if (completion.verdict === 'approved' && completion.findings.some(f => f.severity !== 'P2' && f.disposition !== 'resolved'))
+    throw new Error('Approval cannot leave an unresolved P0/P1 finding')
+  return completion
 }

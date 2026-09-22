@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from .automatic import DEFAULTS, automatic_settings, drive, read_completion, validate_automatic, wait_handoffs, supervise
+from .automatic import (DEFAULTS, automatic_settings, drive, read_completion, read_review_completion,
+                        transport, validate_automatic, wait_handoffs, wait_review, supervise)
 from .pipeline import build_pipeline
 from .sessions import git, read_json, save_json
 from .verification import policy_digest
@@ -155,7 +156,151 @@ class CompletionTests(unittest.TestCase):
             validate_automatic(self.plan)
 
 
+class ReviewCompletionTests(unittest.TestCase):
+    """The reviewer's file is the verdict; schema validity alone is never acceptance."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS)}
+        self.bundle = {"run_id": "test", "candidate_commit": "b" * 40, "snapshots": {}}
+        self.digest = "e" * 64
+        self.token = "a2f1c0d4-1111-4111-8111-111111111111"
+        self.state = "idle"
+        sessions = SimpleNamespace(receipt_path=lambda node: self.root / "review.interactive.json",
+                                   inventory=lambda: [], locate=lambda node, rows: {"state": self.state})
+        self.runtime = SimpleNamespace(directory=self.root, plan=self.plan, sessions=sessions)
+        save_json(self.root / "review.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00"})
+
+    def completion(self, **changes):
+        item = {"contract_version": "1.0.0", "run_id": "test", "node_id": "review", "launch_token": self.token,
+                "bundle_sha256": self.digest, "candidate_commit": self.bundle["candidate_commit"],
+                "verdict": "approved",
+                "findings": [{"severity": "P2", "message": "Non-blocking observation", "disposition": "open",
+                              "worker": "ui", "requirement": "Distinguish no workflows from no runs"}]}
+        item.update(changes)
+        save_json(self.root / "review.completion.json", item)
+        return item
+
+    def read(self):
+        return read_review_completion(self.runtime, self.bundle, self.digest, self.token)
+
+    def test_bound_completion_carries_worker_and_requirement(self):
+        self.completion()
+        decision = self.read()
+        self.assertEqual(decision["verdict"], "approved")
+        self.assertEqual(decision["findings"][0]["worker"], "ui")
+        self.assertEqual(decision["findings"][0]["requirement"], "Distinguish no workflows from no runs")
+
+    def test_foreign_run_token_bundle_or_candidate_fails_closed(self):
+        for change in ({"run_id": "other"}, {"launch_token": "11111111-2222-4333-8444-555555555555"},
+                       {"bundle_sha256": "f" * 64}, {"candidate_commit": "c" * 40}):
+            self.completion(**change)
+            with self.assertRaisesRegex(ValueError, "Stale or foreign"):
+                self.read()
+
+    def test_schema_violations_fail_closed(self):
+        from jsonschema.exceptions import ValidationError
+        for change in ({"node_id": "candidate"}, {"contract_version": "1.1.0"}, {"reviewer": "someone"},
+                       {"findings": [{"severity": "P2", "message": "No worker named", "disposition": "open"}]},
+                       {"findings": [{"severity": "P4", "message": "Unknown severity", "disposition": "open",
+                                      "worker": "ui", "requirement": None}]}):
+            self.completion(**change)
+            with self.assertRaises(ValidationError):
+                self.read()
+
+    def test_a_verdict_cannot_contradict_its_own_findings(self):
+        self.completion(verdict="blocked", findings=[])
+        with self.assertRaisesRegex(ValueError, "blocked verdict"):
+            self.read()
+        open_defect = {"severity": "P1", "message": "Unredacted path in the response", "disposition": "open",
+                       "worker": "adapter", "requirement": None}
+        self.completion(findings=[open_defect])
+        with self.assertRaisesRegex(ValueError, "unresolved P0/P1"):
+            self.read()
+        self.completion(verdict="blocked", findings=[open_defect])
+        self.assertEqual(self.read()["verdict"], "blocked")
+
+    def test_symlinked_or_oversized_completion_is_never_read(self):
+        self.completion()
+        payload = self.root / "elsewhere.json"
+        (self.root / "review.completion.json").replace(payload)
+        (self.root / "review.completion.json").symlink_to(payload)
+        with self.assertRaisesRegex(ValueError, "Invalid reviewer completion file"):
+            self.read()
+        (self.root / "review.completion.json").unlink()
+        self.completion(findings=[{"severity": "P2", "message": "x" * 70000, "disposition": "open",
+                                   "worker": "ui", "requirement": None}])
+        with self.assertRaisesRegex(ValueError, "Invalid reviewer completion file"):
+            self.read()
+
+    def test_idle_without_a_file_times_out_without_a_second_reviewer(self):
+        ticks = iter([1, 1, DEFAULTS["review_timeout_seconds"] + 1])
+        with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
+            wait_review(self.runtime, self.bundle, self.digest, self.token,
+                        clock=lambda: next(ticks), sleep=lambda _: None)
+
+    def test_completion_written_while_working_is_not_accepted(self):
+        self.completion()
+        self.state = "working"
+        ticks = iter([1, 1, DEFAULTS["review_timeout_seconds"] + 1])
+        with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
+            wait_review(self.runtime, self.bundle, self.digest, self.token,
+                        clock=lambda: next(ticks), sleep=lambda _: None)
+        self.state = "idle"
+        self.assertEqual(wait_review(self.runtime, self.bundle, self.digest, self.token, clock=lambda: 1)["verdict"], "approved")
+
+    def test_a_missing_or_blocked_reviewer_stops_rather_than_relaunching(self):
+        self.completion()
+        self.runtime.sessions.locate = lambda node, rows: None
+        with self.assertRaisesRegex(RuntimeError, "reconciliation required"):
+            wait_review(self.runtime, self.bundle, self.digest, self.token, clock=lambda: 1)
+        self.runtime.sessions.locate = lambda node, rows: {"state": "blocked"}
+        with self.assertRaisesRegex(RuntimeError, "Reviewer blocked"):
+            wait_review(self.runtime, self.bundle, self.digest, self.token, clock=lambda: 1)
+
+    def test_only_an_interrupted_review_of_a_live_session_resumes(self):
+        """An error recorded against the review node is not a licence to review again."""
+        from .automatic import advance_failed_checks
+        live = {"row": None}
+        runtime = SimpleNamespace(directory=self.root, plan=self.plan, policy={},
+                                  sessions=SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: live["row"]))
+        state = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="interrupted")])
+        self.assertFalse(advance_failed_checks(runtime, state))  # No reviewer was ever launched.
+        save_json(self.root / "automatic-review.json", {"transport": "native", "status": "running"})
+        self.assertFalse(advance_failed_checks(runtime, state))  # The session is gone; reconcile instead.
+        live["row"] = {"state": "idle"}
+        self.assertTrue(advance_failed_checks(runtime, state))
+        for receipt in ({"transport": "native", "status": "blocked"}, {"transport": "native", "status": "succeeded"},
+                        {"transport": "print", "status": "running"}):
+            save_json(self.root / "automatic-review.json", receipt)
+            self.assertFalse(advance_failed_checks(runtime, state))
+        save_json(self.root / "automatic-review.json", {"transport": "native", "status": "running"})
+        self.plan["automatic"]["reviewer_transport"] = "print"
+        self.assertFalse(advance_failed_checks(runtime, state))
+        self.plan["automatic"]["reviewer_transport"] = "native"
+        # A review failure alongside a failed check is never advanced automatically.
+        mixed = SimpleNamespace(next=("review", "candidate"),
+                                tasks=[SimpleNamespace(name="review", error="x"), SimpleNamespace(name="candidate", error="y")])
+        self.assertFalse(advance_failed_checks(runtime, mixed))
+
+    def test_transport_defaults_to_native_and_is_bounded(self):
+        self.assertEqual(transport(self.plan), "native")
+        self.assertEqual(transport({"automatic": {"reviewer_transport": "print"}}), "print")
+        self.assertEqual(transport({"automatic": {}}), "native")  # Runs prepared before this slice.
+        self.plan["automatic"]["reviewer_transport"] = "herdr"
+        with self.assertRaisesRegex(ValueError, "transport"):
+            validate_automatic(self.plan)
+        with self.assertRaises(ValueError):
+            automatic_settings(reviewer_transport="print-mode")
+
+
 class AutomaticGraphTests(unittest.TestCase):
+    """Default transport: a reviewer session with a pane, a completion file and a stop."""
+
+    transport = "native"
+
     def setUp(self):
         self.fixture = fixtures.PipelineTests()
         self.fixture.setUp()
@@ -165,7 +310,8 @@ class AutomaticGraphTests(unittest.TestCase):
         git(f.repo, "switch", "-c", "feature/automatic-test")
         f.policy.update(version="1.1.0", max_verification_attempts=3,
                         failure_drill={"node_id": "adapter", "phase": "worker", "attempt": 1})
-        f.plan.update(source_branch="feature/automatic-test", automatic=dict(DEFAULTS), policy_sha256=policy_digest(f.policy))
+        f.plan.update(source_branch="feature/automatic-test", policy_sha256=policy_digest(f.policy),
+                      automatic=automatic_settings(reviewer_transport=self.transport))
         save_json(f.directory / "plan.json", f.plan)
         save_json(f.directory / "policy.json", f.policy)
         f.runtime = fixtures.OfflinePipeline(f.directory, f.sessions)
@@ -192,6 +338,21 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
             first = graph.invoke({"run_id": "run"}, f.config)
             self.assertEqual(first["__interrupt__"][0].value["kind"], "worker_handoff")
 
+    def reviews_started(self) -> int:
+        """Reviewer launches, however this transport starts one."""
+        if self.transport == "native":
+            return len(self.fixture.sessions.reviewer_launches)
+        return int(self.counter.read_text()) if self.counter.exists() else 0
+
+    def block_review(self):
+        self.verdict.write_text("blocked")
+        self.fixture.sessions.reviewer_verdict = {"verdict": "blocked", "findings": [
+            {"severity": "P1", "message": "Synthetic blocking defect", "disposition": "open",
+             "worker": "adapter", "requirement": None}]}
+
+    def events(self) -> list[dict]:
+        return [json.loads(line) for line in (self.fixture.directory / "events.jsonl").read_text().splitlines()]
+
     def test_automatic_drill_review_and_feature_only_finish(self):
         f = self.fixture
         # Completion protocol has separate tests; FakeSessions already supplied handoffs.
@@ -201,11 +362,32 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
         self.assertEqual(git(f.repo, "rev-parse", self.original_branch), f.plan["base_commit"])
         self.assertEqual(git(f.repo, "symbolic-ref", "--short", "HEAD"), "feature/automatic-test")
         self.assertEqual(sorted(f.sessions.starts), ["adapter", "ui"])
-        self.assertEqual(self.counter.read_text(), "1")
+        self.assertEqual(self.reviews_started(), 1)
         self.assertEqual(read_json(f.directory / "failure-report.json")["verification_attempts"], {"ui": [1], "adapter": [1, 2]})
         self.assertEqual(drive(f.runtime), commit)
-        self.assertEqual(self.counter.read_text(), "1")
+        self.assertEqual(self.reviews_started(), 1)
         self.assertFalse(git(f.repo, "remote"))
+
+    def test_review_node_records_the_reviewer_session_and_its_findings(self):
+        f = self.fixture
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(f.runtime)
+        review = read_json(f.directory / "review.json")
+        self.assertEqual(review["verdict"], "approved")
+        if self.transport == "print":
+            self.assertEqual(review["findings"], [])
+            return
+        receipt = read_json(f.directory / "review.interactive.json")
+        self.assertEqual(receipt["node_id"], "review")
+        self.assertEqual(review["reviewer"], receipt["session_id"])
+        self.assertNotIn(review["reviewer"], {f.plan["nodes"][node]["session_id"] for node in ("ui", "adapter")})
+        self.assertEqual(read_json(f.directory / "automatic-review.json")["transport"], "native")
+        # Findings carry the fields slice C links to tasks with.
+        self.assertEqual([(item["worker"], item["requirement"]) for item in review["findings"]], [("ui", "UI")])
+        session_events = [event for event in self.events() if event["node"] == "review"]
+        self.assertTrue(any(receipt["session_id"] in event["message"] for event in session_events))
+        self.assertEqual([event["status"] for event in session_events][-2:], ["stopped", "approved"])
+        self.assertTrue((f.directory / "review.stop.json").exists())
 
     def test_recovery_in_actual_new_controller_processes(self):
         f = self.fixture
@@ -219,24 +401,44 @@ sessions = FakeSessions(directory, read_json(directory / 'plan.json'))
 sessions.executable = sys.argv[2]
 runtime = OfflinePipeline(directory, sessions)
 automatic.wait_handoffs = lambda runtime: None
-commit = automatic.drive(runtime, single_step=True)
+if Path(sys.argv[3]).exists():
+    def interrupt_the_operator(*arguments, **keywords):
+        raise KeyboardInterrupt
+    automatic.wait_review = interrupt_the_operator
+try:
+    commit = automatic.drive(runtime, single_step=True)
+except KeyboardInterrupt:
+    assert (directory / 'review.interactive.json').exists(), 'Interrupt lost the reviewer receipt'
+    sys.exit(130)
 assert not sessions.starts, 'Restart launched workers again'
+assert not sessions.reviewer_launches, 'Restart launched a second reviewer'
 sys.exit(0 if commit else 75)
 '''
-        codes = []
-        for _ in range(4):
-            result = subprocess.run([sys.executable, "-c", script, str(f.directory), f.sessions.executable],
+        marker = f.root / "interrupt-review"
+        marker.touch()
+        codes, launched = [], None
+        for _ in range(5):
+            result = subprocess.run([sys.executable, "-c", script, str(f.directory), f.sessions.executable, str(marker)],
                                     cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=90)
             codes.append(result.returncode)
-            self.assertIn(result.returncode, (0, 75), result.stderr)
+            self.assertIn(result.returncode, (0, 75, 130), result.stderr)
+            if result.returncode == 130:
+                # Interrupted mid-review: the reviewer session is left running.
+                launched = read_json(f.directory / "review.interactive.json")
+                self.assertEqual(read_json(f.directory / "automatic-review.json")["status"], "running")
+                self.assertFalse((f.directory / "review.stop.json").exists())
+                marker.unlink()
             if result.returncode == 0:
                 break
-        self.assertEqual(codes, [75, 75, 0])
-        events = [json.loads(line) for line in (f.directory / "events.jsonl").read_text().splitlines()]
-        self.assertEqual(len({event["message"] for event in events if event["node"] == "controller"}), 3)
+        self.assertEqual(codes, [75, 130, 75, 0])  # Interrupted at the review step, then resumed.
+        # The resumed process reused the same reviewer session rather than launching one.
+        self.assertEqual(read_json(f.directory / "review.interactive.json")["launch_token"], launched["launch_token"])
+        self.assertEqual(read_json(f.directory / "review.json")["reviewer"], launched["session_id"])
+        controller = [event for event in self.events() if event["node"] == "controller"]
+        self.assertGreaterEqual(len({event["message"] for event in controller}), 4)
+        self.assertTrue(any(event["status"] == "interrupted" for event in controller))
         self.assertEqual(read_json(f.directory / "failure-report.json")["verification_attempts"], {"ui": [1], "adapter": [1, 2]})
         self.assertEqual(git(f.repo, "rev-parse", self.original_branch), f.plan["base_commit"])
-        self.assertEqual(self.counter.read_text(), "1")
 
     def test_interrupt_during_worker_wait_keeps_workers_and_resumes(self):
         f = self.fixture
@@ -244,8 +446,7 @@ sys.exit(0 if commit else 75)
             with self.assertRaises(KeyboardInterrupt):
                 drive(f.runtime)
         stop.assert_not_called()
-        events = [json.loads(line) for line in (f.directory / "events.jsonl").read_text().splitlines()]
-        self.assertTrue(any(event["status"] == "interrupted" and "resume with" in event["message"] for event in events))
+        self.assertTrue(any(event["status"] == "interrupted" and "resume with" in event["message"] for event in self.events()))
         self.assertFalse((f.directory / "ui.stop.json").exists())
         # The same run resumes from the persisted checkpoint without relaunching anything.
         with patch("workflow.automatic.wait_handoffs"):
@@ -263,14 +464,67 @@ sys.exit(0 if commit else 75)
 
     def test_reviewer_block_preserves_branch_and_does_not_relaunch(self):
         f = self.fixture
-        self.verdict.write_text("blocked")
+        self.block_review()
         with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
         self.assertEqual(read_json(f.directory / "automatic-review.json")["status"], "blocked")
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
-        self.assertEqual(self.counter.read_text(), "1")
+        self.assertEqual(self.reviews_started(), 1)
+
+    def test_a_foreign_completion_file_is_not_a_verdict(self):
+        f = self.fixture
+        launch = f.sessions.run_reviewer
+
+        def foreign(prompt, token, commit):
+            receipt = launch(prompt, token, commit)
+            item = read_json(f.directory / "review.completion.json")
+            item["bundle_sha256"] = "f" * 64  # A verdict on some other evidence.
+            save_json(f.directory / "review.completion.json", item)
+            return receipt
+        f.sessions.run_reviewer = foreign
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        receipt = read_json(f.directory / "automatic-review.json")
+        self.assertEqual(receipt["status"], "blocked")
+        self.assertIn("Stale or foreign", receipt["error"])
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        self.assertFalse((f.directory / "review.json").exists())
+        with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(self.reviews_started(), 1)
+
+    def test_a_reviewer_that_writes_no_file_times_out_with_evidence_retained(self):
+        f = self.fixture
+        f.sessions.reviewer_writes_completion = False
+        f.runtime.plan["automatic"]["review_timeout_seconds"] = 1
+        with patch("workflow.automatic.wait_handoffs"), patch("workflow.automatic.time.sleep"), \
+                self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        receipt = read_json(f.directory / "automatic-review.json")
+        self.assertEqual(receipt["status"], "blocked")
+        self.assertIn("deadline exhausted", receipt["error"])
+        self.assertFalse((f.directory / "review.completion.json").exists())
+        self.assertTrue((f.directory / "review.diff").exists())
+        self.assertEqual(self.reviews_started(), 1)
+        # No second reviewer is launched for the same blocked review.
+        with patch("workflow.automatic.time.sleep"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(self.reviews_started(), 1)
+
+
+class PrintReviewerTests(AutomaticGraphTests):
+    """`--reviewer-transport print`: the retained fallback for hosts without Herdr."""
+
+    transport = "print"
+    # Graph recovery, interruption and the completion protocol are exercised by the
+    # native class; print mode has no session, pane or completion file of its own.
+    test_recovery_in_actual_new_controller_processes = None
+    test_interrupt_during_worker_wait_keeps_workers_and_resumes = None
+    test_deadline_or_blocked_worker_stops_workers = None
+    test_a_foreign_completion_file_is_not_a_verdict = None
+    test_a_reviewer_that_writes_no_file_times_out_with_evidence_retained = None
 
 
 if __name__ == "__main__":
