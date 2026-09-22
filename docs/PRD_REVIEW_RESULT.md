@@ -1,6 +1,6 @@
 # PRD: Review verdict and findings in the viewer (slice B)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Ordered after slice A by choice, so this run's own review exercises the reviewer pane live. Displaying persisted review results does not technically require A; the only coupling is that findings' `worker` and `requirement` fields are defined by A's completion schema, and the contract treats both as optional so runs reviewed before A still export.
+Status: Implemented 2026-09-21 on branch `ultra` directly in the checkout rather than as a feature run (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)); the `review-result` feature directory and launch choice were removed before merge because the work is already in the tree. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Ordered after slice A by choice, so this run's own review exercises the reviewer pane live. Displaying persisted review results does not technically require A; the only coupling is that findings' `worker` and `requirement` fields are defined by A's completion schema, and the contract treats both as optional so runs reviewed before A still export.
 
 ## 1. Goal
 

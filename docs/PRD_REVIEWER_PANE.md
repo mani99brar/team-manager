@@ -1,6 +1,6 @@
 # PRD: Reviewer as an attachable native session (slice A)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
+Status: Implemented 2026-09-21 on branch `ultra` (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)); shipped as an ordinary change with offline tests and a controlled live smoke test. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
 
 This slice is controller work plus the completion schema and docs: `workflow/`, `contracts/workflow/reviewCompletion.schema.json`, `workflow/RUNBOOK.md` and the feature README. None of it is worker-owned, so it ships as an ordinary commit with offline tests and a controlled live smoke test (section 5), and needs no feature run. Its first live exercise inside a full run is the review step of the next feature run (slice B).
 
@@ -23,7 +23,7 @@ The review node launches `claude --bg --name workflow-<run>-reviewer` in `review
 | Item | Value |
 | --- | --- |
 | Completion file | `<run>/review.completion.json` |
-| Bound to | run id, `review` node, bundle SHA-256, candidate commit, reviewer session UUID |
+| Bound to | run id, `review` node, bundle SHA-256, candidate commit, and a controller-issued launch token (the session UUID does not exist when the prompt is composed; the reviewer session identity is verified separately from the launch receipt against `claude agents --json`, decided 2026-09-21) |
 | Payload | verdict `approved` or `blocked`, findings `[{severity, message, disposition, worker, requirement}]` |
 | Accepted when | file validates against the schema and the native session is `idle` or `done` |
 | Timeout | `review_timeout_seconds` from launch of the reviewer session, default 30 minutes |

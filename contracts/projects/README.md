@@ -1,4 +1,4 @@
-# Project workflow viewer contract v1.0.0
+# Project workflow viewer contract v1.2.0
 
 Approved first feature: add a **Projects** root alongside the existing **Pi** and **Claude** roots. Browse a project, its workflow definitions, and executions; inspect a graph and run evidence. Existing skills browsing/editing is unchanged.
 
@@ -27,6 +27,8 @@ All IDs are opaque path segments and must be percent-encoded. The server validat
 | `GET .../runs/{run_id}/events?after=0` | `{ events: WorkflowEvent[] }`, reusing workflow v1 events |
 | `GET .../runs/{run_id}/results/{node_id}/{attempt}` | Existing workflow-v1 `WorkerResult` |
 | `GET .../runs/{run_id}/artifacts/{artifact_id}` | Registered immutable artifact content only |
+| `GET .../runs/{run_id}/reviews/{attempt}` | `reviewResult.schema.json`: the persisted review verdict, reviewer identity, bundle hash, findings and the diff artifact (1.1.0; finding links 1.2.0) |
+| `GET .../runs/{run_id}/inputs` | `runInputs.schema.json`: what the run was asked to do, pinned from its own files (1.2.0) |
 
 Workflow lists return current definitions. A run detail returns **that run's pinned definition**, even if the current workflow has changed. The definition revision is a backend-generated SHA-256 of canonical definition JSON excluding `definition_revision` (sorted object keys, compact separators, UTF-8 literal Unicode; retain array order). The server retains historical definitions rather than rendering old runs against the latest graph. Cross-field validators verify scope/revision equality, graph structure and snapshot correspondence; computing/retaining the revision remains a backend responsibility.
 
@@ -37,6 +39,20 @@ Unknown or cross-project/project-workflow-mismatched resources return 404. Inval
 Artifacts/logs are served only through an allowlisted registry confined to that run, with appropriate content types. Do not fetch arbitrary `uri` values or expose the entire run directory. Render text safely; treat screenshots as images, never arbitrary HTML. Legacy runs require an explicit project/workflow registration or import mapping; do not auto-register a repository from untrusted `plan.json` paths.
 
 This project-scoped read API supersedes the unscoped viewer route proposal in `../workflow/transport.md` for this feature. Existing workflow-v1 message schemas and the CLI are unchanged; execution controls are intentionally excluded from this slice.
+
+## Versions
+
+Existing payloads (`projectList`, `workflowList`, `runList`, `runDetail`, worker results, events) are unchanged and keep `contract_version: "1.0.0"`. Additions are versioned by the release that introduced or last changed their shape:
+
+- **1.1.0**: `reviewResult` (`.../reviews/{attempt}`). The review node's `session_id` is the reviewer session and its `result_uri` points at the review result. Findings carry `worker` and `requirement` as recorded by the reviewer (null for reviews recorded before the reviewer prompt asked for them).
+- **1.2.0**: `reviewResult` findings gain `requirement_found_in`, the worker lanes whose task text contains the quote verbatim (the backend never guesses a match); `runInputs` (`.../inputs`) adds the pinned assignment: feature, base commit, branch, mode, automatic settings, per-worker task text and exact prompt, owned paths, required checks, launch receipt, completion signal, accepted handoff and stop confirmation. Both payloads carry `contract_version: "1.2.0"`.
+
+A run whose export predates a section returns a 404 with code `REVIEW_NOT_FOUND` or `INPUTS_NOT_FOUND` for that route, never an error page: the viewer says "no review recorded" / "inputs not recorded". Re-export old runs with `workflow export <run>` to add the sections.
+
+## Review results and run inputs
+
+- `reviewResult`: one review per bundle (attempt is 1). `reviewer.transport` is `native` (attachable background session), `print` (headless `claude --print`) or `manual` (operator-supplied review file); `reviewer.session_id` is the Claude session UUID for the first two and the operator-stated identity for the last. `diff` is the run's `review.diff` registered as a bounded patch artifact served through the artifact route; null when the file is absent. Cross-field rule: an approved review carries no unresolved P0/P1 finding. Messages and quotes pass through path redaction.
+- `runInputs`: `workers[].task.text` is the task pinned in `plan.json` (the authored assignment plus the appended ownership/checks JSON), `prompt` the exact prompt the native session received when the run recorded one. Text is bounded: oversized text is truncated with a marker and `truncated: true`. `checks[].command` is the approved argv joined exactly as executed checks record `command`, so a required check links to its execution. Receipts (`launch`, `completion`, `handoff`, `stop`) are null when the run has not produced them; `automatic.reviewer_transport` is null for runs pinned before the setting existed that never reviewed (a reviewed run reports the transport it actually used). Check and scenario IDs are the policy's own labels, not route segments. Absolute paths never appear; nothing here is a filesystem identifier.
 
 ## State projection
 

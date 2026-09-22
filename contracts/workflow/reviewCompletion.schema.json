@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review completion signal v1.0.0",
+  "description": "Written once by the native reviewer session to <run>/review.completion.json. The controller accepts it only when it validates here, its bindings match the run (run_id, review node, launch_token from the reviewer prompt, bundle SHA-256 and candidate commit from review-bundle.json) and the reviewer session is idle or done. A verdict of blocked, or any P0/P1 finding that is not resolved, ends the run; no second reviewer is launched.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "node_id", "launch_token", "bundle_sha256", "candidate_commit", "verdict", "findings"],
+  "properties": {
+    "version": {"const": "1.0.0"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "node_id": {"const": "review"},
+    "launch_token": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "bundle_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "candidate_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "verdict": {"enum": ["approved", "blocked"]},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "message", "disposition", "worker", "requirement"],
+        "properties": {
+          "severity": {"enum": ["P0", "P1", "P2"]},
+          "message": {"type": "string", "minLength": 1},
+          "disposition": {"enum": ["open", "resolved", "accepted"]},
+          "worker": {
+            "description": "Which worker's assignment the finding concerns: ui, adapter, both, or none for cross-cutting/policy findings.",
+            "enum": ["ui", "adapter", "both", "none"]
+          },
+          "requirement": {
+            "description": "A verbatim quote from that worker's task text that the finding relates to, or null when no single requirement applies. Consumers link a finding to its task only when the quote is found verbatim; nothing is inferred.",
+            "type": ["string", "null"],
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

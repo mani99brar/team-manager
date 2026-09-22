@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { AnchorHTMLAttributes, ReactNode } from 'react'
 import { describeApiError, ProjectsApiError } from './api.ts'
 import { RUN_STATUS_MEANING, STATUS_LABEL, type RunStatus } from './status.ts'
 
@@ -41,10 +41,18 @@ export function EmptyPanel({ title, children, testId }: { title: string; childre
   )
 }
 
-/** A link that navigates inside the app through history rather than reloading. */
-export function AppLink({ href, onNavigate, className, children, current = false }: { href: string; onNavigate: (pathname: string) => void; className?: string; children: ReactNode; current?: boolean }) {
+type AppLinkProps = Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href' | 'onClick'> & {
+  href: string
+  onNavigate: (pathname: string) => void
+  children: ReactNode
+  current?: boolean
+}
+
+/** A link that navigates inside the app through history rather than reloading. Other anchor attributes (title, data-*) pass through. */
+export function AppLink({ href, onNavigate, className, children, current = false, ...rest }: AppLinkProps) {
   return (
     <a
+      {...rest}
       href={href}
       className={className}
       aria-current={current ? 'page' : undefined}

@@ -1,6 +1,6 @@
 # PRD: Run inputs and finding-to-task links in the viewer (slice C)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
+Status: Implemented 2026-09-21 on branch `ultra` directly in the checkout rather than as a feature run (see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)); the `run-inputs` feature directory and launch choice were removed before merge because the work is already in the tree. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
 
 ## 1. Goal
 
@@ -60,7 +60,7 @@ Feature directory `features/run-inputs/`, same roles and ownership.
 ## 7. Open questions
 
 - Task display: the exact prompt the model received (proposed) or the authored Markdown file. The exact prompt is honest but includes the policy JSON block and completion protocol.
-- Measure the verbatim match rate of requirement quotes on this run before deciding whether fuzzy matching is worth building.
+- Measure the verbatim match rate of requirement quotes on this run before deciding whether fuzzy matching is worth building. Measured 2026-09-21 on the slice A live smoke test (a native reviewer over project-workflows-001's candidate): 8 of 8 quotes verbatim in the named worker's task, so verbatim matching stays.
 
 ## 8. How to run
 

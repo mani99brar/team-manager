@@ -374,9 +374,50 @@
 .event-seq { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-muted); }
 .event-type { font-weight: 600; }
 
+/* Run views: tabs above the graph, the Assignment tab, worker input panels and the review panel */
+.run-tabs { padding: 8px 0 0; margin-top: 12px; flex-wrap: wrap; }
+.run-body, .assignment { min-width: 0; }
+.assignment > h3 { margin-top: 12px; }
+.assignment-worker { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); min-width: 0; }
+.assignment-worker h4 { margin-top: 0; overflow-wrap: anywhere; }
+.assignment-scenarios { margin-top: 4px; }
+.workspace-projects h5 { margin: 12px 0 4px; font-size: 0.9rem; }
+.task-rendered { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); min-width: 0; overflow-wrap: anywhere; }
+.task-rendered .markdown { max-width: none; }
+.task-source { margin: 0; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 480px; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 6px; tab-size: 4; }
+.task-source:focus-visible, .task-prompt summary:focus-visible, .check:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.task-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.task-head h4 { margin: 12px 0 6px; }
+.task-toggle { display: inline-flex; gap: 4px; }
+/* The highlighted requirement keeps readable contrast in both schemes (tokens in index.css) and a focus-coloured ring so it stands out from the surrounding source. */
+.task-highlight { background: var(--mark-bg); color: var(--mark-text); padding: 1px 2px; border-radius: 3px; outline: 2px solid var(--focus); outline-offset: 1px; }
+.task-checks li { overflow-wrap: anywhere; }
+.task-check-status { font-size: 0.9rem; margin-top: 2px; }
+.task-prompt { margin-top: 12px; }
+.task-prompt summary { cursor: pointer; padding: 8px 0; }
+.task-prompt .task-source { margin-top: 6px; }
+.worker-stop { margin: 8px 0 0; font-size: 0.9rem; }
+.review-verdict-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.review-summary { margin: 0 0 8px; font-weight: 600; overflow-wrap: anywhere; }
+.finding-group { margin-top: 8px; min-width: 0; }
+.finding-group .table-wrap { overflow: auto; max-width: 100%; }
+.findings-table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 0.9rem; }
+.findings-table th, .findings-table td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.findings-table th { background: var(--surface-alt); white-space: nowrap; }
+.findings-table q { quotes: '\201C' '\201D'; }
+.finding-severity { font-weight: 700; }
+.finding-blocking .finding-severity { color: var(--danger-text); }
+.finding-blocking > td:first-child { border-left: 4px solid var(--danger-text); }
+.finding-task-link, .finding-task-note { display: block; margin-top: 4px; font-size: 0.85rem; }
+
 @media (max-width: 760px) {
   .run-columns { grid-template-columns: 1fr; }
   .workspace-projects { padding: 10px; }
   .projects-facts { grid-template-columns: 1fr; }
   .status-badge { white-space: normal; }
+  .task-source { max-height: 360px; }
 }
+
+.review-findings-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.review-findings-head h4 { margin: 12px 0 6px; }
+.review-group-toggle { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }

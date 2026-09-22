@@ -1,11 +1,22 @@
-"""Atomic read-only-consumer export. Producing state never launches an agent."""
+"""Atomic read-only-consumer export. Producing state never launches an agent.
+
+Version 1.2.0 adds two sections derived from the run's own files: `review`
+(the persisted verdict) and `inputs` (what the run was asked to do). Missing
+evidence is `null`; a malformed optional receipt is `null` too, never guessed.
+The reviewer transport of a plan pinned before that setting existed is the one
+the run's receipts record, or `null` before any reviewer ran; never a default.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .sessions import read_json, save_json
+
+EXPORT_VERSION = "1.2.0"
 
 GRAPH_NODES = [
     {"node_id": "launch_ui", "label": "Launch UI worker", "kind": "worker", "depends_on": []},
@@ -20,25 +31,150 @@ GRAPH_NODES = [
 ]
 
 
+def utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def zulu(value: str) -> str:
+    """Receipts store a +00:00 offset; the export spells UTC with a trailing Z."""
+    return value.replace("+00:00", "Z")
+
+
+def load_optional(path: Path):
+    """An absent, non-regular or malformed optional file is None: absent evidence, never invented."""
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        return read_json(path)
+    except ValueError:
+        return None
+
+
+def read_events(directory: Path) -> list:
+    path = directory / "events.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def string_list(value) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
+
+
+def recorded_transport(directory: Path) -> str | None:
+    """The transport the run's own reviewer receipts record; None when no reviewer has run."""
+    if (directory / "review.interactive.json").exists():
+        return "native"
+    if (directory / "automatic-review.json").exists():
+        return "print"
+    return None
+
+
+def review_section(directory: Path) -> dict | None:
+    review = load_optional(directory / "review.json")
+    if review is None:
+        return None
+    receipt = load_optional(directory / "automatic-review.json") or {}
+    transport = recorded_transport(directory) or "manual"
+    reviewed_at = receipt.get("accepted_at")
+    if not isinstance(reviewed_at, str):
+        times = [event["time"] for event in read_events(directory) if event.get("node") == "review"]
+        reviewed_at = times[-1] if times else utc((directory / "review.json").stat().st_mtime)
+    diff = None
+    patch = directory / "review.diff"
+    if patch.is_file() and not patch.is_symlink():
+        with patch.open("rb") as handle:
+            diff = {"path": "review.diff", "sha256": hashlib.file_digest(handle, "sha256").hexdigest(), "bytes": patch.stat().st_size}
+    findings = [{"severity": finding["severity"], "message": finding["message"], "disposition": finding["disposition"],
+                 "worker": finding.get("worker"), "requirement": finding.get("requirement")} for finding in review["findings"]]
+    return {"attempt": 1, "transport": transport, "reviewer_session_id": review["reviewer"], "independent": review["independent"],
+            "bundle_sha256": review["bundle_sha256"], "candidate_commit": review["candidate_commit"], "verdict": review["verdict"],
+            "findings": findings, "reviewed_at": reviewed_at, "diff": diff}
+
+
+def launch_receipt(item) -> dict | None:
+    if (not isinstance(item, dict) or not isinstance(item.get("launch_requested_at"), str) or not isinstance(item.get("launch_token"), str)
+            or not isinstance(item.get("status"), str) or type(item.get("launcher_invocations")) is not int):
+        return None
+    optional = {key: item.get(key) if isinstance(item.get(key), str) else None for key in ("session_id", "observed_state", "background_id")}
+    started = item.get("native_started_at")
+    return {"session_id": optional["session_id"], "launch_token": item["launch_token"], "launch_requested_at": zulu(item["launch_requested_at"]),
+            "native_started_at": started if type(started) is int else None, "observed_state": optional["observed_state"],
+            "status": item["status"], "launcher_invocations": item["launcher_invocations"], "background_id": optional["background_id"]}
+
+
+def completion_signal(item) -> dict | None:
+    if (not isinstance(item, dict) or item.get("status") not in {"completed", "blocked"} or not isinstance(item.get("summary"), str)
+            or not item["summary"].strip() or not string_list(item.get("open_assumptions"))):
+        return None
+    return {"status": item["status"], "summary": item["summary"], "open_assumptions": list(item["open_assumptions"])}
+
+
+def accepted_handoff(item) -> dict | None:
+    if not isinstance(item, dict) or not isinstance(item.get("summary"), str) or not item["summary"].strip() or not string_list(item.get("open_assumptions")):
+        return None
+    return {"summary": item["summary"], "open_assumptions": list(item["open_assumptions"])}
+
+
+def stop_confirmation(path: Path) -> dict | None:
+    item = load_optional(path)
+    if not isinstance(item, dict) or not isinstance(item.get("stopped"), bool):
+        return None
+    return {"stopped": item["stopped"], "confirmed_at": utc(path.stat().st_mtime) if item["stopped"] else None}
+
+
+def worker_inputs(directory: Path, plan: dict, worker: dict) -> dict:
+    node = worker["node_id"]
+    prompt = directory / f"{node}.prompt.txt"
+    return {"role": worker["role"], "task": plan["nodes"][node]["task"],
+            "prompt": prompt.read_text() if prompt.is_file() and not prompt.is_symlink() else None,
+            "owned_paths": list(worker["owned_paths"]),
+            "checks": [{"id": check["id"], "kind": check["kind"], "argv": list(check["argv"]), "command": shlex.join(check["argv"]),
+                        "timeout_seconds": check["timeout_seconds"],
+                        "scenarios": [{"id": scenario["id"], "description": scenario["description"]} for scenario in check["scenarios"]]}
+                       for check in worker["checks"]],
+            "launch": launch_receipt(load_optional(directory / f"{node}.interactive.json")),
+            "completion": completion_signal(load_optional(directory / f"{node}.completion.json")),
+            "handoff": accepted_handoff(load_optional(directory / f"{node}.handoff.json")),
+            "stop": stop_confirmation(directory / f"{node}.stop.json")}
+
+
+def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
+    automatic = plan.get("automatic")
+    return {"feature": policy["feature"], "policy_version": policy["version"], "base_commit": plan["base_commit"],
+            "source_branch": plan.get("source_branch"), "mode": "automatic" if automatic else "manual",
+            "automatic": None if not automatic else {
+                "finish": automatic["finish"], "permission_mode": automatic["permission_mode"],
+                "worker_timeout_seconds": automatic["worker_timeout_seconds"], "review_timeout_seconds": automatic["review_timeout_seconds"],
+                # Plans pinned before the setting: the transport the receipts record, null before any reviewer ran.
+                "reviewer_transport": automatic["reviewer_transport"] if "reviewer_transport" in automatic else recorded_transport(directory)},
+            "setup": [{"argv": list(item["argv"]), "command": shlex.join(item["argv"]), "timeout_seconds": item["timeout_seconds"]}
+                      for item in policy.get("setup", [])],
+            "max_verification_attempts": policy.get("max_verification_attempts", 3),
+            "failure_drill": policy.get("failure_drill"),
+            "workers": {worker["node_id"]: worker_inputs(directory, plan, worker) for worker in policy["workers"]}}
+
+
 def export_state(runtime, state) -> dict:
+    """Needs only runtime.directory and runtime.plan; policy comes from runtime.policy or policy.json when present."""
     path = runtime.directory / "run-state.json"
     previous = read_json(path) if path.exists() else None
-    events_path = runtime.directory / "events.jsonl"
-    events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
+    events = read_events(runtime.directory)
     tasks = [{"node_id": task.name, "error": str(task.error) if task.error else None,
               "interrupts": [item.value for item in task.interrupts],
               "result": getattr(task, "result", None)} for task in state.tasks]
-    created = runtime.plan.get("created_at") or datetime.fromtimestamp((runtime.directory / "plan.json").stat().st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")
+    created = runtime.plan.get("created_at") or utc((runtime.directory / "plan.json").stat().st_mtime)
     packets = []
     for packet_path in sorted((runtime.directory / "verification").glob("*/*/*/packet.json")):
         relative = packet_path.relative_to(runtime.directory)
         _, phase, node, attempt, _ = relative.parts
         packets.append({"phase": phase, "node_id": node, "attempt": int(attempt), "path": str(relative),
                         "sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest()})
-    value = {"version": "1.0.0", "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
+    policy = getattr(runtime, "policy", None) or load_optional(runtime.directory / "policy.json")
+    value = {"version": EXPORT_VERSION, "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
              "created_at": created, "definition": {"name": "Feature implementation", "nodes": GRAPH_NODES},
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
-             "verification_packets": packets}
+             "verification_packets": packets,
+             "review": review_section(runtime.directory),
+             "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous
     value["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

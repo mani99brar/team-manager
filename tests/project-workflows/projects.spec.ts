@@ -16,7 +16,9 @@ import {
   PROJECT,
   REUSE_MESSAGE,
   RUN_AWAITING,
+  RUN_BLOCKED,
   RUN_FAILED,
+  RUN_LEGACY,
   RUN_SUCCEEDED,
   UI_ASSUMPTION,
   WORKFLOW_ID,
@@ -137,10 +139,12 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
 
   // The run list carries each run's actual status, newest first; the current definition graph shows the latest labels.
   const runList = page.getByTestId('run-list')
-  await expect(runList.locator('li')).toHaveCount(3)
+  await expect(runList.locator('li')).toHaveCount(5)
   await expect(runList.locator(`[data-run-id="${RUN_SUCCEEDED}"]`)).toHaveAttribute('data-status', 'succeeded')
   await expect(runList.locator(`[data-run-id="${RUN_FAILED}"]`)).toHaveAttribute('data-status', 'failed')
   await expect(runList.locator(`[data-run-id="${RUN_AWAITING}"]`)).toHaveAttribute('data-status', 'awaiting_approval')
+  await expect(runList.locator(`[data-run-id="${RUN_BLOCKED}"]`)).toHaveAttribute('data-status', 'failed')
+  await expect(runList.locator(`[data-run-id="${RUN_LEGACY}"]`)).toHaveAttribute('data-status', 'succeeded')
   await expect(page.getByTestId('current-definition')).toContainText('9 nodes')
   await expect(page.getByRole('group', { name: `Current definition graph of ${WORKFLOW_NAME}` }).locator('[data-graph-node="verify_ui"]')).toHaveAttribute('aria-label', new RegExp(`^${CURRENT_LABEL}, verification`))
 
@@ -189,7 +193,8 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   type Snapshot = { snapshot: { nodes: { node_id: string; result_uri: string | null; attempt: number }[] } }
   type Result = { artifacts: { kind: string }[]; checks: unknown[] }
   const detail: Snapshot = phase === 'worker' ? runDetails[RUN_SUCCEEDED] : await (await request.get(apiRun(RUN_SUCCEEDED))).json()
-  const published = detail.snapshot.nodes.filter(node => node.result_uri !== null)
+  // Worker results only: the review node links to the review result, which carries no artifacts.
+  const published = detail.snapshot.nodes.filter(node => node.result_uri !== null && node.result_uri.includes('/results/'))
   expect(published.length, 'the succeeded run must expose at least one node result').toBeGreaterThan(0)
   const results = await Promise.all(published.map(async node => ({
     node,

@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,24 @@ class FeatureLaunchTests(unittest.TestCase):
             launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, worker_timeout_seconds=0)
         with self.assertRaisesRegex(ValueError, "automatic runs only"):
             launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), worker_timeout_seconds=7200)
+
+    def test_reviewer_transport_is_pinned_into_prepare(self):
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "native")
+        _, commands = launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True,
+                                      reviewer_transport="print")
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "print")
+        with self.assertRaisesRegex(ValueError, "reviewer transport"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, reviewer_transport="stdio")
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), reviewer_transport="print")
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["project-workflows", "--dry-run", "--automatic", "--reviewer-transport", "print"])
+        command.assert_not_called()
+        printed = json.loads(output.getvalue())
+        self.assertIn("print", printed["commands"][2])
 
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):

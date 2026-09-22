@@ -6,10 +6,28 @@
  * Artifacts and results are only ever requested through the scoped routes of the run being viewed.
  */
 import { z } from 'zod'
-import { schemas, validateRunDetail, type Project, type RunDetail, type RunSummary, type WorkflowDefinition } from '../../contracts/projects/v1.ts'
+import {
+  isBlockingFinding,
+  schemas,
+  validateReviewResult,
+  validateRunDetail,
+  validateRunInputs,
+  type Project,
+  type ReviewFinding,
+  type ReviewResult,
+  type RunDetail,
+  type RunInputs,
+  type RunInputWorker,
+  type RunSummary,
+  type WorkflowDefinition,
+} from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
-export type { Project, RunDetail, RunSummary, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { Project, ReviewFinding, ReviewResult, RunDetail, RunInputs, RunInputWorker, RunSummary, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export { isBlockingFinding }
+
+/** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
+export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND' } as const
 
 export type ApiErrorKind = 'network' | 'http' | 'malformed'
 
@@ -67,6 +85,8 @@ export const paths = {
   events: (scope: RunScope, after = 0) => `${paths.run(scope)}/events?after=${after}`,
   result: (scope: RunScope, nodeId: string, attempt: number) => `${paths.run(scope)}/results/${encodeSegments(nodeId)}/${attempt}`,
   artifact: (scope: RunScope, artifactId: string) => `${paths.run(scope)}/artifacts/${encodeSegments(artifactId)}`,
+  review: (scope: RunScope, attempt: number) => `${paths.run(scope)}/reviews/${attempt}`,
+  inputs: (scope: RunScope) => `${paths.run(scope)}/inputs`,
 }
 
 async function request(path: string, signal: AbortSignal | undefined, accept: string): Promise<Response> {
@@ -171,4 +191,43 @@ export function fetchWorkerResult(scope: RunScope, resultPath: string, signal?: 
 export async function fetchArtifactText(scope: RunScope, artifactId: string, signal?: AbortSignal): Promise<string> {
   const response = await request(paths.artifact(scope, artifactId), signal, 'text/plain, */*')
   return response.text()
+}
+
+/** Only reviews published under this run's scoped `reviews/` route are fetched; anything else is refused. */
+export function scopedReviewPath(scope: RunScope, resultUri: string): string | null {
+  const prefix = `${paths.run(scope)}/reviews/`
+  if (!resultUri.startsWith(prefix)) return null
+  if (!/^[1-9][0-9]*$/.test(resultUri.slice(prefix.length))) return null
+  return resultUri
+}
+
+export function fetchReviewResult(scope: RunScope, reviewPath: string, signal?: AbortSignal): Promise<ReviewResult> {
+  return requestJson(reviewPath, input => {
+    const review = validateReviewResult(input)
+    if (review.run_id !== scope.runId) throw new Error(`the review belongs to run ${review.run_id}.`)
+    return review
+  }, signal)
+}
+
+export function fetchRunInputs(scope: RunScope, signal?: AbortSignal): Promise<RunInputs> {
+  return requestJson(paths.inputs(scope), input => {
+    const inputs = validateRunInputs(input)
+    if (inputs.run_id !== scope.runId) throw new Error(`the inputs belong to run ${inputs.run_id}.`)
+    return inputs
+  }, signal)
+}
+
+/** Whether a failure is the contract's 404 for a section the run's export does not carry. */
+export function isNotRecorded(error: unknown, code: string): boolean {
+  return error instanceof ProjectsApiError && error.notFound && error.code === code
+}
+
+/** Resolves to null when the section is not recorded (the contract's 404 code); every other failure propagates. */
+export async function orNotRecorded<T>(request: Promise<T>, code: string): Promise<T | null> {
+  try {
+    return await request
+  } catch (error) {
+    if (isNotRecorded(error, code)) return null
+    throw error
+  }
 }
