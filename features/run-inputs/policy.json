@@ -1,0 +1,180 @@
+{
+  "version": "1.1.0",
+  "feature": "Run inputs and finding-to-task links in the Projects viewer",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "ui",
+      "role": "frontend",
+      "owned_paths": [
+        "src/App.tsx",
+        "src/App.css",
+        "src/graph",
+        "src/projects",
+        "src/index.css",
+        "tests/project-workflows"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": [
+            {
+              "id": "projects-navigation",
+              "description": "Pi and Claude remain usable and Projects opens registered projects"
+            },
+            {
+              "id": "workflow-run-graph",
+              "description": "Select a project, workflow and run and inspect the pinned graph"
+            },
+            {
+              "id": "run-evidence",
+              "description": "Inspect worker checks, changed files, assumptions, logs and screenshot evidence"
+            },
+            {
+              "id": "empty-states",
+              "description": "Distinguish no workflows from no runs"
+            },
+            {
+              "id": "failed-and-paused",
+              "description": "Show failure and awaiting-approval state without implying completion"
+            },
+            {
+              "id": "request-errors",
+              "description": "Show an actionable API error rather than silently substituting fixtures"
+            },
+            {
+              "id": "review-verdict",
+              "description": "Review node shows approved, reviewer session, bundle hash, summary line and a findings table with severity and disposition"
+            },
+            {
+              "id": "review-blocked",
+              "description": "A seeded blocked review shows verdict blocked, node failed, and the findings that caused it"
+            },
+            {
+              "id": "review-legacy",
+              "description": "A seeded run without the review export section shows 'no review recorded' and no error"
+            },
+            {
+              "id": "run-assignment",
+              "description": "Assignment tab shows feature, branch, mode, deadlines, setup commands and both workers' tasks rendered as Markdown"
+            },
+            {
+              "id": "worker-inputs",
+              "description": "A worker node shows its task, owned paths, required checks linked to executed checks, launch receipt and completion signal"
+            },
+            {
+              "id": "finding-to-task",
+              "description": "A verbatim requirement quote links to the worker's Task panel with the quote highlighted; an unmatched quote is shown without a link"
+            },
+            {
+              "id": "inputs-legacy",
+              "description": "A seeded run without the inputs section shows 'inputs not recorded' and no error"
+            },
+            {
+              "id": "paths-redacted",
+              "description": "No absolute path from the seeded fixtures appears in the rendered review or inputs"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "adapter",
+      "role": "backend",
+      "owned_paths": [
+        "server",
+        "config/projects.example.json"
+      ],
+      "checks": [
+        {
+          "id": "backend-unit",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "backend-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "backend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    }
+  ]
+}

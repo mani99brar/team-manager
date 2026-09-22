@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "name": "Review verdict and findings in the viewer",
+  "branch_prefix": "feature/review-result",
+  "policy": "policy.json",
+  "ui_task": "ui-task.md",
+  "adapter_task": "adapter-task.md"
+}

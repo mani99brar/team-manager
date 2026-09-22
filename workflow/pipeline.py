@@ -27,6 +27,23 @@ from .sessions import NODES, git, prepare, read_json, run_lock, save_json
 from .verification import owns, policy_digest, safe_path, validate_policy
 
 
+FINDING_KEYS = {"severity", "message", "disposition"}
+# Slice A reviewers add these so findings can be linked to the worker task they concern. Reviews
+# recorded before then omit them; both shapes remain valid review records.
+FINDING_LINK_KEYS = {"worker": {"ui", "adapter", "both", "none"}, "requirement": None}
+
+
+def validate_finding(finding: dict) -> None:
+    if not isinstance(finding, dict) or not FINDING_KEYS <= set(finding) or set(finding) - FINDING_KEYS - set(FINDING_LINK_KEYS):
+        raise ValueError("Malformed review finding")
+    if finding["severity"] not in {"P0", "P1", "P2"} or finding["disposition"] not in {"open", "resolved", "accepted"} or not isinstance(finding["message"], str) or not finding["message"].strip():
+        raise ValueError("Malformed review finding")
+    if "worker" in finding and finding["worker"] not in FINDING_LINK_KEYS["worker"]:
+        raise ValueError("Malformed review finding worker")
+    if "requirement" in finding and finding["requirement"] is not None and (not isinstance(finding["requirement"], str) or not finding["requirement"].strip()):
+        raise ValueError("Malformed review finding requirement")
+
+
 def validate_pipeline_policy(policy: dict) -> dict:
     validate_policy(policy)
     if {worker["node_id"]: worker["role"] for worker in policy["workers"]} != {"ui": "frontend", "adapter": "backend"}:
@@ -109,34 +126,39 @@ class Pipeline:
         self.event(node, "interactive", "Awaiting explicit completion signal; idle is not acceptance")
         return receipt
 
-    def stop_workers(self):
+    def stop_session(self, node: str) -> dict:
         """Persist native identity before stopping. Never signal guessed/reused PIDs."""
+        marker = self.directory / f"{node}.stop.json"
+        if marker.exists():
+            intent = read_json(marker)
+        else:
+            row = self.sessions.locate(node, self.sessions.inventory())
+            if row is None:
+                raise RuntimeError(f"{node} session missing before stop; reconcile before continuing")
+            intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
+            save_json(marker, intent)
+        if not intent["stopped"]:
+            rows = self.sessions.inventory()
+            matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
+            if matching:
+                row = self.sessions.locate(node, rows)
+                if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
+                    raise RuntimeError(f"Native {node} identity changed after stop intent; reconcile manually")
+                result = subprocess.run([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
+                if result.returncode != 0:
+                    raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
+            # Recover stop-before-receipt without issuing another stop command.
+            rows = self.sessions.inventory()
+            if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):
+                raise RuntimeError(f"{node} termination is not established; retry after reconciliation")
+            intent["stopped"] = True
+            intent["stopped_at"] = now()
+            save_json(marker, intent)
+        return intent
+
+    def stop_workers(self):
         for node in NODES:
-            marker = self.directory / f"{node}.stop.json"
-            if marker.exists():
-                intent = read_json(marker)
-            else:
-                row = self.sessions.locate(node, self.sessions.inventory())
-                if row is None:
-                    raise RuntimeError("Worker missing before freeze; reconcile before snapshotting")
-                intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
-                save_json(marker, intent)
-            if not intent["stopped"]:
-                rows = self.sessions.inventory()
-                matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
-                if matching:
-                    row = self.sessions.locate(node, rows)
-                    if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
-                        raise RuntimeError("Native worker identity changed after stop intent; reconcile manually")
-                    result = subprocess.run([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
-                    if result.returncode != 0:
-                        raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
-                # Recover stop-before-receipt without issuing another stop command.
-                rows = self.sessions.inventory()
-                if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):
-                    raise RuntimeError("Worker termination is not established; retry freeze after reconciliation")
-                intent["stopped"] = True
-                save_json(marker, intent)
+            self.stop_session(node)
         stopped_ids = {read_json(self.directory / f"{node}.stop.json")["session_id"] for node in NODES}
         if any(row.get("sessionId") in stopped_ids and row.get("pid") for row in self.sessions.inventory()):
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")
@@ -315,8 +337,7 @@ class Pipeline:
         if review["verdict"] != "approved" or not isinstance(review["findings"], list):
             raise ValueError("Review is not approved")
         for finding in review["findings"]:
-            if not isinstance(finding, dict) or set(finding) != {"severity", "message", "disposition"} or finding["severity"] not in {"P0", "P1", "P2"} or finding["disposition"] not in {"open", "resolved", "accepted"} or not isinstance(finding["message"], str) or not finding["message"].strip():
-                raise ValueError("Malformed review finding")
+            validate_finding(finding)
             if finding["severity"] in {"P0", "P1"} and finding["disposition"] != "resolved":
                 raise ValueError("Unresolved blocking review finding")
 
@@ -397,6 +418,64 @@ def build_pipeline(checkpointer, runtime: Pipeline):
     return graph.compile(checkpointer=checkpointer)
 
 
+def validate_review_record(directory: Path, plan: dict, review: dict) -> None:
+    """Structural validation of a persisted review for either verdict, without touching worktrees.
+
+    The bundle file's own hash is checked when it is present; packet paths are not re-resolved, so a
+    copied run directory (without worktrees) validates the same way as the original.
+    """
+    required = {"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"}
+    if not isinstance(review, dict) or set(review) != required or review["run_id"] != plan["run_id"]:
+        raise ValueError("review.json is not a review record for this run")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(review["bundle_sha256"])) or not re.fullmatch(r"[a-f0-9]{40}", str(review["candidate_commit"])):
+        raise ValueError("review.json has malformed evidence references")
+    if review["independent"] is not True or not isinstance(review["reviewer"], str) or not review["reviewer"].strip():
+        raise ValueError("review.json lacks an independent reviewer identity")
+    if review["verdict"] not in {"approved", "blocked"} or not isinstance(review["findings"], list):
+        raise ValueError("review.json has no recognised verdict; refusing to export it")
+    for finding in review["findings"]:
+        validate_finding(finding)
+        if review["verdict"] == "approved" and finding["severity"] in {"P0", "P1"} and finding["disposition"] != "resolved":
+            raise ValueError("Unresolved blocking review finding")
+    bundle_path = directory / "review-bundle.json"
+    if bundle_path.exists():
+        bundle = read_json(bundle_path)
+        if digest_file(bundle_path) != review["bundle_sha256"] or bundle.get("candidate_commit") != review["candidate_commit"]:
+            raise ValueError("Review must reference this exact run, bundle hash and candidate")
+
+
+def export_run(directory: Path) -> Path:
+    """Rebuild `run-state.json` under the current export version from persisted run files.
+
+    Launches nothing, binds no sessions and changes no evidence, so it also works on a copy of a run
+    directory. A run whose plan, policy or review record fails validation is refused rather than
+    exported with a fabricated section.
+    """
+    from types import SimpleNamespace
+    directory = directory.resolve()
+    plan = read_json(directory / "plan.json")
+    if "automatic" in plan:
+        from .automatic import validate_automatic
+        validate_automatic(plan)
+    if set(plan.get("nodes", {})) != set(NODES) or not plan.get("base_commit"):
+        raise ValueError("plan.json is not a two-worker pipeline plan")
+    policy = validate_pipeline_policy(read_json(directory / "policy.json"))
+    if plan.get("policy_sha256") != policy_digest(policy):
+        raise ValueError("Pinned policy changed")
+    runtime = SimpleNamespace(directory=directory, plan=plan, policy=policy)
+    review_path = directory / "review.json"
+    if review_path.exists():
+        validate_review_record(directory, plan, read_json(review_path))
+    checkpoints = directory / "pipeline.sqlite"
+    if checkpoints.exists():
+        with SqliteSaver.from_conn_string(str(checkpoints)) as saver:
+            state = build_pipeline(saver, runtime).get_state({"configurable": {"thread_id": plan["run_id"]}})
+    else:
+        state = SimpleNamespace(values={}, next=("launch_ui", "launch_adapter"), tasks=[])
+    export_state(runtime, state)
+    return directory / "run-state.json"
+
+
 def report(runtime: Pipeline, state) -> Path:
     """Escaped local results viewer, generated on every CLI boundary; no server needed."""
     export_state(runtime, state)
@@ -447,7 +526,7 @@ def report(runtime: Pipeline, state) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status"])
+    parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"])
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -456,7 +535,9 @@ def main():
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
-    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer process timeout (default 30m)")
+    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer session timeout from launch (default 30m)")
+    parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless print mode")
+    parser.add_argument("--feature", help="Committed feature name (features/<name>) recorded in the plan for the reviewer's requirements")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--ui-handoff", type=Path)
     parser.add_argument("--adapter-handoff", type=Path)
@@ -481,7 +562,7 @@ def main():
             help_text = subprocess.check_output(["claude", "--help"], text=True, timeout=15)
             required_flags = ["--bg", "--safe-mode", "--tools", "--permission-mode"]
             if args.automatic:
-                required_flags += ["--dangerously-skip-permissions", "--json-schema", "--print", "--permission-prompts", "--add-dir"]
+                required_flags += ["--dangerously-skip-permissions", "--json-schema", "--print", "--permission-prompts", "--add-dir", "--allowedTools"]
             if not all(flag in help_text for flag in required_flags):
                 raise ValueError("Installed Claude CLI lacks required flags")
             auth = json.loads(subprocess.check_output(["claude", "auth", "status"], text=True, timeout=15))
@@ -505,11 +586,15 @@ def main():
                 tasks[worker["node_id"]] += "\nApproved ownership and checks:\n" + json.dumps(worker)
             plan = prepare(directory, args.repo, "HEAD", tasks, True)
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"))
+            if args.feature:
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", args.feature):
+                    parser.error("--feature must be a plain feature directory name")
+                plan["feature"] = args.feature
             if args.automatic:
                 from .automatic import automatic_settings
-                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds)
-            elif args.worker_timeout_seconds or args.review_timeout_seconds:
-                parser.error("Timeouts apply to --automatic runs only; manual runs have operator-controlled lifetimes")
+                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
+            elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
+                parser.error("Timeouts and reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes")
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             from types import SimpleNamespace
@@ -524,6 +609,9 @@ def main():
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             return
         with run_lock(directory):
+            if args.action == "export":
+                print(f"Exported {export_run(directory)}")
+                return
             runtime = Pipeline(directory)
             if args.action == "automatic-step":
                 if not args.live:

@@ -33,6 +33,7 @@ Order: A, then B's run, then C's run. Two runs cost two rounds of `npm ci` and t
 - [x] Findings carry `worker` and `requirement` from slice A onward; the link is built in slice C
 - [x] `workflow export <run>` re-exports old runs so project-workflows-001 shows its own data (slice B)
 - [x] Issues #4, #5, #7, #8 stay out of all three slices
-- [ ] Task display: exact prompt (proposed) or authored file (slice C)
-- [ ] Three-pane layout: same tab at review start (proposed) or separate tab (slice A)
+- [x] Task display: the assignment text as prepared, task file plus appended policy JSON; the generated preamble and completion protocol are not exported (slice C export, decided 2026-09-21)
+- [x] Three-pane layout: same tab at review start; the reviewer pane splits off the adapter pane (slice A, implemented 2026-09-21)
+- [x] Reviewer tools: Read, Glob, Grep, plus Write allow-listed to `review.completion.json` only, because a native session has no structured-output channel and the completion file is the verdict (slice A). Permission mode `dontAsk` denies every other write; worktree and evidence hashes are re-checked after the review
 - [x] Issues #3 and #6 stay out of slice B by default; either rides along only if it blocks a named acceptance scenario, and none currently does

@@ -22,7 +22,7 @@ The committed Projects-viewer assignment is in [features/project-workflows](../f
 .venv/bin/python -m workflow launch project-workflows --live --automatic
 ```
 
-This performs preflight, creates a feature branch (not main), prepares worktrees, starts the two interactive workers with run-scoped permission bypass/Bash access, and supervises them through checks and independent automated review. The command remains running until it stops on a verified feature branch or a blocker. It never pushes or merges main. Use `--dry-run` instead of `--live` to inspect without execution. Omit `--automatic` for the original manual gates. See the feature README for completion signals, recovery and privilege boundaries.
+This performs preflight, creates a feature branch (not main), prepares worktrees, starts the two interactive workers with run-scoped permission bypass/Bash access, and supervises them through checks and an independent review by a third native Claude session (see [Automatic review session](#automatic-review-session)). The command remains running until it stops on a verified feature branch or a blocker. It never pushes or merges main. Use `--dry-run` instead of `--live` to inspect without execution. Omit `--automatic` for the original manual gates. See the feature README for completion signals, recovery and privilege boundaries.
 
 The profile includes a deliberate first adapter-verification gate failure and a hard limit of three verification attempts per lane/phase. Read the feature README for the exact retry and evidence procedure. Automatic mode adds persisted per-worker deadlines (default 4 hours, `--worker-timeout-seconds`) enforced by the running supervisor and a reviewer process timeout (default 30 minutes, `--review-timeout-seconds`). Interrupting the supervisor leaves the workers running and the run resumable; only deadline expiry or a blocked worker stops them. It does not impose token caps or automatically repair code. Manual mode retains operator-controlled worker lifetimes.
 
@@ -34,7 +34,7 @@ The profile includes a deliberate first adapter-verification gate failure and a 
 - Verification runs in fresh worktrees, with separate cache, temp, browser-output and artifact directories. Installed Python/Node/browser executables may be shared read-only; do not share mutable dependency installations.
 - Frontend: build plus real Playwright scenarios and a PNG attachment per scenario. Backend: unit tests, plus any configured contract/integration checks. Missing tests, skipped required scenarios, flaky browser retries, nonzero exits and missing/tampered artifacts block the graph.
 - Both worker snapshots are checked separately, then the combined integration candidate is checked again. Thus individually passing workers are not sufficient for integration.
-- Review is performed by Pi/a fresh reviewer or a human against the exact bundle and candidate. The CLI imports that review; it does not spawn an unconfigured Pi model or fabricate independent review. Review identity is an operator attestation, not a cryptographic identity service.
+- Review is performed by Pi/a fresh reviewer or a human against the exact bundle and candidate. In manual mode the CLI imports that review; it does not spawn an unconfigured Pi model or fabricate independent review. In automatic mode the review node launches its own native reviewer session (read-only tools, its own worktree) and accepts only that session's completion file. Review identity is an operator attestation, not a cryptographic identity service.
 - Explicit approval authorizes a **local fast-forward of the original source branch**. Source drift/dirty state blocks it. Nothing pushes, publishes, deletes worktrees, or changes provider/billing plans automatically.
 - This is a trusted local development tool, not a sandbox or multi-tenant service. Tests/configuration are executable code. Review policy commands and task ownership before approving a run. CLI/manual terminal input is trusted operator authority.
 
@@ -50,7 +50,7 @@ npx --no-install playwright install chromium
 
 .venv/bin/python -m unittest \
   workflow.test_graph workflow.test_sessions workflow.test_interactive \
-  workflow.test_verification workflow.test_pipeline workflow.test_feature_launch workflow.test_automatic -v
+  workflow.test_verification workflow.test_pipeline workflow.test_feature_launch workflow.test_automatic workflow.test_export -v
 npm run test:contracts
 ```
 
@@ -155,7 +155,7 @@ Successful verification interrupts at `independent_review` and produces:
 - `verification/candidate/.../packet.json`: checks of the combined candidate. These are candidate-verification records, not per-worker ownership claims.
 - `candidate/`: clean candidate worktree for read-only inspection.
 - `report.html`: local visual graph, pending state/errors, timeline, checks and artifact/screenshot links.
-- `run-state.json`: atomic, versioned private state export for the upcoming read-only project adapter; created during preparation and updated at reporting boundaries.
+- `run-state.json`: atomic, versioned private state export for the read-only project adapter; created during preparation and updated at reporting boundaries. Export 1.1.0 added the `review` section (the recorded verdict, findings, reviewer session and diff hash) and 1.2.0 the `inputs` section (feature, branch, automatic settings, each worker's task text, ownership, checks, launch receipt, completion signal, handoff and stop marker). `workflow export "$RUN"` rebuilds it for older runs.
 - `failure-drill.json` / `failure-report.json`: pre/post launch identities and observed verification attempts when the explicit lab drill is configured.
 
 Ask Pi to assign an independent read-only reviewer against these exact artifacts. If the reviewer needs to run commands, give it another isolated worktree; do not let it mutate the captured candidate/check worktrees. The review JSON is:
@@ -179,6 +179,22 @@ Findings, if present, contain `severity` (`P0`, `P1`, `P2`), `message`, and `dis
 ```
 
 Review does not integrate. The graph then waits at a separate approval interrupt.
+
+### Automatic review session
+
+In automatic mode the review node does not wait for `workflow review`. It creates `review-worktree/` at the candidate commit, writes `review.diff`, and launches a third native session, `claude --bg --name workflow-<run>-reviewer`, in that worktree with the workers' lifecycle but reviewer tools: Read, Glob and Grep, plus Write allow-listed to exactly one path, `<run>/review.completion.json`. Permission mode is `dontAsk`, so any other write is denied; the worktree and evidence hashes are re-checked after the review regardless. The run directory is an added directory so the reviewer can read packets, screenshots and the diff.
+
+If the run has a Herdr tab (`terminals.json`), a third pane `Claude: reviewer` is split off the adapter pane and attached the same way as the workers. You can type into it: answer a question, point the reviewer at a file. The transcript is the record; the verdict is only the completion file. A pane that fails to attach is recorded in the timeline and does not affect the verdict; reconnect with `workflow.interactive attach-one "$RUN" --node review`.
+
+The allow rule is spelled `Edit(...)` because Write follows Edit rules; a `Write(...)` rule is silently ignored (the first live smoke test ended with the reviewer unable to write its verdict). A reviewer that ends a turn asking a person shows as `blocked` in `claude agents`; the controller records that once in the timeline and keeps waiting until the deadline, so an answer typed in the pane can still lead to the completion file.
+
+Completion protocol (`contracts/workflow/reviewCompletion.schema.json`): the file must validate, name this run, the exact `review-bundle.json` SHA-256 and candidate commit, carry the reviewer's own session UUID (which must differ from both worker UUIDs), and hold a verdict (`approved` or `blocked`) with findings `{severity, message, disposition, worker, requirement}`. `worker` says which assignment a finding concerns (`ui`, `adapter`, `both`, `none`) and `requirement` quotes the task text verbatim or is null. The file is accepted only once the session is `idle` or `done`; idle without a file is not a verdict. Acceptance stops the session (`claude stop`, identity re-checked, `review.stop.json`) and writes `review.json` for either verdict; a blocked verdict or an unresolved P0/P1 ends the run with evidence retained.
+
+Bounds and recovery: one review per bundle, `review_timeout_seconds` from the reviewer's launch (default 30 minutes, `--review-timeout-seconds`). At the deadline the reviewer is stopped and the run is blocked; no second reviewer is launched, and a rejected file (wrong bundle, wrong candidate, wrong or worker UUID, schema violation) blocks the same way. Interrupting the supervisor during the review leaves the reviewer running; `workflow automatic "$RUN" --live` reconciles the same session from `review.interactive.json` and keeps waiting. The transcript stays resumable afterwards like a worker's: `cd "$RUN/review-worktree" && claude --resume <reviewer uuid>`.
+
+`--reviewer-transport print` keeps the previous headless `claude --print` reviewer (structured output, no pane, same acceptance rules) for environments without an attachable terminal. Runs prepared before this transport existed are treated as print-mode runs.
+
+Files: `automatic-review.json` (transport, bundle/patch hashes, status, the accepted review), `review.interactive.json` (launch receipt with the native UUID), `review.launch.log`, `review.completion.json`, `review.stop.json`, `review.json`, `review.diff`, `review-worktree/`; print mode adds `review.stdout.json` and `review.stderr.log`.
 
 ## 6. Approve local integration
 
@@ -205,5 +221,6 @@ Status refreshes `report.html`. It is a local snapshot viewer, not a live multi-
 - **Partial candidate/worktree allocation:** preserve and inspect it. Automatic destructive cleanup or speculative Git conflict resolution is intentionally unavailable.
 - **Usage exhausted:** workers stay at the manual terminal/handoff boundary. Preserve their receipts/worktrees, record the decision, and ask the owner to wait or approve a new plan/provider. The system never switches to another payment/provider mode or replays an opaque Claude workflow automatically.
 - **Stopping an unfinished run:** use the exact native IDs from its receipts with Claude's `stop` command after verifying identity. Closing Herdr alone is not a stop. All run artifacts/worktrees are retained; cleanup is a separate operator decision.
+- **Re-exporting a run:** `python -m workflow export "$RUN"` rebuilds `run-state.json` under the current export version from the persisted run files. It takes the controller lock, launches nothing, and refuses a run whose `plan.json`, `policy.json` or `review.json` fail validation.
 
 The two-worker limit is a training constraint, not an optimality claim. Selective check recovery is tested independently of Claude's own workflow-relaunch semantics.

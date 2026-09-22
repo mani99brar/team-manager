@@ -12,8 +12,13 @@ from .pipeline import validate_pipeline_policy
 from .sessions import read_json
 
 
+FEATURES = ("project-workflows", "review-result", "run-inputs")
+DEFAULT_RUN_ROOT = Path.home() / ".local/state/md-manager-workflows"
+
+
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
-                    worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None) -> tuple[Path, list[list[str]]]:
+                    worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
+                    reviewer_transport: str | None = None) -> tuple[Path, list[list[str]]]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
     folder = repo / "features" / feature
@@ -38,38 +43,43 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     commands = [
         preflight,
         ["git", "switch", "-c", branch],
-        [*base, "prepare", str(run), "--repo", str(repo), "--policy", str(files["policy"]),
+        [*base, "prepare", str(run), "--repo", str(repo), "--policy", str(files["policy"]), "--feature", feature,
          "--ui-task", str(files["ui_task"]), "--adapter-task", str(files["adapter_task"])],
         start,
     ]
     if automatic:
         from .automatic import automatic_settings
-        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds)  # Reject bad deadlines before any command runs.
+        # Reject bad deadlines or transport before any command runs.
+        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds, reviewer_transport)
         commands[0].append("--automatic")
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
-                            "--review-timeout-seconds", str(settings["review_timeout_seconds"])])
+                            "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
+                            "--reviewer-transport", settings["reviewer_transport"]])
         commands.append([*base, "automatic", str(run), "--live"])
-    elif worker_timeout_seconds is not None or review_timeout_seconds is not None:
-        raise ValueError("Timeouts apply to --automatic runs only")
+    elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None:
+        raise ValueError("Timeouts and reviewer transport apply to --automatic runs only")
     return run, commands
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("feature", choices=["project-workflows"])
-    parser.add_argument("--run-id", default="project-workflows-001")
-    parser.add_argument("--run-root", type=Path, default=Path.home() / ".local/state/md-manager-workflows/project-workflows")
+    parser.add_argument("feature", choices=FEATURES)
+    parser.add_argument("--run-id", help="Opaque run identifier (default <feature>-001)")
+    parser.add_argument("--run-root", type=Path, help=f"Run storage parent (default {DEFAULT_RUN_ROOT}/<feature>)")
     parser.add_argument("--live", action="store_true", help="Authorize Claude usage")
     parser.add_argument("--automatic", action="store_true", help="Bypass worker permission prompts; run through independent review to a verified feature branch")
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: per-worker deadline from launch to completion signal (default 4h, max 24h)")
-    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer process timeout (default 30m, max 24h)")
+    parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer session timeout from launch (default 30m, max 24h)")
+    parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: attachable native reviewer session (default) or headless print mode")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands only")
     args = parser.parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
+    run_id = args.run_id or f"{args.feature}-001"
+    run_root = (args.run_root or DEFAULT_RUN_ROOT / args.feature).resolve()
     try:
-        run, commands = launch_commands(repo, args.feature, args.run_id, args.run_root.resolve(), not args.no_herdr, args.automatic,
-                                        args.worker_timeout_seconds, args.review_timeout_seconds)
+        run, commands = launch_commands(repo, args.feature, run_id, run_root, not args.no_herdr, args.automatic,
+                                        args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
         if args.dry_run:
             print(json.dumps({"run_directory": str(run), "commands": commands, "executes": False}, indent=2))
             return
@@ -89,7 +99,7 @@ def main(argv=None):
             return
         print(f"\nRun: {run}\nWorkers are in their dedicated Herdr tab (unless --no-herdr).")
         print("Watch/answer permission prompts. When both finish, return to Pi for handoffs and freeze.")
-        print("The intentional adapter verification drill will block its first attempt; retry that check explicitly after restarting the controller.")
+        print("A policy with a failure drill blocks that lane's first verification attempt; retry that check explicitly after restarting the controller.")
         print(f"Status: {sys.executable} -m workflow status {run}")
         print("Review and integration still require separate explicit approval. Nothing is pushed.")
     except (ValueError, OSError, subprocess.SubprocessError) as error:

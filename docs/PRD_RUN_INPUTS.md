@@ -1,6 +1,6 @@
 # PRD: Run inputs and finding-to-task links in the viewer (slice C)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
+Status: Pre-run work done 2026-09-21 (contract 1.2.0 `runInputs`, export `inputs` section, feature directory `features/run-inputs/`); the feature run waits for slice B's run to merge. See [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md). Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md). Depends on slice B, because the finding-to-task link needs the findings panel.
 
 ## 1. Goal
 
@@ -59,7 +59,7 @@ Feature directory `features/run-inputs/`, same roles and ownership.
 
 ## 7. Open questions
 
-- Task display: the exact prompt the model received (proposed) or the authored Markdown file. The exact prompt is honest but includes the policy JSON block and completion protocol.
+- Task display: decided for the export, the assignment text as prepared (task file plus the appended policy JSON block); the controller's fixed preamble and completion-protocol sentences are generated per launch and are not exported. The viewer renders that text.
 - Measure the verbatim match rate of requirement quotes on this run before deciding whether fuzzy matching is worth building.
 
 ## 8. How to run
