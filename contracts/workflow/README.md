@@ -9,7 +9,8 @@ Reusable data boundary for a LangGraph backend, independent Claude sessions, and
 - `examples.ts`: synthetic fixtures for every message (not execution evidence).
 - `contract.test.ts`: positive/negative validation and schema-drift tests.
 - `verification.schema.json`: the separately authored verification policy (see below).
-- `reviewCompletion.schema.json`: the completion file a native reviewer session writes to `<run>/review.completion.json` (version 1.0.0, hand-written, not generated from `v1.ts`). The Python controller validates it with `workflow.verification.validate_schema("reviewCompletion", ...)` and additionally binds `run_id`, `node_id`, `launch_token`, `bundle_sha256` and `candidate_commit` to the run before accepting a verdict; findings carry `worker` and `requirement` for the viewer's finding-to-task links.
+- `feature.schema.json`: the committed feature file `features/<name>/feature.json` (version 2.0.0, hand-written): `workers` declares every lane with its `node_id` and task file; the ids must match the policy's `workers[].node_id`. `workflow launch` validates it (translating a deprecated 1.0.0 `ui_task`/`adapter_task` file first) and `--workers a,b` selects a subset of the declared lanes.
+- `reviewCompletion.schema.json`: the completion file a native reviewer session writes to `<run>/review.completion.json` (version 1.1.0, hand-written, not generated from `v1.ts`). The Python controller validates it with `workflow.verification.validate_schema("reviewCompletion", ...)` and additionally binds `run_id`, `node_id`, `launch_token`, `bundle_sha256` and `candidate_commit` to the run before accepting a verdict; findings carry `worker` (one of the run's selected lane ids, `multiple` or `none`; the controller rejects a lane the run did not select, and the legacy `both` is refused) and `requirement` for the viewer's finding-to-task links.
 
 Run `npm run contracts:export` after editing schemas, and `npm run test:contracts` to validate. Non-TypeScript consumers must implement the cross-field and runtime invariants below in addition to JSON Schema validation.
 
@@ -31,7 +32,7 @@ Task-specific application types and APIs belong in their own contract. This work
 2. Set `base_commit` in the runtime run specification to that full Git SHA. Do not attempt to embed a commit's own SHA into files inside that commit.
 3. Create each worktree from that revision. The launcher must actually run `git rev-parse HEAD`, verify a clean worktree, and record `observed_start_commit`; never trust an agent's assertion alone.
 4. `validateRunSpec` requires unique worker IDs, distinct worktree strings and identical base SHAs. The launcher must additionally resolve real paths, check independent Git worktrees and reject overlapping ownership boundaries. Schema validation cannot prove filesystem isolation.
-5. This lab profile allows at most two concurrent implementation workers. Review follows worker verification, in its own worktree; Pi is the sole integration authority. Cache/test/browser isolation applies to review too.
+5. The `runSpec` envelope of this lab profile allows at most two concurrent implementation workers; the pipeline's worker lanes come from the verification policy and are not bounded by it (see below). Review follows worker verification, in its own worktree; Pi is the sole integration authority. Cache/test/browser isolation applies to review too.
 6. Worktree paths and execution sessions are backend-only information. Redact sensitive paths, credentials and logs before publishing UI data.
 
 ## Results and join rules
@@ -65,7 +66,9 @@ Use a durable LangGraph checkpointer and explicit session/artifact tracking. A c
 
 ## Verification policy extension
 
-The separately authored `verification.schema.json` accepts legacy policy v1.0.0 and policy v1.1.0. Only v1.1.0 may specify `max_verification_attempts` and the explicit first-attempt `failure_drill`. Workflow message envelopes and worker-result schemas remain v1.0.0. The configured Projects-viewer feature uses v1.1.0; see `features/project-workflows/README.md` for the launch and checkpoint drill.
+The separately authored `verification.schema.json` accepts policies v1.0.0, v1.1.0 and v1.2.0. Only v1.1.0 and later may specify `max_verification_attempts` and the explicit first-attempt `failure_drill`. Workflow message envelopes and worker-result schemas remain v1.0.0.
+
+Policy v1.2.0 declares worker lanes from configuration: `workers` has one or more entries; `node_id` matches `^[a-z][a-z0-9-]{0,31}$`, is unique and is never a reserved name (`review`, `candidate`, `handoff`, `approval`, `integrate`, `multiple`, `none`, `both`, or anything starting with `launch_`, `verify_`, `candidate_` or `review-`); `role` is a free label of 1 to 40 characters; `required_check_kinds` lists one or more check kinds that must each appear in that lane's `checks`; `failure_drill.node_id` is any declared lane. Owned paths stay pairwise disjoint across all declared lanes. Versions 1.0.0 and 1.1.0 stay accepted so pinned policies in old runs still validate; for those `role` is `frontend` or `backend`, `required_check_kinds` is absent and the controller derives it from the role (frontend: build and browser; backend: unit). The configured Projects-viewer feature uses v1.2.0; see `features/project-workflows/README.md` for the launch and checkpoint drill.
 
 ## Versioning
 

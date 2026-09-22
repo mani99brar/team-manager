@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "feature": "Project-scoped workflow graph and run viewer",
   "independent_review": true,
   "integration_approval": true,
@@ -8,7 +8,7 @@
   "setup": [{"argv": ["npm", "ci"], "timeout_seconds": 600}],
   "workers": [
     {
-      "node_id": "ui", "role": "frontend",
+      "node_id": "ui", "role": "frontend", "required_check_kinds": ["build", "browser"],
       "owned_paths": ["src/App.tsx", "src/App.css", "src/graph", "src/projects", "src/index.css", "tests/project-workflows"],
       "checks": [
         {"id": "frontend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []},
@@ -29,7 +29,7 @@
       ]
     },
     {
-      "node_id": "adapter", "role": "backend",
+      "node_id": "adapter", "role": "backend", "required_check_kinds": ["unit"],
       "owned_paths": ["server", "config/projects.example.json"],
       "checks": [
         {"id": "backend-unit", "kind": "unit", "argv": ["npx", "--no-install", "tsx", "--test", "server/projects.test.ts"], "timeout_seconds": 180, "scenarios": []},

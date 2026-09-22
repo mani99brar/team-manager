@@ -30,9 +30,9 @@ export const runList = { runs: [runDetail.summary], next_cursor: null }
 
 const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Show every finding with severity and disposition.\n\nApproved ownership and checks:\n{"node_id": "ui"}'
 
-/** A recorded review with one open finding linked to the UI task and one cross-cutting finding without a quote. */
+/** A recorded review with one open finding linked to the UI task, one cross-cutting finding without a quote and one naming several lanes. */
 export const reviewResult: ReviewResult = {
-  contract_version: '1.2.0', run_id: 'run-001', node_id: 'review', attempt: 1,
+  contract_version: '1.3.0', run_id: 'run-001', node_id: 'review', attempt: 1,
   reviewer: { session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01', transport: 'native', independent: true },
   bundle_sha256: 'b'.repeat(64), candidate_commit: 'c'.repeat(40),
   verdict: 'approved',
@@ -45,21 +45,27 @@ export const reviewResult: ReviewResult = {
       severity: 'P2', message: 'The root Playwright suite is not part of the policy check set.', disposition: 'accepted',
       worker: 'none', requirement: null, requirement_found_in: [],
     },
+    {
+      severity: 'P2', message: 'The review route and its panel disagree about the attempt number.', disposition: 'resolved',
+      worker: 'multiple', requirement: null, requirement_found_in: [],
+    },
   ],
   reviewed_at: '2026-01-01T12:30:00Z',
   diff: { artifact_id: 'patch-review-2bb474561d3e', kind: 'patch', uri: '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts/patch-review-2bb474561d3e', sha256: 'd'.repeat(64) },
 }
 
-/** The pinned assignment of the same run: two workers, one automatic profile, receipts as far as the run got. */
+/** The pinned assignment of the same run: two of three declared lanes selected, one automatic profile, receipts as far as the run got. */
 export const runInputs: RunInputs = {
-  contract_version: '1.2.0', run_id: 'run-001', feature: 'Review verdict and findings in the viewer',
+  contract_version: '1.3.0', run_id: 'run-001', feature: 'Review verdict and findings in the viewer',
   base_commit: 'e'.repeat(40), source_branch: 'feature/review-result/run-001', mode: 'automatic',
   automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 14400, review_timeout_seconds: 1800, reviewer_transport: 'native' },
   setup: [{ command: 'npm ci', timeout_seconds: 600 }],
   max_verification_attempts: 3,
+  selected_workers: ['ui', 'adapter'],
+  excluded_workers: ['docs'],
   workers: [
     {
-      node_id: 'ui', launch_node_id: 'ui', role: 'frontend',
+      node_id: 'ui', launch_node_id: 'launch_ui', role: 'frontend', required_check_kinds: ['build', 'browser'],
       task: { text: UI_TASK, truncated: false },
       prompt: { text: `You are a workflow worker in your own worktree.\n\n${UI_TASK}`, truncated: false },
       owned_paths: ['src/projects', 'tests/project-workflows'],
@@ -73,7 +79,7 @@ export const runInputs: RunInputs = {
       stop: { stopped: true, confirmed_at: '2026-01-01T12:20:00Z' },
     },
     {
-      node_id: 'adapter', launch_node_id: 'adapter', role: 'backend',
+      node_id: 'adapter', launch_node_id: 'launch_adapter', role: 'backend', required_check_kinds: ['unit'],
       task: { text: '# Adapter worker\n\nServe the review route.', truncated: false },
       prompt: null,
       owned_paths: ['server'],

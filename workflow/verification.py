@@ -45,6 +45,19 @@ def unique(items: list[dict], key: str) -> dict:
     return result
 
 
+# Policies before 1.2.0 derived the required check kinds from the role; the export of an old run keeps them.
+ROLE_REQUIRED_KINDS = {"frontend": ("build", "browser"), "backend": ("unit",)}
+
+
+def required_kinds(policy: dict, worker: dict) -> list[str]:
+    """The check kinds a lane must pass: declared from policy 1.2.0, derived from the role before."""
+    if "required_check_kinds" in worker:
+        return list(worker["required_check_kinds"])
+    if policy.get("version") in {"1.0.0", "1.1.0"} and worker.get("role") in ROLE_REQUIRED_KINDS:
+        return list(ROLE_REQUIRED_KINDS[worker["role"]])
+    raise ValueError(f"{worker.get('node_id')} declares no required_check_kinds")
+
+
 def validate_policy(policy: dict) -> dict:
     validate_schema("verification", policy)
     workers = unique(policy["workers"], "node_id")
@@ -59,9 +72,9 @@ def validate_policy(policy: dict) -> dict:
         if len({tuple(check["argv"]) for check in checks.values()}) != len(checks):
             raise ValueError("Each check needs a distinct command")
         kinds = {check["kind"] for check in checks.values()}
-        required = {"build", "browser"} if worker["role"] == "frontend" else {"unit"}
+        required = set(required_kinds(policy, worker))
         if not required <= kinds:
-            raise ValueError(f"{worker['role']} requires {sorted(required)} checks")
+            raise ValueError(f"{worker['node_id']} requires {sorted(required)} checks; missing {sorted(required - kinds)}")
         for check in checks.values():
             unique(check["scenarios"], "id")
             if (check["kind"] == "browser") != bool(check["scenarios"]):

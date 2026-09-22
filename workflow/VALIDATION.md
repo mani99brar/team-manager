@@ -4,7 +4,7 @@ The complete pipeline is ready for a **supervised local run** with an operator-a
 
 ## Executed checks
 
-- `python -m unittest workflow.test_graph workflow.test_sessions workflow.test_interactive workflow.test_verification workflow.test_pipeline -v`: **40 passed**.
+- `python -m unittest workflow.test_graph workflow.test_sessions workflow.test_interactive workflow.test_verification workflow.test_pipeline -v`: **40 passed** (historical: `workflow.test_graph` was removed with the worker-lanes slice; run `python -m unittest discover -s workflow -t .` today).
 - `npm run test:contracts`: **5 passed**.
 - `npm run test:unit`: **130 passed** (existing Markdown-manager regression tests).
 - `npm run build`: **passed**; existing Vite bundle-size warning remains.

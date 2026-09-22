@@ -5,6 +5,13 @@ Version 1.2.0 adds two sections derived from the run's own files: `review`
 evidence is `null`; a malformed optional receipt is `null` too, never guessed.
 The reviewer transport of a plan pinned before that setting existed is the one
 the run's receipts record, or `null` before any reviewer ran; never a default.
+
+Version 1.3.0 (additive) takes the worker lanes from the run's plan: the graph
+definition has one `launch_<lane>` and one `verify_<lane>` node per selected
+lane, `inputs.workers` is keyed by those lanes in policy order with each lane's
+`required_check_kinds`, and `inputs` records `selected_workers` and
+`excluded_workers`. A run exported before keeps its stored definition when it
+names the same nodes, so re-exporting an old run changes no labels.
 """
 from __future__ import annotations
 
@@ -14,21 +21,39 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .sessions import read_json, save_json
+from .sessions import plan_excluded, plan_workers, read_json, save_json
+from .verification import required_kinds
 
-EXPORT_VERSION = "1.2.0"
+EXPORT_VERSION = "1.3.0"
 
-GRAPH_NODES = [
-    {"node_id": "launch_ui", "label": "Launch UI worker", "kind": "worker", "depends_on": []},
-    {"node_id": "launch_adapter", "label": "Launch adapter worker", "kind": "worker", "depends_on": []},
-    {"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": ["launch_ui", "launch_adapter"]},
-    {"node_id": "verify_ui", "label": "Verify UI", "kind": "verification", "depends_on": ["handoff"]},
-    {"node_id": "verify_adapter", "label": "Verify adapter", "kind": "verification", "depends_on": ["handoff"]},
-    {"node_id": "candidate", "label": "Verify combined candidate", "kind": "verification", "depends_on": ["verify_ui", "verify_adapter"]},
+GRAPH_TAIL = [
+    {"node_id": "candidate", "label": "Verify combined candidate", "kind": "verification"},
     {"node_id": "review", "label": "Independent review", "kind": "review", "depends_on": ["candidate"]},
     {"node_id": "approval", "label": "Integration approval", "kind": "integration", "depends_on": ["review"]},
     {"node_id": "integrate", "label": "Integrate candidate", "kind": "integration", "depends_on": ["approval"]},
 ]
+
+
+def graph_nodes(workers: list[str]) -> list[dict]:
+    """The pinned graph of a run over `workers`: per-lane launch and verify fan-outs around the fixed tail."""
+    launches = [f"launch_{node}" for node in workers]
+    verifies = [f"verify_{node}" for node in workers]
+    nodes = [{"node_id": name, "label": f"Launch {node} worker", "kind": "worker", "depends_on": []} for node, name in zip(workers, launches)]
+    nodes.append({"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": launches})
+    nodes.extend({"node_id": name, "label": f"Verify {node}", "kind": "verification", "depends_on": ["handoff"]} for node, name in zip(workers, verifies))
+    for item in GRAPH_TAIL:
+        nodes.append({**item, "depends_on": list(item.get("depends_on", verifies))})
+    return nodes
+
+
+def definition(workers: list[str], previous: dict | None) -> dict:
+    """A stored definition over the same nodes is kept verbatim (labels included); anything else is rebuilt."""
+    nodes = graph_nodes(workers)
+    stored = (previous or {}).get("definition")
+    if isinstance(stored, dict) and isinstance(stored.get("nodes"), list) and stored.get("name") and \
+            [item.get("node_id") for item in stored["nodes"]] == [item["node_id"] for item in nodes]:
+        return stored
+    return {"name": "Feature implementation", "nodes": nodes}
 
 
 def utc(timestamp: float) -> str:
@@ -121,10 +146,10 @@ def stop_confirmation(path: Path) -> dict | None:
     return {"stopped": item["stopped"], "confirmed_at": utc(path.stat().st_mtime) if item["stopped"] else None}
 
 
-def worker_inputs(directory: Path, plan: dict, worker: dict) -> dict:
+def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> dict:
     node = worker["node_id"]
     prompt = directory / f"{node}.prompt.txt"
-    return {"role": worker["role"], "task": plan["nodes"][node]["task"],
+    return {"role": worker["role"], "required_check_kinds": required_kinds(policy, worker), "task": plan["nodes"][node]["task"],
             "prompt": prompt.read_text() if prompt.is_file() and not prompt.is_symlink() else None,
             "owned_paths": list(worker["owned_paths"]),
             "checks": [{"id": check["id"], "kind": check["kind"], "argv": list(check["argv"]), "command": shlex.join(check["argv"]),
@@ -139,6 +164,10 @@ def worker_inputs(directory: Path, plan: dict, worker: dict) -> dict:
 
 def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
     automatic = plan.get("automatic")
+    workers = plan_workers(plan)
+    declared = [worker["node_id"] for worker in policy["workers"]]
+    if not set(workers) <= set(declared):
+        raise ValueError("Plan selects lanes the pinned policy does not declare")
     return {"feature": policy["feature"], "policy_version": policy["version"], "base_commit": plan["base_commit"],
             "source_branch": plan.get("source_branch"), "mode": "automatic" if automatic else "manual",
             "automatic": None if not automatic else {
@@ -149,8 +178,10 @@ def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
             "setup": [{"argv": list(item["argv"]), "command": shlex.join(item["argv"]), "timeout_seconds": item["timeout_seconds"]}
                       for item in policy.get("setup", [])],
             "max_verification_attempts": policy.get("max_verification_attempts", 3),
-            "failure_drill": policy.get("failure_drill"),
-            "workers": {worker["node_id"]: worker_inputs(directory, plan, worker) for worker in policy["workers"]}}
+            # A drill naming an excluded lane is pinned as null at prepare; plans before the selection keep the policy's.
+            "failure_drill": plan["failure_drill"] if "failure_drill" in plan else policy.get("failure_drill"),
+            "selected_workers": list(workers), "excluded_workers": plan_excluded(plan),
+            "workers": {worker["node_id"]: worker_inputs(directory, plan, policy, worker) for worker in policy["workers"] if worker["node_id"] in workers}}
 
 
 def export_state(runtime, state) -> dict:
@@ -170,7 +201,7 @@ def export_state(runtime, state) -> dict:
                         "sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest()})
     policy = getattr(runtime, "policy", None) or load_optional(runtime.directory / "policy.json")
     value = {"version": EXPORT_VERSION, "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
-             "created_at": created, "definition": {"name": "Feature implementation", "nodes": GRAPH_NODES},
+             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous),
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
              "verification_packets": packets,
              "review": review_section(runtime.directory),

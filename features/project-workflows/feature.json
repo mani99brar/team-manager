@@ -1,8 +1,16 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "name": "Project workflows and run viewer",
   "branch_prefix": "feature/project-workflows",
   "policy": "policy.json",
-  "ui_task": "ui-task.md",
-  "adapter_task": "adapter-task.md"
+  "workers": [
+    {
+      "node_id": "ui",
+      "task": "ui-task.md"
+    },
+    {
+      "node_id": "adapter",
+      "task": "adapter-task.md"
+    }
+  ]
 }

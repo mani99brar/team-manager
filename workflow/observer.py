@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from .sessions import NODES, TERMINAL, read_json, save_json
+from .sessions import TERMINAL, plan_workers, read_json, save_json, validate_node_id
 
 
 def safe_text(value: str) -> str:
@@ -51,7 +51,7 @@ def herdr(*args: str) -> dict:
 def open_panels(directory: Path) -> dict:
     """Only run the observer command in newly created panes; never Claude itself."""
     directory = directory.resolve()
-    read_json(directory / "plan.json")
+    workers = plan_workers(read_json(directory / "plan.json"))
     mapping_path = directory / "observers.json"
     if mapping_path.exists():
         raise RuntimeError("Observer mapping already exists; inspect it before opening duplicate panes")
@@ -62,7 +62,7 @@ def open_panels(directory: Path) -> dict:
     tab_id = created["tab"]["tab_id"]
     pane = created["root_pane"]["pane_id"]
     mapping = {}
-    for index, node in enumerate(NODES):
+    for index, node in enumerate(workers):
         if index == 0:
             new_pane = pane
         else:
@@ -125,10 +125,12 @@ def watch(directory: Path, node: str, once: bool = False) -> None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
-    parser.add_argument("node", choices=NODES)
+    parser.add_argument("node", type=validate_node_id, help="A worker lane id of the run")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     try:
+        if args.node not in plan_workers(read_json(args.directory.resolve() / "plan.json")):
+            parser.error(f"{args.node} is not a worker lane of this run")
         watch(args.directory.resolve(), args.node, args.once)
     except KeyboardInterrupt:
         pass

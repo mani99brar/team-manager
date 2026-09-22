@@ -3,8 +3,8 @@ import { artifactSchema, runSnapshotSchema } from '../workflow/v1.js'
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
 const version = z.literal('1.0.0')
-/** Payloads added by contract 1.1.0 (review results) and extended/added by 1.2.0 (finding links, run inputs). */
-const version120 = z.literal('1.2.0')
+/** Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs) and 1.3.0 (configured worker lanes). */
+const version130 = z.literal('1.3.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
 const commit = z.string().regex(/^[a-f0-9]{40}$/)
 const timestamp = z.iso.datetime()
@@ -45,26 +45,34 @@ export const runDetailSchema = z.strictObject({
   snapshot: runSnapshotSchema,
 })
 
-// ---- Review results (1.1.0, finding links added in 1.2.0) --------------------------------------------------
+// ---- Review results (1.1.0, finding links added in 1.2.0, lanes from configuration in 1.3.0) ------------------
 
-export const WORKER_LANES = ['ui', 'adapter'] as const
-export const FINDING_WORKERS = ['ui', 'adapter', 'both', 'none'] as const
+/**
+ * A worker lane ID as the verification policy declares it (`contracts/workflow/verification.schema.json` 1.2.0):
+ * lower-case, at most 32 characters. `multiple` and `none` are the finding attributions that name no single lane;
+ * the legacy `both` still appears in reviews recorded before 1.3.0 and is rendered as "multiple workers".
+ */
+export const LANE_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
+export const laneId = z.string().regex(LANE_ID_PATTERN)
+/** Finding attributions that are not lane IDs. `both` is never written any more but is accepted from old exports. */
+export const FINDING_ATTRIBUTIONS = ['multiple', 'none', 'both'] as const
 
 /** One reviewer finding. `worker`/`requirement` are null for reviews recorded before the reviewer prompt asked for them. */
 export const reviewFindingSchema = z.strictObject({
   severity: z.enum(['P0', 'P1', 'P2']),
   message: z.string().min(1),
   disposition: z.enum(['open', 'resolved', 'accepted']),
-  worker: z.enum(FINDING_WORKERS).nullable(),
+  /** The lane the finding concerns, `multiple`, `none`, the legacy `both`, or null when unrecorded. */
+  worker: laneId.nullable(),
   /** A verbatim quote from a worker's task text, as the reviewer wrote it. */
   requirement: z.string().min(1).nullable(),
   /** The worker lanes whose task text contains `requirement` verbatim; the backend never guesses a match. */
-  requirement_found_in: z.array(z.enum(WORKER_LANES)),
+  requirement_found_in: z.array(laneId),
 })
 
 /** The persisted verdict of a run's review node, served at `.../runs/{run_id}/reviews/{attempt}`. */
 export const reviewResultSchema = z.strictObject({
-  contract_version: version120,
+  contract_version: version130,
   run_id: id,
   node_id: z.literal('review'),
   attempt: z.number().int().positive(),
@@ -83,17 +91,21 @@ export const reviewResultSchema = z.strictObject({
   diff: artifactSchema.nullable(),
 })
 
-// ---- Run inputs (1.2.0) ---------------------------------------------------------------------------------------
+// ---- Run inputs (1.2.0, worker lanes from configuration in 1.3.0) ---------------------------------------------
 
 const boundedText = z.strictObject({ text: z.string(), truncated: z.boolean() })
 const assumptions = z.array(z.string().min(1))
+export const CHECK_KINDS = ['build', 'typecheck', 'unit', 'integration', 'contract', 'browser'] as const
 
 export const runInputWorkerSchema = z.strictObject({
-  /** Logical worker (`ui`, `adapter`): the ID its results are served under. */
-  node_id: id,
-  /** The graph node that launched it (`launch_ui`, `launch_adapter`). */
+  /** Logical worker lane (`ui`, `adapter`, `docs`, ...): the ID its results are served under. */
+  node_id: laneId,
+  /** The graph node that launched it (`launch_<node_id>`). */
   launch_node_id: id,
-  role: z.enum(['frontend', 'backend']),
+  /** A free label from the policy (`frontend`, `backend`, `docs`, ...); it no longer determines required checks. */
+  role: z.string().min(1).max(40),
+  /** The check kinds this lane must pass, from the policy (derived from the role for policies before 1.2.0). */
+  required_check_kinds: z.array(z.enum(CHECK_KINDS)).min(1),
   /** The task text as pinned in the run plan (the authored assignment plus the appended ownership/checks JSON), rendered as Markdown. */
   task: boundedText,
   /** The exact prompt the native session received, when the run recorded it; null for runs that predate prompt capture. */
@@ -102,7 +114,7 @@ export const runInputWorkerSchema = z.strictObject({
   /** Check and scenario IDs are the policy's own labels (any non-empty string, e.g. `test:unit`), never route segments. */
   checks: z.array(z.strictObject({
     id: z.string().min(1),
-    kind: z.enum(['build', 'typecheck', 'unit', 'integration', 'contract', 'browser']),
+    kind: z.enum(CHECK_KINDS),
     /** The approved argv joined exactly as the verifier records executed commands, so check IDs can be matched to executed checks. */
     command: z.string().min(1),
     timeout_seconds: z.number().int().positive(),
@@ -123,7 +135,7 @@ export const runInputWorkerSchema = z.strictObject({
 
 /** What a run was asked to do, served at `.../runs/{run_id}/inputs`; pinned from the run's own files. */
 export const runInputsSchema = z.strictObject({
-  contract_version: version120,
+  contract_version: version130,
   run_id: id,
   feature: z.string().min(1),
   base_commit: commit,
@@ -139,6 +151,10 @@ export const runInputsSchema = z.strictObject({
   }).nullable(),
   setup: z.array(z.strictObject({ command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
+  /** The lanes the run actually launched, in policy order; `workers` describes exactly these. */
+  selected_workers: z.array(laneId).min(1),
+  /** Declared lanes the launch left out; their owned paths stayed off-limits and they have no node in the run. */
+  excluded_workers: z.array(laneId),
   workers: z.array(runInputWorkerSchema).min(1),
 })
 
@@ -211,6 +227,7 @@ export function validateReviewResult(input: unknown): ReviewResult {
   for (const finding of result.findings) {
     if (new Set(finding.requirement_found_in).size !== finding.requirement_found_in.length) throw new Error('Duplicate requirement match lanes')
     if (finding.requirement === null && finding.requirement_found_in.length > 0) throw new Error('A finding without a requirement quote cannot match a task')
+    if (finding.requirement_found_in.some(lane => (FINDING_ATTRIBUTIONS as readonly string[]).includes(lane))) throw new Error('Requirement matches name lanes, not attributions')
   }
   return result
 }
@@ -220,7 +237,17 @@ export function validateRunInputs(input: unknown): RunInputs {
   if ((inputs.mode === 'automatic') !== (inputs.automatic !== null)) throw new Error('Automatic settings are present exactly for automatic runs')
   if (new Set(inputs.workers.map(worker => worker.node_id)).size !== inputs.workers.length) throw new Error('Duplicate worker IDs')
   if (new Set(inputs.workers.map(worker => worker.launch_node_id)).size !== inputs.workers.length) throw new Error('Duplicate launch node IDs')
+  if (JSON.stringify(inputs.selected_workers) !== JSON.stringify(inputs.workers.map(worker => worker.node_id))) throw new Error('selected_workers must list exactly the described workers in order')
+  if (new Set(inputs.excluded_workers).size !== inputs.excluded_workers.length) throw new Error('Duplicate excluded worker IDs')
+  if (inputs.excluded_workers.some(lane => inputs.selected_workers.includes(lane))) throw new Error('A lane cannot be both selected and excluded')
+  for (const lane of [...inputs.selected_workers, ...inputs.excluded_workers]) {
+    if ((FINDING_ATTRIBUTIONS as readonly string[]).includes(lane)) throw new Error(`"${lane}" is a finding attribution, not a lane`)
+  }
   for (const worker of inputs.workers) {
+    for (const kind of worker.required_check_kinds) {
+      if (!worker.checks.some(check => check.kind === kind)) throw new Error(`${worker.node_id} requires a ${kind} check it does not declare`)
+    }
+    if (new Set(worker.required_check_kinds).size !== worker.required_check_kinds.length) throw new Error(`Duplicate required check kinds for ${worker.node_id}`)
     if (new Set(worker.checks.map(check => check.id)).size !== worker.checks.length) throw new Error(`Duplicate check IDs for ${worker.node_id}`)
     for (const check of worker.checks) {
       if ((check.kind === 'browser') !== (check.scenarios.length > 0)) throw new Error(`Browser checks need scenarios and other checks must not have them (${check.id})`)

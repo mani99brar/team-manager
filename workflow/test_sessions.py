@@ -6,9 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-from .live import build_session_graph
 from .observer import herdr, open_panels, render, safe_text
 from .sessions import ClaudeSessions, prepare, read_json, run_lock, save_json
 
@@ -55,17 +52,19 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
         for info in nodes.values():
             self.assertEqual(info["observed_start_commit"], self.plan["base_commit"])
 
-    def test_graph_launches_two_sessions_then_interrupts_and_receipts_are_reused(self):
-        with SqliteSaver.from_conn_string(str(self.directory / "graph.sqlite")) as saver:
-            graph = build_session_graph(saver, self.sessions())
-            result = graph.invoke({"run_id": "run"}, {"configurable": {"thread_id": "run"}, "max_concurrency": 2})
-            self.assertIn("__interrupt__", result)
-            self.assertEqual(result["ui"]["status"], "succeeded")
-            self.assertNotEqual(result["ui"]["session_id"], result["adapter"]["session_id"])
-        # Durable receipts protect even replay outside the original checkpoint.
+    def test_each_lane_launches_once_and_receipts_are_reused(self):
+        self.assertEqual((self.plan["workers"], self.plan["excluded_workers"]), (["ui", "adapter"], []))
+        sessions = self.sessions()
+        self.assertEqual(sessions.workers, ["ui", "adapter"])
+        receipts = {node: sessions.run(node) for node in sessions.workers}
+        self.assertEqual(receipts["ui"]["status"], "succeeded")
+        self.assertNotEqual(receipts["ui"]["session_id"], receipts["adapter"]["session_id"])
+        # Durable receipts protect even a fresh controller instance.
         self.sessions().run("ui")
         self.sessions().run("adapter")
         self.assertEqual(len((self.directory / "starts.log").read_text().splitlines()), 2)
+        with self.assertRaisesRegex(ValueError, "Unknown worker"):
+            self.sessions().run("docs")
 
     def test_failed_session_is_not_relaunched(self):
         (self.directory / "fail").touch()

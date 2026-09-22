@@ -55,6 +55,6 @@ Before wiring it into the live graph:
 Run local tests without any live agent launches:
 
 ```bash
-python -m unittest workflow.test_verification workflow.test_interactive workflow.test_sessions workflow.test_graph -v
+python -m unittest workflow.test_verification workflow.test_interactive workflow.test_sessions workflow.test_lanes -v
 npm run test:contracts
 ```

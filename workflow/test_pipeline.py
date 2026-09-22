@@ -15,8 +15,12 @@ from langgraph.types import Command
 
 from .checks import execute, now
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
-from .sessions import git, prepare, read_json, save_json
+from .sessions import git, plan_workers, prepare, read_json, save_json
 from .verification import CONTRACTS, policy_digest
+
+# What each fake lane writes into its worktree: the two classic lanes edit fixture files the checks read;
+# any other lane creates a file under a directory named after it.
+LANE_EDITS = {"ui": ("ui.txt", "after"), "adapter": ("backend.py", "VALUE = 2\n")}
 
 
 class FakeSessions:
@@ -26,6 +30,8 @@ class FakeSessions:
 
     def __init__(self, directory, plan):
         self.directory, self.plan = directory, plan
+        self.workers = plan_workers(plan)
+        self.edits = dict(LANE_EDITS)          # Per-lane (path, content) a fake worker writes; tests override to violate ownership.
         self.starts = []
         self.reviewer_verdict_file = None  # A file whose text is the fake reviewer's verdict (default approved).
         self.reviewer_findings = []        # Findings the fake reviewer reports.
@@ -50,7 +56,9 @@ class FakeSessions:
     def run(self, node):
         self.record(node)
         cwd = Path(self.plan["nodes"][node]["worktree"])
-        (cwd / ("ui.txt" if node == "ui" else "backend.py")).write_text("after" if node == "ui" else "VALUE = 2\n")
+        path, content = self.edits.get(node, (f"{node}/{node}.md", f"# {node}\n"))
+        (cwd / path).parent.mkdir(parents=True, exist_ok=True)
+        (cwd / path).write_text(content)
         receipt = {"node_id": node, "session_id": self.native_id(node), "launch_token": self.plan["nodes"][node]["session_id"],
                    "background_id": self.background_id(node), "status": "fake-worker-completed", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": now(), "observed_state": "idle", "native_started_at": None}
@@ -91,7 +99,7 @@ class FakeSessions:
     def inventory(self):
         """The native registry: one row per session this fake launched, whatever its receipt recorded so far."""
         return [{"id": self.background_id(node), "sessionId": self.native_id(node), "state": "idle", "pid": os.getpid(), "kind": "background"}
-                for node in ("ui", "adapter", "review") if (self.directory / f"{node}.interactive.json").exists()]
+                for node in (*self.workers, "review") if (self.directory / f"{node}.interactive.json").exists()]
 
     def locate(self, node, rows):
         if not (self.directory / f"{node}.interactive.json").exists():
@@ -221,7 +229,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.2.0")
+            self.assertEqual(exported["version"], "1.3.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             self.assertEqual(exported["inputs"]["mode"], "manual")
             self.assertEqual(exported["inputs"]["workers"]["ui"]["launch"]["session_id"], self.plan["nodes"]["ui"]["session_id"])
@@ -300,15 +308,21 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.runtime.retry_check("worker", "adapter")
         self.assertEqual(self.runtime.attempt("worker", "adapter"), 2)
 
-    def test_wrong_role_mapping_cannot_disable_required_gate_categories(self):
-        for role in ("backend", "frontend"):
-            policy = copy.deepcopy(self.policy)
-            template = next(worker for worker in policy["workers"] if worker["role"] == role)
-            for worker in policy["workers"]:
-                worker["role"] = role
-                worker["checks"] = copy.deepcopy(template["checks"])
-            with self.assertRaisesRegex(ValueError, "ui/frontend"):
-                validate_pipeline_policy(policy)
+    def test_relabelling_a_lane_cannot_disable_its_required_check_kinds(self):
+        # Before policy 1.2.0 the role decides the kinds: relabelling the adapter as frontend demands build and browser checks.
+        policy = copy.deepcopy(self.policy)
+        policy["workers"][1]["role"] = "frontend"
+        with self.assertRaisesRegex(ValueError, "adapter requires .*browser"):
+            validate_pipeline_policy(policy)
+        # From 1.2.0 the lane declares its kinds and the role is a free label; a kind without a check is refused.
+        policy = copy.deepcopy(self.policy)
+        policy["version"] = "1.2.0"
+        policy["workers"][0].update(role="pixel pusher", required_check_kinds=["build", "browser"])
+        policy["workers"][1].update(role="plumbing", required_check_kinds=["unit"])
+        validate_pipeline_policy(policy)
+        policy["workers"][1]["required_check_kinds"] = ["unit", "browser"]
+        with self.assertRaisesRegex(ValueError, "adapter requires .*browser"):
+            validate_pipeline_policy(policy)
 
     def test_check_review_accepts_finding_links_and_blocked_verdicts_only_when_asked(self):
         bundle = {"run_id": "run", "candidate_commit": "c" * 40, "snapshots": {"ui": {"session_id": "ui-session"}, "adapter": {"session_id": "adapter-session"}}}
@@ -318,10 +332,13 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         linked = {"severity": "P2", "message": "Linked finding", "disposition": "accepted", "worker": "ui", "requirement": "Show every finding"}
         unlinked = {"severity": "P1", "message": "Cross-cutting", "disposition": "resolved", "worker": "none", "requirement": None}
         check_review({**base, "verdict": "approved", "findings": [plain, linked, unlinked]}, bundle, digest)
-        for bad in ({**linked, "worker": "reviewer"}, {**linked, "requirement": ""}, {**linked, "requirement": 3}, {**linked, "extra": True},
+        for bad in ({**linked, "worker": "reviewer"}, {**linked, "worker": "both"}, {**linked, "requirement": ""}, {**linked, "requirement": 3}, {**linked, "extra": True},
                     {**linked, "worker": None}, {**plain, "severity": "P3"}, {**plain, "message": " "}):
             with self.assertRaisesRegex(ValueError, "finding"):
                 check_review({**base, "verdict": "approved", "findings": [bad]}, bundle, digest)
+        # `multiple` replaces `both`; the legacy spelling is accepted only for reviews recorded before configured lanes.
+        check_review({**base, "verdict": "approved", "findings": [{**linked, "worker": "multiple"}]}, bundle, digest)
+        check_review({**base, "verdict": "approved", "findings": [{**linked, "worker": "both"}]}, bundle, digest, allow_legacy=True)
         open_p1 = {**unlinked, "disposition": "open"}
         with self.assertRaisesRegex(ValueError, "Unresolved blocking"):
             check_review({**base, "verdict": "approved", "findings": [open_p1]}, bundle, digest)

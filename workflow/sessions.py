@@ -9,15 +9,58 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TypedDict
 
-NODES = ("ui", "adapter")
 TERMINAL = {"succeeded", "failed", "blocked"}
+
+# Worker lanes come from configuration (policy 1.2.0, feature file 2.0.0). A lane id names the
+# per-lane graph nodes (launch_<id>, verify_<id>), files (<id>.completion.json, ...) and the
+# finding attribution vocabulary, so it can never collide with a fixed graph node, an
+# attribution or a per-lane prefix.
+NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+RESERVED_NODE_IDS = frozenset({"review", "candidate", "handoff", "approval", "integrate", "multiple", "none", "both"})
+RESERVED_NODE_PREFIXES = ("launch_", "verify_", "candidate_", "review-")
+# Plans pinned before lanes were configurable (every existing run) launched exactly these two.
+LEGACY_WORKERS = ("ui", "adapter")
+
+
+def validate_node_id(node) -> str:
+    if not isinstance(node, str) or not NODE_ID_PATTERN.fullmatch(node):
+        raise ValueError(f"Worker lane id must match {NODE_ID_PATTERN.pattern}: {node!r}")
+    if node in RESERVED_NODE_IDS or node.startswith(RESERVED_NODE_PREFIXES):
+        raise ValueError(f"Worker lane id is reserved: {node}")
+    return node
+
+
+def plan_workers(plan: dict) -> list[str]:
+    """The lanes a run launches, in declared order. Plans without `workers` mean the legacy pair."""
+    workers = plan.get("workers")
+    if workers is None:
+        return list(LEGACY_WORKERS)
+    if not isinstance(workers, list) or not workers or len(set(workers)) != len(workers):
+        raise ValueError("Plan workers must be a non-empty list of distinct lane ids")
+    return [validate_node_id(node) for node in workers]
+
+
+def plan_excluded(plan: dict) -> list[str]:
+    """Declared lanes the launch left out; their owned paths stay off-limits."""
+    excluded = plan.get("excluded_workers", [])
+    if not isinstance(excluded, list) or len(set(excluded)) != len(excluded) or set(excluded) & set(plan_workers(plan)):
+        raise ValueError("Plan excluded_workers must be distinct lane ids that are not selected")
+    return [validate_node_id(node) for node in excluded]
+
+
+class SessionState(TypedDict, total=False):
+    """Launch-only graph state (workflow.interactive): one receipt per lane under `lanes`."""
+    run_id: str
+    lanes: dict
 
 
 def read_json(path: Path) -> dict:
@@ -58,9 +101,29 @@ def git(repo: Path, *arguments: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *arguments], text=True).strip()
 
 
-def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow_edits: bool) -> dict:
-    if set(tasks) != set(NODES) or any(not text.strip() for text in tasks.values()):
-        raise ValueError("Exactly two nonempty tasks are required: ui and adapter")
+def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow_edits: bool,
+            declared: list[str] | None = None) -> dict:
+    """Allocate one worktree per selected lane.
+
+    `tasks` maps each selected lane id to its task text. `declared` is the policy's full lane
+    list in declared order; the selection is pinned in that order and the remaining lanes are
+    pinned as `excluded_workers`. Without `declared`, the mapping's own order is the declared order.
+    """
+    if not isinstance(tasks, dict) or not tasks:
+        raise ValueError("At least one worker lane with a nonempty task is required")
+    for node, text in tasks.items():
+        validate_node_id(node)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"Worker lane {node} needs a nonempty task")
+    if declared is None:
+        declared = list(tasks)
+    if len(set(declared)) != len(declared):
+        raise ValueError("Declared worker lanes must be distinct")
+    unknown = sorted(set(tasks) - set(declared))
+    if unknown:
+        raise ValueError(f"Worker lanes not declared in the pinned policy: {', '.join(unknown)}")
+    workers = [node for node in declared if node in tasks]
+    excluded = [node for node in declared if node not in tasks]
     repo = repo.resolve()
     if git(repo, "status", "--porcelain"):
         raise ValueError("Commit or preserve source changes before creating worker worktrees")
@@ -73,10 +136,10 @@ def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow
     directory.mkdir(parents=True, mode=0o700, exist_ok=False)
     os.chmod(directory, 0o700)
     plan = {"run_id": directory.name, "repository": str(repo), "base_commit": revision,
-            "allow_edits": allow_edits, "nodes": {}}
+            "allow_edits": allow_edits, "workers": workers, "excluded_workers": excluded, "nodes": {}}
     # Journal before allocation. Partial worktrees are retained on failure.
     save_json(directory / "plan.json", plan)
-    for node in NODES:
+    for node in workers:
         worktree = directory / f"worktree-{node}"
         plan["nodes"][node] = {"worktree": str(worktree), "task": tasks[node],
                                "session_id": str(uuid.uuid4()), "observed_start_commit": None}
@@ -110,9 +173,11 @@ class ClaudeSessions:
     def __init__(self, directory: Path, executable: str = "claude", timeout: float = 1800):
         self.directory = directory.resolve()
         self.plan = read_json(self.directory / "plan.json")
-        if set(self.plan["nodes"]) != set(NODES):
+        self.workers = plan_workers(self.plan)
+        self.excluded = plan_excluded(self.plan)
+        if set(self.plan["nodes"]) != set(self.workers):
             raise RuntimeError("Run preparation is incomplete; inspect retained allocation state")
-        for node in NODES:
+        for node in self.workers:
             info = self.plan["nodes"][node]
             if Path(info["worktree"]).resolve() != self.directory / f"worktree-{node}" or info["observed_start_commit"] != self.plan["base_commit"]:
                 raise RuntimeError("Invalid worktree identity/start revision in plan")
@@ -121,7 +186,7 @@ class ClaudeSessions:
         self.cancelled = threading.Event()
 
     def run(self, node: str) -> dict:
-        if node not in NODES:
+        if node not in self.workers:
             raise ValueError("Unknown worker")
         if self.cancelled.is_set():
             raise RuntimeError("Controller cancelled before launch")

@@ -1,4 +1,6 @@
-# LangGraph-owned Claude sessions with passive Herdr panels
+# LangGraph-owned Claude sessions with passive Herdr panels (historical)
+
+**Removed.** The `workflow.live` print-mode launcher described below was deleted with the worker-lanes slice (PRD_WORKER_LANES); `workflow.observer` remains as the read-only stream viewer, now over any configured lane. Use `python -m workflow` (RUNBOOK.md) or `workflow.interactive` (INTERACTIVE_SESSIONS.md). The text is kept as the record of that slice.
 
 This is an initial live-launch slice, separate from the original stub demo. LangGraph launches two independent Claude processes in verified Git worktrees. Herdr runs only observers. No Pi subagent runner is used for execution.
 
@@ -70,7 +72,7 @@ Still to implement: contract-complete worker results and immutable artifacts; re
 ## Checks
 
 ```bash
-python -m unittest workflow.test_sessions workflow.test_graph -v
+python -m unittest workflow.test_sessions -v
 ```
 
 Tests use a fake executable for deterministic process lifecycle coverage. A live smoke test additionally exercised two authenticated, read-only Claude sessions from LangGraph and real Herdr observers. Both read the shared contract heading, exited successfully with distinct UUIDs, left worktrees clean, and reached the verification interrupt. Re-invoking the run did not relaunch them. No implementation/browser checks or merge were claimed by this smoke test.

@@ -3,8 +3,7 @@
 This is the preferred path when you want to **type into Claude**, not view streamed logs. It uses Claude Code's native persistent background terminals (tested with CLI 2.1.278).
 
 ```text
-LangGraph launch_ui      → claude --bg → persistent UI terminal/worktree
-LangGraph launch_adapter → claude --bg → persistent adapter terminal/worktree
+LangGraph launch_<lane> → claude --bg → persistent terminal/worktree, one per configured lane
                                      ↑
 Herdr workflow tab → claude attach <id> in each pane (keyboard input enabled)
 ```
@@ -18,20 +17,20 @@ From this source checkout, with the workflow Python environment active:
 ```bash
 python -m workflow.interactive prepare /path/outside-repo/my-run \
   --repo "$PWD" --base HEAD \
-  --ui-task /path/to/ui-task.txt --adapter-task /path/to/adapter-task.txt \
+  --task ui=/path/to/ui-task.txt --task adapter=/path/to/adapter-task.txt \
   --allow-edits
 
 python -m workflow.interactive run /path/outside-repo/my-run --live --herdr
 python -m workflow.interactive status /path/outside-repo/my-run
 ```
 
-Source repository must be clean and the shared contract must exist at the pinned revision. Both worktrees are created at that exact commit. Do not reuse a print-mode run directory: interactive sessions are new native terminals, not conversions of completed `--print` conversations.
+Source repository must be clean and the shared contract must exist at the pinned revision. One worktree per lane (`--task <lane>=<path>`, any lane ids the policy rules allow) is created at that exact commit. Do not reuse a print-mode run directory: interactive sessions are new native terminals, not conversions of completed `--print` conversations.
 
 `--live` authorizes Claude usage. `--allow-edits` enables Read/Glob/Grep/Edit/Write; omit it for read-only tools. Permission mode is **manual**, so you can answer permission prompts yourself. Shell tools and nested agents remain disabled in this initial slice. No bypass-permissions mode or automatic provider/budget fallback is configured. This is worktree isolation, not an OS sandbox.
 
 ## Use the panels
 
-A dedicated `Workflow: <run-name>` tab contains `Claude: ui` and `Claude: adapter`. Your original tab is not split and focus is preserved. Select either worker pane and type at Claude's normal prompt.
+A dedicated `Workflow: <run-name>` tab contains one `Claude: <lane>` pane per lane, in declared order (the first lane takes the root pane, each following lane splits right of the previous one). Your original tab is not split and focus is preserved. Select a worker pane and type at Claude's normal prompt.
 
 - **Ctrl+Z** detaches to the pane's shell; Claude documents that the background session keeps running.
 - Closing the attachment pane does not intentionally stop the worker. A client/SSH disconnect should leave the native background session available to reattach; recovery still verifies its identity.
@@ -42,7 +41,7 @@ A dedicated `Workflow: <run-name>` tab contains `Claude: ui` and `Claude: adapte
 To reconnect in an available terminal:
 
 ```bash
-python -m workflow.interactive attach-one /path/outside-repo/my-run --node ui
+python -m workflow.interactive attach-one /path/outside-repo/my-run --node <lane>
 ```
 
 This validates the native session ID, worktree, name, live inventory state and PID before `exec`-ing `claude attach`. A terminal is required. Never type this command into a pane already occupied by another program. The programmatic pane adapter also checks that only the pane's shell is in the foreground before submitting a command.
@@ -53,7 +52,7 @@ To create the dedicated tab after launching without `--herdr`:
 python -m workflow.interactive attach /path/outside-repo/my-run
 ```
 
-The recorded `terminals.json` prevents automatically opening duplicate attachments. A failed partial layout is retained for inspection. To deliberately replace the two old, idle log observers, supply `--reuse-observers /old/run/observers.json` to `attach` or to `run --live --herdr`. The adapter checks distinct pane identities, same dedicated tab/current workspace, and shell availability, then records the ownership transfer. It never closes or repurposes an unrelated pane.
+The recorded `terminals.json` prevents automatically opening duplicate attachments. A failed partial layout is retained for inspection. To deliberately replace old, idle log observers (one per lane), supply `--reuse-observers /old/run/observers.json` to `attach` or to `run --live --herdr`. The adapter checks distinct pane identities, same dedicated tab/current workspace, and shell availability, then records the ownership transfer. It never closes or repurposes an unrelated pane.
 
 ## Identity and recovery
 
@@ -65,16 +64,16 @@ If the controller fails after launching, rerunning may reconcile the **same** te
 
 ## Workflow handoff
 
-The graph has two independent **launch** nodes and then interrupts at `interactive_workers_active`. Finishing a launch node does not mean the implementation is finished. Neither idle/done state nor human typing triggers integration. The implementation does not yet offer a final evidence/verification/approval command, automated stop, or merge.
+The graph has one independent **launch** node per lane and then interrupts at `interactive_workers_active`. Finishing a launch node does not mean the implementation is finished. Neither idle/done state nor human typing triggers integration. The implementation does not yet offer a final evidence/verification/approval command, automated stop, or merge.
 
 Before integration is added, we still need to freeze further terminal edits, capture contract-complete results, run isolated tests/browser checks and obtain independent review. There is no claim of successful verification from these launch receipts.
 
 ## Validation
 
 ```bash
-python -m unittest workflow.test_interactive workflow.test_sessions workflow.test_graph -v
+python -m unittest workflow.test_interactive workflow.test_sessions workflow.test_lanes -v
 ```
 
 Coverage includes native launch flags, assigned-ID binding, exact surviving-session reconciliation, refusal to retry ambiguous launches, identity/worktree checks, occupied-pane rejection, dedicated-tab attachment and the human-handoff interrupt. Live testing launched two native background workers via LangGraph, reconciled their assigned IDs without additional launches, and verified real `claude attach` processes and interactive prompts in the existing workflow tab.
 
-`workflow.live` / `LIVE_SESSIONS.md` remain the separate headless print-mode/log-viewer path. They are not the interactive terminal path.
+The headless print-mode launcher (`workflow.live`, `LIVE_SESSIONS.md`) was removed with the worker-lanes slice; `python -m workflow` is the complete pipeline.

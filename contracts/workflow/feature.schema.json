@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Feature file v2.0.0",
+  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. A 1.0.0 file (`ui_task`/`adapter_task`) is translated to this shape by `launch` and reported as deprecated. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy and existing, non-empty task files inside the feature directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "branch_prefix",
+    "policy",
+    "workers"
+  ],
+  "properties": {
+    "version": {
+      "const": "2.0.0"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch_prefix": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+    },
+    "policy": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Policy file relative to the feature directory (contracts/workflow/verification.schema.json)."
+    },
+    "workers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "task"
+        ],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both)$)(?!(?:launch_|verify_|candidate_|review-))[a-z][a-z0-9-]{0,31}$",
+            "description": "A lane id as the policy declares it: lower-case, at most 32 characters, never a reserved graph name, attribution or per-lane prefix."
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Task file relative to the feature directory."
+          }
+        }
+      }
+    }
+  }
+}

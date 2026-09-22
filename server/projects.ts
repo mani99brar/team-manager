@@ -3,7 +3,7 @@ import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { z } from 'zod'
 import {
-  FINDING_WORKERS, WORKER_LANES, validateReviewResult, validateRunDetail, validateRunInputs,
+  CHECK_KINDS, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, validateReviewResult, validateRunDetail, validateRunInputs,
   type Project, type ReviewResult, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -18,9 +18,15 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * persisted files and projects them onto the public contract. Missing or contradictory evidence is reported as
  * an error or a paused/failed state, never as success.
  *
- * Export versions: 1.0.0 (graph state only), 1.1.0 (adds the `review` section from `review.json`) and 1.2.0
- * (adds the `inputs` section pinned from `plan.json`, `policy.json` and the worker receipts). A section is
- * served only when the export carries it; `values` is never mined for either.
+ * Export versions: 1.0.0 (graph state only), 1.1.0 (adds the `review` section from `review.json`), 1.2.0
+ * (adds the `inputs` section pinned from `plan.json`, `policy.json` and the worker receipts) and 1.3.0 (worker
+ * lanes from configuration: `inputs.workers` is keyed by any lane ID, `inputs` records the selected and excluded
+ * lanes, per-lane graph state lives under `lanes` and `packets`). A section is served only when the export
+ * carries it; `values` is never mined for either.
+ *
+ * The lane list comes from `inputs.workers` (policy order). Exports without an `inputs` section, which only
+ * 1.0.0 and 1.1.0 produce, fall back to the fixed `ui`/`adapter` pair those versions always had. The node map
+ * follows the `launch_<lane>`, `verify_<lane>` and `candidate_<lane>` naming the controller guarantees.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -41,7 +47,14 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] as const
+/** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
+const LEGACY_LANES = ['ui', 'adapter'] as const
+/** Node IDs a lane can never take: the fixed graph tail, the finding attributions and the per-lane node prefixes. */
+const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both'])
+const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-']
+/** Required check kinds the controller derived from the role before policies declared them (verification.py before 1.2.0). */
+const ROLE_REQUIRED_KINDS: Record<string, readonly (typeof CHECK_KINDS)[number][]> = { frontend: ['build', 'browser'], backend: ['unit'] }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 /** Task and prompt texts are served up to this many characters; the rest is replaced by a marker. */
 const TEXT_LIMIT = 65536
@@ -68,6 +81,10 @@ const timestamp = z.iso.datetime()
 const zonedTimestamp = z.iso.datetime({ offset: true })
 const relativePath = z.string().min(1).regex(/^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*(?:^|\/)\.\.(?:\/|$)).+$/)
 const assumptions = z.array(z.string())
+/** A configured lane ID: the policy's pattern, never a reserved graph node, attribution or per-lane node prefix. */
+const laneKey = z.string().regex(LANE_ID_PATTERN).refine(lane => !RESERVED_LANE_IDS.has(lane) && !RESERVED_LANE_PREFIXES.some(prefix => lane.startsWith(prefix)), 'reserved lane id')
+/** A finding attribution: a lane ID, `multiple`, `none` or the legacy `both`; the lane check happens against the run's lanes later. */
+const attribution = z.string().regex(LANE_ID_PATTERN)
 
 /** The export's `review` section: `review.json` plus the reviewer receipt, exactly as workflow/export_state.py writes it. */
 const reviewSectionSchema = z.strictObject({
@@ -82,7 +99,7 @@ const reviewSectionSchema = z.strictObject({
     severity: z.enum(['P0', 'P1', 'P2']),
     message: z.string().min(1),
     disposition: z.enum(['open', 'resolved', 'accepted']),
-    worker: z.enum(FINDING_WORKERS).nullable(),
+    worker: attribution.nullable(),
     requirement: z.string().min(1).nullable(),
   })),
   reviewed_at: zonedTimestamp,
@@ -90,14 +107,17 @@ const reviewSectionSchema = z.strictObject({
 })
 
 const workerInputSchema = z.strictObject({
-  role: z.enum(['frontend', 'backend']),
+  /** A free label since policy 1.2.0; `frontend`/`backend` before, when it also determined the required check kinds. */
+  role: z.string().min(1),
+  /** Present from export 1.3.0; derived from the role for earlier exports. */
+  required_check_kinds: z.array(z.enum(CHECK_KINDS)).optional(),
   task: z.string(),
   prompt: z.string().nullable(),
   owned_paths: z.array(relativePath),
   /** Check and scenario IDs are the policy's own labels (any non-empty string, as the policy schema allows), never route segments. */
   checks: z.array(z.strictObject({
     id: z.string().min(1),
-    kind: z.enum(['build', 'typecheck', 'unit', 'integration', 'contract', 'browser']),
+    kind: z.enum(CHECK_KINDS),
     argv: z.array(z.string()),
     command: z.string().min(1),
     timeout_seconds: z.number().int().positive(),
@@ -137,8 +157,12 @@ const inputsSectionSchema = z.strictObject({
   setup: z.array(z.strictObject({ argv: z.array(z.string()), command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
   failure_drill: z.strictObject({ node_id: z.string(), phase: z.string(), attempt: z.number().int() }).nullable(),
-  /** Keyed by logical worker lane in policy order; only the lanes the contract can link findings to are accepted. */
-  workers: z.partialRecord(z.enum(WORKER_LANES), workerInputSchema).refine(workers => Object.keys(workers).length > 0, 'at least one worker is required'),
+  /** The lanes the run launched, in policy order (export 1.3.0); earlier exports describe every lane they have under `workers`. */
+  selected_workers: z.array(laneKey).min(1).optional(),
+  /** Declared lanes the launch left out (export 1.3.0); absent before, when every declared lane ran. */
+  excluded_workers: z.array(laneKey).optional(),
+  /** Keyed by the selected lanes in policy order: the run's lane list. */
+  workers: z.record(laneKey, workerInputSchema).refine(workers => Object.keys(workers).length > 0, 'at least one worker is required'),
 })
 
 const exportSchema = z.object({
@@ -191,7 +215,6 @@ type RawEvent = z.infer<typeof rawEventSchema>
 type PacketRegistration = RunExport['verification_packets'][number]
 type ReviewSection = z.infer<typeof reviewSectionSchema>
 type InputsSection = z.infer<typeof inputsSectionSchema>
-type WorkerLane = (typeof WORKER_LANES)[number]
 
 /** A registered packet after loading: either verified content or the reason it cannot be trusted. */
 type LoadedPacket = PacketRegistration & (
@@ -223,16 +246,58 @@ export type ArtifactContent = {
   bytes: Buffer
 }
 
-/** Internal graph node → the LangGraph state key whose presence proves that node completed. */
-const EVIDENCE_KEY: Record<string, string> = {
-  launch_ui: 'ui', launch_adapter: 'adapter', handoff: 'snapshots', verify_ui: 'ui_packet', verify_adapter: 'adapter_packet',
-  candidate: 'bundle', review: 'review', approval: 'approved_bundle', integrate: 'integrated_commit',
+/** Fixed graph tail → the LangGraph state key whose presence proves that node completed. */
+const TAIL_EVIDENCE_KEY: Record<string, string> = { handoff: 'snapshots', candidate: 'bundle', review: 'review', approval: 'approved_bundle', integrate: 'integrated_commit' }
+
+/**
+ * The run's lanes and the graph nodes that concern each of them. Built per run from the export: the lane list is
+ * `inputs.workers` in policy order (the fixed pair for exports without `inputs`); `launch_<lane>` and
+ * `verify_<lane>` are that lane's nodes, raw events name a lane (`docs`) for its launch, `candidate_<lane>` for
+ * the combined check and `freeze` for the handoff.
+ */
+export type LaneMap = {
+  lanes: readonly string[]
+  /** Graph node → the lane it concerns, for launch and verify nodes. */
+  workerOf: ReadonlyMap<string, string>
+  verifyNodes: ReadonlySet<string>
+  /** Raw event node aliases → graph nodes. Anything else must already be a graph node or is left unattributed. */
+  eventAliases: ReadonlyMap<string, string>
 }
-/** Graph nodes that concern one logical worker (`ui`/`adapter`), whose results are served under that ID. */
-const WORKER_OF: Record<string, string> = { launch_ui: 'ui', launch_adapter: 'adapter', verify_ui: 'ui', verify_adapter: 'adapter' }
-const VERIFY_NODES = new Set(['verify_ui', 'verify_adapter'])
-/** Raw event node aliases → graph nodes. Anything else must already be a graph node or is left unattributed. */
-const EVENT_ALIASES: Record<string, string> = { ui: 'launch_ui', adapter: 'launch_adapter', freeze: 'handoff', candidate_ui: 'candidate', candidate_adapter: 'candidate' }
+
+export function laneMap(lanes: readonly string[]): LaneMap {
+  const workerOf = new Map<string, string>()
+  const verifyNodes = new Set<string>()
+  const eventAliases = new Map<string, string>([['freeze', 'handoff']])
+  for (const lane of lanes) {
+    workerOf.set(`launch_${lane}`, lane)
+    workerOf.set(`verify_${lane}`, lane)
+    verifyNodes.add(`verify_${lane}`)
+    eventAliases.set(lane, `launch_${lane}`)
+    eventAliases.set(`candidate_${lane}`, 'candidate')
+  }
+  return { lanes, workerOf, verifyNodes, eventAliases }
+}
+
+/**
+ * Per-lane graph state: exports before 1.3.0 store a lane's launch receipt under `<lane>` and its packet under
+ * `<lane>_packet`; 1.3.0 stores them under `lanes.<lane>` and `packets.<lane>`. Both spellings are read so a
+ * re-exported old run keeps its evidence.
+ */
+function laneValue(record: Record<string, unknown>, lane: string, kind: 'launch' | 'packet'): unknown {
+  const flat = record[kind === 'launch' ? lane : `${lane}_packet`]
+  if (flat !== undefined && flat !== null) return flat
+  const nested = record[kind === 'launch' ? 'lanes' : 'packets']
+  return nested && typeof nested === 'object' ? (nested as Record<string, unknown>)[lane] : undefined
+}
+
+/** The state entry whose presence proves a graph node completed, read from `values` or from a preserved task result. */
+function nodeEvidence(record: Record<string, unknown>, nodeId: string, map: LaneMap): unknown {
+  const lane = map.workerOf.get(nodeId)
+  if (lane !== undefined) return laneValue(record, lane, map.verifyNodes.has(nodeId) ? 'packet' : 'launch')
+  const key = TAIL_EVIDENCE_KEY[nodeId]
+  return key ? record[key] : undefined
+}
+
 const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
   running: 'running', interactive: 'running', blocked: 'failed', succeeded: 'succeeded', passed: 'succeeded', approved: 'succeeded',
   /** The controller stepped away (Ctrl-C) while a native session kept running: unresolved until `automatic --live` resumes it. */
@@ -394,21 +459,19 @@ function nonBlank(items: readonly string[]): string[] {
  * with the redaction marker does not; the redacted quote must also survive in the served (bounded) text, so a
  * link never points at a task whose visible text cannot show the quote. Nothing is inferred.
  */
-function lanesQuoting(requirement: string | null, inputs: InputsSection | null): WorkerLane[] {
+function lanesQuoting(requirement: string | null, inputs: InputsSection | null): string[] {
   if (requirement === null || inputs === null) return []
   const served = redactPaths(requirement)
-  return WORKER_LANES.filter(lane => {
-    const worker = inputs.workers[lane]
-    if (!worker) return false
+  return Object.entries(inputs.workers).filter(([, worker]) => {
     const text = worker.task.length > 0 ? worker.task : worker.prompt ?? ''
     return text.includes(requirement) && boundedText(text).text.includes(served)
-  })
+  }).map(([lane]) => lane)
 }
 
 /** Projects the export's review section onto the review-result contract; the caller applies the cross-field rules. */
 function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null): ReviewResult {
   return {
-    contract_version: '1.2.0', run_id: runId, node_id: 'review', attempt: section.attempt,
+    contract_version: '1.3.0', run_id: runId, node_id: 'review', attempt: section.attempt,
     reviewer: { session_id: redactPaths(section.reviewer_session_id), transport: section.transport, independent: true },
     bundle_sha256: section.bundle_sha256, candidate_commit: section.candidate_commit, verdict: section.verdict,
     findings: section.findings.map(finding => ({
@@ -430,10 +493,12 @@ function reviewDiffArtifact(scope: Scope, runId: string, sha256: string): NonNul
 /** Projects the export's inputs section onto the run-inputs contract: policy order, redacted and bounded texts, Z timestamps. */
 function projectInputs(runId: string, definition: WorkflowDefinition, section: InputsSection): RunInputs {
   const nodes = new Set(definition.nodes.map(node => node.node_id))
-  const workers = (Object.entries(section.workers) as [WorkerLane, NonNullable<InputsSection['workers'][WorkerLane]>][]).map(([lane, worker]) => ({
+  const workers = Object.entries(section.workers).map(([lane, worker]) => ({
     node_id: lane,
     launch_node_id: nodes.has(`launch_${lane}`) ? `launch_${lane}` : lane,
     role: worker.role,
+    // Exports before 1.3.0 carry no required kinds; the controller derived them from the role exactly like this.
+    required_check_kinds: worker.required_check_kinds ? [...worker.required_check_kinds] : [...(ROLE_REQUIRED_KINDS[worker.role] ?? [])],
     task: boundedText(worker.task),
     prompt: worker.prompt === null ? null : boundedText(worker.prompt),
     owned_paths: [...worker.owned_paths],
@@ -451,11 +516,30 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
     stop: worker.stop === null ? null : { stopped: worker.stop.stopped, confirmed_at: worker.stop.confirmed_at === null ? null : utcTimestamp(worker.stop.confirmed_at) },
   }))
   return {
-    contract_version: '1.2.0', run_id: runId, feature: redactPaths(section.feature), base_commit: section.base_commit, source_branch: section.source_branch,
+    contract_version: '1.3.0', run_id: runId, feature: redactPaths(section.feature), base_commit: section.base_commit, source_branch: section.source_branch,
     mode: section.mode, automatic: section.automatic === null ? null : { ...section.automatic },
     setup: section.setup.map(step => ({ command: step.command, timeout_seconds: step.timeout_seconds })),
-    max_verification_attempts: section.max_verification_attempts, workers,
+    max_verification_attempts: section.max_verification_attempts,
+    // Exports before 1.3.0 describe every lane they ran and excluded nothing.
+    selected_workers: section.selected_workers ? [...section.selected_workers] : Object.keys(section.workers),
+    excluded_workers: section.excluded_workers ? [...section.excluded_workers] : [],
+    workers,
   }
+}
+
+/**
+ * The lanes of a run: `inputs.workers` in policy order, or the fixed pair for exports without an `inputs` section.
+ * A definition whose per-lane nodes name a lane the export does not describe is contradictory once `inputs` exists.
+ */
+function runLanes(runId: string, definition: WorkflowDefinition, inputs: InputsSection | null): LaneMap {
+  const map = laneMap(inputs ? Object.keys(inputs.workers) : LEGACY_LANES)
+  if (inputs) {
+    for (const node of definition.nodes) {
+      const prefix = ['launch_', 'verify_'].find(candidate => node.node_id.startsWith(candidate))
+      if (prefix && !map.workerOf.has(node.node_id)) throw invalidRun(runId, `graph node ${node.node_id} names a lane the inputs section does not describe`)
+    }
+  }
+  return map
 }
 
 /** Splits `ui`/`candidate_ui` result route IDs back into a registered packet phase and worker. */
@@ -675,8 +759,9 @@ export class RunStore {
     }
     const packets = await this.loadPackets(runId, directory, state.verification_packets)
     const rawEvents = await this.readEvents(runId, directory, state)
-    const events = normalizeEvents(state.run_id, definition, rawEvents)
-    const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets)
+    const lanes = runLanes(runId, definition, state.inputs ?? null)
+    const events = normalizeEvents(state.run_id, definition, rawEvents, lanes)
+    const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes)
     const created_at = state.created_at
     const updated_at = laterTimestamp(laterTimestamp(state.updated_at, rawEvents.at(-1)?.time ?? created_at), created_at)
     const summary: RunSummary = {
@@ -703,6 +788,12 @@ export class RunStore {
     if (state.review) {
       try {
         review = validateReviewResult(projectReview(scope, state.run_id, state.review, state.inputs ?? null))
+        // A finding names a lane this run had, an attribution (`multiple`, `none`, the legacy `both`) or nothing; anything else is contradictory.
+        for (const item of review.findings) {
+          if (item.worker !== null && !lanes.lanes.includes(item.worker) && !(FINDING_ATTRIBUTIONS as readonly string[]).includes(item.worker)) {
+            throw new Error(`finding names "${item.worker}", which is neither a lane of this run nor an attribution`)
+          }
+        }
       } catch (error) {
         throw contractFailure('review section', error)
       }
@@ -785,17 +876,20 @@ const artifactRegistrationSchema = z.object({
 })
 
 /** Maps a raw event node name onto the pinned graph, or null when it names nothing in this definition. */
-function eventNode(definition: WorkflowDefinition, node: string): string | null {
+function eventNode(definition: WorkflowDefinition, node: string, map: LaneMap): string | null {
   const known = new Set(definition.nodes.map(item => item.node_id))
   if (known.has(node)) return node
-  const alias = EVENT_ALIASES[node]
+  const alias = map.eventAliases.get(node)
   return alias && known.has(alias) ? alias : null
 }
 
-function hasEvidence(state: RunExport, key: string | undefined): boolean {
-  if (!key) return false
-  if (state.values[key] !== undefined && state.values[key] !== null) return true
-  return state.tasks.some(task => task.result !== null && task.result[key] !== undefined && task.result[key] !== null)
+function present(value: unknown): boolean {
+  return value !== undefined && value !== null
+}
+
+function hasEvidence(state: RunExport, nodeId: string, map: LaneMap): boolean {
+  if (present(nodeEvidence(state.values, nodeId, map))) return true
+  return state.tasks.some(task => task.result !== null && present(nodeEvidence(task.result, nodeId, map)))
 }
 
 function attemptFromMessage(message: string): number | null {
@@ -804,10 +898,10 @@ function attemptFromMessage(message: string): number | null {
 }
 
 /** Normalizes internal `{sequence,time,node,status,message}` records into workflow-v1 events. */
-export function normalizeEvents(runId: string, definition: WorkflowDefinition, raw: readonly RawEvent[]): WorkflowEvent[] {
+export function normalizeEvents(runId: string, definition: WorkflowDefinition, raw: readonly RawEvent[], map: LaneMap = laneMap(LEGACY_LANES)): WorkflowEvent[] {
   const attempts = new Map<string, number>()
   return raw.map(event => {
-    const node_id = eventNode(definition, event.node)
+    const node_id = eventNode(definition, event.node, map)
     let attempt = 0
     if (node_id) {
       const parsed = attemptFromMessage(event.message)
@@ -832,11 +926,11 @@ type NodeStatus = RunSnapshot['nodes'][number]['status']
  * their registered packet to load, match its hash and have passed), then the last persisted event, then pending.
  * The run succeeds only once integrated with nothing pending; contradictory evidence is paused.
  */
-export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, state: RunExport, rawEvents: readonly RawEvent[], packets: readonly LoadedPacket[]): RunSnapshot {
+export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, state: RunExport, rawEvents: readonly RawEvent[], packets: readonly LoadedPacket[], map: LaneMap = laneMap(LEGACY_LANES)): RunSnapshot {
   const lastEvent = new Map<string, RawEvent>()
   const eventAttempt = new Map<string, number>()
   for (const event of rawEvents) {
-    const node = eventNode(definition, event.node)
+    const node = eventNode(definition, event.node, map)
     if (!node) continue
     // Only a status-bearing event moves a node; a plain record (`stopped`, a note) never hides the last status.
     if (EVENT_STATUS[event.status] !== undefined) lastEvent.set(node, event)
@@ -848,27 +942,27 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   const workers = new Set(packets.map(packet => packet.node_id))
   const nodes = definition.nodes.map(node => {
     const task = state.tasks.find(candidate => candidate.node_id === node.node_id)
-    const key = EVIDENCE_KEY[node.node_id]
-    const worker = WORKER_OF[node.node_id]
+    const evidenced = map.workerOf.has(node.node_id) || node.node_id in TAIL_EVIDENCE_KEY
+    const worker = map.workerOf.get(node.node_id)
     const workerPacket = worker ? latestPacket('worker', worker) : undefined
     let attempt = 0
     let session_id: string | null = null
     let result_uri: string | null = null
     if (worker) {
       if (workerPacket) {
-        attempt = VERIFY_NODES.has(node.node_id) ? workerPacket.attempt : 1
+        attempt = map.verifyNodes.has(node.node_id) ? workerPacket.attempt : 1
         result_uri = resultRoute(scope, state.run_id, 'worker', worker, workerPacket.attempt)
         const session = workerPacket.ok ? workerPacket.result.session_id : null
         session_id = typeof session === 'string' && session.length > 0 ? session : null
       }
-      if (!VERIFY_NODES.has(node.node_id)) {
-        const receipt = state.values[worker]
+      if (!map.verifyNodes.has(node.node_id)) {
+        const receipt = laneValue(state.values, worker, 'launch')
         const session = receipt && typeof receipt === 'object' ? (receipt as Record<string, unknown>).session_id : null
         if (typeof session === 'string' && session.length > 0) session_id = session
       }
     }
     if (node.node_id === 'candidate') attempt = Math.max(0, ...packets.filter(packet => packet.phase === 'candidate').map(packet => packet.attempt))
-    if (VERIFY_NODES.has(node.node_id)) attempt = Math.max(attempt, eventAttempt.get(node.node_id) ?? 0)
+    if (map.verifyNodes.has(node.node_id)) attempt = Math.max(attempt, eventAttempt.get(node.node_id) ?? 0)
     // The review node names its reviewer and links to the recorded result only from the export's review section, never from `values`.
     if (node.node_id === 'review' && state.review) {
       attempt = state.review.attempt
@@ -880,13 +974,13 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     const eventStatus = event ? EVENT_STATUS[event.status] ?? null : null
     if (task?.error) status = 'failed'
     else if (task && task.interrupts.length > 0) status = 'awaiting_approval'
-    else if (hasEvidence(state, key)) {
-      if (VERIFY_NODES.has(node.node_id)) status = workerPacket?.ok && workerPacket.gate.status === 'passed' ? 'succeeded' : 'paused'
+    else if (hasEvidence(state, node.node_id, map)) {
+      if (map.verifyNodes.has(node.node_id)) status = workerPacket?.ok && workerPacket.gate.status === 'passed' ? 'succeeded' : 'paused'
       else if (node.node_id === 'candidate') {
         const latest = [...workers].map(candidate => latestPacket('candidate', candidate)).filter(packet => packet !== undefined)
         status = latest.length > 0 && latest.every(packet => packet.ok && packet.gate.status === 'passed') ? 'succeeded' : 'paused'
       } else status = 'succeeded'
-    } else if (eventStatus === 'succeeded') status = key ? 'paused' : 'succeeded'
+    } else if (eventStatus === 'succeeded') status = evidenced ? 'paused' : 'succeeded'
     else if (eventStatus) status = eventStatus
     else status = 'pending'
     if (status !== 'pending' && attempt === 0) attempt = 1
@@ -894,7 +988,7 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     return { node_id: node.node_id, kind: node.kind, depends_on: [...node.depends_on], status, attempt, session_id, result_uri }
   })
   const statuses = new Set(nodes.map(node => node.status))
-  const integrated = hasEvidence(state, 'integrated_commit')
+  const integrated = hasEvidence(state, 'integrate', map)
   let status: NodeStatus
   if (statuses.has('failed')) status = 'failed'
   else if (statuses.has('awaiting_approval')) status = 'awaiting_approval'
