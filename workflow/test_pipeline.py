@@ -251,6 +251,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             Pipeline.stop_workers(self.runtime)
             self.assertEqual(command.call_count, 2)
         self.assertTrue(all(read_json(self.directory / f"{node}.stop.json")["stopped"] for node in ("ui", "adapter")))
+        self.assertTrue(all(read_json(self.directory / f"{node}.stop.json")["stopped_at"].endswith("Z") for node in ("ui", "adapter")))
 
     def test_completed_stop_intent_is_reconciled_without_another_stop(self):
         for node, row in self.native_rows().items():

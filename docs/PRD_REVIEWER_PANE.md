@@ -1,6 +1,6 @@
 # PRD: Reviewer as an attachable native session (slice A)
 
-Status: Draft for approval — implementation has not started. Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
+Status: Implemented and smoke-tested live 2026-09-21 (offline tests green; two live attempts, the first exposed the permission-rule spelling, the second ran the whole protocol to a recorded verdict; see [HANDOFF_REVIEW_VISIBILITY.md](HANDOFF_REVIEW_VISIBILITY.md)). Umbrella: [PRD_REVIEW_VISIBILITY.md](PRD_REVIEW_VISIBILITY.md).
 
 This slice is controller work plus the completion schema and docs: `workflow/`, `contracts/workflow/reviewCompletion.schema.json`, `workflow/RUNBOOK.md` and the feature README. None of it is worker-owned, so it ships as an ordinary commit with offline tests and a controlled live smoke test (section 5), and needs no feature run. Its first live exercise inside a full run is the review step of the next feature run (slice B).
 
@@ -66,5 +66,7 @@ Offline tests (work item 5) gate the commit. Before merging, run one controlled 
 
 ## 6. Open questions
 
-- Three-pane layout: create the reviewer pane in the same tab when the review node starts (proposed), or in a separate tab.
+- ~~Three-pane layout~~: decided, same tab, split off the adapter pane when the review node starts.
+- Decided during implementation: the reviewer also gets Write, allow-listed to `review.completion.json` only (`--allowedTools "Edit(//<run>/review.completion.json)"` with `--permission-mode dontAsk`), because a native session has no structured-output channel. Everything else stays read-only. The rule is spelled `Edit(...)`: Write follows Edit rules and a `Write(...)` rule is ignored by the CLI, which the first live smoke test exposed (the reviewer finished its review and could not write the file).
+- Decided during implementation: a reviewer in native state `blocked` (it ended a turn asking a person) is waiting, not failed; the controller notes it once and keeps polling until `review_timeout_seconds`.
 - Whether to fail earlier than the timeout when the reviewer is idle without a file for ten minutes. Same question exists for workers; decide once for both.

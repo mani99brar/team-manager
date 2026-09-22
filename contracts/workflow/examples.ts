@@ -1,4 +1,4 @@
-import type { RunSpec, WorkerResult, RunSnapshot, WorkflowEvent, ControlRequest } from './v1.js'
+import type { RunSpec, WorkerResult, RunSnapshot, WorkflowEvent, ControlRequest, ReviewCompletion } from './v1.js'
 
 // Demonstration SHAs only; replace with observed Git revisions before execution.
 const base = 'a'.repeat(40)
@@ -34,4 +34,13 @@ export const event: WorkflowEvent = {
 export const controlRequest: ControlRequest = {
   contract_version: '1.0.0', run_id: 'demo-001', request_id: 'request-1',
   expected_sequence: 1, action: 'pause', node_id: null, reason: 'Review remaining included usage',
+}
+export const reviewCompletion: ReviewCompletion = {
+  version: '1.0.0', run_id: 'demo-001', node_id: 'review',
+  bundle_sha256: 'd'.repeat(64), candidate_commit: 'b'.repeat(40),
+  reviewer_session: '0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f', verdict: 'approved',
+  findings: [
+    { severity: 'P2', message: 'Reuse evidence is stated as absent rather than derived from events', disposition: 'accepted', worker: 'adapter', requirement: 'Show statuses, attempts, explicit reuse evidence' },
+    { severity: 'P2', message: 'Root Playwright suite is outside the policy check set', disposition: 'accepted', worker: 'none', requirement: null },
+  ],
 }

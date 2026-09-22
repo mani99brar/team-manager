@@ -47,6 +47,28 @@ class FeatureLaunchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "automatic runs only"):
             launch_commands(REPO, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), worker_timeout_seconds=7200)
 
+    def test_review_visibility_features_are_launchable_with_the_native_reviewer_by_default(self):
+        for feature in ("review-result", "run-inputs"):
+            run, commands = launch_commands(REPO, feature, f"{feature}-001", Path("/tmp/workflow-launch-tests"), automatic=True)
+            self.assertEqual(run.name, f"{feature}-001")
+            self.assertEqual(commands[1], ["git", "switch", "-c", f"feature/{feature}/{feature}-001"])
+            prepare = commands[2]
+            self.assertEqual(prepare[prepare.index("--feature") + 1], feature)
+            self.assertEqual(prepare[prepare.index("--reviewer-transport") + 1], "native")
+        _, commands = launch_commands(REPO, "review-result", "x", Path("/tmp/workflow-launch-tests"), automatic=True, reviewer_transport="print")
+        self.assertEqual(commands[2][commands[2].index("--reviewer-transport") + 1], "print")
+        with self.assertRaises(ValueError):
+            launch_commands(REPO, "review-result", "x", Path("/tmp/workflow-launch-tests"), automatic=True, reviewer_transport="pi")
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(REPO, "review-result", "x", Path("/tmp/workflow-launch-tests"), reviewer_transport="native")
+
+    def test_run_defaults_follow_the_feature(self):
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["run-inputs", "--dry-run"])
+        command.assert_not_called()
+        printed = output.getvalue()
+        self.assertIn("md-manager-workflows/run-inputs/run-inputs-001", printed)
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--dry-run"])

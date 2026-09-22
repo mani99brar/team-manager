@@ -1,4 +1,4 @@
-# Project workflow viewer contract v1.0.0
+# Project workflow viewer contract v1.2.0
 
 Approved first feature: add a **Projects** root alongside the existing **Pi** and **Claude** roots. Browse a project, its workflow definitions, and executions; inspect a graph and run evidence. Existing skills browsing/editing is unchanged.
 
@@ -14,6 +14,8 @@ The backend maintains an operator-configured allowlist mapping project IDs to ca
 
 `v1.ts` is the source for structural Zod schemas and cross-field validators. Generated `*.schema.json` support Python consumers. `examples.ts` contains synthetic fixtures, not actual execution evidence. `contract.test.ts` checks schema drift and invariants. Run `npm run contracts:export` and `npm run test:contracts` from the repository root.
 
+Versions are per message and additive. Messages unchanged since 1.0.0 keep `contract_version: "1.0.0"`. 1.1.0 added `reviewResult` (the recorded independent review of a run). 1.2.0 added `runInputs` / `runInputsResponse` (what the run and its workers were given) and the optional `requirement_verbatim` flag on review findings. A consumer accepts exactly the version each message declares.
+
 ## Read-only API
 
 All IDs are opaque path segments and must be percent-encoded. The server validates the entire project/workflow/run tuple on every nested request.
@@ -27,6 +29,8 @@ All IDs are opaque path segments and must be percent-encoded. The server validat
 | `GET .../runs/{run_id}/events?after=0` | `{ events: WorkflowEvent[] }`, reusing workflow v1 events |
 | `GET .../runs/{run_id}/results/{node_id}/{attempt}` | Existing workflow-v1 `WorkerResult` |
 | `GET .../runs/{run_id}/artifacts/{artifact_id}` | Registered immutable artifact content only |
+| `GET .../runs/{run_id}/reviews/{attempt}` | `reviewResult.schema.json` (1.1.0): verdict, reviewer session, bundle hash, candidate commit, findings, reviewed time, diff artifact reference. One review per run: only attempt `1`; 404 when no review is recorded |
+| `GET .../runs/{run_id}/inputs` | `runInputsResponse`: `{ inputs: RunInputs \| null }` (1.2.0). Feature, branch, mode, automatic settings, setup commands, and per worker the task text, ownership, checks, launch receipt, completion signal, handoff and stop marker. `null` when the run's export has no inputs section |
 
 Workflow lists return current definitions. A run detail returns **that run's pinned definition**, even if the current workflow has changed. The definition revision is a backend-generated SHA-256 of canonical definition JSON excluding `definition_revision` (sorted object keys, compact separators, UTF-8 literal Unicode; retain array order). The server retains historical definitions rather than rendering old runs against the latest graph. Cross-field validators verify scope/revision equality, graph structure and snapshot correspondence; computing/retaining the revision remains a backend responsibility.
 
@@ -48,6 +52,8 @@ The backend adapter must project actual persisted pipeline/checkpoint/native-ses
 - Failed graph/check execution is `failed`; unresolved session reconciliation can be `paused`.
 - A run is `succeeded` only after confirmed integration with no remaining graph work.
 - Use persisted event/checkpoint timestamps for created/updated times, not the time the UI fetched the record.
+- The review node's `session_id` is the reviewer identity and its `result_uri` the reviews route once a review is recorded, for either verdict; both are null otherwise, with no error. Findings' `worker` and `requirement` are null when the review predates the reviewer link fields; `requirement_verbatim` is set only by an adapter that looked the quote up in the worker's task text, and is never a fuzzy guess.
+- Run inputs are pinned from the run's own files, never from the current feature directory. Task text is the assignment the worker received, including the appended policy JSON; absolute paths are redacted; oversized text is truncated with a marker.
 
 Every snapshot contains every node in the pinned definition, with matching kind/dependencies. Nodes not started have attempt 0, pending status and nullable session/result references. Result/artifact links use the scoped API paths. Distinguish graph-node attempts from native-worker attempts and display explicit reuse evidence rather than guessing from status.
 
