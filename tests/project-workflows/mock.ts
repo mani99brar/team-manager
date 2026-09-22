@@ -6,7 +6,7 @@
  * run has none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runList, workerResults, workflowLists, WORKFLOW_ID, EMPTY_WORKFLOW_ID } from './fixtures.ts'
+import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, workerResults, workflowLists } from './fixtures.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
 const notFound = (message: string, code = 'not_found') => json({ error: { code, message } }, 404)
@@ -27,11 +27,11 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (!workflows.workflows.some(workflow => workflow.workflow_id === workflowId)) return notFound(`Workflow "${workflowId}" does not belong to project "${projectId}".`)
   if (runsLiteral !== 'runs') return notFound('Unknown resource.')
   if (runId === undefined) {
-    if (projectId === PROJECT.project_id && workflowId === WORKFLOW_ID) return json(runList)
-    if (projectId === PROJECT.project_id && workflowId === EMPTY_WORKFLOW_ID) return json({ runs: [], next_cursor: null })
-    return json({ runs: [], next_cursor: null })
+    // Runs are listed per workflow (empty-flow and any other registered workflow without runs answer an empty page).
+    return json(projectId === PROJECT.project_id ? runLists[workflowId] ?? { runs: [], next_cursor: null } : { runs: [], next_cursor: null })
   }
-  const detail = projectId === PROJECT.project_id && workflowId === WORKFLOW_ID ? runDetails[runId] : undefined
+  const candidate = projectId === PROJECT.project_id ? runDetails[runId] : undefined
+  const detail = candidate && candidate.summary.workflow_id === workflowId ? candidate : undefined
   if (!detail) return notFound(`Run "${runId}" was not found in workflow "${workflowId}".`)
   if (rest.length === 0) return json(detail)
   const [kind, ...tail] = rest

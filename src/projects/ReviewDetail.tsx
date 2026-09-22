@@ -12,6 +12,7 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
+import { runLanes, workerGroupOf, workerGroups, workerWording } from './findings.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { runPathname } from './routes.ts'
 import { formatTime, reviewSummary, shortRevision } from './status.ts'
@@ -22,7 +23,6 @@ type DefinitionNode = RunDetail['definition']['nodes'][number]
 type Lane = ReviewFinding['requirement_found_in'][number]
 type Disposition = ReviewFinding['disposition']
 type GroupBy = 'disposition' | 'worker'
-type WorkerGroup = NonNullable<ReviewFinding['worker']> | 'unrecorded'
 
 type Props = {
   scope: RunScope
@@ -43,9 +43,6 @@ const TRANSPORT_WORDING: Record<ReviewResult['reviewer']['transport'], string> =
 }
 const DISPOSITIONS: readonly Disposition[] = ['open', 'resolved', 'accepted']
 const DISPOSITION_LABEL: Record<Disposition, string> = { open: 'Open', resolved: 'Resolved', accepted: 'Accepted' }
-const WORKER_GROUPS: readonly WorkerGroup[] = ['ui', 'adapter', 'both', 'none', 'unrecorded']
-const WORKER_LABEL: Record<WorkerGroup, string> = { ui: 'Worker ui', adapter: 'Worker adapter', both: 'Both workers', none: 'No worker (cross-cutting)', unrecorded: 'Worker not recorded' }
-
 /** The graph node that launched a lane: from the inputs when loaded, else `launch_<lane>` when the pinned graph has it, else the lane itself. */
 function launchNodeFor(lane: Lane, definitionNodes: DefinitionNode[], inputs: Resource<RunInputs | null>): string {
   if (inputs.status === 'ready' && inputs.data !== null) {
@@ -67,7 +64,7 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
     >
       <td><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
       <td>{finding.message}</td>
-      <td>{finding.worker ?? <span className="projects-muted">not recorded</span>}</td>
+      <td>{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
       <td>
         {finding.requirement === null ? '—' : (
           <>
@@ -105,9 +102,10 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
   const diffHref = review.diff === null ? null : paths.artifact(scope, review.diff.artifact_id)
   const diffScoped = review.diff !== null && review.diff.uri === diffHref
   const [groupBy, setGroupBy] = useState<GroupBy>('disposition')
+  const lanes = runLanes(definitionNodes, inputs)
   const groups = groupBy === 'disposition'
     ? DISPOSITIONS.map(disposition => ({ key: disposition, label: DISPOSITION_LABEL[disposition], attributes: { 'data-disposition': disposition }, findings: review.findings.filter(finding => finding.disposition === disposition) }))
-    : WORKER_GROUPS.map(worker => ({ key: worker, label: WORKER_LABEL[worker], attributes: { 'data-worker-group': worker }, findings: review.findings.filter(finding => (finding.worker ?? 'unrecorded') === worker) }))
+    : workerGroups(lanes, review.findings).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: review.findings.filter(finding => workerGroupOf(finding) === group.key) }))
   const populated = groups.filter(group => group.findings.length > 0)
   return (
     <div className="review-result" data-testid="review-result" data-verdict={review.verdict}>
@@ -121,7 +119,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
       <dl className="projects-facts">
         <div>
           <dt>Reviewer</dt>
-          <dd data-testid="review-reviewer"><code>{review.reviewer.session_id}</code> · {TRANSPORT_WORDING[review.reviewer.transport]}, independent of both workers</dd>
+          <dd data-testid="review-reviewer"><code>{review.reviewer.session_id}</code> · {TRANSPORT_WORDING[review.reviewer.transport]}, independent of every worker lane</dd>
         </div>
         <div><dt>Reviewed at</dt><dd>{formatTime(review.reviewed_at)}</dd></div>
         <div>
@@ -178,7 +176,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
             </div>
           </section>
         ))}
-        <p className="projects-muted">Blocking means an unresolved P0 or P1 finding; a quote links only where the task text contains it verbatim.</p>
+        <p className="projects-muted">Blocking means an unresolved P0 or P1 finding; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane.</p>
       </section>
     </div>
   )

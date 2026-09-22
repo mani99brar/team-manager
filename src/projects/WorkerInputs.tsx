@@ -83,6 +83,9 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied }: Tas
       )}
 
       <h5 id="task-checks-title">Required checks</h5>
+      <p className="projects-muted" data-testid="task-required-kinds">
+        Required check kinds for this lane: {worker.required_check_kinds.length === 0 ? 'none pinned' : worker.required_check_kinds.join(', ')}
+      </p>
       {worker.checks.length === 0 ? (
         <p className="projects-muted">No checks were required.</p>
       ) : (
