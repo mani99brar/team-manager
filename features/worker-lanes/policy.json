@@ -1,0 +1,37 @@
+{
+  "version": "1.1.0",
+  "feature": "Worker lanes from configuration (slice A)",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [{"argv": ["npm", "ci"], "timeout_seconds": 600}],
+  "workers": [
+    {
+      "node_id": "ui", "role": "frontend",
+      "owned_paths": ["src/projects", "tests/project-workflows"],
+      "checks": [
+        {"id": "frontend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []},
+        {"id": "frontend-unit-regression", "kind": "unit", "argv": ["npm", "run", "test:unit"], "timeout_seconds": 180, "scenarios": []},
+        {
+          "id": "project-workflows-browser", "kind": "browser",
+          "argv": ["npx", "--no-install", "playwright", "test", "--config=tests/project-workflows/playwright.config.ts"],
+          "timeout_seconds": 300,
+          "scenarios": [
+            {"id": "viewer-three-lanes", "description": "A seeded three-lane run shows three launch and verify nodes, three workers in the Assignment tab and findings grouped by lane, with a legacy both finding under multiple workers"},
+            {"id": "legacy-run", "description": "A stored 1.2.0 two-lane export renders identically to before without re-export"}
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "adapter", "role": "backend",
+      "owned_paths": ["workflow", "contracts", "server", "features/project-workflows"],
+      "checks": [
+        {"id": "workflow-unit", "kind": "unit", "argv": ["/home/agentops/dev/md-manager/.venv/bin/python", "-m", "unittest", "discover", "-s", "workflow", "-t", "."], "timeout_seconds": 1200, "scenarios": []},
+        {"id": "shared-contract", "kind": "contract", "argv": ["npm", "run", "test:contracts"], "timeout_seconds": 120, "scenarios": []},
+        {"id": "backend-regression", "kind": "unit", "argv": ["npm", "run", "test:unit"], "timeout_seconds": 180, "scenarios": []},
+        {"id": "backend-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 180, "scenarios": []}
+      ]
+    }
+  ]
+}
