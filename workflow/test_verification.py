@@ -127,6 +127,71 @@ class VerificationTests(unittest.TestCase):
             self.evidence["checks"][index].update(id=check["id"], scenarios=[], tests={"passed": 3, "failed": 0, "skipped": 0})
         self.assertEqual(self.evaluate()["status"], "passed")
 
+    def fail_build_and_browser(self):
+        """An isolated lane snapshot whose build fails and whose browser suite cannot load."""
+        checks = {check["id"]: check for check in self.policy["workers"][0]["checks"]}
+        build_index = self.evidence["checks"][[c["id"] for c in self.evidence["checks"]].index("frontend-build")]["worker_check_index"]
+        self.result["checks"][build_index]["exit_code"] = 2
+        browser = next(receipt for receipt in self.evidence["checks"] if receipt["id"] == "workflow-browser")
+        self.result["checks"][browser["worker_check_index"]]["exit_code"] = 1
+        browser.update(tests={"passed": 0, "failed": 0, "skipped": 0}, scenarios=[])
+        self.assertEqual({checks["frontend-build"]["kind"], checks["workflow-browser"]["kind"]}, {"build", "browser"})
+
+    def test_worker_phase_records_build_and_browser_without_gating(self):
+        self.fail_build_and_browser()
+        result = evaluate_worker(self.policy, self.result, self.evidence, expected=self.expected,
+                                 artifact_root=self.root, artifact_paths=self.paths, phase="worker")
+        self.assertEqual(result["status"], "passed", result)
+        self.assertEqual(result["deferred_checks"], ["frontend-build", "workflow-browser"])
+        self.assertFalse(result["integration_allowed"])
+
+    def test_candidate_phase_gates_on_build_and_browser(self):
+        self.fail_build_and_browser()
+        for phase in ("candidate", None):
+            result = evaluate_worker(self.policy, self.result, self.evidence, expected=self.expected,
+                                     artifact_root=self.root, artifact_paths=self.paths, **({"phase": phase} if phase else {}))
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["deferred_checks"], [])
+            self.assertTrue(any(reason.startswith("Executed check failed: ") for reason in result["reasons"]), result)
+            self.assertIn("workflow-browser: no passing test evidence or failed tests", result["reasons"])
+
+    def test_worker_phase_still_checks_deferred_command_integrity_and_lane_local_kinds(self):
+        self.fail_build_and_browser()
+        self.result["checks"][0]["command"] = "npm run build -- --unapproved"
+        result = evaluate_worker(self.policy, self.result, self.evidence, expected=self.expected,
+                                 artifact_root=self.root, artifact_paths=self.paths, phase="worker")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["reasons"], ["frontend-build: executed command differs from approved argv"])
+        # Lane-local kinds gate in the worker phase exactly as before.
+        worker = self.policy["workers"][1]
+        self.expected["node_id"] = self.result["node_id"] = self.evidence["node_id"] = "adapter"
+        self.result["changed_files"] = ["workflow/graph.py"]
+        for index, check in enumerate(worker["checks"]):
+            self.result["checks"][index].update(command=shlex.join(check["argv"]), exit_code=0)
+            self.evidence["checks"][index].update(id=check["id"], scenarios=[], tests={"passed": 3, "failed": 1, "skipped": 0})
+        result = evaluate_worker(self.policy, self.result, self.evidence, expected=self.expected,
+                                 artifact_root=self.root, artifact_paths=self.paths, phase="worker")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["deferred_checks"], [])
+        self.assertIn("backend-unit: no passing test evidence or failed tests", result["reasons"])
+
+    def test_recheck_packet_keeps_deferred_capture_errors_out_of_the_worker_gate(self):
+        from .checks import recheck_packet
+        self.fail_build_and_browser()
+        packet = {"phase": "worker", "expected": self.expected, "result": self.result, "evidence": self.evidence,
+                  "artifact_root": str(self.root), "artifact_paths": {key: str(path) for key, path in self.paths.items()},
+                  "capture_errors": ["frontend-build: exit 2", "workflow-browser: [Errno 2] No such file or directory: 'browser-report.json'",
+                                     "workflow-browser/viewer: screenshot missing"]}
+        gate = recheck_packet(copy.deepcopy(packet), self.policy, self.root)["gate"]
+        self.assertEqual((gate["status"], gate["reasons"]), ("passed", []))
+        packet["capture_errors"].append("Intentional lab drill: verification branch failure, not a worker or test failure")
+        gate = recheck_packet(copy.deepcopy(packet), self.policy, self.root)["gate"]
+        self.assertEqual((gate["status"], gate["reasons"]), ("blocked", ["Intentional lab drill: verification branch failure, not a worker or test failure"]))
+        packet["phase"] = "candidate"
+        gate = recheck_packet(copy.deepcopy(packet), self.policy, self.root)["gate"]
+        self.assertEqual(gate["status"], "blocked")
+        self.assertIn("frontend-build: exit 2", gate["reasons"])
+
     def test_malformed_payload_blocks(self):
         del self.result["open_assumptions"]
         self.assertEqual(self.evaluate()["status"], "blocked")
