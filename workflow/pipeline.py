@@ -533,6 +533,38 @@ def lanes_of(plan: dict, policy: dict | None) -> tuple[list[str], list[str]]:
     return workers, excluded
 
 
+def carry_legacy_lanes(runtime: ExportRuntime, state, saver: SqliteSaver | None = None):
+    """Carry a pre-lane checkpoint's per-lane evidence into the lane state shape.
+
+    A checkpoint written before configured lanes stored each lane under `<lane>` and
+    `<lane>_packet`; the graph no longer has those channels, so `get_state` drops them.
+    Read them from the raw checkpoint and carry them under `lanes`/`packets` so the launch
+    evidence survives every export, whether from `export` or from the report written at
+    each CLI boundary. Runs with configured lanes are returned unchanged.
+    """
+    from types import SimpleNamespace
+    database = runtime.directory / "pipeline.sqlite"
+    if "workers" in runtime.plan or not database.exists():
+        return state
+    config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
+
+    def carry(saver: SqliteSaver):
+        stored = saver.get_tuple(config)
+        raw = stored.checkpoint.get("channel_values", {}) if stored else {}
+        values = dict(state.values)
+        for node in runtime.workers:
+            if node in raw:
+                values.setdefault("lanes", {}).setdefault(node, raw[node])
+            if f"{node}_packet" in raw:
+                values.setdefault("packets", {}).setdefault(node, raw[f"{node}_packet"])
+        return SimpleNamespace(values=values, next=state.next, tasks=state.tasks)
+
+    if saver is not None:
+        return carry(saver)
+    with SqliteSaver.from_conn_string(str(database)) as own:
+        return carry(own)
+
+
 def export_run(runtime: ExportRuntime) -> dict:
     """Re-export from the persisted checkpoint. Reading state never invokes a node or a session."""
     from types import SimpleNamespace
@@ -540,20 +572,7 @@ def export_run(runtime: ExportRuntime) -> dict:
     if database.exists():
         config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
         with SqliteSaver.from_conn_string(str(database)) as saver:
-            state = build_pipeline(saver, runtime).get_state(config)
-            values = dict(state.values)
-            if "workers" not in runtime.plan:
-                # A checkpoint written before configured lanes stored each lane under `<lane>` and
-                # `<lane>_packet`; the graph no longer has those channels, so read them from the raw
-                # checkpoint and carry them under `lanes`/`packets` so the launch evidence survives.
-                stored = saver.get_tuple(config)
-                raw = stored.checkpoint.get("channel_values", {}) if stored else {}
-                for node in runtime.workers:
-                    if node in raw:
-                        values.setdefault("lanes", {}).setdefault(node, raw[node])
-                    if f"{node}_packet" in raw:
-                        values.setdefault("packets", {}).setdefault(node, raw[f"{node}_packet"])
-            state = SimpleNamespace(values=values, next=state.next, tasks=state.tasks)
+            state = carry_legacy_lanes(runtime, build_pipeline(saver, runtime).get_state(config), saver)
     else:
         state = SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in runtime.workers), tasks=[])  # Prepared, never started.
     return export_state(runtime, state)
@@ -626,6 +645,7 @@ def graph_config(runtime) -> dict:
 
 def report(runtime: Pipeline, state) -> Path:
     """Escaped local results viewer, generated on every CLI boundary; no server needed."""
+    state = carry_legacy_lanes(runtime, state)  # `status` on a legacy run must export the same evidence as `export`.
     export_state(runtime, state)
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []

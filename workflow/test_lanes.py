@@ -600,6 +600,35 @@ class LegacyFeatureAndRun(LaneRun):
         save_json(directory / "review.json", review)
         self.assertEqual(export_run(ExportRuntime(directory))["review"]["findings"][0]["worker"], "multiple")
 
+    def test_legacy_run_report_carries_lane_evidence_like_export(self):
+        """`status` (and every CLI boundary ending in report()) must not degrade a legacy run's export."""
+        directory = legacy_run(self.root)
+        config = {"configurable": {"thread_id": "legacy-001"}}
+        class OldState(TypedDict, total=False):
+            run_id: str
+            ui: dict
+            adapter: dict
+            ui_packet: str
+            adapter_packet: str
+            integrated_commit: str
+        with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
+            old = StateGraph(OldState)
+            old.add_node("integrate", lambda state: state)
+            old.add_edge(START, "integrate")
+            old.add_edge("integrate", END)
+            old.compile(checkpointer=saver).update_state(config, {"run_id": "legacy-001", "ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"},
+                                                                 "ui_packet": "/x", "adapter_packet": "/y", "integrated_commit": "d" * 40}, as_node="integrate")
+        runtime = ExportRuntime(directory)
+        exported = export_run(runtime)
+        self.assertEqual(exported["values"]["lanes"], {"ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"}})
+        written = (directory / "run-state.json").read_bytes()
+        with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
+            state = build_pipeline(saver, runtime).get_state(config)
+        self.assertEqual((state.values.get("lanes"), state.values.get("packets")), ({}, {}))  # No channel carries the two-lane keys.
+        report(runtime, state)
+        self.assertEqual(read_json(directory / "run-state.json"), exported)
+        self.assertEqual((directory / "run-state.json").read_bytes(), written)  # Same evidence, no rewrite.
+
 
 class Panes(unittest.TestCase):
     """Offline half of the panes scenario: one pane per selected lane in order, the reviewer right of the last."""
