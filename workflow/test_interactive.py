@@ -6,9 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-
-from .interactive import InteractiveSessions, attach_panels, build_interactive_graph, require_shell
+from .interactive import InteractiveSessions, attach_panels, require_shell
 from .sessions import read_json, save_json
 
 
@@ -154,17 +152,6 @@ class InteractiveTests(unittest.TestCase):
         with patch("workflow.interactive.herdr", return_value=info(shell_pid=None, foreground_processes=[])), patch("workflow.interactive.time.sleep"):
             with self.assertRaisesRegex(RuntimeError, "occupied"):
                 require_shell("w1:p1", settle_seconds=0)
-
-    def test_graph_launch_returns_human_handoff_not_verified_completion(self):
-        with SqliteSaver.from_conn_string(str(self.directory / "interactive.sqlite")) as saver:
-            with patch.object(self.sessions, "run", side_effect=lambda node: {"node": node, "status": "attached_session_available"}) as launch:
-                graph = build_interactive_graph(saver, self.sessions)
-                config = {"configurable": {"thread_id": "interactive"}, "max_concurrency": 2}
-                result = graph.invoke({"run_id": "interactive"}, config)
-                self.assertEqual(result["__interrupt__"][0].value["kind"], "interactive_workers_active")
-                self.assertEqual(launch.call_count, 2)
-                graph.invoke(None, config)
-                self.assertEqual(launch.call_count, 2)
 
     def fake_herdr(self, calls):
         splits = iter(["w1:p3", "w1:p4"])
@@ -454,8 +441,6 @@ class InteractiveTests(unittest.TestCase):
         self.assertIsNone(self.sessions.locate("review-general", [self.declared_row("coverage")]))
         with self.assertRaises(RuntimeError):
             self.sessions.locate("review-coverage", [self.declared_row("coverage", name=self.sessions.launch_name("review-general"))])
-        self.assertEqual(self.sessions.status()["review-coverage"]["receipt"]["node_id"], "review-coverage")
-        self.assertNotIn("review-general", self.sessions.status())
 
     def test_declared_reviewers_get_one_pane_each_in_declared_order_right_of_the_workers(self):
         from .sessions import plan_digest

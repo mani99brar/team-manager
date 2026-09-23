@@ -26,7 +26,7 @@ from langgraph.types import Command
 from .automatic import DEFAULTS, advance_failed_checks, automatic_settings, check_finding_lanes, drive, read_review_completion, review_prompt, review_schema
 from .export_state import graph_nodes
 from .interactive import InteractiveSessions, attach_panels
-from .launch import DEPRECATED_FEATURE_NOTE, launch_commands, main as launch_main
+from .launch import LEGACY_FEATURE_MESSAGE, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, check_review, digest_file, export_run, graph_config, lane_positions, parse_lane_selection, report, validate_pipeline_policy
 from .sessions import git, plan_digest, prepare, read_json, save_json, validate_node_id
 from .test_export import legacy_run
@@ -34,6 +34,8 @@ from .test_pipeline import FakeSessions, OfflinePipeline
 from .verification import CONTRACTS, policy_digest, required_kinds, validate_policy
 
 REPO = Path(__file__).resolve().parents[1]
+# Copies of the finished features' files; the feature directories themselves are gone.
+TESTDATA = Path(__file__).resolve().parent / "testdata"
 PY = sys.executable
 LANES = ["ui", "adapter", "docs"]
 
@@ -69,8 +71,7 @@ class LaneRun(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
-        (self.repo / "contracts/workflow").mkdir(parents=True)
-        shutil.copyfile(CONTRACTS / "workerResult.schema.json", self.repo / "contracts/workflow/workerResult.schema.json")
+        self.repo.mkdir(parents=True)  # No contracts/: the controller validates against the tool's bundled schemas.
         (self.repo / "ui.txt").write_text("before")
         (self.repo / "backend.py").write_text("VALUE = 1\n")
         (self.repo / ".gitignore").write_text("__pycache__/\n")
@@ -286,7 +287,7 @@ class SubsetSelection(LaneRun):
         for bad in ("ui,nope", "ui,ui"):
             with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit):
-                    launch_main(["project-workflows", "--live", "--workers", bad, "--run-root", str(self.run_root)])
+                    launch_main(["lanes", "--repo", str(self.repo), "--live", "--workers", bad, "--run-root", str(self.run_root)])
             command.assert_not_called()
             self.assertIn("Launch blocked", errors.getvalue())
         # The step-by-step path refuses the same selections before allocating anything.
@@ -358,7 +359,7 @@ class DeclaredReviewers(LaneRun):
             _, commands, _ = launch_commands(self.repo, "lanes", "lanes-003", self.run_root, herdr=False)
             self.assertNotIn("--reviewer", commands[2])
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
-            launch_main(["project-workflows", "--dry-run"])
+            launch_main(["lanes", "--repo", str(self.repo), "--dry-run"])  # The feature file now declares no reviewers.
         command.assert_not_called()
         self.assertEqual(json.loads(output.getvalue())["reviewers"], ["review"])
         # Refused before any Git action: a reviewer named after a lane, a reserved id, a duplicate, a missing or empty brief, or reviewers on 2.0.0.
@@ -543,7 +544,7 @@ class PolicyRules(unittest.TestCase):
         policy["workers"][0]["role"] = "r" * 41
         with self.assertRaises(ValidationError):
             validate_policy(policy)
-        legacy = read_json(REPO / "features/worker-lanes/policy.json")
+        legacy = read_json(TESTDATA / "worker-lanes/policy.json")
         self.assertEqual(legacy["version"], "1.1.0")
         validate_pipeline_policy(legacy)
         self.assertEqual([required_kinds(legacy, worker) for worker in legacy["workers"]], [["build", "browser"], ["unit"]])
@@ -557,7 +558,7 @@ class PolicyRules(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 validate_policy(relabelled)
         # The committed 1.2.0 policy declares its kinds explicitly and still validates.
-        committed = read_json(REPO / "features/project-workflows/policy.json")
+        committed = read_json(TESTDATA / "project-workflows/policy.json")
         self.assertEqual(committed["version"], "1.2.0")
         validate_pipeline_policy(committed)
         self.assertEqual([required_kinds(committed, worker) for worker in committed["workers"]], [["build", "browser"], ["unit"]])
@@ -671,7 +672,7 @@ class FindingLanesForADeclaredReviewer(FindingLanes):
 class LegacyFeatureAndRun(LaneRun):
     def two_lane_features(self):
         """The same two-lane assignment committed twice: as a 2.0.0 file and as its 1.0.0 predecessor."""
-        policy = read_json(REPO / "features/worker-lanes/policy.json")  # 1.1.0: ui/frontend and adapter/backend.
+        policy = read_json(TESTDATA / "worker-lanes/policy.json")  # 1.1.0: ui/frontend and adapter/backend.
         for name, manifest in (("new", {"version": "2.0.0", "workers": [{"node_id": "ui", "task": "ui-task.md"}, {"node_id": "adapter", "task": "adapter-task.md"}]}),
                                ("old", {"version": "1.0.0", "ui_task": "ui-task.md", "adapter_task": "adapter-task.md"})):
             folder = self.repo / "features" / name
@@ -683,18 +684,19 @@ class LegacyFeatureAndRun(LaneRun):
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Features"], check=True)
 
-    def test_legacy_feature_file_dry_runs_with_the_same_commands_plus_a_deprecation_line(self):
+    def test_legacy_feature_refused_1_0_0_file_is_refused_and_2_0_0_still_launches(self):
+        """Scenario legacy-feature-refused: a 1.0.0 feature.json is refused with a message to use 2.x; nothing runs."""
         self.two_lane_features()
-        run_new, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
-        run_old, commands_old, notes_old = launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
-        self.assertEqual(run_new, run_old)
-        normalised = [[item.replace("/features/old/", "/features/new/") for item in command] for command in commands_old]
-        self.assertEqual(normalised, commands_new)
-        self.assertEqual((notes_new, notes_old), ([], [DEPRECATED_FEATURE_NOTE]))
-        _, commands_old, _ = launch_commands(self.repo, "old", "r2", self.run_root, herdr=False, workers="adapter")
-        self.assertEqual(commands_old[2][commands_old[2].index("--workers") + 1], "adapter")
-        with self.assertRaisesRegex(ValueError, "not declare"):
-            launch_commands(self.repo, "old", "r3", self.run_root, herdr=False, workers="docs")
+        _, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
+        self.assertEqual((commands_new[1], notes_new), (["git", "switch", "-c", "feature/two/r1"], []))
+        with self.assertRaisesRegex(ValueError, r"version 1\.0\.0 .*no longer supported: rewrite it as version 2\.x"):
+            launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit):
+                launch_main(["old", "--repo", str(self.repo), "--dry-run", "--automatic"])
+        command.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(f"Launch blocked: {LEGACY_FEATURE_MESSAGE}", errors.getvalue())
         # A 2.0.0 file whose lanes differ from the policy's, or with a broken task file, is refused.
         manifest = read_json(self.repo / "features/new/feature.json")
         manifest["workers"].append({"node_id": "docs", "task": "ui-task.md"})
@@ -709,16 +711,10 @@ class LegacyFeatureAndRun(LaneRun):
         save_json(self.repo / "features/new/feature.json", manifest)
         with self.assertRaises((ValueError, ValidationError)):
             launch_commands(self.repo, "new", "r4", self.run_root, herdr=False)
-        # The committed worker-lanes feature is still 1.0.0: its dry run prints the deprecation line and executes nothing.
+        # The finished project-workflows feature (a fixture copy) launches without a note; --workers narrows it.
+        shutil.copytree(TESTDATA / "project-workflows", self.repo / "features/project-workflows")
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
-            launch_main(["worker-lanes", "--dry-run", "--automatic"])
-        command.assert_not_called()
-        printed = json.loads(output.getvalue())
-        self.assertEqual((printed["workers"], printed["notes"], printed["executes"]), (["ui", "adapter"], [DEPRECATED_FEATURE_NOTE], False))
-        self.assertIn("Deprecation: feature.json version 1.0.0", errors.getvalue())
-        # The migrated project-workflows feature launches unchanged, without a note; --workers narrows it.
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
-            launch_main(["project-workflows", "--dry-run", "--workers", "adapter"])
+            launch_main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--workers", "adapter", "--run-root", str(self.run_root)])
         command.assert_not_called()
         printed = json.loads(output.getvalue())
         self.assertEqual((printed["workers"], printed["notes"]), (["adapter"], []))  # The drill names adapter, which is selected.

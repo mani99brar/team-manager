@@ -1,4 +1,3 @@
-import json
 import os
 import subprocess
 import tempfile
@@ -6,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from .observer import herdr, open_panels, render, safe_text
+from .herdr import herdr
 from .sessions import ClaudeSessions, prepare, read_json, run_lock, save_json
 
 
@@ -20,11 +19,9 @@ class SessionTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "test@example.invalid"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Test"], check=True)
-        contract = self.repo / "contracts/workflow/workerResult.schema.json"
-        contract.parent.mkdir(parents=True)
-        contract.write_text("{}")
+        (self.repo / "README.md").write_text("A target without contracts/\n")  # The tool bundles the schemas.
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Contract"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Base"], check=True)
         self.directory = self.root / "run"
         self.plan = prepare(self.directory, self.repo, "HEAD", {"ui": "Read UI", "adapter": "Read adapter"}, False)
         self.executable = self.root / "fake-claude"
@@ -104,33 +101,8 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
             ClaudeSessions(self.directory, str(self.executable), timeout=0.05).run("ui")
         self.assertEqual(read_json(self.directory / "ui.json")["status"], "blocked")
 
-    def test_panels_only_launch_observers_and_preserve_focus(self):
-        calls = []
-        def fake_herdr(*args):
-            calls.append(args)
-            if args[:2] == ("tab", "create"):
-                return {"result": {"tab": {"tab_id": "w1:t2"}, "root_pane": {"pane_id": "w1:p2"}}}
-            return {"result": {"pane": {"pane_id": f"w1:p{len(calls)}", "workspace_id": "w1"}}}
-        with patch("workflow.observer.herdr", side_effect=fake_herdr):
-            mapping = open_panels(self.directory)
-        self.assertEqual(set(mapping), {"ui", "adapter"})
-        self.assertEqual({entry["tab_id"] for entry in mapping.values()}, {"w1:t2"})
-        self.assertEqual(mapping["ui"]["pane_id"], "w1:p2")
-        self.assertEqual(sum(call[:2] == ("tab", "create") for call in calls), 1)
-        self.assertEqual(sum(call[:2] == ("pane", "split") for call in calls), 1)
-        for call in calls:
-            if call[:2] == ("pane", "run"):
-                self.assertIn("workflow.observer", call[3])
-                self.assertNotIn("workflow.live", call[3])
-            if call[:2] in (("pane", "split"), ("tab", "create")):
-                self.assertIn("--no-focus", call)
-            if call[:2] == ("pane", "split"):
-                self.assertEqual(call[call.index("--pane") + 1], "w1:p2")
-        with self.assertRaisesRegex(RuntimeError, "mapping already exists"):
-            open_panels(self.directory)
-
     def test_herdr_silent_success_and_environment_guard(self):
-        with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.observer.subprocess.run") as run:
+        with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.herdr.subprocess.run") as run:
             run.return_value.stdout = ""
             self.assertEqual(herdr("pane", "rename", "w1:p1", "label"), {})
         with patch.dict(os.environ, {"HERDR_ENV": "0"}):
@@ -149,10 +121,6 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
         with self.assertRaisesRegex(RuntimeError, "cancelled before launch"):
             sessions.run("ui")
         self.assertFalse((self.directory / "starts.log").exists())
-
-    def test_terminal_control_sequences_are_removed(self):
-        self.assertEqual(safe_text("hello\x1b[2Jworld\x1b]0;evil\x07"), "helloworld")
-        self.assertEqual(render(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}})), "hi")
 
 
 if __name__ == "__main__":

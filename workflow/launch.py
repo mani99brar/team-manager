@@ -1,4 +1,9 @@
-"""One-command preparation/start of a committed feature; never skips human gates."""
+"""One-command preparation/start of a committed feature in any Git repository; never skips human gates.
+
+The target repository is `--repo`, else the current directory when it is a Git repository with a
+`features/` directory, else the repository this tool lives in (md-manager). The feature is any
+directory under `<target>/features/` that holds a `feature.json`.
+"""
 from __future__ import annotations
 
 import argparse
@@ -9,30 +14,91 @@ import sys
 from pathlib import Path
 
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
+from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
 from .verification import validate_schema
 
+# The repository this tool lives in: the fallback target, and the working directory of every
+# `python -m workflow` command a launch runs (it locates the tool, not the target).
+TOOL = Path(__file__).resolve().parents[1]
+BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
+BUILTIN_PREFIX = "builtin:"
+PLACEHOLDER = "TODO:"
+FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
+                          "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
-FEATURES = ("project-workflows", "worker-lanes", "parallel-reviewers", "parallel-reviewers-align", "workflow-audit", "viewer-clarity", "portable-workflow")
-FEATURE_VERSION = "2.0.0"
-DEPRECATED_FEATURE_NOTE = ("feature.json version 1.0.0 (ui_task/adapter_task) is deprecated: it is translated to 2.0.0 "
-                           "(workers: [{node_id, task}]); migrate the file. See contracts/workflow/feature.schema.json.")
+
+def git_root(path: Path) -> Path | None:
+    """The working tree containing `path` (a `.git` directory, or the `.git` file of a linked worktree), or None."""
+    path = path.resolve()
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
 
 
-def load_feature(folder: Path) -> tuple[dict, list[str]]:
-    """The feature file as 2.0.0 or 2.1.0 plus any deprecation notes; 1.0.0 files are translated in memory.
+def resolve_target(repo: Path | None, cwd: Path, tool: Path = TOOL) -> Path:
+    """`--repo` wins; then a cwd inside a Git repository with `features/`; otherwise the tool's own repository."""
+    if repo is not None:
+        root = git_root(repo)
+        if root is None:
+            raise ValueError(f"--repo is not inside a Git repository: {repo}")
+        if not (root / "features").is_dir():
+            raise ValueError(f"--repo has no features/ directory: {root}")
+        return root
+    root = git_root(cwd)
+    if root is not None and (root / "features").is_dir():
+        return root
+    return tool.resolve()
 
-    2.1.0 adds `reviewers`: one entry per reviewer with its brief file. A file without `reviewers` (2.0.0 or
-    2.1.0) runs the single built-in reviewer, so `features/project-workflows` needs no change.
+
+def feature_names(target: Path) -> list[str]:
+    """Every directory under `<target>/features/` that holds a `feature.json`, sorted."""
+    features = target / "features"
+    if not features.is_dir():
+        return []
+    return sorted(item.name for item in features.iterdir() if item.is_dir() and (item / "feature.json").is_file())
+
+
+def feature_folder(target: Path, feature: str) -> Path:
+    names = feature_names(target)
+    if feature not in names or not FEATURE_NAME.fullmatch(feature):
+        raise ValueError(f"Unknown feature {feature!r} in {target / 'features'}; found: {', '.join(names) or 'none'}")
+    return target / "features" / feature
+
+
+def default_run_root(target: Path, feature: str, tool: Path = TOOL, home: Path | None = None) -> Path:
+    """md-manager keeps `~/.local/state/md-manager-workflows/<feature>`; other targets `~/.local/state/agent-workflows/<repo>/<feature>`."""
+    home = home or Path.home()
+    if target.resolve() == tool.resolve():
+        return home / ".local/state/md-manager-workflows" / feature
+    return home / ".local/state/agent-workflows" / repo_name(target) / feature
+
+
+def placeholders(folder: Path) -> list[str]:
+    """Every `TODO:` line left in the feature directory, as `<file>:<line>: <text>`."""
+    found = []
+    for path in sorted(folder.rglob("*")):
+        if not path.is_file() or any(part.startswith(".") for part in path.relative_to(folder).parts):
+            continue
+        try:
+            lines = path.read_text().splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        found.extend(f"{path.relative_to(folder)}:{number}: {line.strip()}" for number, line in enumerate(lines, 1) if PLACEHOLDER in line)
+    return found
+
+
+def load_feature(folder: Path) -> dict:
+    """The feature file as 2.0.0 or 2.1.0; 1.0.0 files are refused.
+
+    2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
+    A file without `reviewers` (2.0.0 or 2.1.0) runs the single built-in reviewer.
     """
     manifest = read_json(folder / "feature.json")
-    notes = []
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
-        translated = {key: manifest[key] for key in ("name", "branch_prefix", "policy") if key in manifest}
-        translated["version"] = FEATURE_VERSION
-        translated["workers"] = [{"node_id": "ui", "task": manifest.get("ui_task")}, {"node_id": "adapter", "task": manifest.get("adapter_task")}]
-        manifest = translated
-        notes.append(DEPRECATED_FEATURE_NOTE)
+        raise ValueError(LEGACY_FEATURE_MESSAGE)
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -48,7 +114,7 @@ def load_feature(folder: Path) -> tuple[dict, list[str]]:
             validate_reviewer_id(reviewer_id, ids)
         if len(set(reviewer_ids)) != len(reviewer_ids):
             raise ValueError("feature.json declares a reviewer twice")
-    return manifest, notes
+    return manifest
 
 
 def feature_file(folder: Path, name: str) -> Path:
@@ -58,14 +124,33 @@ def feature_file(folder: Path, name: str) -> Path:
     return path
 
 
+def builtin_briefs() -> list[str]:
+    return sorted(path.stem for path in BUILTIN_BRIEFS.glob("*.md"))
+
+
+def reviewer_brief(folder: Path, prompt: str) -> Path:
+    """A reviewer's brief: `builtin:<id>` names a brief bundled in workflow/prompts/reviewers/, anything else a feature file."""
+    if prompt.startswith(BUILTIN_PREFIX):
+        name = prompt[len(BUILTIN_PREFIX):]
+        if name not in builtin_briefs():
+            raise ValueError(f"Unknown bundled reviewer brief {prompt!r}; bundled: {', '.join(BUILTIN_PREFIX + item for item in builtin_briefs())}")
+        return BUILTIN_BRIEFS / f"{name}.md"
+    return feature_file(folder, prompt)
+
+
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
-    """The exact commands a launch runs, the run directory and any deprecation notes; nothing is executed here."""
+    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
-    folder = repo / "features" / feature
-    manifest, notes = load_feature(folder)
+    repo = repo.resolve()
+    folder = feature_folder(repo, feature)
+    left = placeholders(folder)
+    if left:
+        raise ValueError(f"features/{feature} still has {len(left)} placeholder(s) to fill in:\n  " + "\n  ".join(left))
+    manifest = load_feature(folder)
+    notes: list[str] = []
     policy_path = feature_file(folder, manifest["policy"])
     policy = validate_pipeline_policy(read_json(policy_path))
     declared = policy_workers(policy)
@@ -79,7 +164,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         tasks[worker["node_id"]] = path
     reviewers = {}
     for reviewer in manifest.get("reviewers") or []:
-        path = feature_file(folder, reviewer["prompt"])
+        path = reviewer_brief(folder, reviewer["prompt"])
         if not path.is_file() or not path.read_text().strip():
             raise ValueError(f"Brief for reviewer {reviewer['reviewer_id']} is missing or empty: {reviewer['prompt']}")
         reviewers[reviewer["reviewer_id"]] = path
@@ -120,11 +205,19 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     return run, commands, notes
 
 
+def command_cwd(command: list[str], target: Path, tool: Path = TOOL) -> Path:
+    """`git switch` runs in the target; the `python -m workflow` commands run from the tool's directory."""
+    return target if command[0] == "git" else tool
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("feature", choices=FEATURES)
+    parser.add_argument("feature", help="A directory under <target>/features/ that holds a feature.json")
+    parser.add_argument("--repo", type=Path, help="Target Git repository (default: the current directory when it is a Git repository "
+                                                  "with features/, otherwise this tool's own repository)")
     parser.add_argument("--run-id", help="Opaque run identifier (default: <feature>-001)")
-    parser.add_argument("--run-root", type=Path, help="Run storage outside the repository (default: ~/.local/state/md-manager-workflows/<feature>)")
+    parser.add_argument("--run-root", type=Path, help="Run storage outside the target (default: ~/.local/state/md-manager-workflows/<feature> "
+                                                      "for md-manager, ~/.local/state/agent-workflows/<repo>/<feature> otherwise)")
     parser.add_argument("--workers", help="Comma-separated subset of the feature's declared lanes to launch (default: every declared lane)")
     parser.add_argument("--live", action="store_true", help="Authorize Claude usage")
     parser.add_argument("--automatic", action="store_true", help="Bypass worker permission prompts; run through independent review to a verified feature branch")
@@ -132,31 +225,43 @@ def main(argv=None):
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m, max 24h)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
-    parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands only")
+    parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     args = parser.parse_args(argv)
-    repo = Path(__file__).resolve().parents[1]
     run_id = args.run_id or f"{args.feature}-001"
-    run_root = args.run_root or Path.home() / ".local/state/md-manager-workflows" / args.feature
     try:
+        repo = resolve_target(args.repo, Path.cwd())
+        feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
+        run_root = args.run_root or default_run_root(repo, args.feature)
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
+        registry = registry_path()
+        entry = registry_entry(repo, args.feature, run_root.resolve(), selected)
         if args.dry_run:
-            print(json.dumps({"run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands, "executes": False, "notes": notes}, indent=2))
+            print(json.dumps({"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
+                              "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry}}, indent=2))
             for note in notes:
-                print(f"Deprecation: {note}" if note is DEPRECATED_FEATURE_NOTE else f"Note: {note}", file=sys.stderr)
+                print(f"Note: {note}", file=sys.stderr)
             return
         if not args.live:
             parser.error("Use --live to authorize worker usage, or --dry-run to inspect without running anything")
         if run.exists():
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
+        # A malformed registry blocks the launch here, before any Git action; it is never rewritten.
+        merge_registry(read_registry(registry), entry)
         for note in notes:
-            print(f"Deprecation: {note}" if note is DEPRECATED_FEATURE_NOTE else f"Note: {note}", file=sys.stderr)
+            print(f"Note: {note}", file=sys.stderr)
         try:
-            for command in commands:
-                subprocess.run(command, cwd=repo, check=True)
+            for index, command in enumerate(commands):
+                subprocess.run(command, cwd=command_cwd(command, repo), check=True)
+                if index == 2:
+                    # The run directory exists now: make the run visible in the Projects viewer.
+                    try:
+                        print(f"Projects registry {registry}: {register(registry, entry)}", flush=True)
+                    except (ValueError, OSError) as error:
+                        print(f"Projects registry {registry} not updated: {error}", file=sys.stderr, flush=True)
         except KeyboardInterrupt:
             parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
                              f"inspect with: {sys.executable} -m workflow status {run}\n"
@@ -170,8 +275,8 @@ def main(argv=None):
         if drill_note:
             print(drill_note)
         else:
-            policy = read_json(feature_file(repo / "features" / args.feature, load_feature(repo / "features" / args.feature)[0]["policy"]))
-            drill = policy.get("failure_drill")
+            folder = feature_folder(repo, args.feature)
+            drill = read_json(feature_file(folder, load_feature(folder)["policy"])).get("failure_drill")
             if drill:
                 print(f"The intentional {drill['node_id']} verification drill will block its first attempt; retry that check explicitly after restarting the controller.")
         print(f"Status: {sys.executable} -m workflow status {run}")

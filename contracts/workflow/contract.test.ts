@@ -4,6 +4,7 @@ import test from 'node:test'
 import { z } from 'zod'
 import { schemas, validateRunSpec, validateWorkerResult } from './v1.js'
 import * as examples from './examples.js'
+import { validateProjectsConfig } from '../../server/projectsConfig.ts'
 
 /** The hand-written schemas (not generated from v1.ts) that the Python controller validates with jsonschema. */
 function handWritten(name: string) {
@@ -121,14 +122,14 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   assert.equal(example.version, '1.2.0')
   assert.ok(example.workers.length >= 3)
   for (const item of example.workers) assert.ok(item.required_check_kinds.every((kind: string) => item.checks.some((check: { kind: string }) => check.kind === kind)), item.node_id)
-  const committed = readJson('../../features/project-workflows/policy.json')
+  const committed = readJson('../../workflow/testdata/project-workflows/policy.json')
   assert.equal(committed.version, '1.2.0')
   assert.deepEqual(committed.workers.map((item: { node_id: string; required_check_kinds: string[] }) => [item.node_id, item.required_check_kinds]), [['ui', ['build', 'browser']], ['adapter', ['unit']]])
 })
 
 test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the reviewers and their briefs', () => {
   const feature = handWritten('feature')
-  const committed = readJson('../../features/project-workflows/feature.json')
+  const committed = readJson('../../workflow/testdata/project-workflows/feature.json')
   feature.parse(committed)
   const reject = (label: string, mutate: (value: typeof committed) => void) => {
     const value = structuredClone(committed)
@@ -144,6 +145,8 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   const reviewed = { ...structuredClone(committed), version: '2.1.0', reviewers: [{ reviewer_id: 'general', prompt: 'reviewers/general.md' }, { reviewer_id: 'coverage', prompt: 'reviewers/coverage.md' }] }
   feature.parse(reviewed)
   feature.parse({ ...structuredClone(committed), version: '2.1.0' })
+  // A reviewer brief may name a bundled brief instead of a feature file.
+  feature.parse({ ...structuredClone(reviewed), reviewers: [{ reviewer_id: 'general', prompt: 'builtin:general' }] })
   const rejectReviewed = (label: string, mutate: (value: typeof reviewed) => void) => {
     const value = structuredClone(reviewed)
     mutate(value)
@@ -175,4 +178,17 @@ test('review completion 1.2.0 binds a file to one reviewer node and attributes f
   for (const node_id of ['review', 'review-general', 'review-coverage', 'review-a', `review-${'a'.repeat(32)}`]) completion.parse({ ...base, node_id })
   for (const node_id of ['reviewer', 'review-', 'review-General', `review-${'a'.repeat(33)}`, 'ui', 'candidate', '']) assert.equal(completion.safeParse({ ...base, node_id }).success, false, node_id)
   assert.equal(readJson('./reviewCompletion.schema.json').properties.node_id.pattern, '^review(-[a-z0-9-]{1,32})?$')
+})
+
+test('registry-entry: the golden entry a live launch writes parses with the server registry schema', () => {
+  const entry = readJson('./examples/registry-entry.json')
+  const config = validateProjectsConfig({ version: 1, projects: [entry] })
+  assert.equal(config.projects.length, 1)
+  const [project] = config.projects
+  assert.deepEqual([project.project_id, project.name, project.repository], [entry.project_id, entry.name, entry.repository])
+  assert.deepEqual(project.workflows.map(workflow => [workflow.workflow_id, workflow.runs_root]), [['skeleton', entry.workflows[0].runs_root]])
+  assert.deepEqual(project.workflows[0].definition.nodes.map(node => node.node_id), entry.workflows[0].definition.nodes.map((node: { node_id: string }) => node.node_id))
+  // The server schema is strict: the golden shape is exact, not merely tolerated.
+  assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, extra: true }] }))
+  assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, repository: 'relative/path' }] }))
 })

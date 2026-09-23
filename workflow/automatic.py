@@ -19,6 +19,7 @@ from langgraph.types import Command
 
 from .checks import now
 from .sessions import DEFAULT_REVIEWER, git, plan_reviewers, plan_workers, read_json, review_node, reviewer_ids, run_lock, save_json, terminate
+from .verification import CONTRACTS
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
             "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native"}
@@ -185,6 +186,8 @@ REVIEW_COMPLETION_LIMIT = 262144
 REVIEW_RESUME_NOTE = ("Controller interrupted while waiting for the reviewers. The native reviewer sessions were NOT stopped "
                       "and keep running; resume with: python -m workflow automatic {directory} --live")
 BUILTIN_REVIEW_BRIEF = Path(__file__).resolve().parent / "prompts" / "review.md"
+# The tool's own copy: the target repository needs no contracts/ directory.
+REVIEW_COMPLETION_SCHEMA = CONTRACTS / "reviewCompletion.schema.json"
 
 
 def reviewers(runtime) -> list[dict]:
@@ -203,7 +206,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
     return (review_brief(reviewer) + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
             f"Requirements: each worker's task text pinned in {runtime.directory / 'plan.json'} under nodes.<worker>.task, "
-            "and the feature/contract READMEs those tasks cite (for this repository, features/<feature>/README.md and contracts/projects/README.md). "
+            "and the documents those tasks cite, read in the candidate checkout. "
             f"This run's worker lanes are: {', '.join(lanes(runtime))}. "
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
@@ -223,7 +226,7 @@ def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidat
                     "in their own sessions. Do not read their completion files or wait for them; every reviewer must approve." if others else "")
     return ("\n\nREVIEW COMPLETION PROTOCOL: you run as a native session. A human may type in this terminal; the transcript "
             f"is the record, but your verdict is only the file {completion}. Write exactly this JSON shape there "
-            "(schema: contracts/workflow/reviewCompletion.schema.json in this checkout when present):\n" + json.dumps(example) + "\n"
+            f"(schema: {REVIEW_COMPLETION_SCHEMA}):\n" + json.dumps(example) + "\n"
             "Keep version, run_id, node_id, launch_token, bundle_sha256 and candidate_commit exactly as shown; the controller "
             "rejects any other binding without launching another reviewer. verdict is approved or blocked. Each finding "
             "has severity P0, P1 or P2 (P2 is the lowest; there is no P3, use P2 for minor items), disposition open, "

@@ -1,0 +1,86 @@
+{
+  "project_id": "project-b",
+  "name": "project-B",
+  "repository": "/home/operator/dev/project-B",
+  "workflows": [
+    {
+      "workflow_id": "skeleton",
+      "runs_root": "/home/operator/.local/state/agent-workflows/project-B/skeleton",
+      "definition": {
+        "name": "Feature implementation",
+        "nodes": [
+          {
+            "node_id": "launch_app",
+            "label": "Launch app worker",
+            "kind": "worker",
+            "depends_on": []
+          },
+          {
+            "node_id": "launch_api",
+            "label": "Launch api worker",
+            "kind": "worker",
+            "depends_on": []
+          },
+          {
+            "node_id": "handoff",
+            "label": "Freeze worker handoffs",
+            "kind": "prepare",
+            "depends_on": [
+              "launch_app",
+              "launch_api"
+            ]
+          },
+          {
+            "node_id": "verify_app",
+            "label": "Verify app",
+            "kind": "verification",
+            "depends_on": [
+              "handoff"
+            ]
+          },
+          {
+            "node_id": "verify_api",
+            "label": "Verify api",
+            "kind": "verification",
+            "depends_on": [
+              "handoff"
+            ]
+          },
+          {
+            "node_id": "candidate",
+            "label": "Verify combined candidate",
+            "kind": "verification",
+            "depends_on": [
+              "verify_app",
+              "verify_api"
+            ]
+          },
+          {
+            "node_id": "review",
+            "label": "Independent review",
+            "kind": "review",
+            "depends_on": [
+              "candidate"
+            ]
+          },
+          {
+            "node_id": "approval",
+            "label": "Integration approval",
+            "kind": "integration",
+            "depends_on": [
+              "review"
+            ]
+          },
+          {
+            "node_id": "integrate",
+            "label": "Integrate candidate",
+            "kind": "integration",
+            "depends_on": [
+              "approval"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

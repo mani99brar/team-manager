@@ -1,4 +1,8 @@
-"""LangGraph launches persistent Claude terminals; Herdr attaches with input enabled."""
+"""LangGraph launches persistent Claude terminals; Herdr attaches with input enabled.
+
+The pipeline (`python -m workflow`) is the only entry point that launches sessions. This module's own
+CLI keeps one action: `attach-one`, which the Herdr panes run to reconnect one session in a terminal.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,14 +15,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, TypedDict
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
-
-from .observer import herdr
-from .sessions import ClaudeSessions, SessionState, git, plan_digest, prepare, read_json, review_node, review_nodes, reviewer_of_node, run_lock, save_json
+from .herdr import herdr
+from .sessions import ClaudeSessions, git, plan_digest, read_json, review_node, review_nodes, save_json
 
 REVIEW = "review"
 
@@ -245,51 +244,10 @@ class InteractiveSessions(ClaudeSessions):
                    "--add-dir", str(self.directory), "--permission-mode", "dontAsk", prompt]
         return self.launch(node, path, receipt, command, cwd)
 
-    def status(self) -> dict:
-        rows = self.inventory()
-        result = {}
-        nodes = [*self.workers] + [node for node in review_nodes(self.plan) if (self.directory / f"{node}.interactive.json").exists()]
-        for node in nodes:
-            path = self.directory / f"{node}.interactive.json"
-            row = self.locate(node, rows)
-            result[node] = {"receipt": read_json(path) if path.exists() else None,
-                            "current_session": row, "verified": False}
-        return result
-
 
 def write_private(path: Path, text: str) -> None:
     path.write_text(text)
     os.chmod(path, 0o600)
-
-
-def merge_lanes(left: dict | None, right: dict | None) -> dict:
-    return {**(left or {}), **(right or {})}
-
-
-def build_interactive_graph(checkpointer, sessions: InteractiveSessions):
-    """Launch-only graph: one `launch_<lane>` node per lane of the plan, then a human handoff interrupt."""
-    def launcher(node):
-        return lambda _state: {"lanes": {node: sessions.run(node)}}
-
-    def handoff(state: SessionState):
-        interrupt({"kind": "interactive_workers_active", "run_id": state["run_id"],
-                   "message": "Type directly in the Claude panels. Idle is not completion. Explicit evidence/review handoff is still required."})
-        raise RuntimeError("Verification/integration handoff is not implemented yet")
-
-    class LaunchState(TypedDict, total=False):
-        run_id: str
-        lanes: Annotated[dict, merge_lanes]
-
-    graph = StateGraph(LaunchState)
-    launches = [f"launch_{node}" for node in sessions.workers]
-    for node, name in zip(sessions.workers, launches):
-        graph.add_node(name, launcher(node))
-    graph.add_node("human_handoff", handoff)
-    for name in launches:
-        graph.add_edge(START, name)
-    graph.add_edge(launches, "human_handoff")
-    graph.add_edge("human_handoff", END)
-    return graph.compile(checkpointer=checkpointer)
 
 
 def require_shell(pane_id: str, settle_seconds: float = 10.0) -> None:
@@ -311,7 +269,7 @@ def require_shell(pane_id: str, settle_seconds: float = 10.0) -> None:
         time.sleep(0.5)
 
 
-def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = None) -> dict:
+def attach_panels(sessions: InteractiveSessions) -> dict:
     directory = sessions.directory
     mapping_path = directory / "terminals.json"
     workers = list(sessions.workers)
@@ -329,38 +287,16 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
             raise RuntimeError("Cannot attach an unverified/missing session")
     caller = herdr("pane", "current", "--current")["result"]["pane"]
     source = Path(__file__).resolve().parents[1]
-    if reuse_observers:
-        mapping = read_json(reuse_observers)
-        if set(mapping) != set(workers) or any(value.get("mode") != "read-only-observer" for value in mapping.values()):
-            raise RuntimeError("Can only replace explicitly identified read-only observer panels")
-        if len({value["pane_id"] for value in mapping.values()}) != len(workers):
-            raise RuntimeError("Observer pane identities must be distinct")
-        tabs = set()
-        for entry in mapping.values():
-            pane = herdr("pane", "get", entry["pane_id"])["result"]["pane"]
-            if pane["workspace_id"] != caller["workspace_id"] or pane["tab_id"] != entry["tab_id"] or pane["tab_id"] == caller["tab_id"]:
-                raise RuntimeError("Observer pane moved or is not in a dedicated tab in this workspace")
-            require_shell(entry["pane_id"])
-            tabs.add(pane["tab_id"])
-        if len(tabs) != 1:
-            raise RuntimeError("Workers must share a dedicated workflow tab")
-        # Consume the old observer mapping before any attach command is sent.
-        for entry in mapping.values():
-            entry.update(mode="transferred-to-interactive", transferred_to=str(directory))
-        save_json(reuse_observers, mapping)
+    # The first lane takes the tab's root pane; each following lane splits right of the previous one.
+    created = herdr("tab", "create", "--workspace", caller["workspace_id"], "--cwd", str(source),
+                    "--label", f"Workflow: {directory.name}", "--no-focus")["result"]
+    tab_id = created["tab"]["tab_id"]
+    mapping = {workers[0]: {"pane_id": created["root_pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}}
+    save_json(mapping_path, mapping)
+    for previous, node in zip(workers, workers[1:]):
+        split = herdr("pane", "split", "--pane", mapping[previous]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
+        mapping[node] = {"pane_id": split["pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}
         save_json(mapping_path, mapping)
-        herdr("tab", "rename", next(iter(tabs)), f"Workflow: {directory.name}")
-    else:
-        # The first lane takes the tab's root pane; each following lane splits right of the previous one.
-        created = herdr("tab", "create", "--workspace", caller["workspace_id"], "--cwd", str(source),
-                        "--label", f"Workflow: {directory.name}", "--no-focus")["result"]
-        tab_id = created["tab"]["tab_id"]
-        mapping = {workers[0]: {"pane_id": created["root_pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}}
-        save_json(mapping_path, mapping)
-        for previous, node in zip(workers, workers[1:]):
-            split = herdr("pane", "split", "--pane", mapping[previous]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
-            mapping[node] = {"pane_id": split["pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}
-            save_json(mapping_path, mapping)
     # Reviewers that already exist (attach after the review node started) get their panes now, in declared
     # order; otherwise the review node adds them through attach_reviewer_panel as it launches them.
     for node in reviewers:
@@ -425,65 +361,27 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "run", "status", "attach", "attach-one"])
+    parser.add_argument("action", choices=["attach-one"])
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--repo", type=Path, default=Path.cwd())
-    parser.add_argument("--base", default="HEAD")
-    parser.add_argument("--task", action="append", metavar="LANE=PATH", help="prepare: task file for one lane; repeat once per lane")
-    parser.add_argument("--allow-edits", action="store_true")
-    parser.add_argument("--live", action="store_true")
-    parser.add_argument("--herdr", action="store_true")
-    parser.add_argument("--reuse-observers", type=Path)
     parser.add_argument("--node", help="attach-one: a worker lane of the run, or a reviewer node (review, or review-<id>)")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
-        if args.action == "prepare":
-            from .pipeline import parse_lane_files
-            task_files = parse_lane_files(args.task, "--task")
-            if not task_files:
-                parser.error("prepare requires --task <lane>=<path> for every lane")
-            plan = prepare(directory, args.repo, args.base, {node: path.read_text() for node, path in task_files.items()}, args.allow_edits)
-            plan["mode"] = "interactive"
-            save_json(directory / "plan.json", plan)
-            print(json.dumps(plan, indent=2))
-            return
         sessions = InteractiveSessions(directory, timeout=45)
         if sessions.plan.get("mode") != "interactive":
             parser.error("Not an interactive run; prepare a new run instead of converting print-mode sessions")
-        if args.action == "status":
-            print(json.dumps(sessions.status(), indent=2))
-            return
-        if args.action == "attach-one":
-            if not args.node or not sys.stdin.isatty():
-                parser.error("attach-one requires --node and an interactive terminal")
-            if args.node not in sessions.workers and args.node not in review_nodes(sessions.plan):
-                parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or {', '.join(review_nodes(sessions.plan))}")
-            receipt = read_json(directory / f"{args.node}.interactive.json")
-            if receipt["plan_digest"] != plan_digest(sessions.plan):
-                raise RuntimeError("Plan changed; cannot attach")
-            row = sessions.locate(args.node, sessions.inventory())
-            if row is None:
-                raise RuntimeError("Session unavailable; refusing implicit restart")
-            os.chdir(sessions.node_worktree(args.node))
-            os.execvp(sessions.executable, [sessions.executable, "attach", row["id"]])
-        with run_lock(directory):
-            if args.action == "attach":
-                print(json.dumps(attach_panels(sessions, args.reuse_observers), indent=2))
-                return
-            if not args.live:
-                parser.error("run requires --live (consumes Claude usage)")
-            with SqliteSaver.from_conn_string(str(directory / "interactive-checkpoints.sqlite")) as saver:
-                graph = build_interactive_graph(saver, sessions)
-                config = {"configurable": {"thread_id": sessions.plan["run_id"]}, "max_concurrency": max(2, len(sessions.workers))}
-                snapshot = graph.get_state(config)
-                if any(task.interrupts for task in snapshot.tasks):
-                    print("Interactive handoff pending; no agents relaunched.")
-                else:
-                    result = graph.invoke(None if snapshot.values else {"run_id": sessions.plan["run_id"]}, config)
-                    print(json.dumps(result, indent=2, default=str))
-            if args.herdr:
-                print(json.dumps(attach_panels(sessions, args.reuse_observers), indent=2))
+        if not args.node or not sys.stdin.isatty():
+            parser.error("attach-one requires --node and an interactive terminal")
+        if args.node not in sessions.workers and args.node not in review_nodes(sessions.plan):
+            parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or {', '.join(review_nodes(sessions.plan))}")
+        receipt = read_json(directory / f"{args.node}.interactive.json")
+        if receipt["plan_digest"] != plan_digest(sessions.plan):
+            raise RuntimeError("Plan changed; cannot attach")
+        row = sessions.locate(args.node, sessions.inventory())
+        if row is None:
+            raise RuntimeError("Session unavailable; refusing implicit restart")
+        os.chdir(sessions.node_worktree(args.node))
+        os.execvp(sessions.executable, [sessions.executable, "attach", row["id"]])
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nSession/worktree state retained at {directory}; no automatic stop or relaunch.\n")
 

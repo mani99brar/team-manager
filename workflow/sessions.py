@@ -16,7 +16,6 @@ import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TypedDict
 
 TERMINAL = {"succeeded", "failed", "blocked"}
 
@@ -112,12 +111,6 @@ def plan_excluded(plan: dict) -> list[str]:
     return [validate_node_id(node) for node in excluded]
 
 
-class SessionState(TypedDict, total=False):
-    """Launch-only graph state (workflow.interactive): one receipt per lane under `lanes`."""
-    run_id: str
-    lanes: dict
-
-
 def read_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -182,9 +175,9 @@ def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow
     repo = repo.resolve()
     if git(repo, "status", "--porcelain"):
         raise ValueError("Commit or preserve source changes before creating worker worktrees")
+    # The target needs no copy of the contracts: the controller validates against the schemas bundled
+    # with the tool (workflow.verification.CONTRACTS), so any repository with a commit can be pinned.
     revision = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}")
-    # Require the pinned revision to include the shared contract.
-    git(repo, "cat-file", "-e", f"{revision}:contracts/workflow/workerResult.schema.json")
     directory = directory.resolve()
     if directory == repo or repo in directory.parents:
         raise ValueError("Run data/worktrees must be outside the source repository")

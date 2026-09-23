@@ -1,8 +1,8 @@
 # Runbook: supervised multi-lane LangGraph workflow
 
-**Entry point: `python -m workflow`.** This is the complete operator-driven path. `workflow.interactive` remains the focused launch-only development entry point, not the full integration workflow.
+**Entry point: `python -m workflow`.** This is the complete operator-driven path, for md-manager or any other Git repository (the target: `--repo`, else the current directory when it is a Git repository with `features/`, else md-manager; see [README.md](README.md#use-it-in-another-project)). `workflow.interactive` keeps only `attach-one`, which the Herdr panes run.
 
-Worker lanes come from configuration. A feature declares any number of lanes (`features/<feature>/feature.json` 2.0.0, one `{node_id, task}` per lane; `policy.json` 1.2.0 with each lane's `role` label, `owned_paths`, `checks` and `required_check_kinds`). A launch runs every declared lane or the subset named with `--workers a,b`; the selection is pinned in `plan.json` as `workers` and `excluded_workers`. Every lane gets the same session command, tools, permission mode and deadline. The graph shape is fixed; only the lane list varies:
+Worker lanes come from configuration. A feature declares any number of lanes (`<target>/features/<feature>/feature.json` 2.0.0 or 2.1.0, one `{node_id, task}` per lane; `policy.json` 1.2.0 with each lane's `role` label, `owned_paths`, `checks` and `required_check_kinds`). A launch runs every declared lane or the subset named with `--workers a,b`; the selection is pinned in `plan.json` as `workers` and `excluded_workers`. Every lane gets the same session command, tools, permission mode and deadline. The graph shape is fixed; only the lane list varies:
 
 ```text
               launch_<lane> ┐  (one per selected lane)          ┌ verify_<lane> ┐  (one per selected lane)
@@ -16,17 +16,20 @@ START ────────              ├─ handoff / freeze ────
                                                              fast-forward source branch
 ```
 
-## One-command launch for the first feature
+## One-command launch
 
-The committed Projects-viewer assignment is in [features/project-workflows](../features/project-workflows/README.md). From a clean checkout in Herdr:
+A feature is any directory under `<target>/features/` that holds a `feature.json`; an unknown name is refused with the list found. From a clean checkout in Herdr:
 
 ```bash
-.venv/bin/python -m workflow launch project-workflows --live --automatic
+.venv/bin/python -m workflow launch <feature> --live --automatic                       # md-manager's own features
+.venv/bin/python -m workflow launch <feature> --repo ~/dev/project-B --live --automatic # any other repository
 ```
 
-This performs preflight, creates a feature branch (not main), prepares one worktree per selected lane, starts the interactive workers with run-scoped permission bypass/Bash access, and supervises them through checks and independent automated review. Add `--workers ui` (or any comma-separated subset of the declared lanes) to run only those lanes: the others are not launched, their owned paths stay off-limits to every running lane, and the candidate is built from the selected lanes only. The command remains running until it stops on a verified feature branch or a blocker. It never pushes or merges main. Use `--dry-run` instead of `--live` to inspect without execution. Omit `--automatic` for the original manual gates. See the feature README for completion signals, recovery and privilege boundaries. The later features `review-result` and `run-inputs` launch the same way (`features/<feature>/README.md`); `--run-id` defaults to `<feature>-001` and the run root to `~/.local/state/md-manager-workflows/<feature>`.
+This performs preflight, creates a feature branch (not main) in the target, prepares one worktree per selected lane, starts the interactive workers with run-scoped permission bypass/Bash access, and supervises them through checks and independent automated review. The `python -m workflow` commands run from the tool's directory; `git switch` runs in the target. Add `--workers ui` (or any comma-separated subset of the declared lanes) to run only those lanes: the others are not launched, their owned paths stay off-limits to every running lane, and the candidate is built from the selected lanes only. The command remains running until it stops on a verified feature branch or a blocker. It never pushes or merges main. Use `--dry-run` instead of `--live` to inspect without execution; it also prints the Projects registry entry a live launch writes. Omit `--automatic` for the manual gates. `--run-id` defaults to `<feature>-001`; the run root to `~/.local/state/md-manager-workflows/<feature>` for md-manager and `~/.local/state/agent-workflows/<repo-name>/<feature>` for other targets.
 
-The profile includes a deliberate first adapter-verification gate failure and a hard limit of three verification attempts per lane/phase. Read the feature README for the exact retry and evidence procedure. Automatic mode adds persisted per-worker deadlines (default 4 hours, `--worker-timeout-seconds`) enforced by the running supervisor and a reviewer deadline (default 30 minutes, `--review-timeout-seconds`, counted from the reviewer's launch). Interrupting the supervisor leaves the workers running and the run resumable; only deadline expiry, a worker that writes `status: blocked`, or a missing native session stops them. A worker whose native state is `blocked` (its turn ended on a question, a permission prompt or a refusal the harness could not continue past) is not a failure: the controller records one `interactive` event naming the lane, keeps the other lanes running and waits until that worker's deadline, so the operator can answer in its pane. It does not impose token caps or automatically repair code. Manual mode retains operator-controlled worker lifetimes. The independent review runs as a third native session by default; `--reviewer-transport print` keeps the headless `claude --print` reviewer for environments without Herdr (see "Automatic mode: the review step").
+Before launching, `launch` refuses: a feature directory with any `TODO:` line left (each is named), a `feature.json` at version 1.0.0 (rewrite it as 2.x with `workers: [{node_id, task}]`), lanes that differ from the policy's, a missing or empty task or brief file, a reviewer `prompt` naming an unknown bundled brief (`builtin:<id>`), a run directory inside the target, and an existing run directory. None of these touches Git.
+
+A policy may declare a `failure_drill`: a deliberate first verification failure of one lane, retried explicitly ("Status, failures and recovery"). Every lane/phase has a hard limit of three verification attempts. Automatic mode adds persisted per-worker deadlines (default 4 hours, `--worker-timeout-seconds`) enforced by the running supervisor and a reviewer deadline (default 30 minutes, `--review-timeout-seconds`, counted from the reviewer's launch). Interrupting the supervisor leaves the workers running and the run resumable; only deadline expiry, a worker that writes `status: blocked`, or a missing native session stops them. A worker whose native state is `blocked` (its turn ended on a question, a permission prompt or a refusal the harness could not continue past) is not a failure: the controller records one `interactive` event naming the lane, keeps the other lanes running and waits until that worker's deadline, so the operator can answer in its pane. It does not impose token caps or automatically repair code. Manual mode retains operator-controlled worker lifetimes. The independent review runs as a third native session by default; `--reviewer-transport print` keeps the headless `claude --print` reviewer for environments without Herdr (see "Automatic mode: the review step").
 
 ## Guarantees and boundaries
 
@@ -34,7 +37,7 @@ The profile includes a deliberate first adapter-verification gate failure and a 
 - Exact shared starting Git revision is recorded and verified. Frozen ownership is checked against actual captured files, not just agent reports, against the full declared policy: a selected lane that edits a path owned by an excluded lane is an ownership violation naming both lanes. Lane ids follow `^[a-z][a-z0-9-]{0,31}$` and never take a reserved graph name (`review`, `candidate`, `handoff`, `approval`, `integrate`, `multiple`, `none`, `both`, or a `launch_`/`verify_`/`candidate_`/`review-` prefix). `role` is a free label; each lane's `required_check_kinds` decide which check kinds it must pass (policies before 1.2.0 derive them from the role: `frontend` needs `build` and `browser`, `backend` needs `unit`), so relabelling a lane cannot bypass required tests.
 - **Idle is not complete.** The operator gathers handoff summaries/assumptions and explicitly freezes the run. The runtime stops every worker process before snapshotting. Source ownership violations or uncertain termination block capture.
 - Verification runs in fresh worktrees, with separate cache, temp, browser-output and artifact directories. Installed Python/Node/browser executables may be shared read-only; do not share mutable dependency installations.
-- Each lane runs the checks its policy entry lists and must cover its `required_check_kinds` (for the committed feature: the UI lane builds and runs real Playwright scenarios with a PNG attachment per scenario; the adapter lane runs unit tests plus the configured contract/build checks). Missing tests, skipped required scenarios, flaky browser retries, nonzero exits and missing/tampered artifacts block the graph.
+- Each lane runs the checks its policy entry lists and must cover its `required_check_kinds` (for example a UI lane that builds and runs real Playwright scenarios with a PNG attachment per scenario, and a backend lane that runs unit tests plus contract/build checks). Missing tests, skipped required scenarios, flaky browser retries, nonzero exits and missing/tampered artifacts block the graph.
 - **Created files are evidence.** In the worker phase only, after the verification worktree is confirmed clean at the snapshot commit and before setup or any check runs, the verifier copies each changed file of the snapshot into the packet as an artifact of kind `file` with its repo-relative `path`, in changed-file order. A file is captured when it is a regular file inside the worktree, is text (decodes as UTF-8 and contains no NUL byte) and fits the caps: 512 KiB per file (`FILE_CAPTURE_LIMIT`) and 8 MiB of captured files per packet (`PACKET_FILE_CAPTURE_LIMIT`), both in `workflow/checks.py`. Every other changed path is listed in the result's `files_not_captured` with its reason: `binary` (not UTF-8 or contains a NUL byte), `too_large` (over 512 KiB), `missing` (deleted or renamed away in the snapshot, or not a regular file, such as a symbolic link, which is never followed) or `budget` (it would take the packet's captured total past 8 MiB; a later, smaller file may still fit). A check that rewrites a captured file cannot change what was recorded, and the post-check cleanliness rule blocks the packet. A recheck verifies every `file` artifact's hash like any other artifact, so a retained copy edited after capture blocks the packet. Candidate-phase packets capture nothing and have no `files_not_captured`; packets recorded before capture have neither and stay valid. The Projects viewer serves these files through the artifact route as `text/plain`; nothing reads the repository.
 - Every lane's snapshot is checked separately, then the combined integration candidate (the selected lanes cherry-picked in declared order) is checked again per lane. Thus individually passing workers are not sufficient for integration. A run over one lane is valid: its candidate is that lane's snapshot, still verified in the combined phase.
 - Review is performed by Pi/a fresh reviewer or a human against the exact bundle and candidate. The CLI imports that review; it does not spawn an unconfigured Pi model or fabricate independent review. Review identity is an operator attestation, not a cryptographic identity service.
@@ -55,11 +58,11 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers, a fake reviewer session and mocked native lifecycle controls. `workflow.test_lanes` covers lanes from configuration: a three-lane run, a one-lane run, a pinned subset, excluded-lane ownership, refused selections, required check kinds, reserved ids, retrying any lane, a skipped drill, finding attribution per lane, the deprecated 1.0.0 feature file and the export of a run recorded before configured lanes. The end-to-end test uses real temporary Git worktrees, Python unit tests, headless Chromium, screenshot files, review/approval interrupts and a fast-forward of a **temporary test repository**. It makes no Claude model calls. A second test injects a check failure, reopens checkpoints and verifies that only the failed verification attempt reruns. The automatic tests run once with the native reviewer protocol and once with the print-mode fallback, each with the single built-in reviewer and with two declared reviewers, including a controller interrupted while waiting for the reviewers and every rejected completion file; `ParallelReviewerScenarios` covers PRD_PARALLEL_REVIEWERS section 6 (two approve, one blocks, a P1 anywhere, one times out, a file naming the other reviewer, a shared session UUID, an interrupted second launch) and `test_lanes` the manual import per reviewer.
+The tests use fake workers, a fake reviewer session and mocked native lifecycle controls. `workflow.test_lanes` covers lanes from configuration: a three-lane run, a one-lane run, a pinned subset, excluded-lane ownership, refused selections, required check kinds, reserved ids, retrying any lane, a skipped drill, finding attribution per lane, the refused 1.0.0 feature file and the export of a run recorded before configured lanes. `workflow.test_portable` covers targets other than md-manager (PRD_PORTABLE_WORKFLOW section 6): `--repo`, the cwd rule, feature scanning, a target without `contracts/`, md-manager's unchanged commands, the registry entry, `init` and the bundled briefs. The end-to-end test uses real temporary Git worktrees, Python unit tests, headless Chromium, screenshot files, review/approval interrupts and a fast-forward of a **temporary test repository**. It makes no Claude model calls. A second test injects a check failure, reopens checkpoints and verifies that only the failed verification attempt reruns. The automatic tests run once with the native reviewer protocol and once with the print-mode fallback, each with the single built-in reviewer and with two declared reviewers, including a controller interrupted while waiting for the reviewers and every rejected completion file; `ParallelReviewerScenarios` covers PRD_PARALLEL_REVIEWERS section 6 (two approve, one blocks, a P1 anywhere, one times out, a file naming the other reviewer, a shared session UUID, an interrupted second launch) and `test_lanes` the manual import per reviewer.
 
 ## 1. Define and commit the feature contract
 
-Commit shared application types/API expectations and the workflow contract before either worker starts. Define:
+`python -m workflow init <feature> [--repo X]` writes a starting point (README, "Use it in another project"). Commit shared application types/API expectations and the feature files before any worker starts. The target needs no copy of `contracts/`: the controller validates against the schemas bundled with the tool, and prompts name their absolute paths. Define:
 
 - One task file per lane, with distinct responsibilities, declared in `feature.json` (`contracts/workflow/feature.schema.json`).
 - Each lane's owned path prefixes (no globs; pairwise disjoint across all declared lanes, excluded ones included).
@@ -75,11 +78,12 @@ Optional policy `setup` is an array of approved `{ "argv": [...], "timeout_secon
 Use a new run directory outside the source repository. Keep the source clean, and use a named source branch.
 
 ```bash
-RUN="$HOME/.local/state/md-manager-workflows/my-feature-001"
-PY="$PWD/.venv/bin/python"
+RUN="$HOME/.local/state/md-manager-workflows/my-feature/my-feature-001"
+PY="$PWD/.venv/bin/python"                 # md-manager's interpreter, run from its root
+TARGET="$PWD"                              # or the other repository
 
-"$PY" -m workflow preflight "$RUN" --repo "$PWD" --policy /path/to/policy.json --herdr
-"$PY" -m workflow prepare "$RUN" --repo "$PWD" --policy /path/to/policy.json \
+"$PY" -m workflow preflight "$RUN" --repo "$TARGET" --policy /path/to/policy.json --herdr
+"$PY" -m workflow prepare "$RUN" --repo "$TARGET" --policy /path/to/policy.json \
   --task ui=/path/to/ui-task.txt --task adapter=/path/to/adapter-task.txt
 ```
 
@@ -103,7 +107,7 @@ Ctrl+Z detaches without stopping the native terminal. Closing a panel only detac
 "$PY" -m workflow.interactive attach-one "$RUN" --node <lane>
 ```
 
-If `start` was used without `--herdr`, `python -m workflow attach "$RUN"` creates the dedicated tab. Partial/duplicate panel allocations are preserved and reported, not silently replaced.
+If `start` was used without `--herdr`, `python -m workflow attach "$RUN"` creates the dedicated tab. Partial/duplicate panel allocations are preserved and reported, not silently replaced. "Interactive panes and session identity" below covers what typing into a pane does and how sessions are bound.
 
 While workers run, do one independent task outside their worktrees and leave `$RUN/return-note.md` describing the run, independent task, current state and next action.
 
@@ -227,7 +231,7 @@ Status refreshes `report.html`. It is a local snapshot viewer, not a live multi-
 "$PY" -m workflow export "$RUN"
 ```
 
-Export rebuilds `run-state.json` from the run directory under the current export version (1.4.0: the `review` and `inputs` sections the Projects viewer reads, the lane list and one `reviewers` entry per reviewer, see the feature README's runtime storage seam). A run recorded before configured lanes keeps its stored graph definition (same node ids, same labels), reports `ui` and `adapter` as its selected lanes and carries its launch receipts and packet paths under `values.lanes` and `values.packets`. It takes the controller lock, reads the persisted checkpoint without invoking any node, constructs no sessions (a copied run whose worktrees are gone still exports), launches nothing, and refuses a run whose `plan.json`, pinned policy or `review.json` fail validation. Unchanged content does not bump `updated_at`. Run it on runs recorded before a newer export version, such as project-workflows-001, so the viewer shows their review and inputs.
+Export rebuilds `run-state.json` from the run directory under the current export version (1.4.0: the `review` and `inputs` sections the Projects viewer reads, the lane list and one `reviewers` entry per reviewer). A run recorded before configured lanes keeps its stored graph definition (same node ids, same labels), reports `ui` and `adapter` as its selected lanes and carries its launch receipts and packet paths under `values.lanes` and `values.packets`. It takes the controller lock, reads the persisted checkpoint without invoking any node, constructs no sessions (a copied run whose worktrees are gone still exports), launches nothing, and refuses a run whose `plan.json`, pinned policy or `review.json` fail validation. Unchanged content does not bump `updated_at`. Run it on runs recorded before a newer export version, such as project-workflows-001, so the viewer shows their review and inputs.
 
 - **Failed verification:** inspect its packet/log. Attempts default to a hard limit of three per lane/phase; policy v1.1.0 and later can explicitly set `max_verification_attempts`. For a transient check/environment failure at the same immutable revision, explicitly retry only that lane (`--node` accepts any lane of the run and nothing else):
   `python -m workflow retry "$RUN" --phase worker --node adapter`.
@@ -240,4 +244,111 @@ Export rebuilds `run-state.json` from the run directory under the current export
 - **Stopping an unfinished run:** use the exact native IDs from its receipts (`<lane>.interactive.json` for every selected lane and, in automatic mode, `review.interactive.json` or `review-<id>.interactive.json` for every reviewer) with Claude's `stop` command after verifying identity. Closing Herdr alone is not a stop. All run artifacts/worktrees are retained; cleanup is a separate operator decision.
 - **Reviewer needs reconciliation:** `automatic-review.json` at `needs_reconciliation` or `blocked` never relaunches a reviewer. Inspect each reviewer's `.interactive.json`, `.launch.log` and status file (`automatic-review.json` for the built-in reviewer, `automatic-review-<id>.json` per declared reviewer) and `claude agents --json`, stop a stray reviewer by its exact ID, and start a new run for a fresh review.
 
-Lanes are configuration, not a fixed pair: the committed feature declares two, the tests exercise one and three. Selective check recovery is tested independently of Claude's own workflow-relaunch semantics.
+Lanes are configuration, not a fixed pair: the tests exercise one, two and three. Selective check recovery is tested independently of Claude's own workflow-relaunch semantics.
+
+## Command reference
+
+```bash
+PY="$HOME/dev/md-manager/.venv/bin/python"                        # controller interpreter, run from md-manager's root
+RUN="$HOME/.local/state/<md-manager-workflows|agent-workflows/<repo>>/<feature>/<run-id>"   # always outside the target
+```
+
+Nothing launches a Claude session without `--live`. Nothing ever pushes or merges `main`.
+
+### `launch`
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `<feature>` | a directory under `<target>/features/` that holds a `feature.json` | required |
+| `--repo PATH` | the target Git repository (a path inside it selects its root) | the cwd's repository when it has `features/`, else md-manager |
+| `--run-id ID` | opaque run identifier, not a path | `<feature>-001` |
+| `--run-root DIR` | run storage outside the target | `~/.local/state/md-manager-workflows/<feature>` (md-manager), `~/.local/state/agent-workflows/<repo>/<feature>` |
+| `--workers a,b` | launch only these declared lanes (unknown ids, duplicates and an empty list are refused before any Git action); pinned in `plan.json` | every declared lane |
+| `--live` | authorize Claude usage | off |
+| `--automatic` | run-scoped permission bypass for workers, automatic freeze, checks, reviewers, verified feature branch | off, manual gates |
+| `--worker-timeout-seconds N` | per-worker deadline from launch to completion signal, automatic only | 4 h, max 24 h |
+| `--review-timeout-seconds N` | reviewer deadline from its launch to its completion file, automatic only | 30 min, max 24 h |
+| `--reviewer-transport native\|print` | attachable reviewer session, or headless `claude --print`, automatic only | `native` |
+| `--no-herdr` | omit terminal attachments | attaches |
+| `--dry-run` | validate the feature, print the commands and the registry entry | off |
+
+`launch` refuses an existing run directory. It runs, in order: `preflight`, `git switch -c <branch_prefix>/<run-id>` (in the target), `prepare`, then registers the run in the Projects registry, then `start`, and with `--automatic` also `automatic`. A registry that cannot be updated after `prepare` is reported and the launch continues. A policy `failure_drill` that names a lane the selection leaves out is skipped, with a note and a timeline event.
+
+### Step by step (what `launch` runs for you)
+
+| Action | Required flags | Optional flags | What it does |
+| --- | --- | --- | --- |
+| `preflight` | `--policy` | `--repo`, `--herdr`, `--automatic` | validates the policy, clean source, installed `git`/`claude`/`node`, the Claude CLI flags the run needs, Claude login; `--herdr` requires a managed Herdr pane (`HERDR_ENV=1`) |
+| `prepare` | `--policy`, `--task <lane>=<path>` once per selected lane | `--workers a,b`, `--reviewer <id>=<brief>` once per declared reviewer, `--repo`, `--automatic`, the three automatic settings | pins base commit, branch, policy digest, `repository`, `workers`, `excluded_workers` and `reviewers` (ids and brief texts; absent means the single built-in reviewer) into `plan.json`, creates one worktree per selected lane, writes the first `run-state.json`; `--automatic` requires a `feature/` branch |
+| `start` | `--live` | `--herdr` | launches every selected lane's native session once; refuses an already-started run; with `--herdr` opens the workflow tab |
+| `freeze` | `--handoff <lane>=<path>` for every selected lane | | validates every handoff, stops the recorded sessions, snapshots, checks each lane, builds and rechecks the candidate |
+| `review` | `--review-file`, `--reviewer <id>` when the run declares reviewers | | stores one reviewer's import; once all are imported, combines them into `review.json` and resumes the graph |
+| `approve` | `--bundle-sha256` | | refused until every declared reviewer is imported and approved; then fast-forwards the source branch locally |
+| `automatic` | `--live` | | supervises to a verified feature branch, or resumes an interrupted run |
+| `automatic-step` | `--live` | | one controller step; exit 75 means checkpoint persisted, run again |
+| `retry` | | `--phase worker\|candidate`, `--node <lane>` | reruns one failed check at the same revision, or resumes failed post-freeze steps; never relaunches |
+| `reconcile` | | | rebinds surviving sessions after an ambiguous launch; never relaunches |
+| `attach` | | | creates the run's Herdr tab and panes when `start` ran without `--herdr`, or adds missing reviewer panes |
+| `status` | | | next nodes, pending interrupts, errors, `workers`/`excluded_workers`; refreshes `report.html` |
+| `export` | | | rebuilds `run-state.json` at the current export version; launches nothing |
+
+`python -m workflow.interactive attach-one "$RUN" --node <lane>|review|review-<reviewer>` reconnects one session in the current terminal; it needs an interactive terminal and refuses to restart a missing session. Native session controls, from the run's receipts:
+
+```bash
+claude agents --json                                  # the run's sessions: workflow-<run-id>-<lane>, workflow-<run-id>-reviewer[-<reviewer>]
+claude stop <background_id>                           # stop one session by its exact id from <node>.interactive.json
+cd "$RUN/review-worktree" && claude --resume <uuid>   # reread or continue a reviewer transcript
+```
+
+### Files in a run directory
+
+| File | Written by | Meaning |
+| --- | --- | --- |
+| `plan.json`, `policy.json` | `prepare` | pinned repository, base commit, branch, `workers`, `excluded_workers`, `failure_drill`, tasks, `reviewers`, automatic settings, policy |
+| `run-state.json` | every CLI boundary, `export` | versioned export the viewer reads |
+| `worktree-<lane>/` | `prepare` | one worktree per selected lane |
+| `<node>.interactive.json` | launch | session receipt with UUID, launch token, status (one per lane and per reviewer) |
+| `<node>.prompt.txt`, `<node>.launch.log` | launch | exact prompt and launch output |
+| `<lane>.completion.json`, `<lane>.handoff.json` | the worker, `freeze` or the controller | automatic completion signal, accepted handoff |
+| `<node>.stop.json` | stop | identity-checked stop marker |
+| `review-bundle.json`, `review.diff`, `review-worktree/` | candidate | what every reviewer sees (one shared worktree) |
+| `review[-<reviewer>].completion.json`, `<node>.imported.json` | each reviewer, `review --reviewer` | a reviewer's bound verdict file, a manually imported review |
+| `automatic-review[-<reviewer>].json`, `review.json` | controller | combined and per-reviewer review status, the combined verdict |
+| `verification/<phase>/<node>/<attempt>/packet.json` | checks | check evidence and screenshots; worker phase also the changed text files and `files_not_captured` |
+| `report.html`, `events.jsonl`, `terminals.json` | controller | local report, timeline, Herdr pane map |
+| `controller.lock`, `pipeline.sqlite` | controller | lock and LangGraph checkpoint |
+
+## Interactive panes and session identity
+
+LangGraph launches each worker with `claude --bg` into a persistent native terminal in its worktree; Herdr only attaches to terminals that already exist (`claude attach <id>` in each pane, keyboard input enabled). Herdr never submits tasks, launches replacements or decides that work is accepted.
+
+- A dedicated `Workflow: <run-name>` tab holds one `Claude: <lane>` pane per lane in declared order, then one `Claude: reviewer [<id>]` pane per reviewer. Your own tab is not split and focus is preserved. Before typing a command into a pane, the adapter checks that only the pane's idle shell is in the foreground; an occupied pane is refused.
+- **Ctrl+Z** detaches to the pane's shell; the background session keeps running. Closing a pane or losing SSH does not stop the worker. **Ctrl+C inside Claude** interrupts its current turn. Do not type `/exit` unless you mean to end the session.
+- Direct human messages consume Claude usage and change work outside any graph node; the graph does not know them. Idle or done is never completion.
+- Native `--bg` ignores `--session-id` and assigns its own id: the plan's `session_id` is a launch token. The launcher writes its intent before calling Claude, keeps the launch output, binds the id printed by that launch and resolves the exact UUID through `claude agents --json`, cross-checking worktree and launch name. A guessed UUID or a name-only match is never adopted; unsupported states fail closed.
+- `done` in the native inventory is a finished turn, not an exited process; attaching requires a live native PID as well. PIDs are never authority to kill a process.
+
+## Verification policy and evidence
+
+Feature requirements are supplied per feature; the gates are reusable. The policy (`contracts/workflow/verification.schema.json`, bundled with the tool) gives each lane a node id, a `role` label, exact owned path prefixes (no globs; `src/workflow` owns itself and its descendants, not `src/workflow-other`; lanes never overlap), its checks and `required_check_kinds`. A check has a unique id, a kind (`build`, `typecheck`, `unit`, `integration`, `contract`, `browser`), an argv array, a timeout and, for browser checks only, named scenarios. Every listed check is required.
+
+| Lane kind | Usually required | Add when relevant |
+| --- | --- | --- |
+| UI | build; browser tests for every named scenario with a PNG screenshot each | typecheck, accessibility, mobile/desktop scenarios |
+| Backend | unit tests with a nonzero passing count | contract, integration and failure/recovery tests |
+| Every lane | ownership, exact run/attempt/revision identity, executed check logs, matching artifact hashes | task-specific checks |
+
+- Policy commands are operator-approved configuration, never code a worker invents. The runner executes argv without a shell, with timeouts, in a separate verification worktree with isolated caches, ports and artifact paths.
+- Test checks need parsed counts (Python unittest or Node TAP/spec summaries); an exit code with zero executed tests is not evidence. Browser checks need exact scenario ids, passed status and a screenshot each. Build and typecheck checks need no counts.
+- The evidence sidecar binds the policy SHA-256 (canonical JSON: sorted keys, no whitespace, literal UTF-8), run id, lane, attempt and output commit; each check points to one entry of the worker result, whose command is `shlex.join(argv)` run in the backend-owned worktree.
+- The **worker phase** verifies one lane's snapshot in isolation: its `build` and `browser` checks run and are recorded but do not gate (`gate.deferred_checks`), because another lane may be changing what they compile against; `unit`, `contract` and `integration` gate in both phases. The **candidate phase** runs every lane's checks on the combined revision and gates on all of them.
+- Artifact paths resolve through a backend-owned registry, constrained to its root and hash-checked. PNG header checks are format sanity only; screenshots are for the reviewers to examine.
+
+## Operator boundaries
+
+- Choose the feature, ownership and acceptance tests before preparing a run; `verification.example.json` is illustrative.
+- Tests and setup commands are trusted code, not sandboxed workloads; worktrees are not an OS sandbox.
+- Terminal edits must stop before frozen verification. Independent review is a separate session or an imported artifact; the graph never invents approval.
+- Ambiguous native sessions, partial candidate allocations, source drift and exhausted usage stop for operator action, never a silent relaunch or provider switch.
+- `report.html` is a local snapshot viewer; the controls are local CLI actions, not a web service.
+- Run and worktree cleanup, pushing and merging `main` remain separate, explicit actions.

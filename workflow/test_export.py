@@ -18,6 +18,8 @@ from .sessions import read_json, save_json
 from .verification import policy_digest
 
 REPO = Path(__file__).resolve().parents[1]
+# Copies of the finished features' files; the feature directories themselves are gone.
+TESTDATA = Path(__file__).resolve().parent / "testdata"
 REVIEWER = "dd7bdcd1-adec-4efe-bcd4-bbadc3525d95"
 
 
@@ -26,7 +28,7 @@ def legacy_run(root: Path, *, with_policy: bool = True, automatic: bool = True) 
     directory = root / "legacy-001"
     directory.mkdir()
     # The committed policy is 1.2.0 now; the first live run pinned its 1.1.0 predecessor (roles, no required kinds).
-    policy = read_json(REPO / "features/project-workflows/policy.json")
+    policy = read_json(TESTDATA / "project-workflows/policy.json")
     policy["version"] = "1.1.0"
     for worker in policy["workers"]:
         worker.pop("required_check_kinds", None)
