@@ -55,9 +55,9 @@ const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBL
 const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
-/** Node IDs a lane can never take: the fixed graph tail, the finding attributions and the per-lane node prefixes. */
-const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both'])
-const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-']
+/** Node IDs a lane can never take: the fixed graph tail, the finding attributions, the per-lane node prefixes and the design challenge's node and files. */
+const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge'])
+const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-', 'challenge-']
 /** Required check kinds the controller derived from the role before policies declared them (verification.py before 1.2.0). */
 const ROLE_REQUIRED_KINDS: Record<string, readonly (typeof CHECK_KINDS)[number][]> = { frontend: ['build', 'browser'], backend: ['unit'] }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])

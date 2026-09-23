@@ -45,7 +45,7 @@
         "properties": {
           "node_id": {
             "type": "string",
-            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both)$)(?!(?:launch_|verify_|candidate_|review-))[a-z][a-z0-9-]{0,31}$",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$",
             "description": "A lane id as the policy declares it: lower-case, at most 32 characters, never a reserved graph name, attribution or per-lane prefix."
           },
           "task": {
@@ -70,7 +70,7 @@
         "properties": {
           "reviewer_id": {
             "type": "string",
-            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both)$)(?!(?:launch_|verify_|candidate_|review-))[a-z][a-z0-9-]{0,31}$",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$",
             "description": "Lower-case, at most 32 characters, unique, never a lane id of the policy nor a reserved graph name, attribution or per-lane prefix."
           },
           "prompt": {

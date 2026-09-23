@@ -589,6 +589,39 @@ class PolicyRules(unittest.TestCase):
                 prepare(root / "run", root, "HEAD", {"docs": "task"}, True, declared=["ui", "adapter"])
             self.assertFalse((root / "run").exists())
 
+    def test_the_design_challenge_names_are_reserved(self):
+        """The design challenge owns the node `challenge` and the run files `challenge.json`, `challenge-<n>.*`,
+        `challenge.running.json`, `challenge-inputs/` and `challenge-worktree/`: a lane or reviewer so named would share them."""
+        from .launch import load_feature
+        from .sessions import validate_reviewer_id
+        for bad in ("challenge", "challenge-1", "challenge-inputs", "challenge-worktree"):
+            with self.assertRaisesRegex(ValueError, f"reserved: {bad}"):
+                validate_node_id(bad)
+            with self.assertRaisesRegex(ValueError, f"reserved: {bad}"):
+                validate_reviewer_id(bad)
+            policy = three_lane_policy()
+            policy["workers"][2]["node_id"] = bad
+            with self.assertRaises(ValidationError):
+                validate_policy(policy)  # The schema alone refuses it too.
+        for ok in ("challenger", "challenges"):
+            self.assertEqual(validate_node_id(ok), ok)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "reserved: challenge"):
+                prepare(root / "run", root, "HEAD", {"challenge": "task"}, True)
+            self.assertFalse((root / "run").exists())
+            # A feature file declaring the lane (or a reviewer of that name) is refused at launch, before any Git action.
+            feature = {"version": "2.2.0", "name": "N", "branch_prefix": "feature/n", "policy": "policy.json", "workers": [{"node_id": "ui", "task": "ui.md"}]}
+            for change in (lambda value: value["workers"].append({"node_id": "challenge", "task": "c.md"}),
+                           lambda value: value.update(reviewers=[{"reviewer_id": "challenge-1", "prompt": "builtin:general"}])):
+                bad = copy.deepcopy(feature)
+                change(bad)
+                save_json(root / "feature.json", bad)
+                with self.assertRaisesRegex(ValidationError, "challenge"):
+                    load_feature(root)
+            save_json(root / "feature.json", feature)
+            load_feature(root)
+
 
 class FindingLanes(unittest.TestCase):
     TOKEN = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

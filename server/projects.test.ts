@@ -1390,6 +1390,8 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     withInputs(section => { section.mode = 'manual' }, 'inputs-manual-with-settings'),
     withInputs(section => { section.workers.review = workerInput('ui') }, 'inputs-reserved-lane'),
     withInputs(section => { section.workers['launch_docs'] = workerInput('ui') }, 'inputs-prefixed-lane'),
+    withInputs(section => { section.workers.challenge = workerInput('ui') }, 'inputs-challenge-lane'),
+    withInputs(section => { section.workers['challenge-1'] = workerInput('ui') }, 'inputs-challenge-prefixed-lane'),
     withInputs(section => { section.workers.Docs = workerInput('ui') }, 'inputs-lane-pattern'),
     withInputs(section => { section.selected_workers = ['ui'] }, 'inputs-selection-disagrees-with-workers'),
     withInputs(section => { section.selected_workers = ['ui', 'adapter']; section.excluded_workers = ['ui'] }, 'inputs-excluded-and-selected'),

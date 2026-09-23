@@ -83,7 +83,7 @@
           "worker": {
             "description": "The lane whose assignment the finding concerns (one of the run's selected lane ids), `multiple` when it concerns several lanes, or `none` for cross-cutting/policy findings. Never `both` and never a fixed graph node name.",
             "type": "string",
-            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|both)$)(?!(?:launch_|verify_|candidate_|review-))[a-z][a-z0-9-]{0,31}$"
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$"
           },
           "requirement": {
             "description": "A verbatim quote from that lane's task text that the finding relates to, or null when no single requirement applies. Consumers link a finding to its task only when the quote is found verbatim; nothing is inferred.",

@@ -22,10 +22,11 @@ TERMINAL = {"succeeded", "failed", "blocked"}
 # Worker lanes come from configuration (policy 1.2.0, feature file 2.0.0). A lane id names the
 # per-lane graph nodes (launch_<id>, verify_<id>), files (<id>.completion.json, ...) and the
 # finding attribution vocabulary, so it can never collide with a fixed graph node, an
-# attribution or a per-lane prefix.
+# attribution or a per-lane prefix. The design challenge (feature file 2.2.0) owns the node `challenge` and the
+# run files `challenge.json`, `challenge-<n>.*`, `challenge-inputs/` and `challenge-worktree/`.
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-RESERVED_NODE_IDS = frozenset({"review", "candidate", "handoff", "approval", "integrate", "multiple", "none", "both"})
-RESERVED_NODE_PREFIXES = ("launch_", "verify_", "candidate_", "review-")
+RESERVED_NODE_IDS = frozenset({"review", "candidate", "handoff", "approval", "integrate", "multiple", "none", "both", "challenge"})
+RESERVED_NODE_PREFIXES = ("launch_", "verify_", "candidate_", "review-", "challenge-")
 # Plans pinned before lanes were configurable (every existing run) launched exactly these two.
 LEGACY_WORKERS = ("ui", "adapter")
 

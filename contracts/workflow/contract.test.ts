@@ -112,11 +112,11 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   // The lane id pattern is shared by the policy, the feature file and the completion file's attribution (minus multiple/none).
   const lane = new RegExp(schema.$defs.nodeId.pattern)
   assert.equal(readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern, schema.$defs.nodeId.pattern)
-  for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
-  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
+  for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'challenger', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
+  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
   const attribution = new RegExp(readJson('./reviewCompletion.schema.json').properties.findings.items.properties.worker.pattern)
   for (const ok of ['ui', 'docs', 'multiple', 'none']) assert.ok(attribution.test(ok), ok)
-  for (const bad of ['both', 'review', 'review-x', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
+  for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
   // The committed examples carry the shapes the schema describes.
   const example = readJson('./verification.example.json')
   assert.equal(example.version, '1.2.0')
@@ -155,7 +155,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   rejectReviewed('no reviewers', value => { value.reviewers = [] })
   rejectReviewed('blank brief', value => { value.reviewers[0].prompt = '' })
   rejectReviewed('unknown reviewer key', value => { (value.reviewers[0] as Record<string, unknown>).transport = 'print' })
-  for (const bad of ['review', 'review-x', 'multiple', 'none', 'both', 'launch_x', 'General', '1general', '', 'a'.repeat(33)]) {
+  for (const bad of ['review', 'review-x', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'launch_x', 'General', '1general', '', 'a'.repeat(33)]) {
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
