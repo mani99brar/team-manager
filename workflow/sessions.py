@@ -1,7 +1,8 @@
 """LangGraph-owned Claude processes. Herdr never launches these processes.
 
 Execution receipts are internal state, NOT verified WorkerResult evidence. Interrupted
-or failed launches require operator reconciliation; this module never retries them.
+or failed launches require operator reconciliation; this module never retries them. Only
+an exec that failed before anything ran (a Claude Code update in progress) is repeated.
 """
 from __future__ import annotations
 
@@ -214,27 +215,102 @@ CLAUDE_MISSING_GRACE_SECONDS = 60
 UPDATE_ERRNOS = {errno.ENOENT, errno.ENOEXEC, errno.ETXTBSY}
 
 
-def run_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=time.sleep, **kwargs) -> subprocess.CompletedProcess:
-    """`subprocess.run` for a `claude` command that waits out a Claude Code update in progress.
+class TransientInfraError(RuntimeError):
+    """Claude Code itself is unavailable: an update is replacing the binary, or the background service is restarting.
 
-    An update replaces the installed binary: for a moment the command is missing (ENOENT), half written
-    (ENOEXEC) or busy (ETXTBSY), and the call fails before anything runs. That is retried every 2 seconds for
-    `grace` seconds, so an update during a run does not block it. `retry_output`, when given, also retries a
-    command that ran but printed output it rejects (an empty inventory from a restarting background service).
-    Any other failure is not retried.
+    It is not a verdict on any session, so the automatic controller stops nothing on it and exits resumable.
+    Raised by type at the source (run_claude and friends, the session inventory); never classified from message text.
     """
-    retry_output = kwargs.pop("retry_output", None)
+
+
+def claude_env(env: dict | None = None) -> dict:
+    """The environment of every Claude process the controller starts: `env` (default: this process's) with the auto-updater off.
+
+    An update replaces the binary under every running session and restarts the background service, so a run never
+    updates Claude Code underneath itself; operators update between runs.
+    """
+    return {**(os.environ if env is None else env), "DISABLE_AUTOUPDATER": "1"}
+
+
+def wait_out_update(start, grace: float, sleep=None, retry_output=None):
+    """`start()` (it runs, starts or execs one `claude` command), repeated while a Claude Code update is in progress.
+
+    An update replaces the installed binary: for a moment the command is missing (ENOENT), half written (ENOEXEC)
+    or busy (ETXTBSY), and the exec fails before anything runs. That is repeated every 2 seconds for `grace`
+    seconds, then raised as TransientInfraError. `retry_output`, when given, also repeats a command that ran but
+    printed output it rejects (an empty inventory from a restarting background service); the last output is
+    returned once the grace is spent. Any other failure is raised at once, and a command that ran is never
+    repeated without `retry_output`: a launch or a print job never starts twice.
+    """
+    sleep = sleep or time.sleep
     waited = 0.0
     while True:
         try:
-            result = subprocess.run(command, **kwargs)
+            result = start()
+        except OSError as error:
+            if not (isinstance(error, FileNotFoundError) or error.errno in UPDATE_ERRNOS):
+                raise
+            if waited >= grace:
+                raise TransientInfraError(f"Claude Code unavailable for {grace:g}s ({error}); an update may be replacing it") from error
+        else:
             if retry_output is None or not retry_output(result) or waited >= grace:
                 return result
-        except OSError as error:
-            if not (isinstance(error, FileNotFoundError) or error.errno in UPDATE_ERRNOS) or waited >= grace:
-                raise
-            sleep(2)
-            waited += 2
+        sleep(2)
+        waited += 2
+
+
+def run_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=None, retry_output=None,
+               **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for a `claude` command, with the auto-updater off, that waits out an update in progress (wait_out_update)."""
+    kwargs["env"] = claude_env(kwargs.get("env"))
+    return wait_out_update(lambda: subprocess.run(command, **kwargs), grace, sleep, retry_output)
+
+
+def popen_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=None, **kwargs) -> subprocess.Popen:
+    """`subprocess.Popen` for a `claude` print job, like run_claude: only a failed exec is repeated, a started job never."""
+    kwargs["env"] = claude_env(kwargs.get("env"))
+    return wait_out_update(lambda: subprocess.Popen(command, **kwargs), grace, sleep)
+
+
+def exec_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=None) -> None:
+    """Replace this process with a `claude` command (`claude attach`), with the auto-updater off, like run_claude."""
+    os.environ.update(claude_env())  # The exec passes this process's environment on.
+    wait_out_update(lambda: os.execvp(command[0], command), grace, sleep)
+
+
+def stale_claude_processes(proc: Path = Path("/proc")) -> list[dict]:
+    """Running Claude Code processes whose executable an update deleted: `{pid, cwd, command}` each, by pid.
+
+    Such a long-lived session keeps seeing a newer version and reinstalls Claude Code, which makes `claude` briefly
+    missing for every other caller. Linux only: without /proc, or for an entry that cannot be read, nothing is reported.
+    """
+    try:
+        entries = [entry for entry in proc.iterdir() if entry.name.isdigit()]
+    except OSError:
+        return []
+    found = []
+    for entry in sorted(entries, key=lambda item: int(item.name)):
+        try:
+            executable = os.readlink(entry / "exe")
+            if not executable.endswith(" (deleted)") or "claude" not in executable.lower():
+                continue
+            cwd = os.readlink(entry / "cwd")
+            command = (entry / "cmdline").read_bytes().rstrip(b"\0").replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        found.append({"pid": int(entry.name), "cwd": cwd, "command": command})
+    return found
+
+
+def stale_claude_warning(proc: Path = Path("/proc")) -> str:
+    """One warning naming every stale Claude Code process (stale_claude_processes), or "" when there is none. Never a refusal."""
+    stale = stale_claude_processes(proc)
+    if not stale:
+        return ""
+    return "\n".join([f"Warning: {len(stale)} running Claude Code process(es) still run an executable that an update deleted. "
+                      "These long-lived sessions keep reinstalling Claude Code, which makes `claude` briefly unavailable to this "
+                      "run; restart them before the run:",
+                      *(f"  pid {item['pid']} in {item['cwd']}: {item['command']}" for item in stale)])
 
 
 def terminate(process: subprocess.Popen) -> None:
@@ -308,8 +384,8 @@ class ClaudeSessions:
             os.chmod(prompt_path, 0o600)
             # A regular stdin file avoids blocking the controller on a full pipe.
             with prompt_path.open("rb") as input_handle, (self.directory / f"{node}.stream.jsonl").open("wb") as output:
-                process = subprocess.Popen(command, cwd=cwd, env=env, stdin=input_handle,
-                                           stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                process = popen_claude(command, cwd=cwd, env=env, stdin=input_handle,
+                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                 record.update(status="running", pid=process.pid)
                 save_json(path, record)
                 import time

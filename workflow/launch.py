@@ -313,6 +313,12 @@ def main(argv=None):
             parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
                              f"inspect with: {sys.executable} -m workflow status {run}\n"
                              + (f"resume with:  {sys.executable} -m workflow automatic {run} --live\n" if args.automatic else ""))
+        except subprocess.CalledProcessError as error:
+            if not (args.automatic and error.returncode == 75):
+                raise
+            # `automatic` exits 75 when Claude Code itself was unavailable: nothing was stopped and the run is resumable.
+            parser.exit(75, f"Launch interrupted: Claude Code was unavailable; nothing was stopped. Once `claude` works,\n"
+                            f"resume with:  {sys.executable} -m workflow automatic {run} --live\n")
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
             return

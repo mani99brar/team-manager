@@ -92,6 +92,22 @@ class FeatureLaunchTests(unittest.TestCase):
         printed = json.loads(output.getvalue())
         self.assertIn("print", printed["commands"][2])
 
+    def test_automatic_launch_passes_a_resumable_exit_on_and_still_blocks_on_a_failure(self):
+        # `automatic` exits 75 when Claude Code itself was unavailable: the launch says how to resume, not that it is blocked.
+        for returncode, expected_code, expected in ((75, 75, "Claude Code was unavailable; nothing was stopped"), (1, 1, "Launch blocked")):
+            def run(command, cwd, check):
+                if command[3:4] == ["automatic"]:
+                    raise subprocess.CalledProcessError(returncode, command)
+            with self.subTest(returncode=returncode), patch("workflow.launch.subprocess.run", side_effect=run), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(SystemExit) as exited:
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr",
+                          "--run-id", f"auto-{returncode}", "--run-root", str(self.root / "runs")])
+                self.assertEqual(exited.exception.code, expected_code)
+                self.assertIn(expected, errors.getvalue())
+                if returncode == 75:
+                    self.assertIn(f"-m workflow automatic {self.root / 'runs' / 'auto-75'} --live", errors.getvalue())
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--repo", str(self.repo), "--dry-run"])

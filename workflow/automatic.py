@@ -20,7 +20,8 @@ from langgraph.types import Command
 
 from .checks import now
 from .guardrails import decisions_block
-from .sessions import DEFAULT_REVIEWER, git, plan_reviewers, plan_workers, read_json, review_node, reviewer_ids, run_lock, save_json, terminate
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
+                       run_lock, save_json, terminate)
 from .verification import CONTRACTS
 from .worktrees import git_worktree
 
@@ -662,6 +663,13 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
         # running and `automatic --live` resumes waiting for their completion files.
         runtime.event("review", "interrupted", REVIEW_RESUME_NOTE.format(directory=runtime.directory))
         raise
+    except TransientInfraError as error:
+        # Claude Code itself was unavailable, not a verdict: the reviewers keep running. The marker lets the
+        # next controller re-enter the review node once, which rebinds them and waits again; nothing is relaunched.
+        combined["interrupted"] = str(error)
+        state.save()
+        runtime.event("review", "interrupted", f"{error}. {REVIEW_RESUME_NOTE.format(directory=runtime.directory)}")
+        raise
     except BaseException as error:
         # Deadline, blocked session, rejected file or blocked verdict: stop every reviewer so none
         # consumes usage for a run that cannot continue. Nothing is relaunched.
@@ -721,7 +729,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
             os.chmod(prompt_path, 0o600)
             command = print_command(runtime.sessions.executable, status["session_id"], review_schema(runtime), [str(runtime.directory)])
             with prompt_path.open() as stdin, (runtime.directory / f"{node}.stdout.json").open("w") as output, (runtime.directory / f"{node}.stderr.log").open("w") as errors:
-                process = subprocess.Popen(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
+                process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
             processes[reviewer_id] = (process, time.monotonic())
             status.update(status="running", pid=process.pid)
             state.save()
@@ -914,6 +922,8 @@ def supervise(directory: Path) -> None:
                 raise RuntimeError(RESUME_NOTE.format(directory=directory)) from None
             if result.returncode == 0:
                 return
+            if result.returncode == UNAVAILABLE_EXIT:
+                raise TransientInfraError(UNAVAILABLE_NOTE.format(directory=directory))
             if result.returncode != 75:
                 raise RuntimeError(f"Automatic controller blocked (exit {result.returncode}); inspect retained run")
         raise RuntimeError("Automatic controller restart limit exhausted")
@@ -921,6 +931,12 @@ def supervise(directory: Path) -> None:
 
 RESUME_NOTE = ("Supervisor interrupted. Native workers were NOT stopped and keep running; "
                "resume with: python -m workflow automatic {directory} --live")
+# automatic-step exits 75 when a checkpoint persisted (the supervisor continues in a new process) and 69
+# (EX_UNAVAILABLE) when Claude Code itself was unavailable; then the supervisor, `automatic`, exits 75 itself.
+UNAVAILABLE_EXIT = 69
+UNAVAILABLE_NOTE = ("Claude Code was unavailable (an update replacing it, or its background service restarting). Nothing was "
+                    "stopped: the native sessions keep running. Once `claude` works, resume with: "
+                    "python -m workflow automatic {directory} --live")
 REVIEW_STOP_NOTE = ("Reviewer stop not confirmed after acceptance: {error}. The verdict is kept; inspect the reviewer "
                     "session, then resume retries the stop with: python -m workflow automatic {directory} --live")
 
@@ -938,6 +954,30 @@ def reviewer_stop_pending(runtime, state) -> bool:
     state = ReviewStatus.load(runtime)
     return (state.combined.get("transport") == "native" and state.combined.get("status") == "succeeded"
             and not all(reviewer_stopped(runtime, reviewer_id) for reviewer_id in state.ids))
+
+
+def review_interrupted(runtime, state) -> bool:
+    """The review node failed only because Claude Code was unavailable while it waited: its native reviewers keep running."""
+    if [task.name for task in state.tasks if task.error and task.name in state.next] != ["review"]:
+        return False
+    if not combined_status_path(runtime).exists():
+        return False
+    combined = read_json(combined_status_path(runtime))
+    return combined.get("transport") == "native" and combined.get("status") == "running" and "interrupted" in combined
+
+
+def resume_interrupted_review(runtime, state) -> bool:
+    """Re-enter an interrupted review node once: review_candidate rebinds the running reviewers and launches nothing.
+
+    The marker is consumed first, so a re-entry that fails for another reason is classified as that failure.
+    """
+    if not review_interrupted(runtime, state):
+        return False
+    combined = read_json(combined_status_path(runtime))
+    cause = combined.pop("interrupted")
+    save_json(combined_status_path(runtime), combined)
+    runtime.event("review", "running", f"Resuming the review interrupted by: {cause}; the reviewers are rebound, not relaunched")
+    return True
 
 
 def drive(runtime, *, single_step=False) -> str | None:
@@ -973,6 +1013,12 @@ def drive(runtime, *, single_step=False) -> str | None:
                     runtime.event("controller", "interrupted", RESUME_NOTE.format(directory=runtime.directory))
                     report(runtime, state)
                     raise
+                except TransientInfraError as error:
+                    # Claude Code itself was unavailable (an update replacing it, the background service
+                    # restarting): no verdict on any worker, so none is stopped and the run stays resumable.
+                    runtime.event("controller", "interrupted", f"{error}. {UNAVAILABLE_NOTE.format(directory=runtime.directory)}")
+                    report(runtime, state)
+                    raise
                 except BaseException as error:
                     # Deadline, quota block, missing/blocked completion: stop the workers so
                     # no session keeps consuming usage for a run that cannot continue.
@@ -986,7 +1032,8 @@ def drive(runtime, *, single_step=False) -> str | None:
                 value = Command(resume={"freeze": True})
             elif pending:
                 raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
-            elif any(task.error for task in state.tasks) and not (advance_failed_checks(runtime, state) or reviewer_stop_pending(runtime, state)):
+            elif any(task.error for task in state.tasks) and not (advance_failed_checks(runtime, state) or reviewer_stop_pending(runtime, state)
+                                                                  or resume_interrupted_review(runtime, state)):
                 raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
             try:
                 graph.invoke(value, config)
@@ -998,6 +1045,8 @@ def drive(runtime, *, single_step=False) -> str | None:
                     # Not retried in this loop: the operator inspects the session first; a resumed
                     # controller retries the stop once before continuing.
                     raise RuntimeError(REVIEW_STOP_NOTE.format(error=error, directory=runtime.directory)) from error
+                if isinstance(error, TransientInfraError) and review_interrupted(runtime, failed):
+                    raise  # The review node recorded the interruption; a new controller re-enters it.
                 # Next loop reopens the checkpointer and classifies the exact failure.
             finally:
                 report(runtime, graph.get_state(config))

@@ -1,4 +1,6 @@
 """Offline automatic-controller tests: synthetic Claude, real Git/checkpoints/checks."""
+import contextlib
+import io
 import json
 import subprocess
 import sys
@@ -110,6 +112,15 @@ class CompletionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "controller blocked"):
                 supervise(self.root)
         self.assertEqual(run.call_count, 1)
+
+    def test_supervisor_stops_resumable_when_claude_code_was_unavailable(self):
+        from .automatic import UNAVAILABLE_EXIT
+        from .sessions import TransientInfraError
+        save_json(self.root / "plan.json", self.plan)
+        with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], UNAVAILABLE_EXIT)) as run:
+            with self.assertRaisesRegex(TransientInfraError, "Nothing was stopped.*resume with: python -m workflow automatic .* --live"):
+                supervise(self.root)
+        self.assertEqual(run.call_count, 1)  # Not restarted: the operator reruns it once `claude` works.
 
     def test_supervisor_interrupt_reports_resume_without_stopping_workers(self):
         save_json(self.root / "plan.json", self.plan)
@@ -491,10 +502,112 @@ class ReviewCompletionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, f"Native reviewer {last} missing; reconciliation"):
             wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
 
+    def test_claude_code_unavailable_during_the_wait_stops_no_reviewer_and_is_resumed_once(self):
+        from unittest.mock import Mock
+        from .automatic import ReviewStatus, _accept_native, resume_interrupted_review, review_interrupted
+        from .sessions import TransientInfraError
+        self.runtime.stop_reviewer = Mock()
+        self.runtime.sessions.inventory = Mock(side_effect=TransientInfraError("Claude session inventory unavailable: timed out"))
+        with self.assertRaises(TransientInfraError):
+            _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
+        self.runtime.stop_reviewer.assert_not_called()
+        combined = read_json(self.root / "automatic-review.json")
+        self.assertEqual((combined["status"], combined["interrupted"]), ("running", "Claude session inventory unavailable: timed out"))
+        self.assertNotIn("error", combined)
+        state = ReviewStatus.load(self.runtime)
+        self.assertEqual([state.statuses[reviewer_id]["status"] for reviewer_id in self.ids], ["running"] * len(self.ids))
+        self.assertFalse(any((self.root / f"{self.node(reviewer_id)}.stop.json").exists() for reviewer_id in self.ids))
+        self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.events[0][:2], ("review", "interrupted"))
+        self.assertIn("NOT stopped", self.events[0][2])
+        self.assertIn(f"python -m workflow automatic {self.root} --live", self.events[0][2])
+        # The graph recorded the node's error; the next controller re-enters the node once, and only for this state.
+        failed = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="TransientInfraError('Claude session inventory unavailable')")])
+        self.assertTrue(review_interrupted(self.runtime, failed))
+        self.assertTrue(resume_interrupted_review(self.runtime, failed))
+        self.assertNotIn("interrupted", read_json(self.root / "automatic-review.json"))
+        self.assertEqual(self.events[-1][:2], ("review", "running"))
+        self.assertIn("rebound, not relaunched", self.events[-1][2])
+        self.assertFalse(resume_interrupted_review(self.runtime, failed))  # Consumed: a second failure is classified as itself.
+        for status in ("blocked", "needs_reconciliation", "succeeded"):
+            save_json(self.root / "automatic-review.json", {**combined, "status": status})
+            self.assertFalse(review_interrupted(self.runtime, failed), status)
+
 
 class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
     reviewers = ["general", "coverage"]
+
+
+class PrintReviewerLaunchTests(unittest.TestCase):
+    """The headless reviewer job at unit level (no graph, no checks): a failed exec is repeated, a started job never."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.cwd = self.root / "review-worktree"
+        self.cwd.mkdir()
+        for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["commit", "-q", "--allow-empty", "-m", "Candidate"]):
+            subprocess.run(["git", "-C", str(self.cwd), *args], check=True)
+        self.patch_file = self.root / "review.diff"
+        self.patch_file.write_text("")
+        self.executable = self.root / "fake-reviewer"
+        self.reviewer(0)
+        self.bundle = {"run_id": "test", "candidate_commit": git(self.cwd, "rev-parse", "HEAD"), "snapshots": {}}
+        self.runtime = SimpleNamespace(directory=self.root, plan={"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS, reviewer_transport="print")},
+                                       sessions=SimpleNamespace(executable=str(self.executable)), validate_bundle=lambda: (self.bundle, "b" * 64),
+                                       validate_review=lambda review: None)
+
+    def reviewer(self, exit_code: int) -> None:
+        """A fake `claude --print` reviewer that records DISABLE_AUTOUPDATER once per start, approves, and exits `exit_code`."""
+        self.executable.write_text(f'''#!/usr/bin/env python3
+import json, os, sys
+with open({str(self.root / "starts")!r}, "a") as handle:
+    handle.write(os.environ.get("DISABLE_AUTOUPDATER", "-") + "\\n")
+sys.stdin.read()
+print(json.dumps({{"session_id": sys.argv[sys.argv.index("--session-id") + 1], "is_error": False, "subtype": "success",
+                  "structured_output": {{"verdict": "approved", "findings": []}}}}))
+sys.exit({exit_code})
+''')
+        self.executable.chmod(0o700)
+
+    def review(self, failures: list):
+        """_review_print with each of `failures` failing the reviewer's exec first; (review or error, execs, update waits)."""
+        from .automatic import _review_print
+        real_popen, real_sleep = subprocess.Popen, time.sleep
+        execs, waits = [], []
+        def popen(command, *args, **kwargs):
+            if command[0] == str(self.executable):
+                execs.append(kwargs["env"].get("DISABLE_AUTOUPDATER"))
+                if failures:
+                    raise failures.pop(0)
+            return real_popen(command, *args, **kwargs)
+        def sleep(seconds):  # Record the update waits; `process.wait` polls with short sleeps of its own.
+            if seconds == 2:
+                waits.append(seconds)
+            else:
+                real_sleep(seconds)
+        with patch("workflow.sessions.subprocess.Popen", side_effect=popen), patch("workflow.sessions.time.sleep", side_effect=sleep):
+            try:
+                result = _review_print(self.runtime, self.bundle, "b" * 64, self.cwd, self.patch_file)
+            except RuntimeError as error:
+                result = error
+        return result, execs, waits
+
+    def starts(self) -> list:
+        return (self.root / "starts").read_text().splitlines()
+
+    def test_a_print_reviewer_is_started_again_only_when_its_exec_failed(self):
+        import errno
+        review, execs, waits = self.review([OSError(errno.ETXTBSY, "Text file busy", str(self.executable))])
+        self.assertEqual(review["verdict"], "approved")
+        self.assertEqual((execs, waits, self.starts()), (["1", "1"], [2], ["1"]))
+        # A reviewer job that ran and failed is not started again.
+        self.reviewer(1)
+        error, execs, waits = self.review([])
+        self.assertRegex(str(error), "did not succeed.*No automatic retry")
+        self.assertEqual((execs, waits, self.starts()), (["1"], [], ["1", "1"]))
 
 
 class GraphFixture(unittest.TestCase):
@@ -690,6 +803,113 @@ sys.exit(0 if commit else 75)
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
+
+
+class ClaudeUnavailableTests(GraphFixture):
+    """Claude Code itself unavailable (an update, a restarting background service): nothing is stopped, the run resumes.
+
+    Every test stops before verification: the checks never run here. A deadline still stops the workers
+    (SharedGraphTests.test_deadline_or_blocked_worker_stops_workers).
+    """
+
+    def unavailable(self):
+        from .sessions import TransientInfraError
+        return TransientInfraError("Claude session inventory unavailable: Command '['claude', 'agents', '--json']' timed out after 15 seconds")
+
+    def test_unavailable_during_the_worker_wait_stops_no_worker_and_the_run_resumes(self):
+        from .sessions import TransientInfraError
+        f = self.fixture
+        f.sessions.inventory = lambda: (_ for _ in ()).throw(self.unavailable())
+        with patch.object(f.runtime, "stop_workers") as stop:
+            with self.assertRaises(TransientInfraError):
+                drive(f.runtime)
+        stop.assert_not_called()
+        event = self.events()[-1]
+        self.assertEqual((event["node"], event["status"]), ("controller", "interrupted"))
+        for expected in ("Claude session inventory unavailable", "Nothing was stopped", f"python -m workflow automatic {f.directory} --live"):
+            self.assertIn(expected, event["message"])
+        self.assertFalse(any((f.directory / f"{node}.stop.json").exists() for node in ("ui", "adapter")))
+        # Once `claude` works, a new controller goes back to the same wait; nothing is launched or stopped.
+        del f.sessions.inventory
+        starts = list(f.sessions.starts)
+        with patch("workflow.automatic.wait_handoffs", side_effect=KeyboardInterrupt) as wait, patch.object(f.runtime, "stop_workers") as stop:
+            with self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime)
+        wait.assert_called_once_with(f.runtime)
+        stop.assert_not_called()
+        self.assertEqual(f.sessions.starts, starts)
+
+    def cli(self, argv):
+        """`python -m workflow <argv>` in process with the fake sessions; (exit code, stderr)."""
+        from . import pipeline
+        errors = io.StringIO()
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda directory, timeout: self.fixture.sessions), \
+                patch("sys.argv", ["workflow", *argv]), contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as exited:
+                pipeline.main()
+        return exited.exception.code, errors.getvalue()
+
+    def test_the_step_exits_69_and_automatic_exits_75_resumable(self):
+        from .automatic import UNAVAILABLE_EXIT
+        from .pipeline import Pipeline
+        f = self.fixture
+        f.sessions.inventory = lambda: (_ for _ in ()).throw(self.unavailable())
+        with patch.object(Pipeline, "stop_workers") as stop:
+            code, errors = self.cli(["automatic-step", str(f.directory), "--live"])
+        stop.assert_not_called()
+        self.assertEqual(code, UNAVAILABLE_EXIT)
+        self.assertIn("Interrupted: Claude session inventory unavailable", errors)
+        # The supervisor turns that step exit into its own resumable 75, with the stale sessions to restart.
+        stale = "Warning: 1 running Claude Code process(es) still run an executable that an update deleted.\n  pid 7 in /work: claude"
+        with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], UNAVAILABLE_EXIT)) as step, \
+                patch("workflow.pipeline.stale_claude_warning", return_value=stale):
+            code, errors = self.cli(["automatic", str(f.directory), "--live"])
+        self.assertEqual((code, step.call_count), (75, 1))
+        self.assertIn("Interrupted: Claude Code was unavailable", errors)
+        self.assertIn(f"resume with: python -m workflow automatic {f.directory} --live", errors)
+        self.assertIn("pid 7 in /work: claude", errors)
+        self.assertNotIn("Blocked", errors)
+        # A blocked step is still blocked.
+        with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], 1)):
+            code, errors = self.cli(["automatic", str(f.directory), "--live"])
+        self.assertEqual(code, 1)
+        self.assertIn("Blocked: Automatic controller blocked (exit 1)", errors)
+
+    def test_review_interrupted_by_unavailable_claude_code_is_re_entered_once(self):
+        # The review node itself is covered at unit level; here a stand-in graph checks how drive treats its failure.
+        from .sessions import TransientInfraError
+        f = self.fixture
+        combined = f.directory / "automatic-review.json"
+        graph = SimpleNamespace(error=None, invokes=[], outcome=None)
+        def state(config):
+            return SimpleNamespace(values={"run_id": "run"}, next=("review",),
+                                   tasks=[SimpleNamespace(name="review", error=graph.error, interrupts=())])
+        def invoke(value, config):
+            graph.invokes.append(value)
+            outcome, graph.outcome = graph.outcome, None
+            if outcome:
+                graph.error = repr(outcome)
+                raise outcome
+            graph.error = None
+        graph.get_state, graph.invoke = state, invoke
+        with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.pipeline.report"):
+            # The review wait lost `claude`: the node kept its reviewers running and marked the interruption.
+            save_json(combined, {"transport": "native", "status": "running", "reviewers": ["review"], "interrupted": "timed out"})
+            graph.outcome = self.unavailable()
+            with self.assertRaises(TransientInfraError):
+                drive(f.runtime)
+            self.assertEqual(graph.invokes, [None])
+            # A new controller re-enters the node once and consumes the marker.
+            self.assertIsNone(drive(f.runtime, single_step=True))
+            self.assertEqual(graph.invokes, [None, None])
+            self.assertNotIn("interrupted", read_json(combined))
+            self.assertIn("Resuming the review interrupted by: timed out", self.events()[-1]["message"])
+            # Without the marker a review failure stays non-retryable, transient or not: nothing loops or relaunches.
+            graph.outcome = self.unavailable()
+            save_json(combined, {"transport": "native", "status": "needs_reconciliation", "reviewers": ["review"]})
+            with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
+                drive(f.runtime)
+            self.assertEqual(graph.invokes, [None, None, None])
 
 
 class AutomaticGraphTests(SharedGraphTests, GraphFixture):

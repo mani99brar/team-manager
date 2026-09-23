@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -877,6 +878,80 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+
+class ClaudeUpdateAroundTheChallenge(GuardedFeature):
+    """A Claude Code update during a run: the challenge job waits it out, and start/resume name the sessions that cause it."""
+
+    def popen(self, failures: list):
+        """A Popen that fails the fake claude's exec with each of `failures` first; every environment it was given is kept."""
+        real_popen = subprocess.Popen
+        environments = []
+
+        def popen(command, *args, **kwargs):
+            if command[0] == str(self.executable):
+                environments.append(kwargs["env"])
+                if failures:
+                    raise failures.pop(0)
+            return real_popen(command, *args, **kwargs)
+        return popen, environments
+
+    def waits(self):
+        """time.sleep that records the 2-second update waits and really sleeps the short polls of `process.wait`."""
+        real_sleep = time.sleep
+        waits = []
+
+        def sleep(seconds):
+            if seconds == 2:
+                waits.append(seconds)
+            else:
+                real_sleep(seconds)
+        return sleep, waits
+
+    def test_the_challenge_job_waits_out_an_update_without_the_auto_updater_and_never_starts_twice(self):
+        import errno
+        from .guardrails import run_challenge
+        directory = self.prepare("update-001")
+        popen, environments = self.popen([FileNotFoundError(errno.ENOENT, "No such file or directory", str(self.executable))])
+        sleep, waits = self.waits()
+        with patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}), patch("workflow.sessions.subprocess.Popen", side_effect=popen), \
+                patch("workflow.sessions.time.sleep", side_effect=sleep):
+            self.assertEqual(run_challenge(self.runtime(directory), 1)["status"], "passed")
+        self.assertEqual(waits, [2])
+        self.assertEqual((len(environments), len(self.challenge_calls())), (2, 1))  # The failed exec ran nothing.
+        for environment in environments:
+            self.assertEqual(environment["DISABLE_AUTOUPDATER"], "1")
+            self.assertFalse(any(key.startswith("HERDR_") for key in environment))
+        # A job that ran and failed is not started again.
+        self.output.write_text("{not json")
+        popen, environments = self.popen([])
+        sleep, waits = self.waits()
+        with patch("workflow.sessions.subprocess.Popen", side_effect=popen), patch("workflow.sessions.time.sleep", side_effect=sleep):
+            with self.assertRaisesRegex(RuntimeError, "did not succeed"):
+                run_challenge(self.runtime(directory), 2)
+        self.assertEqual((len(environments), len(self.challenge_calls()), waits), (1, 2, []))
+
+    def test_start_and_resume_name_stale_claude_sessions_and_resume_exits_75_when_claude_code_is_unavailable(self):
+        from .sessions import TransientInfraError
+        stale = "Warning: 1 running Claude Code process(es) still run an executable that an update deleted.\n  pid 7 in /work: claude"
+        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/auto-001")
+        run, commands, _ = launch_commands(self.repo, FEATURE, "auto-001", self.runs, herdr=False, automatic=True)
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        with patch("workflow.pipeline.stale_claude_warning", return_value=stale):
+            output, code = self.cli(pipeline.main, ["start", str(run), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertLess(output.index("pid 7 in /work: claude"), output.index("P1 [assumption] The lanes overlap"))
+        with patch("workflow.guardrails.stale_claude_warning", return_value=stale), \
+                patch("workflow.automatic.supervise", side_effect=TransientInfraError("Claude Code was unavailable; nothing was stopped")) as supervise:
+            output, code = self.cli(resume_main, [str(run), "--accept-challenge", "r"])
+        self.assertEqual(code, 75, output)
+        supervise.assert_called_once_with(run)
+        self.assertIn("pid 7 in /work: claude", output)
+        self.assertIn("Interrupted: Claude Code was unavailable; nothing was stopped", output)
+        self.assertNotIn("Blocked", output)
+        self.assertEqual(self.launches(run), ["challenge", "adapter", "ui"])
 
 
 class CompletionEvidence(unittest.TestCase):

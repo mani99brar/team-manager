@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .checks import now
-from .sessions import git, plan_workers, read_json, run_lock, save_json, terminate
+from .sessions import TransientInfraError, git, plan_workers, popen_claude, read_json, run_lock, save_json, stale_claude_warning, terminate
 from .verification import CONTRACTS, validate_schema
 from .worktrees import git_worktree
 
@@ -316,7 +316,7 @@ def run_challenge(runtime, attempt: int) -> dict:
     stdout = directory / f"challenge-{attempt}.stdout.json"
     try:
         with prompt_path.open() as stdin, stdout.open("w") as output, (directory / f"challenge-{attempt}.stderr.log").open("w") as errors:
-            process = subprocess.Popen(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
+            process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
         try:
             process.wait(timeout=challenge_timeout(plan))
         except subprocess.TimeoutExpired:
@@ -800,6 +800,9 @@ def resume_main(argv=None):
     directory = args.directory.resolve()
     from langgraph.checkpoint.sqlite import SqliteSaver
     from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
+    warning = stale_claude_warning()
+    if warning:
+        print(warning, file=sys.stderr)
 
     def export(runtime) -> Path:
         """As `start` does on a pause: run-state.json shows the latest attempt and the plan's base and pinned files."""
@@ -830,7 +833,10 @@ def resume_main(argv=None):
         print(f"Design challenge {record['status']} (attempt {record['attempt']}); workers launched: {', '.join(runtime.workers)}")
         if runtime.plan.get("automatic"):
             from .automatic import supervise
-            supervise(directory)
+            try:
+                supervise(directory)
+            except TransientInfraError as error:
+                parser.exit(75, f"Interrupted: {error}\n")  # Resumable, like `automatic --live`.
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")

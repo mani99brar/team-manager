@@ -19,7 +19,8 @@ from pathlib import Path
 
 from .guardrails import decisions_block
 from .herdr import herdr
-from .sessions import ClaudeSessions, git, plan_digest, run_claude, read_json, review_node, review_nodes, save_json
+from .sessions import (ClaudeSessions, TransientInfraError, exec_claude, git, plan_digest, run_claude, read_json, review_node, review_nodes,
+                       save_json)
 
 REVIEW = "review"
 
@@ -41,9 +42,15 @@ class InteractiveSessions(ClaudeSessions):
     """Native Claude background sessions, not print-mode jobs or Herdr-owned agents."""
 
     def inventory(self) -> list[dict]:
-        response = run_claude([self.executable, "agents", "--json"], capture_output=True, text=True, check=True, timeout=15,
-                              retry_output=lambda result: not result.stdout.strip())
-        rows = json.loads(response.stdout)
+        try:
+            response = run_claude([self.executable, "agents", "--json"], capture_output=True, text=True, check=True, timeout=15,
+                                  retry_output=lambda result: not result.stdout.strip())
+            rows = json.loads(response.stdout)
+        except (subprocess.SubprocessError, ValueError) as error:
+            # The listing itself failed (it timed out, exited nonzero or printed nothing parseable while the background
+            # service restarts): Claude Code is unavailable, which says nothing about any session.
+            detail = error.stderr.strip()[-300:] if isinstance(getattr(error, "stderr", None), str) else ""
+            raise TransientInfraError(f"Claude session inventory unavailable: {error}" + (f" {detail}" if detail else "")) from error
         if not isinstance(rows, list):
             raise RuntimeError("Unexpected Claude inventory response")
         return rows
@@ -149,8 +156,9 @@ class InteractiveSessions(ClaudeSessions):
             # Killing this short helper is NOT evidence that the session stopped.
             with (self.directory / f"{node}.launch.log").open("w") as log:
                 try:
-                    result = subprocess.run(command, cwd=cwd, env=env, stdout=log,
-                                            stderr=subprocess.STDOUT, text=True, timeout=self.timeout)
+                    # Only an exec that failed (nothing ran) is repeated; a helper that ran is never run twice.
+                    result = run_claude(command, cwd=cwd, env=env, stdout=log,
+                                        stderr=subprocess.STDOUT, text=True, timeout=self.timeout)
                 finally:
                     log.flush()
                     os.fsync(log.fileno())

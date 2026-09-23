@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Annotated, TypedDict
@@ -27,8 +28,8 @@ from langgraph.types import Command, interrupt
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json,
-                       validate_node_id, validate_reviewer_id)
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
+                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id)
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import git_worktree
 
@@ -825,7 +826,7 @@ def main():
             for executable in ("git", "claude", "node"):
                 if not shutil.which(executable):
                     raise ValueError(f"Missing executable: {executable}")
-            help_text = subprocess.check_output(["claude", "--help"], text=True, timeout=15)
+            help_text = run_claude(["claude", "--help"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout
             required_flags = ["--bg", "--safe-mode", "--tools", "--permission-mode"]
             if args.automatic:
                 # Workers: --dangerously-skip-permissions. Native reviewer: --add-dir and --allowedTools.
@@ -833,7 +834,7 @@ def main():
                 required_flags += ["--dangerously-skip-permissions", "--add-dir", "--allowedTools", "--json-schema", "--print", "--permission-prompts"]
             if not all(flag in help_text for flag in required_flags):
                 raise ValueError("Installed Claude CLI lacks required flags")
-            auth = json.loads(subprocess.check_output(["claude", "auth", "status"], text=True, timeout=15))
+            auth = json.loads(run_claude(["claude", "auth", "status"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout)
             if auth.get("loggedIn") is not True:
                 raise ValueError("Claude is not authenticated")
             if args.herdr and os.environ.get("HERDR_ENV") != "1":
@@ -901,7 +902,12 @@ def main():
             if not args.live:
                 parser.error("automatic requires --live because it can launch an independent reviewer")
             from .automatic import supervise
-            supervise(directory)
+            try:
+                supervise(directory)
+            except TransientInfraError as error:
+                # Resumable, not blocked: 75 (EX_TEMPFAIL). Stale long-lived sessions are the usual source of an update.
+                warning = stale_claude_warning()
+                parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             return
         if args.action == "export":
@@ -915,8 +921,11 @@ def main():
             if args.action == "automatic-step":
                 if not args.live:
                     parser.error("automatic requires --live because it can launch an independent reviewer")
-                from .automatic import drive
-                commit = drive(runtime, single_step=True)
+                from .automatic import UNAVAILABLE_EXIT, drive
+                try:
+                    commit = drive(runtime, single_step=True)
+                except TransientInfraError as error:
+                    parser.exit(UNAVAILABLE_EXIT, f"Interrupted: {error}\nNothing was stopped; the supervisor exits resumable.\n")
                 if commit is None:
                     parser.exit(75, "Checkpoint persisted; continuing in a new controller process.\n")
                 print(f"Verified feature branch: {runtime.plan['source_branch']} at {commit}. No main merge or push.")
@@ -935,6 +944,9 @@ def main():
                     if state.values:
                         parser.error("Run already started; use status/explicit controls, never start again")
                     from .guardrails import challenge_gate, paused_message
+                    warning = stale_claude_warning()
+                    if warning:
+                        print(warning, file=sys.stderr)
                     # A 2.2.0 run's design challenge decides before any worker launch; a pause exits 0 with the resume commands.
                     if not challenge_gate(runtime):
                         print(paused_message(directory, args.herdr))
