@@ -50,3 +50,41 @@ export function workerGroups(lanes: readonly string[], findings: readonly Pick<R
   }
   return [...keys.map(lane => ({ key: lane, label: `Worker ${lane}` })), ...SPECIAL_GROUPS.map(key => ({ key, label: SPECIAL_LABEL[key] }))]
 }
+
+/**
+ * Where a message names `path` verbatim: the index just past each occurrence. An occurrence counts only as a whole path, so
+ * `docs/a.md` is not named by `src/docs/a.md` or `docs/a.mdx`; a trailing sentence period or a `:N` line suffix still counts.
+ * Nothing is inferred from similar names or partial paths (PRD_VIEWER_CLARITY section 2).
+ */
+function occurrencesOf(message: string, path: string): number[] {
+  const ends: number[] = []
+  if (path === '') return ends
+  for (let index = message.indexOf(path); index !== -1; index = message.indexOf(path, index + 1)) {
+    const before = index === 0 ? '' : message[index - 1]
+    const end = index + path.length
+    const after = message.slice(end, end + 2)
+    if (/[\w./-]/.test(before)) continue
+    if (/^[\w/-]/.test(after) || /^\.[\w/-]/.test(after)) continue
+    ends.push(end)
+  }
+  return ends
+}
+
+/** The findings whose message names `path` verbatim, in review order. */
+export function findingsForFile<T extends Pick<ReviewFinding, 'message'>>(findings: readonly T[], path: string): T[] {
+  return findings.filter(finding => occurrencesOf(finding.message, path).length > 0)
+}
+
+/** The `[from, to]` line ranges a message names for `path`: one per `path:N` (N to N) or `path:N-M` occurrence. */
+export function linesNamed(message: string, path: string): [number, number][] {
+  const ranges: [number, number][] = []
+  for (const end of occurrencesOf(message, path)) {
+    const match = /^:(\d+)(?:[-–](\d+))?/.exec(message.slice(end))
+    if (!match) continue
+    const from = Number(match[1])
+    const to = match[2] === undefined ? from : Number(match[2])
+    if (from < 1) continue
+    ranges.push([from, Math.max(from, to)])
+  }
+  return ranges
+}

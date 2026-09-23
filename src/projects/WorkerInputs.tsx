@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
 import type { RunInputWorker, WorkerResult } from './api.ts'
+import { AppLink } from './panels.tsx'
+import { keepInView } from './scroll.ts'
 import { formatDuration, formatTime } from './status.ts'
 import type { Resource } from './useResource.ts'
 
@@ -12,15 +14,9 @@ type TaskProps = {
   highlight: string | null
   /** Called once the highlight has been applied, so the run view forgets it (leaving the node drops it anyway). */
   onHighlightApplied: () => void
-}
-
-/** Scrolls to and focuses an executed check in the evidence list without touching the history. */
-function jumpToCheck(event: MouseEvent<HTMLAnchorElement>, id: string) {
-  const target = document.getElementById(id)
-  if (!target) return
-  event.preventDefault()
-  target.scrollIntoView({ block: 'center' })
-  target.focus()
+  /** The verify node that shows the executed checks with their logs; null when the pinned graph has none. */
+  checksNode: { href: string; label: string } | null
+  onNavigate: (pathname: string) => void
 }
 
 /**
@@ -29,14 +25,15 @@ function jumpToCheck(event: MouseEvent<HTMLAnchorElement>, id: string) {
  * marked and scrolled into view. The quote is captured when the panel mounts (the node detail remounts per
  * node), so clearing the pending hand-off afterwards does not remove the mark until the reader leaves.
  */
-export function TaskPanel({ worker, result, highlight, onHighlightApplied }: TaskProps) {
+export function TaskPanel({ worker, result, highlight, onHighlightApplied, checksNode, onNavigate }: TaskProps) {
   const [view, setView] = useState<'rendered' | 'source'>(() => (highlight === null ? 'rendered' : 'source'))
   const [activeQuote] = useState(() => highlight)
   const markRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (activeQuote === null) return
-    markRef.current?.scrollIntoView({ block: 'center' })
+    const stop = markRef.current ? keepInView(markRef.current, { block: 'center' }) : undefined
     onHighlightApplied()
+    return stop
   }, [activeQuote, onHighlightApplied])
 
   const text = worker.task.text
@@ -104,10 +101,12 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied }: Tas
                     <span className="projects-muted">{result.status === 'loading' ? 'Loading the published result to compare…' : 'No published result to compare against.'}</span>
                   ) : executedIndex === -1 ? (
                     <span className="projects-muted">not executed in this result</span>
+                  ) : checksNode === null ? (
+                    <span>executed as check {executedIndex + 1}: exit {executed[executedIndex].exit_code}</span>
                   ) : (
-                    <a href={`#check-${executedIndex}`} onClick={event => jumpToCheck(event, `check-${executedIndex}`)}>
-                      executed as check {executedIndex + 1}: exit {executed[executedIndex].exit_code}
-                    </a>
+                    <AppLink href={checksNode.href} onNavigate={onNavigate} data-check-index={executedIndex} title={`The check and its log are shown on ${checksNode.label}`}>
+                      executed as check {executedIndex + 1}: exit {executed[executedIndex].exit_code} (on {checksNode.label})
+                    </AppLink>
                   )}
                 </div>
               </li>

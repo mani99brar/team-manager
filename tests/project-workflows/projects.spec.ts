@@ -190,11 +190,12 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
 
 test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions, logs and screenshot evidence (${phase})`, async ({ page, request }, testInfo) => {
   // Discover which nodes published results: from the explicit fixtures in worker mode, from the real adapter in candidate mode.
-  type Snapshot = { snapshot: { nodes: { node_id: string; result_uri: string | null; attempt: number }[] } }
+  type Snapshot = { snapshot: { nodes: { node_id: string; kind: string; result_uri: string | null; attempt: number }[] } }
   type Result = { artifacts: { kind: string }[]; checks: unknown[] }
   const detail: Snapshot = phase === 'worker' ? runDetails[RUN_SUCCEEDED] : await (await request.get(apiRun(RUN_SUCCEEDED))).json()
-  // Worker results only: the review node links to the review result, which carries no artifacts.
-  const published = detail.snapshot.nodes.filter(node => node.result_uri !== null && node.result_uri.includes('/results/'))
+  // Verified worker results only: the review node links to the review result, which carries no artifacts, and a launch node
+  // shows what the worker produced rather than the checks (PRD_VIEWER_CLARITY 4.2).
+  const published = detail.snapshot.nodes.filter(node => node.kind === 'verification' && node.result_uri !== null && node.result_uri.includes('/results/'))
   expect(published.length, 'the succeeded run must expose at least one node result').toBeGreaterThan(0)
   const results = await Promise.all(published.map(async node => ({
     node,
@@ -222,8 +223,8 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   await checks.first().getByRole('button', { name: 'Hide contents' }).click()
   await expect(log).toHaveCount(0)
 
-  // Changed files, assumptions and screenshots come from the result, not from the viewer.
-  await expect(page.getByTestId('changed-files').locator('li')).toContainText(['src/App.tsx'])
+  // Assumptions and screenshots come from the result, not from the viewer; changed files are shown on the launch node.
+  await expect(page.getByTestId('changed-files')).toHaveCount(0)
   await expect(page.getByTestId('assumptions').locator('li')).toContainText([UI_ASSUMPTION])
   const screenshot = page.getByTestId('screenshots').locator('img').first()
   await expect(screenshot).toBeVisible()
@@ -231,6 +232,10 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   await expect(page.getByTestId('node-events').or(page.getByTestId('events-none'))).toBeVisible()
   await expect(page.getByTestId('reuse-none').or(page.getByTestId('reuse-list'))).toBeVisible()
   await attach(page, testInfo, 'run-evidence')
+  const launchNode = target.node_id.replace(/^verify_/, 'launch_')
+  await nodeListItem(page, launchNode).getByRole('link').click()
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', launchNode)
+  await expect(page.getByTestId('changed-files').locator('li')).toContainText(['src/App.tsx'])
 
   // Nodes without a result say so explicitly instead of showing another node's evidence.
   const unpublished = detail.snapshot.nodes.find(node => node.result_uri === null)

@@ -19,7 +19,7 @@ import {
   uiPathQuote,
   uiTask,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, openTask, phase, renderedText, runUrl, taskDetails } from './support.ts'
 
 installHooks()
 
@@ -98,6 +98,7 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
 test(`[scenario:worker-inputs] A worker node shows its task, ownership, required checks linked to executed ones, launch receipt and completion (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED, 'launch_ui'))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
+  await openTask(page)
   const task = taskPanel(page)
   await expect(task).toBeVisible()
   const rendered = task.getByRole('button', { name: 'Rendered' })
@@ -116,19 +117,17 @@ test(`[scenario:worker-inputs] A worker node shows its task, ownership, required
   await expect(rendered).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByTestId('task-source')).toHaveCount(0)
 
-  // Ownership and the required checks: executed ones link to the evidence with their exit code, the rest say so.
+  // Ownership and the required checks: executed ones link to the verify node that shows them with their logs, the rest say so.
   await expect(page.getByTestId('task-owned-paths').locator('li')).toContainText(['src/projects'])
   const checks = page.getByTestId('task-checks')
   await expect(checks.locator('[data-check-id]')).toHaveCount(4)
   const build = checks.locator('[data-check-id="frontend-build"]')
-  await expect(build.getByRole('link')).toHaveAttribute('href', '#check-0')
+  await expect(build.getByRole('link')).toHaveAttribute('href', runUrl(RUN_SUCCEEDED, 'verify_ui'))
+  await expect(build.getByRole('link')).toHaveAttribute('data-check-index', '0')
   await expect(build).toContainText('exit 0')
-  await expect(checks.locator('[data-check-id="project-workflows-browser"]').getByRole('link')).toHaveAttribute('href', '#check-2')
+  await expect(checks.locator('[data-check-id="project-workflows-browser"]').getByRole('link')).toHaveAttribute('data-check-index', '2')
   await expect(checks.locator('[data-check-id="frontend-typecheck"]')).toContainText('not executed in this result')
   await expect(checks.locator('[data-check-id="frontend-typecheck"]').getByRole('link')).toHaveCount(0)
-  await build.getByRole('link').click()
-  await expect(page.locator('#check-0')).toBeVisible()
-  await expect(page.locator('#check-0 .check-command')).toHaveText('npm run build')
 
   // The exact prompt is available but collapsed by default.
   const prompt = page.getByTestId('task-prompt')
@@ -157,8 +156,14 @@ test(`[scenario:worker-inputs] A worker node shows its task, ownership, required
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'worker-inputs')
 
+  // The executed-check link opens the verify node, which shows that check with its log.
+  await build.getByRole('link').click()
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_ui')
+  await expect(page.locator('#check-0 .check-command')).toHaveText('npm run build')
+
   // The adapter recorded no prompt, and its accepted handoff differs from what it reported.
   await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
+  await openTask(page)
   await expect(taskPanel(page)).toBeVisible()
   await expect(page.getByTestId('task-prompt')).toHaveCount(0)
   await expect(taskPanel(page)).toContainText('prompt was not recorded')
@@ -196,6 +201,9 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
   await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED, 'launch_ui')}$`))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
 
+  // The task disclosure, closed by default on a launch node, is opened by the hand-over.
+  await expect(taskDetails(page)).toHaveAttribute('open', '')
+
   // The task panel is forced to Source and the quote is wrapped in a visible, scrolled-into-view mark.
   await expect(taskPanel(page).getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true')
   const highlight = page.getByTestId('task-highlight')
@@ -213,8 +221,10 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
   await nodeListItem(page, 'review').getByRole('link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await nodeListItem(page, 'launch_ui').getByRole('link').click()
-  await expect(taskPanel(page)).toBeVisible()
+  await expect(taskDetails(page)).toBeVisible()
+  await expect(taskDetails(page)).not.toHaveAttribute('open', '')
   await expect(page.getByTestId('task-highlight')).toHaveCount(0)
+  await openTask(page)
   await expect(taskPanel(page).getByRole('button', { name: 'Rendered' })).toHaveAttribute('aria-pressed', 'true')
 
   // A quote that names a directory still links, and the highlighted text is the redacted form.
@@ -261,6 +271,7 @@ test(`[scenario:inputs-paths-redacted] No absolute path from the seeded inputs r
   // The worker node's task source, exact prompt and completion signal are all served redacted.
   await page.goto(runUrl(RUN_SUCCEEDED, 'launch_ui'))
   await expect(page.getByTestId('worker-completion')).toContainText(PATH_TOKEN)
+  await openTask(page)
   await taskPanel(page).getByRole('button', { name: 'Source' }).click()
   await page.getByTestId('task-prompt').locator('summary').click()
   await expect(page.getByTestId('task-prompt')).toContainText(uiPathQuote(PATH_TOKEN))

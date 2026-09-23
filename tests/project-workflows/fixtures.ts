@@ -17,7 +17,11 @@
  * `reviewers-flow` holds the parallel-reviewer runs (PRD_PARALLEL_REVIEWERS section 4): two 1.4.0 exports of a
  * feature declaring the reviewers `general` and `coverage` (one where both approved, one where `coverage`
  * blocked while `general` was superseded) and one 1.3.0 export of the same graph reviewed by the single
- * default reviewer, whose projection carries a one-entry `reviewers` list named `review`.
+ * default reviewer, whose projection carries a one-entry `reviewers` list named `review`. `clarity-flow` holds one 1.4.0
+ * run whose ui worker-phase result carries the files the verifier captured at freeze (PRD_VIEWER_CLARITY section 4.1): a
+ * Markdown and a TypeScript `file` artifact, a too-large and a binary entry in `files_not_captured`, and review findings
+ * naming those files with and without line ranges plus one naming a similar but different path. Every other run is
+ * unchanged and records no capture, like results verified before it existed.
  */
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
@@ -67,6 +71,11 @@ export const ONE_LANE = ['docs'] as const
 export const TWO_LANES = ['ui', 'adapter'] as const
 /** The reviewers the `reviewers-flow` feature declares, in declared order. */
 export const TWO_REVIEWERS = ['general', 'coverage'] as const
+/** The workflow whose run captured the files its worker created (PRD_VIEWER_CLARITY); two lanes, two reviewers. */
+export const CLARITY_WORKFLOW_ID = 'clarity-flow'
+export const CLARITY_WORKFLOW_NAME = 'Clarity flow'
+/** A 1.4.0 export whose ui worker-phase packet captured the changed files; reviewed by `general` and `coverage`. */
+export const RUN_FILES = 'run-files-captured'
 /** The id the adapter gives the single reviewer of an export that predates `reviewers`. */
 export const DEFAULT_REVIEWER_ID = 'review'
 export const PINNED_LABEL = 'Verify UI (pinned r1)'
@@ -87,6 +96,7 @@ export const PATH_TOKEN = '<path>'
 export const FEATURE_NAME = 'Review visibility and run inputs in the viewer'
 export const LANES_FEATURE_NAME = 'Worker lanes from configuration'
 export const REVIEWERS_FEATURE_NAME = 'Parallel reviewers'
+export const CLARITY_FEATURE_NAME = 'Viewer clarity'
 export const REVIEWER_SESSION = '33333333-3333-4333-8333-333333333333'
 export const PRINT_REVIEWER_SESSION = '44444444-4444-4444-8444-444444444444'
 export const GENERAL_REVIEWER_SESSION = '66666666-6666-4666-8666-666666666666'
@@ -145,6 +155,7 @@ export const THREE_LANE_NODES = laneGraphNodes(THREE_LANES)
 export const ONE_LANE_NODES = laneGraphNodes(ONE_LANE)
 /** The reviewers workflow pins the plain two-lane graph; reviewers share the one `review` node, so the graph does not change with them. */
 export const REVIEWERS_NODES = laneGraphNodes(TWO_LANES)
+export const CLARITY_NODES = laneGraphNodes(TWO_LANES)
 
 /** Definition revision exactly as the contract specifies: SHA-256 of canonical JSON without `definition_revision`. */
 export function definitionRevision(definition: { contract_version: string; project_id: string; workflow_id: string; name: string; nodes: DefinitionNode[] }): string {
@@ -171,10 +182,11 @@ export const EMPTY_WORKFLOW_DEFINITION = definition(PROJECT.project_id, EMPTY_WO
 export const LANES_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID, LANES_WORKFLOW_NAME, THREE_LANE_NODES)
 export const ONE_LANE_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID, LANES_WORKFLOW_NAME, ONE_LANE_NODES)
 export const REVIEWERS_DEFINITION = definition(PROJECT.project_id, REVIEWERS_WORKFLOW_ID, REVIEWERS_WORKFLOW_NAME, REVIEWERS_NODES)
+export const CLARITY_DEFINITION = definition(PROJECT.project_id, CLARITY_WORKFLOW_ID, CLARITY_WORKFLOW_NAME, CLARITY_NODES)
 
 export const projectList = { projects: [PROJECT, EMPTY_PROJECT] }
 export const workflowLists: Record<string, { workflows: WorkflowDefinition[] }> = {
-  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION] },
+  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION, CLARITY_DEFINITION] },
   [EMPTY_PROJECT.project_id]: { workflows: [] },
 }
 
@@ -235,7 +247,8 @@ export const REVIEW_DIFF_ARTIFACT_ID = `patch-review-${sha256(REVIEW_DIFF).slice
 
 // ---- Artifacts and worker results ------------------------------------------------------------------
 
-export type ArtifactFile = { artifact_id: string; kind: WorkerResult['artifacts'][number]['kind']; content: Buffer; contentType: string }
+/** `path` is set exactly for `file` artifacts: the repo-relative path of a file the verifier captured at freeze. */
+export type ArtifactFile = { artifact_id: string; kind: WorkerResult['artifacts'][number]['kind']; content: Buffer; contentType: string; path?: string }
 
 function logArtifact(id: string, command: string, exitCode: number): ArtifactFile {
   const content = Buffer.from(`${LOG_TEXT_PREFIX} ${command}\n... output elided ...\nexit ${exitCode}\n`, 'utf8')
@@ -261,8 +274,57 @@ export const LANE_ARTIFACTS: Record<string, ArtifactFile[]> = { ui: UI_ARTIFACTS
 export const REVIEW_DIFF_ARTIFACT: ArtifactFile = { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', content: Buffer.from(REVIEW_DIFF, 'utf8'), contentType: 'text/plain; charset=utf-8' }
 
 function artifactRefs(files: ArtifactFile[]): WorkerResult['artifacts'] {
-  return files.map(file => ({ artifact_id: file.artifact_id, kind: file.kind, uri: file.artifact_id, sha256: sha256(file.content) }))
+  return files.map(file => ({ artifact_id: file.artifact_id, kind: file.kind, uri: file.artifact_id, sha256: sha256(file.content), ...(file.path === undefined ? {} : { path: file.path }) }))
 }
+
+// ---- Files captured at freeze (PRD_VIEWER_CLARITY 4.1) ---------------------------------------------------
+
+/** The captured Markdown file; its lines 12 to 14 are the ones a finding names. */
+export const AUDIT_PATH = 'docs/audit/WORKFLOW_AUDIT.md'
+/** The captured TypeScript file, named by no finding. */
+export const CAPTURE_TS_PATH = 'src/projects/capture.ts'
+/** Changed but over the per-file cap, so listed in `files_not_captured` as `too_large`. */
+export const TOO_LARGE_PATH = 'tests/fixtures/trace.json'
+/** Changed but binary, so listed in `files_not_captured` as `binary`. */
+export const BINARY_PATH = 'docs/audit/graph.png'
+/** Similar to the captured Markdown path but a different file: a finding naming it must not attach to the captured file. */
+export const SIMILAR_PATH = 'docs/WORKFLOW_AUDIT.md'
+export const CAPTURED_CHANGED_FILES = [AUDIT_PATH, CAPTURE_TS_PATH, TOO_LARGE_PATH, BINARY_PATH]
+export const AUDIT_MARKDOWN = [
+  '# Workflow audit',
+  '',
+  'Run: viewer-clarity-001, audited on 2026-03-01.',
+  '',
+  '## Scope',
+  '',
+  '- The trusted verifier captures changed text files at freeze.',
+  '- The server never reads the repository on demand.',
+  '',
+  '## Recheck',
+  '',
+  '1. Recompute the sha256 of every retained artifact.',
+  '2. Compare it with the packet registration.',
+  '3. Reject the packet on the first mismatch.',
+  '',
+  '## Open questions',
+  '',
+  '- Whether the candidate phase should capture files too.',
+  '',
+].join('\n')
+/** The lines of the audit a finding names as `path:12-14`. */
+export const AUDIT_NAMED_LINES = [12, 14] as const
+export const CAPTURE_TS = [
+  "export const CAPTURE_CAP_BYTES = 512 * 1024",
+  '',
+  'export function isCapturable(bytes: number, text: boolean): boolean {',
+  '  return text && bytes <= CAPTURE_CAP_BYTES',
+  '}',
+  '',
+].join('\n')
+export const FILE_ARTIFACTS: ArtifactFile[] = [
+  { artifact_id: 'file-5-workflow-audit-md', kind: 'file', path: AUDIT_PATH, content: Buffer.from(AUDIT_MARKDOWN, 'utf8'), contentType: 'text/plain; charset=utf-8' },
+  { artifact_id: 'file-6-capture-ts', kind: 'file', path: CAPTURE_TS_PATH, content: Buffer.from(CAPTURE_TS, 'utf8'), contentType: 'text/plain; charset=utf-8' },
+]
 
 function checks(cwd: string, entries: { command: string; log: string; exit: number; start: string; finish: string }[]): WorkerResult['checks'] {
   return entries.map(entry => ({ command: entry.command, cwd, started_at: entry.start, finished_at: entry.finish, exit_code: entry.exit, log_artifact_id: entry.log }))
@@ -335,6 +397,25 @@ export function docsResult(runId: string): WorkerResult {
     summary: 'Trusted worker check capture of the docs worktree; not integration approval.',
     error: null,
   })
+}
+
+/**
+ * The ui lane's worker-phase result with the files captured at freeze: the Markdown and TypeScript files as `file` artifacts
+ * with their paths, the too-large and the binary file listed with their reasons. Checks and screenshots are the usual ones.
+ */
+export function capturedUiResult(runId: string): WorkerResult {
+  const base = uiResult(runId)
+  return validateWorkerResult({
+    ...base,
+    changed_files: CAPTURED_CHANGED_FILES,
+    artifacts: [...base.artifacts, ...artifactRefs(FILE_ARTIFACTS)],
+    files_not_captured: [{ path: TOO_LARGE_PATH, reason: 'too_large' }, { path: BINARY_PATH, reason: 'binary' }],
+  })
+}
+
+/** The same lane at the combined candidate: changed files are listed as always, nothing is captured in that phase. */
+export function candidateUiResult(runId: string): WorkerResult {
+  return validateWorkerResult({ ...uiResult(runId), changed_files: CAPTURED_CHANGED_FILES })
 }
 
 /** The verified result of a lane in the runs whose lanes come from configuration (none of them failed). */
@@ -420,10 +501,13 @@ export const runDetails: Record<string, RunDetail> = {
   [RUN_LEGACY_REVIEWER]: runDetail(RUN_LEGACY_REVIEWER, 'succeeded', REVIEWERS_DEFINITION, T0, T2, {
     ...lanesVerified(TWO_LANES), review: { status: 'succeeded', attempt: 1, session: LEGACY_REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
   }, 9),
+  [RUN_FILES]: runDetail(RUN_FILES, 'succeeded', CLARITY_DEFINITION, T1, T3, {
+    ...lanesVerified(TWO_LANES), review: { status: 'succeeded', attempt: 1, session: GENERAL_REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
+  }, 6),
 }
 
 /** Each workflow's runs sorted by `updated_at` descending then `run_id` ascending, as the contract requires. */
-export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID].map(workflowId => [workflowId, {
+export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, CLARITY_WORKFLOW_ID].map(workflowId => [workflowId, {
   runs: Object.values(runDetails).map(detail => detail.summary).filter(summary => summary.workflow_id === workflowId)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.run_id.localeCompare(b.run_id)),
   next_cursor: null,
@@ -443,6 +527,10 @@ export const workerResults: Record<string, Record<string, WorkerResult>> = {
   ...Object.fromEntries([RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER].map(runId => [runId, {
     ...Object.fromEntries(TWO_LANES.map(lane => [`${lane}/1`, laneResult(lane, runId)])), ...candidateResults(runId, TWO_LANES),
   }])),
+  [RUN_FILES]: {
+    'ui/1': capturedUiResult(RUN_FILES), 'adapter/1': adapterResult(RUN_FILES, false),
+    'candidate_ui/1': candidateUiResult(RUN_FILES), 'candidate_adapter/1': adapterResult(RUN_FILES, false),
+  },
 }
 
 function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {
@@ -515,6 +603,13 @@ export const runEvents: Record<string, WorkflowEvent[]> = {
     event(RUN_LEGACY_REVIEWER, 3, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'succeeded', message: `Reviewer session ${LEGACY_REVIEWER_SESSION} approved the candidate` }),
     event(RUN_LEGACY_REVIEWER, 4, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
   ],
+  [RUN_FILES]: [
+    ...TWO_LANES.map((lane, index) => event(RUN_FILES, index + 1, { type: 'status_changed', node_id: `launch_${lane}`, attempt: 1, status: 'succeeded', message: `Native ${lane} session launched and its turn ended; not implementation completion` })),
+    event(RUN_FILES, 3, { type: 'status_changed', node_id: 'verify_ui', attempt: 1, status: 'succeeded', message: 'ui verification passed; changed text files captured at freeze' }),
+    event(RUN_FILES, 4, { type: 'status_changed', node_id: 'candidate', attempt: 1, status: 'succeeded', message: 'Combined candidate checks passed' }),
+    event(RUN_FILES, 5, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'succeeded', message: 'Reviewers general and coverage approved the candidate' }),
+    event(RUN_FILES, 6, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
+  ],
 }
 
 export const artifactFiles: Record<string, ArtifactFile[]> = {
@@ -528,6 +623,7 @@ export const artifactFiles: Record<string, ArtifactFile[]> = {
   [RUN_TWO_REVIEWERS]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
   [RUN_REVIEWER_BLOCKED]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
   [RUN_LEGACY_REVIEWER]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
+  [RUN_FILES]: [...TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]), ...FILE_ARTIFACTS],
 }
 
 // ---- Worker tasks, prompts and the reviewer's quotes ----------------------------------------------------
@@ -690,6 +786,15 @@ export const COVERAGE_FINDING_UI = 'No browser scenario drives the reviewer filt
 export const COVERAGE_FINDING_ADAPTER = 'The adapter unit tests never serve a superseded reviewer entry.'
 export const BLOCKING_COVERAGE_FINDING = 'The two-reviewer browser scenario asserts nothing about the blocked run.'
 
+/** Findings of the captured-files run: which name the captured Markdown file verbatim, with or without lines, and which do not. */
+export const FILE_FINDING_PLAIN = `${AUDIT_PATH} does not say which reviewer brief applies to print jobs.`
+export const FILE_FINDING_SIMILAR = `The audit summary cites ${SIMILAR_PATH}, a path that does not exist.`
+export const FILE_FINDING_RANGE = `${AUDIT_PATH}:12-14 lists the recheck steps, but no unit test tampers with a file artifact.`
+export const FILE_FINDING_NONE = 'No unit test drives the budget reason of files_not_captured.'
+export const FILE_FINDING_LINE = `${AUDIT_PATH}:3 names the run without its workflow.`
+/** The findings naming the captured Markdown file, in review order. */
+export const AUDIT_FINDINGS = [FILE_FINDING_PLAIN, FILE_FINDING_RANGE, FILE_FINDING_LINE]
+
 /** The findings one reviewer of a two-reviewer run recorded (tagged with its id); the run's union keeps declared order. */
 export function reviewerFindings(runId: string, reviewer: string): RawFinding[] {
   return reviewFindings(runId).filter(finding => finding.reviewer === reviewer)
@@ -697,6 +802,17 @@ export function reviewerFindings(runId: string, reviewer: string): RawFinding[] 
 
 /** The reviewer's findings for a run (the union of every reviewer's from 1.4.0); one message and one quote name a directory (redacted by the adapter). */
 export function reviewFindings(runId: string, leak = PATH_TOKEN): RawFinding[] {
+  if (runId === RUN_FILES) {
+    // `general` then `coverage`: three findings name the captured Markdown file (one without lines, one `:12-14`, one `:3`),
+    // one names a similar but different path, one names no file; none names the captured TypeScript file.
+    return [
+      { severity: 'P2', message: FILE_FINDING_PLAIN, disposition: 'open', worker: 'ui', requirement: UI_QUOTE, reviewer: 'general' },
+      { severity: 'P2', message: FILE_FINDING_SIMILAR, disposition: 'accepted', worker: 'ui', requirement: null, reviewer: 'general' },
+      { severity: 'P1', message: FILE_FINDING_RANGE, disposition: 'resolved', worker: 'ui', requirement: null, reviewer: 'coverage' },
+      { severity: 'P2', message: FILE_FINDING_NONE, disposition: 'open', worker: 'adapter', requirement: ADAPTER_QUOTE, reviewer: 'coverage' },
+      { severity: 'P2', message: FILE_FINDING_LINE, disposition: 'open', worker: 'ui', requirement: null, reviewer: 'coverage' },
+    ]
+  }
   if (runId === RUN_TWO_REVIEWERS) {
     // `general` then `coverage` in declared order; the first ui finding was raised by both and stays two findings.
     return [
@@ -799,6 +915,18 @@ export function rawReviewSection(runId: string, leak = PATH_TOKEN): RawReviewSec
       ],
     }
   }
+  if (runId === RUN_FILES) {
+    // Both reviewers approved; the P1 was resolved before the verdict, so nothing blocks.
+    const findings = reviewFindings(runId, leak)
+    return {
+      attempt: 1, transport: 'native', reviewer_session_id: JOINED_REVIEWER_SESSIONS, independent: true, bundle_sha256: BUNDLE_SHA256, candidate_commit: CANDIDATE_COMMIT,
+      verdict: 'approved', findings, reviewed_at: offset(T3), diff: null,
+      reviewers: TWO_REVIEWERS.map(reviewer => ({
+        reviewer_id: reviewer, transport: 'native', session_id: REVIEWER_SESSIONS[reviewer], verdict: 'approved',
+        findings: findings.filter(finding => finding.reviewer === reviewer), launched_at: offset(T2), accepted_at: offset(T3), status: 'accepted',
+      })),
+    }
+  }
   if (runId === RUN_LEGACY_REVIEWER) {
     // A 1.3.0 export: one reviewer, no `reviewers` list and no `reviewer` tags; the adapter fills one entry named `review`.
     return {
@@ -890,10 +1018,12 @@ function rawLaneWorker(lane: string, runId: string, leak: string, requestedAt: s
 /** The export's `inputs` section for a run, or null for the legacy export that predates it. */
 export function rawInputsSection(runId: string, leak = PATH_TOKEN): RawInputsSection | null {
   if (runId === RUN_LEGACY) return null
-  if (runId === RUN_TWO_REVIEWERS || runId === RUN_REVIEWER_BLOCKED || runId === RUN_LEGACY_REVIEWER) {
+  if (runId === RUN_TWO_REVIEWERS || runId === RUN_REVIEWER_BLOCKED || runId === RUN_LEGACY_REVIEWER || runId === RUN_FILES) {
     // The reviewers workflow's lanes are pinned like any configured policy's; the reviewer set lives in the review section, not here.
+    const files = runId === RUN_FILES
     return {
-      feature: REVIEWERS_FEATURE_NAME, policy_version: '1.2.0', base_commit: BASE_COMMIT, source_branch: sourceBranch(runId, REVIEWERS_WORKFLOW_ID),
+      feature: files ? CLARITY_FEATURE_NAME : REVIEWERS_FEATURE_NAME, policy_version: '1.2.0', base_commit: BASE_COMMIT,
+      source_branch: sourceBranch(runId, files ? CLARITY_WORKFLOW_ID : REVIEWERS_WORKFLOW_ID),
       mode: 'automatic',
       automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 7200, review_timeout_seconds: 1800, reviewer_transport: 'native' },
       setup: [{ argv: ['npm', 'ci'], command: 'npm ci', timeout_seconds: 600 }],
@@ -1008,7 +1138,7 @@ function projectInputs(runId: string, section: RawInputsSection): RunInputs {
 const taskTexts = (section: RawInputsSection | null): Record<string, string> =>
   Object.fromEntries(Object.entries(section?.workers ?? {}).map(([lane, worker]) => [lane, worker.task]))
 
-const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE, RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER]
+const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE, RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER, RUN_FILES]
 
 /** Projected review results per run (runs without one are absent: the mock answers 404 REVIEW_NOT_FOUND). */
 export const reviewResults: Record<string, ReviewResult> = Object.fromEntries(ALL_RUNS.flatMap(runId => {

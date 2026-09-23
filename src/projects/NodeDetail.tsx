@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 import {
   fetchArtifactText,
   fetchWorkerResult,
@@ -6,24 +6,30 @@ import {
   scopedResultPath,
   type RunDetail,
   type RunInputs,
+  type ReviewResult,
   type RunScope,
   type WorkerResult,
   type WorkflowEvent,
 } from './api.ts'
-import { ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
+import { CreatedFiles } from './CreatedFiles.tsx'
+import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { ReviewPanel } from './ReviewDetail.tsx'
-import { formatTime, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
+import { runPathname } from './routes.ts'
+import { executorCategory, executorOf, formatTime, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
 import { useResource, type Resource } from './useResource.ts'
 import { LaunchReceipt, StopLine, TaskPanel, WorkerSignals } from './WorkerInputs.tsx'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
+type ReviewTransport = ReviewResult['reviewer']['transport']
 
 type Props = {
   scope: RunScope
   definition: DefinitionNode
   /** Every node of the pinned definition, so review findings can link to the lanes' launch nodes. */
   definitionNodes: DefinitionNode[]
+  /** Every node's state in the run, so a launch node can find the review and a review can find the launch nodes' files. */
+  snapshotNodes: SnapshotNode[]
   node: SnapshotNode
   events: Resource<WorkflowEvent[]>
   onRetryEvents: () => void
@@ -36,6 +42,10 @@ type Props = {
   highlight: string | null
   onHighlightApplied: () => void
   onOpenRequirement: (nodeId: string, quote: string) => void
+  /** A captured file to scroll to on this launch node, handed over by a review finding's file link. */
+  fileFocus: string | null
+  onFileFocusApplied: () => void
+  onOpenFile: (nodeId: string, path: string) => void
 }
 
 function shortSha(value: string | null): string {
@@ -77,16 +87,10 @@ function ScreenshotArtifact({ scope, artifactId }: { scope: RunScope; artifactId
   )
 }
 
-function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { scope: RunScope; result: WorkerResult; node: SnapshotNode; testId?: string }) {
-  const artifactsById = new Map(result.artifacts.map(artifact => [artifact.artifact_id, artifact]))
-  const checkLogs = new Set(result.checks.map(check => check.log_artifact_id))
-  const screenshots = result.artifacts.filter(artifact => artifact.kind === 'screenshot')
-  // Check logs are shown with their check; everything else that is not a screenshot is listed here.
-  const others = result.artifacts.filter(artifact => artifact.kind !== 'screenshot' && !checkLogs.has(artifact.artifact_id))
-  // Checks the gate recorded on this isolated snapshot but gates only at the combined candidate (build, browser).
-  const deferred = new Map((result.deferred_checks ?? []).map(entry => [entry.check_index, entry.id]))
+/** The facts that anchor a result to its snapshot, shown on both the launch and the verify node: status, attempt, session, commits, summary, error, assumptions. */
+function ResultFacts({ result, node }: { result: WorkerResult; node: SnapshotNode }) {
   return (
-    <div className="worker-evidence" data-testid={testId}>
+    <>
       <dl className="projects-facts">
         <div><dt>Result status</dt><dd><StatusBadge status={result.status} /></dd></div>
         <div><dt>Result attempt</dt><dd>{result.attempt}{result.attempt !== node.attempt ? ` (graph node attempt is ${node.attempt})` : ''}</dd></div>
@@ -101,14 +105,79 @@ function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { sco
           <p>{result.error.retryable ? 'Marked retryable by the producer. Retrying is done through the workflow CLI, not this viewer.' : 'Marked not retryable by the producer.'}</p>
         </div>
       )}
+      <section className="evidence-section" aria-labelledby="evidence-assumptions">
+        <h4 id="evidence-assumptions">Open assumptions</h4>
+        {result.open_assumptions.length === 0 ? (
+          <p className="projects-muted" data-testid="assumptions-empty">No open assumptions were recorded.</p>
+        ) : (
+          <ul className="evidence-list" data-testid="assumptions">
+            {result.open_assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}
+          </ul>
+        )}
+      </section>
+    </>
+  )
+}
 
-      <section className="evidence-section" aria-labelledby="evidence-checks">
-        <h4 id="evidence-checks">Checks actually executed</h4>
+/** What the worker produced, on its launch node: the result facts and the files it created or changed, as captured at freeze. */
+function ProducedEvidence({ scope, result, node, reviewNode, refreshToken, focusPath, onFocusApplied }: {
+  scope: RunScope
+  result: WorkerResult
+  node: SnapshotNode
+  reviewNode: SnapshotNode | null
+  refreshToken: number
+  focusPath: string | null
+  onFocusApplied: () => void
+}) {
+  return (
+    <div className="worker-evidence" data-testid="worker-result" data-view="produced">
+      <ResultFacts result={result} node={node} />
+      <CreatedFiles scope={scope} result={result} reviewNode={reviewNode} refreshToken={refreshToken} focusPath={focusPath} onFocusApplied={onFocusApplied} />
+    </div>
+  )
+}
+
+/**
+ * What the trusted verifier proved, on a verify node and for each lane of the combined candidate: the result facts, the
+ * gate with its deferred checks, the checks with their logs, screenshots, other artifacts and the ownership outcome.
+ * Captured files are the launch node's; they are not repeated here.
+ */
+function VerifiedEvidence({ scope, result, node, phase, testId = 'worker-result' }: { scope: RunScope; result: WorkerResult; node: SnapshotNode; phase: 'worker' | 'candidate'; testId?: string }) {
+  const artifactsById = new Map(result.artifacts.map(artifact => [artifact.artifact_id, artifact]))
+  const checkLogs = new Set(result.checks.map(check => check.log_artifact_id))
+  const screenshots = result.artifacts.filter(artifact => artifact.kind === 'screenshot')
+  // Check logs are shown with their check and captured files on the launch node; everything else that is not a screenshot is listed here.
+  const others = result.artifacts.filter(artifact => artifact.kind !== 'screenshot' && artifact.kind !== 'file' && !checkLogs.has(artifact.artifact_id))
+  // Checks the gate recorded on this isolated snapshot but gates only at the combined candidate (build, browser).
+  const deferred = new Map((result.deferred_checks ?? []).map(entry => [entry.check_index, entry.id]))
+  const passed = result.status === 'succeeded' && result.error === null
+  return (
+    <div className="worker-evidence" data-testid={testId} data-view="verified">
+      <ResultFacts result={result} node={node} />
+
+      <section className="evidence-section" aria-labelledby={`${testId}-gate`} data-testid="gate-outcome" data-passed={passed ? 'true' : 'false'}>
+        <h4 id={`${testId}-gate`}>Gate</h4>
+        <p>
+          {passed
+            ? `Passed: every gating check of this ${phase === 'worker' ? 'isolated lane snapshot' : 'combined candidate'} exited 0.`
+            : 'Did not pass: see the error above for the reasons the gate recorded.'}
+        </p>
         {deferred.size > 0 && (
           <p className="projects-notice-inline" data-testid="deferred-checks">
             Deferred checks: {[...deferred.values()].join(', ')} — executed and recorded on this isolated lane snapshot, but gated only at the combined candidate, which verifies the whole application.
           </p>
         )}
+        <p className="projects-muted" data-testid="ownership-outcome">
+          {phase === 'candidate'
+            ? 'Ownership: enforced on each lane\'s isolated snapshot, not on the combined candidate.'
+            : passed
+              ? 'Ownership: the verifier checked the changed files against the lane\'s owned paths on this snapshot, and the gate passed.'
+              : 'Ownership: checked on this snapshot; an ownership violation, if there was one, is among the reasons in the error above.'}
+        </p>
+      </section>
+
+      <section className="evidence-section" aria-labelledby={`${testId}-checks`}>
+        <h4 id={`${testId}-checks`}>Checks actually executed</h4>
         {result.checks.length === 0 ? (
           <p className="projects-muted" data-testid="checks-empty">No checks were recorded for this result.</p>
         ) : (
@@ -137,30 +206,8 @@ function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { sco
         )}
       </section>
 
-      <section className="evidence-section" aria-labelledby="evidence-files">
-        <h4 id="evidence-files">Changed files</h4>
-        {result.changed_files.length === 0 ? (
-          <p className="projects-muted" data-testid="changed-files-empty">No changed files were recorded.</p>
-        ) : (
-          <ul className="evidence-list evidence-files" data-testid="changed-files">
-            {result.changed_files.map(file => <li key={file}><code>{file}</code></li>)}
-          </ul>
-        )}
-      </section>
-
-      <section className="evidence-section" aria-labelledby="evidence-assumptions">
-        <h4 id="evidence-assumptions">Open assumptions</h4>
-        {result.open_assumptions.length === 0 ? (
-          <p className="projects-muted" data-testid="assumptions-empty">No open assumptions were recorded.</p>
-        ) : (
-          <ul className="evidence-list" data-testid="assumptions">
-            {result.open_assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}
-          </ul>
-        )}
-      </section>
-
-      <section className="evidence-section" aria-labelledby="evidence-screenshots">
-        <h4 id="evidence-screenshots">Screenshots</h4>
+      <section className="evidence-section" aria-labelledby={`${testId}-screenshots`}>
+        <h4 id={`${testId}-screenshots`}>Screenshots</h4>
         {screenshots.length === 0 && deferred.size > 0 ? (
           <p className="projects-muted" data-testid="screenshots-deferred">No screenshot artifacts were published for this isolated lane run; browser evidence is gated and shown at the combined candidate.</p>
         ) : screenshots.length === 0 ? (
@@ -177,10 +224,10 @@ function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { sco
         )}
       </section>
 
-      <section className="evidence-section" aria-labelledby="evidence-artifacts">
-        <h4 id="evidence-artifacts">Other artifacts</h4>
+      <section className="evidence-section" aria-labelledby={`${testId}-artifacts`}>
+        <h4 id={`${testId}-artifacts`}>Other artifacts</h4>
         {others.length === 0 ? (
-          <p className="projects-muted">No artifacts beyond the check logs and screenshots were published.</p>
+          <p className="projects-muted">No artifacts beyond the check logs, screenshots and captured files were published.</p>
         ) : (
           <ul className="evidence-list" data-testid="artifacts">
             {others.map(artifact => (
@@ -199,32 +246,60 @@ function WorkerEvidence({ scope, result, node, testId = 'worker-result' }: { sco
 }
 
 /** One lane's result of the combined candidate, fetched through the run's scoped results route like any worker result. */
-function LaneResult({ scope, node, lane, refreshToken }: { scope: RunScope; node: SnapshotNode; lane: SnapshotNode['lane_results'][number]; refreshToken: number }) {
+function LaneResult({ scope, node, lane, launchNodeId, refreshToken, onNavigate }: {
+  scope: RunScope
+  node: SnapshotNode
+  lane: SnapshotNode['lane_results'][number]
+  /** The graph node that launched the lane, which shows the files it created; null when the pinned graph has none. */
+  launchNodeId: string | null
+  refreshToken: number
+  onNavigate: (pathname: string) => void
+}) {
   const resultPath = scopedResultPath(scope, lane.result_uri)
   const load = useCallback((signal: AbortSignal) => fetchWorkerResult(scope, resultPath!, signal), [scope, resultPath])
   const { state, reload } = useResource(resultPath, load, refreshToken)
   return (
     <section className="lane-result" aria-label={`Lane ${lane.worker}`} data-testid={`lane-result:${lane.worker}`}>
       <h5>Lane {lane.worker} <span className="projects-muted">· candidate attempt {lane.attempt}</span></h5>
+      {launchNodeId !== null && (
+        <p className="projects-muted" data-testid="lane-files-link">
+          Files are captured on the lane's worker snapshot only:{' '}
+          <AppLink href={runPathname(scope.projectId, scope.workflowId, scope.runId, launchNodeId)} onNavigate={onNavigate}>open the files the {lane.worker} lane created or changed</AppLink>.
+        </p>
+      )}
       {resultPath === null && (
         <p className="projects-error-inline" role="alert">The result link <code>{lane.result_uri}</code> is outside this run's results route and was not fetched.</p>
       )}
       {resultPath !== null && state.status === 'loading' && <LoadingPanel>Loading the {lane.worker} lane result…</LoadingPanel>}
       {resultPath !== null && state.status === 'error' && <ErrorPanel error={state.error} what={`The ${lane.worker} lane result`} onRetry={reload} />}
-      {resultPath !== null && state.status === 'ready' && <WorkerEvidence scope={scope} result={state.data} node={node} testId={`lane-result-evidence:${lane.worker}`} />}
+      {resultPath !== null && state.status === 'ready' && <VerifiedEvidence scope={scope} result={state.data} node={node} phase="candidate" testId={`lane-result-evidence:${lane.worker}`} />}
     </section>
   )
 }
 
+/** The pinned task behind a disclosure, closed by default and opened when a finding link hands over a quote to highlight. */
+function TaskDisclosure({ highlight, children }: { highlight: string | null; children: ReactNode }) {
+  const [open, setOpen] = useState(highlight !== null)
+  return (
+    <details className="evidence-section task-details" data-testid="task-details" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+      <summary>Task: what this worker was asked to do</summary>
+      {children}
+    </details>
+  )
+}
+
 /**
- * Everything known about one node of a run: state, reuse evidence, result and events. Absent evidence is
- * stated. A worker node also shows what it was asked to do (task, receipts, completion) when the run's inputs
- * are recorded; a review node's Result is the recorded review verdict.
+ * Everything known about one node of a run: state, executor, reuse evidence, result and events. Absent evidence is stated.
+ * A launch node shows what the worker produced first (result facts and created files), then its completion signal, launch
+ * receipt and the task behind a disclosure; a verify node shows what the verifier proved (gate, checks, screenshots); a
+ * review node's Result is the recorded review verdict.
  */
-export function NodeDetail({ scope, definition, definitionNodes, node, events, onRetryEvents, inputs, onRetryInputs, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement }: Props) {
+export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, node, events, onRetryEvents, inputs, onRetryInputs, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
   const resultPath = node.result_uri === null || definition.kind === 'review' ? null : scopedResultPath(scope, node.result_uri)
   const loadResult = useCallback((signal: AbortSignal) => fetchWorkerResult(scope, resultPath!, signal), [scope, resultPath])
   const { state: result, reload: reloadResult } = useResource(resultPath, loadResult, refreshToken)
+  // A review's executor wording depends on the transport its served result records, known once the review panel loads it.
+  const [reviewTransport, setReviewTransport] = useState<ReviewTransport | undefined>(undefined)
 
   const nodeEvents = events.status === 'ready' ? events.data.filter(event => event.node_id === node.node_id) : []
   const reuse = nodeEvents.filter(event => event.type === 'result_reused')
@@ -235,12 +310,54 @@ export function NodeDetail({ scope, definition, definitionNodes, node, events, o
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const worker = isWorker && recordedInputs !== null ? recordedInputs.workers.find(candidate => candidate.launch_node_id === node.node_id) ?? null : null
   const receiptSession = worker?.launch?.session_id ?? null
+  const reviewNode = snapshotNodes.find(candidate => candidate.kind === 'review') ?? null
+  const hasNode = (nodeId: string) => definitionNodes.some(candidate => candidate.node_id === nodeId)
+  const launchNodeOf = (lane: string) => {
+    const launched = recordedInputs?.workers.find(candidate => candidate.node_id === lane)?.launch_node_id
+    if (launched) return launched
+    return hasNode(`launch_${lane}`) ? `launch_${lane}` : null
+  }
+  const verifyNodeId = worker !== null && hasNode(`verify_${worker.node_id}`) ? `verify_${worker.node_id}` : null
+
+  const resultBody = (evidence: (data: WorkerResult) => ReactNode) => (
+    <>
+      {node.result_uri === null && node.lane_results.length === 0 && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
+      {node.result_uri !== null && resultPath === null && (
+        <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
+          The result link <code>{node.result_uri}</code> is outside this run's results route and was not fetched.
+        </p>
+      )}
+      {resultPath !== null && result.status === 'loading' && <LoadingPanel>Loading the result…</LoadingPanel>}
+      {resultPath !== null && result.status === 'error' && <ErrorPanel error={result.error} what="The node result" onRetry={reloadResult} />}
+      {resultPath !== null && result.status === 'ready' && evidence(result.data)}
+    </>
+  )
+
+  const reuseSection = (
+    <section className="evidence-section" aria-labelledby="node-reuse">
+      <h4 id="node-reuse">Reuse evidence</h4>
+      {events.status === 'loading' && <LoadingPanel>Loading events…</LoadingPanel>}
+      {events.status === 'error' && <p className="projects-muted">Events could not be loaded, so reuse cannot be determined.</p>}
+      {events.status === 'ready' && (reuse.length === 0 ? (
+        <p className="projects-muted" data-testid="reuse-none">No reuse evidence recorded: the attempts shown are this node's own graph attempts, not reused results.</p>
+      ) : (
+        <ul className="evidence-list" data-testid="reuse-list">
+          {reuse.map(event => (
+            <li key={event.event_id}>
+              Attempt {event.attempt} reused the result of attempt {event.reused_from_attempt ?? 'unknown'} (event {event.sequence}, {formatTime(event.occurred_at)}): {event.message}
+            </li>
+          ))}
+        </ul>
+      ))}
+    </section>
+  )
 
   return (
     <section className="node-detail" aria-labelledby="node-detail-title" data-testid="node-detail" data-node-id={node.node_id}>
       <h3 id="node-detail-title">{definition.label} <span className="projects-muted node-detail-id">({node.node_id})</span></h3>
       <dl className="projects-facts">
         <div><dt>Kind</dt><dd>{KIND_LABEL[definition.kind]}</dd></div>
+        <div><dt>Executed by</dt><dd data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport)}</dd></div>
         <div><dt>Status</dt><dd><StatusBadge status={node.status} /> <span data-testid="node-status-meaning">{nodeStatusMeaning(definition.kind, node.status)}</span></dd></div>
         <div><dt>Graph attempt</dt><dd data-testid="node-attempt">{node.attempt === 0 ? '0 (not started)' : node.attempt}</dd></div>
         <div>
@@ -267,65 +384,77 @@ export function NodeDetail({ scope, definition, definitionNodes, node, events, o
         </div>
       )}
 
-      {isWorker && (inputs.status === 'loading' || inputs.status === 'idle') && <LoadingPanel>Loading the run inputs…</LoadingPanel>}
-      {isWorker && inputs.status === 'error' && <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />}
-      {isWorker && inputs.status === 'ready' && recordedInputs === null && (
-        <p className="projects-muted" data-testid="worker-inputs-none">
-          Inputs not recorded for this run (the export predates run inputs; re-export it with the workflow CLI), so the task, launch receipt and completion signal cannot be shown.
-        </p>
-      )}
-      {isWorker && recordedInputs !== null && worker === null && (
-        <p className="projects-muted" data-testid="worker-inputs-unmatched">The run inputs list no worker launched by this node.</p>
-      )}
-      {worker !== null && (
+      {isWorker ? (
         <>
-          <TaskPanel worker={worker} result={result} highlight={highlight} onHighlightApplied={onHighlightApplied} />
-          <LaunchReceipt launch={worker.launch} />
-          <WorkerSignals completion={worker.completion} handoff={worker.handoff} />
+          <section className="evidence-section" aria-labelledby="node-result">
+            <h4 id="node-result">Result</h4>
+            {resultBody(data => (
+              <ProducedEvidence scope={scope} result={data} node={node} reviewNode={reviewNode} refreshToken={refreshToken} focusPath={fileFocus} onFocusApplied={onFileFocusApplied} />
+            ))}
+          </section>
+
+          {(inputs.status === 'loading' || inputs.status === 'idle') && <LoadingPanel>Loading the run inputs…</LoadingPanel>}
+          {inputs.status === 'error' && <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />}
+          {inputs.status === 'ready' && recordedInputs === null && (
+            <p className="projects-muted" data-testid="worker-inputs-none">
+              Inputs not recorded for this run (the export predates run inputs; re-export it with the workflow CLI), so the task, launch receipt and completion signal cannot be shown.
+            </p>
+          )}
+          {recordedInputs !== null && worker === null && (
+            <p className="projects-muted" data-testid="worker-inputs-unmatched">The run inputs list no worker launched by this node.</p>
+          )}
+          {worker !== null && (
+            <>
+              <WorkerSignals completion={worker.completion} handoff={worker.handoff} />
+              <LaunchReceipt launch={worker.launch} />
+              <TaskDisclosure highlight={highlight}>
+                <TaskPanel
+                  worker={worker}
+                  result={result}
+                  highlight={highlight}
+                  onHighlightApplied={onHighlightApplied}
+                  checksNode={verifyNodeId === null ? null : { href: runPathname(scope.projectId, scope.workflowId, scope.runId, verifyNodeId), label: definitionNodes.find(candidate => candidate.node_id === verifyNodeId)!.label }}
+                  onNavigate={onNavigate}
+                />
+              </TaskDisclosure>
+            </>
+          )}
+          {reuseSection}
+        </>
+      ) : (
+        <>
+          {reuseSection}
+          <section className="evidence-section" aria-labelledby="node-result">
+            <h4 id="node-result">{isReview ? 'Review result' : 'Result'}</h4>
+            {isReview ? (
+              <ReviewPanel
+                scope={scope}
+                node={node}
+                definitionNodes={definitionNodes}
+                snapshotNodes={snapshotNodes}
+                inputs={inputs}
+                refreshToken={refreshToken}
+                onNavigate={onNavigate}
+                onOpenRequirement={onOpenRequirement}
+                onOpenFile={onOpenFile}
+                onTransport={setReviewTransport}
+              />
+            ) : (
+              <>
+                {node.lane_results.length > 0 && (
+                  <div className="lane-results" data-testid="lane-results">
+                    <p className="projects-muted">The combined candidate verified every lane on one revision; each lane's result, with its checks and screenshots, is shown below.</p>
+                    {node.lane_results.map(lane => (
+                      <LaneResult key={lane.worker} scope={scope} node={node} lane={lane} launchNodeId={launchNodeOf(lane.worker)} refreshToken={refreshToken} onNavigate={onNavigate} />
+                    ))}
+                  </div>
+                )}
+                {resultBody(data => <VerifiedEvidence scope={scope} result={data} node={node} phase="worker" />)}
+              </>
+            )}
+          </section>
         </>
       )}
-
-      <section className="evidence-section" aria-labelledby="node-reuse">
-        <h4 id="node-reuse">Reuse evidence</h4>
-        {events.status === 'loading' && <LoadingPanel>Loading events…</LoadingPanel>}
-        {events.status === 'error' && <p className="projects-muted">Events could not be loaded, so reuse cannot be determined.</p>}
-        {events.status === 'ready' && (reuse.length === 0 ? (
-          <p className="projects-muted" data-testid="reuse-none">No reuse evidence recorded: the attempts shown are this node's own graph attempts, not reused results.</p>
-        ) : (
-          <ul className="evidence-list" data-testid="reuse-list">
-            {reuse.map(event => (
-              <li key={event.event_id}>
-                Attempt {event.attempt} reused the result of attempt {event.reused_from_attempt ?? 'unknown'} (event {event.sequence}, {formatTime(event.occurred_at)}): {event.message}
-              </li>
-            ))}
-          </ul>
-        ))}
-      </section>
-
-      <section className="evidence-section" aria-labelledby="node-result">
-        <h4 id="node-result">{isReview ? 'Review result' : 'Result'}</h4>
-        {isReview ? (
-          <ReviewPanel scope={scope} node={node} definitionNodes={definitionNodes} inputs={inputs} refreshToken={refreshToken} onNavigate={onNavigate} onOpenRequirement={onOpenRequirement} />
-        ) : (
-          <>
-            {node.lane_results.length > 0 && (
-              <div className="lane-results" data-testid="lane-results">
-                <p className="projects-muted">The combined candidate verified every lane on one revision; each lane's result, with its checks and screenshots, is shown below.</p>
-                {node.lane_results.map(lane => <LaneResult key={lane.worker} scope={scope} node={node} lane={lane} refreshToken={refreshToken} />)}
-              </div>
-            )}
-            {node.result_uri === null && node.lane_results.length === 0 && <p className="projects-muted" data-testid="result-none">No result has been published for this node{node.attempt === 0 ? ' (it has not started)' : ''}.</p>}
-            {node.result_uri !== null && resultPath === null && (
-              <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
-                The result link <code>{node.result_uri}</code> is outside this run's results route and was not fetched.
-              </p>
-            )}
-            {resultPath !== null && result.status === 'loading' && <LoadingPanel>Loading the result…</LoadingPanel>}
-            {resultPath !== null && result.status === 'error' && <ErrorPanel error={result.error} what="The node result" onRetry={reloadResult} />}
-            {resultPath !== null && result.status === 'ready' && <WorkerEvidence scope={scope} result={result.data} node={node} />}
-          </>
-        )}
-      </section>
 
       <section className="evidence-section" aria-labelledby="node-timeline">
         <h4 id="node-timeline">Events for this node</h4>

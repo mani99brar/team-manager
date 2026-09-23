@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   fetchReviewResult,
   isBlockingFinding,
@@ -12,7 +12,8 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
-import { runLanes, workerGroupOf, workerGroups, workerWording } from './findings.ts'
+import { findingsForFile, runLanes, workerGroupOf, workerGroups, workerWording } from './findings.ts'
+import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
@@ -23,7 +24,7 @@ type SnapshotNode = RunDetail['snapshot']['nodes'][number]
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type Lane = ReviewFinding['requirement_found_in'][number]
 type Disposition = ReviewFinding['disposition']
-type GroupBy = 'disposition' | 'worker'
+type GroupBy = 'disposition' | 'worker' | 'reviewer'
 /** A reviewer id, or null for every reviewer. */
 type ReviewerFilter = string | null
 
@@ -31,12 +32,18 @@ type Props = {
   scope: RunScope
   node: SnapshotNode
   definitionNodes: DefinitionNode[]
+  /** Every node's state in the run: the launch nodes' results name the captured files a finding can link to. */
+  snapshotNodes: SnapshotNode[]
   /** The run's inputs, used only to name the graph node that launched a lane; the review itself never needs them. */
   inputs: Resource<RunInputs | null>
   refreshToken: number
   onNavigate: (pathname: string) => void
   /** Opens a worker's task with the quoted requirement highlighted (the run view navigates and hands the quote over). */
   onOpenRequirement: (nodeId: string, quote: string) => void
+  /** Opens a captured file's panel on the launch node that shows it (the run view navigates and hands the path over). */
+  onOpenFile: (nodeId: string, path: string) => void
+  /** Reports the served review's transport, so the node can say whether its reviewers ran as sessions or print jobs. */
+  onTransport?: (transport: ReviewResult['reviewer']['transport']) => void
 }
 
 const TRANSPORT_WORDING: Record<Reviewer['transport'], string> = {
@@ -55,8 +62,16 @@ function launchNodeFor(lane: Lane, definitionNodes: DefinitionNode[], inputs: Re
   return definitionNodes.some(candidate => candidate.node_id === `launch_${lane}`) ? `launch_${lane}` : lane
 }
 
-function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement }: { finding: ReviewFinding } & Omit<Props, 'node' | 'refreshToken' | 'onNavigate'>) {
+type RowProps = Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement' | 'onOpenFile'> & {
+  finding: ReviewFinding
+  /** The run's captured files by path, with the launch node that shows each. */
+  capturedFiles: Map<string, string>
+}
+
+function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement, onOpenFile, capturedFiles }: RowProps) {
   const blocking = isBlockingFinding(finding)
+  // A finding links to every captured file its message names verbatim; the review result itself records no location.
+  const files = [...capturedFiles].filter(([path]) => findingsForFile([finding], path).length > 0)
   return (
     <tr
       data-testid="finding"
@@ -67,7 +82,22 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
       className={blocking ? 'finding-blocking' : undefined}
     >
       <td><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
-      <td>{finding.message}</td>
+      <td>
+        {finding.message}
+        {files.map(([path, nodeId]) => (
+          <AppLink
+            key={path}
+            href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)}
+            onNavigate={() => onOpenFile(nodeId, path)}
+            className="finding-file-link"
+            data-testid="finding-file-link"
+            data-path={path}
+            style={{ display: 'block' }}
+          >
+            Open the captured {path}
+          </AppLink>
+        ))}
+      </td>
       <td>{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
       <td data-testid="finding-reviewer">{finding.reviewer}</td>
       <td>
@@ -135,7 +165,32 @@ function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
   )
 }
 
-function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, onOpenRequirement }: { review: ReviewResult } & Omit<Props, 'node' | 'refreshToken'>) {
+const UNLISTED_REVIEWER = 'unlisted'
+
+/**
+ * One group per reviewer of the run in declared order, labelled with its id, its own verdict and its severity counts, then a
+ * guard group for findings whose reviewer the run does not list (the contract forbids it, so it stays hidden when empty).
+ */
+function reviewerGroups(reviewers: readonly Reviewer[], visible: readonly ReviewFinding[]) {
+  const ids = new Set(reviewers.map(reviewer => reviewer.reviewer_id))
+  const verdictWording = (verdict: Reviewer['verdict']) => (verdict === null ? 'no verdict' : verdict === 'approved' ? 'approved' : 'blocked')
+  return [
+    ...reviewers.map(reviewer => ({
+      key: `reviewer-${reviewer.reviewer_id}`,
+      label: `${reviewer.reviewer_id} · ${verdictWording(reviewer.verdict)} · ${severityCounts(reviewer.findings)}`,
+      attributes: { 'data-reviewer-group': reviewer.reviewer_id, 'data-verdict': reviewer.verdict ?? 'none' },
+      findings: visible.filter(finding => finding.reviewer === reviewer.reviewer_id),
+    })),
+    {
+      key: `reviewer-${UNLISTED_REVIEWER}`,
+      label: 'Reviewer not listed for this run',
+      attributes: { 'data-reviewer-group': UNLISTED_REVIEWER, 'data-verdict': 'none' },
+      findings: visible.filter(finding => !ids.has(finding.reviewer)),
+    },
+  ]
+}
+
+function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile, onTransport }: { review: ReviewResult } & Omit<Props, 'node'>) {
   const approved = review.verdict === 'approved'
   const reviewers = review.reviewers
   const several = reviewers.length > 1
@@ -145,15 +200,21 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
   const diffHref = review.diff === null ? null : paths.artifact(scope, review.diff.artifact_id)
   const diffScoped = review.diff !== null && review.diff.uri === diffHref
-  const [groupBy, setGroupBy] = useState<GroupBy>('disposition')
+  // Several reviewers read best as one group each; a single reviewer's findings group by disposition.
+  const [groupBy, setGroupBy] = useState<GroupBy>(several ? 'reviewer' : 'disposition')
   const [reviewerFilter, setReviewerFilter] = useState<ReviewerFilter>(null)
   const lanes = runLanes(definitionNodes, inputs)
+  const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
+  const transport = review.reviewer.transport
+  useEffect(() => { onTransport?.(transport) }, [onTransport, transport])
   // The filter narrows the union to one reviewer's findings; grouping then applies to what is left.
   const visible = reviewerFilter === null ? review.findings : review.findings.filter(finding => finding.reviewer === reviewerFilter)
   const countFor = (reviewerId: string) => review.findings.filter(finding => finding.reviewer === reviewerId).length
   const groups = groupBy === 'disposition'
     ? DISPOSITIONS.map(disposition => ({ key: disposition, label: DISPOSITION_LABEL[disposition], attributes: { 'data-disposition': disposition }, findings: visible.filter(finding => finding.disposition === disposition) }))
-    : workerGroups(lanes, visible).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: visible.filter(finding => workerGroupOf(finding) === group.key) }))
+    : groupBy === 'reviewer'
+      ? reviewerGroups(reviewers, visible)
+      : workerGroups(lanes, visible).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: visible.filter(finding => workerGroupOf(finding) === group.key) }))
   const populated = groups.filter(group => group.findings.length > 0)
   return (
     <div className="review-result" data-testid="review-result" data-verdict={review.verdict} data-reviewer-count={reviewers.length}>
@@ -233,6 +294,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
                 <span className="projects-muted">Group by</span>
                 <button type="button" className="button button-small" aria-pressed={groupBy === 'disposition'} data-testid="group-by-disposition" onClick={() => setGroupBy('disposition')}>Disposition</button>
                 <button type="button" className="button button-small" aria-pressed={groupBy === 'worker'} data-testid="group-by-worker" onClick={() => setGroupBy('worker')}>Worker</button>
+                <button type="button" className="button button-small" aria-pressed={groupBy === 'reviewer'} data-testid="group-by-reviewer" onClick={() => setGroupBy('reviewer')}>Reviewer</button>
               </div>
             </>
           )}
@@ -251,7 +313,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
                 </thead>
                 <tbody>
                   {group.findings.map((finding, index) => (
-                    <FindingRow key={`${group.key}-${index}`} finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} />
+                    <FindingRow key={`${group.key}-${index}`} finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
                   ))}
                 </tbody>
               </table>
@@ -259,7 +321,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
           </section>
         ))}
         <p className="projects-muted">
-          Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
+          A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
         </p>
       </section>
     </div>
@@ -271,7 +333,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
  * the unioned findings and the diff. A run whose export predates review results (404 REVIEW_NOT_FOUND) is a "not recorded"
  * state, not an error.
  */
-export function ReviewPanel({ scope, node, definitionNodes, inputs, refreshToken, onNavigate, onOpenRequirement }: Props) {
+export function ReviewPanel({ scope, node, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile, onTransport }: Props) {
   // The snapshot links the recorded review; an older export has no link, so the first attempt is asked for once the node ran.
   const reviewPath = node.result_uri !== null
     ? scopedReviewPath(scope, node.result_uri)
@@ -297,5 +359,18 @@ export function ReviewPanel({ scope, node, definitionNodes, inputs, refreshToken
     if (isNotRecorded(state.error, NOT_RECORDED.review)) return none
     return <ErrorPanel error={state.error} what="The recorded review" onRetry={reload} />
   }
-  return <ReviewResultView review={state.data} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onNavigate={onNavigate} onOpenRequirement={onOpenRequirement} />
+  return (
+    <ReviewResultView
+      review={state.data}
+      scope={scope}
+      definitionNodes={definitionNodes}
+      snapshotNodes={snapshotNodes}
+      inputs={inputs}
+      refreshToken={refreshToken}
+      onNavigate={onNavigate}
+      onOpenRequirement={onOpenRequirement}
+      onOpenFile={onOpenFile}
+      onTransport={onTransport}
+    />
+  )
 }

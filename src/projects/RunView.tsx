@@ -20,6 +20,7 @@ type Props = {
 
 type Tab = 'run' | 'assignment'
 type Highlight = { nodeId: string; quote: string }
+type FileFocus = { nodeId: string; path: string }
 
 const TABS: { id: Tab; label: string; testId: string }[] = [
   { id: 'run', label: 'Run', testId: 'tab-run' },
@@ -49,6 +50,10 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
   const [pendingHighlight, setPendingHighlight] = useState<Highlight | null>(null)
   const clearHighlight = useCallback(() => setPendingHighlight(null), [])
   const highlight = pendingHighlight !== null && pendingHighlight.nodeId === selectedNodeId ? pendingHighlight.quote : null
+  // A captured file handed from a review finding to the launch node that shows it, applied the same way.
+  const [pendingFile, setPendingFile] = useState<FileFocus | null>(null)
+  const clearFile = useCallback(() => setPendingFile(null), [])
+  const fileFocus = pendingFile !== null && pendingFile.nodeId === selectedNodeId ? pendingFile.path : null
 
   const nodePathname = (nodeId: string | null = null) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)
   const selectNode = (nodeId: string) => onNavigate(nodePathname(nodeId))
@@ -58,6 +63,11 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
   }
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
+    setTab('run')
+    onNavigate(runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId))
+  }, [onNavigate, scope])
+  const openFile = useCallback((nodeId: string, path: string) => {
+    setPendingFile({ nodeId, path })
     setTab('run')
     onNavigate(runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId))
   }, [onNavigate, scope])
@@ -182,6 +192,7 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
                   scope={scope}
                   definition={selectedDefinition}
                   definitionNodes={definition.nodes}
+                  snapshotNodes={snapshot.nodes}
                   node={selectedState}
                   events={events}
                   onRetryEvents={reloadEvents}
@@ -192,6 +203,9 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
                   highlight={highlight}
                   onHighlightApplied={clearHighlight}
                   onOpenRequirement={openRequirement}
+                  fileFocus={fileFocus}
+                  onFileFocusApplied={clearFile}
+                  onOpenFile={openFile}
                 />
               )}
             </div>

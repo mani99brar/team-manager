@@ -10,7 +10,9 @@
  * inputs section carries the selection and each lane's `required_check_kinds` (PRD_WORKER_LANES section 4).
  * The `reviewers-flow` runs are 1.4.0 exports (PRD_PARALLEL_REVIEWERS section 4): their plan pins `reviewers`
  * and their review section carries one entry per reviewer plus the union of findings tagged by reviewer, except
- * the legacy single-reviewer run, which is a 1.3.0 export of the same graph without either.
+ * the legacy single-reviewer run, which is a 1.3.0 export of the same graph without either. The `clarity-flow` run is a
+ * 1.4.0 export whose ui worker-phase packet carries the files captured at freeze (`file` artifacts written beside the
+ * packet like any artifact, and `files_not_captured` in the packet result); its candidate-phase packet captures nothing.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -19,10 +21,14 @@ import {
   BASE_COMMIT,
   BLOCKED_MESSAGE,
   CANDIDATE_COMMIT,
+  CLARITY_NODES,
+  CLARITY_WORKFLOW_ID,
+  CLARITY_WORKFLOW_NAME,
   EMPTY_PROJECT,
   EMPTY_WORKFLOW_DEFINITION,
   EMPTY_WORKFLOW_ID,
   EMPTY_WORKFLOW_NAME,
+  FILE_ARTIFACTS,
   GRAPH_NODES,
   LANE_ARTIFACTS,
   LANE_OUTPUT_COMMITS,
@@ -39,6 +45,7 @@ import {
   RUN_AWAITING,
   RUN_BLOCKED,
   RUN_FAILED,
+  RUN_FILES,
   RUN_LEGACY,
   RUN_LEGACY_REVIEWER,
   RUN_ONE_LANE,
@@ -64,6 +71,8 @@ import {
   adapterResult,
   adapterTask,
   backgroundId,
+  candidateUiResult,
+  capturedUiResult,
   docsTask,
   laneResult,
   launchToken,
@@ -188,11 +197,13 @@ export function seedCandidate(root: string): string {
   const emptyRunsRoot = join(root, 'runs', EMPTY_WORKFLOW_ID)
   const lanesRunsRoot = join(root, 'runs', LANES_WORKFLOW_ID)
   const reviewersRunsRoot = join(root, 'runs', REVIEWERS_WORKFLOW_ID)
+  const clarityRunsRoot = join(root, 'runs', CLARITY_WORKFLOW_ID)
   mkdirSync(repository, { recursive: true })
   mkdirSync(runsRoot, { recursive: true })
   mkdirSync(emptyRunsRoot, { recursive: true })
   mkdirSync(lanesRunsRoot, { recursive: true })
   mkdirSync(reviewersRunsRoot, { recursive: true })
+  mkdirSync(clarityRunsRoot, { recursive: true })
 
   const packetSet = (runDir: string, phases: { phase: 'worker' | 'candidate'; node: string; attempt: number; result: WorkerResult; blocked?: string }[]) =>
     phases.map(entry => writePacket(runDir, entry.phase, entry.node, entry.attempt, entry.result, LANE_ARTIFACTS[entry.node],
@@ -434,6 +445,23 @@ export function seedCandidate(root: string): string {
     inputs: rawInputsSection(RUN_LEGACY_REVIEWER, reviewersLeak(RUN_LEGACY_REVIEWER)),
   })
 
+  // ---- clarity-flow: the ui worker-phase packet captured the changed files at freeze (PRD_VIEWER_CLARITY 4.1) ----
+
+  writeRun(clarityRunsRoot, repository, RUN_FILES, {
+    createdAt: T1, updatedAt: T3, definitionNodes: CLARITY_NODES, definitionName: CLARITY_WORKFLOW_NAME, version: '1.4.0', lanes: TWO_LANES, reviewers: TWO_REVIEWERS,
+    values: laneValues(RUN_FILES, TWO_LANES, T1, clarityRunsRoot),
+    next: [], tasks: [],
+    events: laneEvents(TWO_LANES, T1, reviewerLaunchEvents()),
+    packets: runDir => [
+      writePacket(runDir, 'worker', 'ui', 1, capturedUiResult(RUN_FILES), [...LANE_ARTIFACTS.ui, ...FILE_ARTIFACTS], { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'worker', 'adapter', 1, adapterResult(RUN_FILES, false), LANE_ARTIFACTS.adapter, { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'candidate', 'ui', 1, candidateUiResult(RUN_FILES), LANE_ARTIFACTS.ui, { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'candidate', 'adapter', 1, adapterResult(RUN_FILES, false), LANE_ARTIFACTS.adapter, { status: 'passed', reasons: [] }),
+    ],
+    review: rawReviewSection(RUN_FILES, leakFor(clarityRunsRoot, RUN_FILES)),
+    inputs: rawInputsSection(RUN_FILES, leakFor(clarityRunsRoot, RUN_FILES)),
+  })
+
   const registry = {
     version: 1,
     projects: [
@@ -444,6 +472,7 @@ export function seedCandidate(root: string): string {
           { workflow_id: EMPTY_WORKFLOW_ID, runs_root: emptyRunsRoot, definition: { name: EMPTY_WORKFLOW_NAME, nodes: EMPTY_WORKFLOW_DEFINITION.nodes } },
           { workflow_id: LANES_WORKFLOW_ID, runs_root: lanesRunsRoot, definition: { name: LANES_WORKFLOW_NAME, nodes: THREE_LANE_NODES } },
           { workflow_id: REVIEWERS_WORKFLOW_ID, runs_root: reviewersRunsRoot, definition: { name: REVIEWERS_WORKFLOW_NAME, nodes: REVIEWERS_NODES } },
+          { workflow_id: CLARITY_WORKFLOW_ID, runs_root: clarityRunsRoot, definition: { name: CLARITY_WORKFLOW_NAME, nodes: CLARITY_NODES } },
         ],
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },

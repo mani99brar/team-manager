@@ -55,6 +55,33 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   integration: 'Integration',
 }
 
+/**
+ * Who executes a node, derived from its kind (PRD_VIEWER_CLARITY 4.3): a worker is an agent session, a review is one
+ * agent session per reviewer (one print job per reviewer when the review ran with the print transport), a
+ * verification is the trusted verifier, and preparation and integration are the controller itself.
+ */
+export type Executor = 'agent' | 'verifier' | 'controller'
+
+export const EXECUTOR_LABEL: Record<NodeKind, string> = {
+  prepare: 'controller',
+  worker: 'agent session',
+  verification: 'trusted verifier',
+  review: 'one agent session per reviewer',
+  integration: 'controller',
+}
+
+/** The executor category of a node kind: agents are drawn solid, the verifier and the controller dashed. */
+export function executorCategory(kind: NodeKind): Executor {
+  if (kind === 'worker' || kind === 'review') return 'agent'
+  return kind === 'verification' ? 'verifier' : 'controller'
+}
+
+/** The executor wording for a node; a review names print jobs when the served review result's transport is `print`. */
+export function executorOf(kind: NodeKind, transport?: ReviewResult['reviewer']['transport']): string {
+  if (kind === 'review' && transport === 'print') return 'one print job per reviewer'
+  return EXECUTOR_LABEL[kind]
+}
+
 export function shortRevision(revision: string): string {
   return revision.slice(0, 12)
 }

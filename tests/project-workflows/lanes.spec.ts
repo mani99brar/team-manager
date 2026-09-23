@@ -26,7 +26,7 @@ import {
   WORKFLOW_NAME,
   reviewFindings,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openTask, phase, renderedText, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -93,16 +93,18 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_docs')
   await expect(nodeDetail(page).getByRole('heading', { level: 3 })).toContainText('Launch docs worker')
   await expect(page.getByTestId('worker-inputs-unmatched')).toHaveCount(0)
+  await openTask(page)
   await expect(page.getByTestId('task-panel').getByRole('heading', { name: 'Docs worker' })).toBeVisible()
   await expect(page.getByTestId('task-required-kinds')).toHaveText('Required check kinds for this lane: unit')
   await expect(page.getByTestId('task-checks').locator('[data-check-id="docs-unit"]')).toContainText('exit 0')
   await expect(page.getByTestId('launch-receipt')).toContainText(DOCS_SESSION)
   await expect(page.getByTestId('worker-completion')).toContainText(DOCS_COMPLETION_SUMMARY)
   await expect(page.getByTestId('worker-stop')).toContainText('Stop confirmed')
+  await expect(page.getByTestId('changed-files').locator('li')).toContainText(['docs/PRD_WORKER_LANES.md'])
   await nodeListItem(page, 'verify_docs').getByRole('link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_docs')
   await expect(page.getByTestId('worker-result')).toBeVisible()
-  await expect(page.getByTestId('changed-files').locator('li')).toContainText(['docs/PRD_WORKER_LANES.md'])
+  await expect(page.getByTestId('checks-list').locator('.check')).toHaveCount(1)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
 
   // Findings group by the run's lanes in policy order, then "multiple workers" (including a legacy `both`) and "none".
@@ -209,6 +211,7 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
 
   // A worker node still matches its recorded lane by its launch node.
   await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
+  await openTask(page)
   await expect(page.getByTestId('task-panel').getByRole('heading', { name: 'Adapter worker' })).toBeVisible()
   await expect(page.getByTestId('task-required-kinds')).toHaveText('Required check kinds for this lane: unit')
   await expect(page.getByTestId('worker-inputs-unmatched')).toHaveCount(0)

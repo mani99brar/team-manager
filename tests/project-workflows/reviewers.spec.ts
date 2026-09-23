@@ -77,6 +77,10 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
   await expect(reviewer).toContainText('coverage:')
   await expect(reviewer).toContainText('independent of every worker lane and of one another')
 
+  // Several reviewers open grouped by reviewer (PRD_VIEWER_CLARITY 4.5); the checks below read the disposition grouping.
+  await expect(findings(page)).toHaveAttribute('data-group-by', 'reviewer')
+  await page.getByTestId('group-by-disposition').click()
+
   // The union of findings: a Reviewer column, both tags, and the finding both reviewers raised listed twice, never merged.
   await expect(findings(page)).toHaveAttribute('data-reviewer-filter', 'all')
   await expect(dispositionGroup(page, 'open').getByRole('columnheader')).toHaveText(['Severity', 'Message', 'Worker', 'Reviewer', 'Requirement'])

@@ -21,6 +21,14 @@ export const workspace = (page: Page) => page.getByTestId('projects-workspace')
 export const graphNode = (page: Page, nodeId: string) => page.locator(`[data-testid="workflow-graph"] [data-graph-node="${nodeId}"]`)
 export const nodeListItem = (page: Page, nodeId: string) => page.locator(`[data-testid="run-node-list"] [data-node-id="${nodeId}"]`)
 export const nodeDetail = (page: Page) => page.getByTestId('node-detail')
+export const taskDetails = (page: Page) => page.getByTestId('task-details')
+
+/** A launch node shows its task behind a disclosure, closed by default (PRD_VIEWER_CLARITY 4.2); this opens it. */
+export async function openTask(page: Page) {
+  await expect(taskDetails(page)).toBeVisible()
+  if ((await taskDetails(page).getAttribute('open')) === null) await taskDetails(page).locator('summary').first().click()
+  await expect(taskDetails(page)).toHaveAttribute('open', '')
+}
 
 /** No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only selectors). */
 export async function expectNoExecutionControls(page: Page) {
