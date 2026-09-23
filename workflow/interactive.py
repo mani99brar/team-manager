@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -366,6 +367,147 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
     return mapping
 
 
+# A Claude Code update restarts the background service, which drops every attached client while the
+# sessions run on (the restarted service adopts them). attach-one reattaches with a bounded backoff.
+REATTACH_LIMIT = 30          # attempts in a row without a working attach before attach-one gives up
+REATTACH_MAX_DELAY = 10      # seconds; the delay doubles from 2 up to this cap
+ATTACH_STABLE_SECONDS = 60   # an attach that held this long was connected: its loss starts a new count
+# What a restarting service answers for a moment: no listing, or a row still registering its PID.
+TRANSIENT_REFUSALS = ("Unexpected Claude inventory response", "No live native PID", "Session is not attachable")
+
+
+def node_title(node: str) -> str:
+    """`Worker <lane>`, `Reviewer review` for the default reviewer, `Reviewer <id>` for a declared one."""
+    if node.startswith("review-"):
+        return f"Reviewer {node[len('review-'):]}"
+    return f"Reviewer {node}" if is_review_node(node) else f"Worker {node}"
+
+
+def process_alive(pid) -> bool:
+    """A PID from the session's own verified row; no PID (nothing attached yet) is never alive.
+
+    kill(pid, 0) also answers for a process that has exited but is not collected yet (a zombie,
+    for as long as its parent or, for an adopted session, init has not reaped it).
+    """
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return True  # No /proc: kill(pid, 0) is all there is.
+
+
+def recorded_stop(directory: Path, node: str) -> dict | None:
+    """The controller's stop of this node's session as `{time, reason}`, or None when it recorded none.
+
+    `<node>.stop.json` is written before `claude stop` runs, so an attach that the stop itself ends
+    already finds it; an unconfirmed intent counts too, since only the controller retries that stop.
+    The time and reason come from the stop's timeline event (for workers stopped after a blocked
+    wait, from that block), else from the marker.
+    """
+    marker = directory / f"{node}.stop.json"
+    if not marker.is_file():
+        return None
+    try:
+        confirmed = read_json(marker).get("stopped") is True
+    except (ValueError, AttributeError):
+        confirmed = False
+    when = datetime.fromtimestamp(marker.stat().st_mtime, timezone.utc)
+    reason = "stop recorded" if confirmed else "stop requested, not yet confirmed"
+    path = directory / "events.jsonl"
+    lines = path.read_text(errors="replace").splitlines() if confirmed and path.is_file() else []
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except ValueError:
+            continue  # A line the controller was still writing.
+    phase, prefix = (REVIEW, f"{node_title(node)} session stopped") if is_review_node(node) else ("freeze", "Native workers stopped")
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if event.get("node") == phase and event.get("status") == "stopped" and str(event.get("message", "")).startswith(prefix):
+            when, reason = datetime.fromisoformat(event["time"]), event["message"]
+            previous = events[index - 1] if index else {}
+            if previous.get("node") == "controller" and previous.get("status") == "blocked":
+                reason = f"the run blocked: {previous['message']}"
+            break
+    return {"time": when.strftime("%Y-%m-%d %H:%M:%S UTC"), "reason": reason}
+
+
+def observe(sessions: InteractiveSessions, node: str, pid) -> dict | None:
+    """The session's verified row, or None while a restarting service cannot confirm it yet.
+
+    Only the process attached before (its PID still alive) earns that wait. A first attach, a session
+    whose process ended and every identity refusal fail at once, exactly as before.
+    """
+    waiting = process_alive(pid)
+    try:
+        row = sessions.locate(node, sessions.inventory())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if not waiting:
+            raise
+        return None
+    except RuntimeError as error:
+        if not waiting or not str(error).startswith(TRANSIENT_REFUSALS):
+            raise
+        return None
+    if row is None and not waiting:
+        raise RuntimeError("Session unavailable; refusing implicit restart")
+    if row is not None and not process_alive(row["pid"]):
+        raise RuntimeError("Native process is unavailable; refusing implicit restart")  # A zombie passes locate's kill(pid, 0).
+    return row
+
+
+def attach_one(sessions: InteractiveSessions, node: str, *, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Attach one session in this terminal, and attach it again after a lost connection.
+
+    `claude attach` exits 0 when the operator detaches (Ctrl+Z, or ← to the agent view) or the session
+    ended, and non-zero when it loses the background service. After each attach the run's own records
+    decide: a stop the controller recorded ends attach-one with one line, a live session the controller
+    has not stopped is attached again after a bounded backoff, and a session gone without a recorded stop
+    is refused. `claude attach` would wake a missing session, so only an exact live row is ever attached.
+    """
+    failures, pid, background_id = 0, None, None
+    ended = None  # How the last attach ended ("detached" or "lost"); None once waited out, or before the first.
+    while True:
+        stop = recorded_stop(sessions.directory, node)
+        if stop is not None:
+            print(f"{node_title(node)} was stopped by the controller at {stop['time']} ({stop['reason']}); nothing to attach.",
+                  file=sys.stderr, flush=True)
+            return
+        row = observe(sessions, node, pid)
+        if ended == "detached":
+            return  # The operator detached; the session keeps running.
+        if row is not None and ended is None:
+            pid, background_id = row["pid"], row["id"]
+            started = clock()
+            try:
+                code = subprocess.run([sessions.executable, "attach", background_id], cwd=sessions.node_worktree(node)).returncode
+            except OSError:
+                code = 1  # An update is replacing the CLI itself: retried like a lost connection.
+            if code != 0 and clock() - started >= ATTACH_STABLE_SECONDS:
+                failures = 0  # It was connected for a while: this loss starts a new count.
+            # An attach the operator interrupted (Ctrl+C: 130, or killed by SIGINT) ends like a detach, never retried.
+            ended = "detached" if code in (0, 130, -signal.SIGINT) else "lost"
+            continue  # The records decide first: a stop, or a session that ended, is never waited for.
+        failures += 1
+        if failures >= REATTACH_LIMIT:
+            raise RuntimeError(f"Gave up reattaching {node} ({background_id}) after {REATTACH_LIMIT} attempts in a row; the session may still "
+                               f"be running. Rerun attach-one once `claude agents` lists it again")
+        delay = min(2 ** failures, REATTACH_MAX_DELAY)
+        if ended == "lost":
+            print(f"Lost the connection to {node} ({background_id}); the background service may be restarting. Reattaching in {delay}s…",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"The background service does not list {node} ({background_id}) yet; retrying in {delay}s…", file=sys.stderr, flush=True)
+        ended = None
+        sleep(delay)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["attach-one"])
@@ -384,11 +526,9 @@ def main():
         receipt = read_json(directory / f"{args.node}.interactive.json")
         if receipt["plan_digest"] != plan_digest(sessions.plan):
             raise RuntimeError("Plan changed; cannot attach")
-        row = sessions.locate(args.node, sessions.inventory())
-        if row is None:
-            raise RuntimeError("Session unavailable; refusing implicit restart")
-        os.chdir(sessions.node_worktree(args.node))
-        os.execvp(sessions.executable, [sessions.executable, "attach", row["id"]])
+        attach_one(sessions, args.node)
+    except KeyboardInterrupt:
+        parser.exit(130, f"\nattach-one interrupted; the {args.node} session keeps running (only the controller stops it).\n")
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nSession/worktree state retained at {directory}; no automatic stop or relaunch.\n")
 

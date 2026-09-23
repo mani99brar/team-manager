@@ -1,10 +1,13 @@
 import contextlib
 import io
+import itertools
+import json
 import os
 import subprocess
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from .interactive import InteractiveSessions, attach_panels, require_shell
 from .sessions import read_json, save_json
@@ -485,12 +488,10 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("--node must be a lane of this run (ui, adapter) or review-general, review-coverage", errors.getvalue())
         with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "review-coverage"]), \
                 patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", return_value=[self.declared_row("coverage")]), \
-                patch("workflow.interactive.os.chdir") as chdir, patch("workflow.interactive.os.execvp", side_effect=SystemExit(0)) as execvp:
+                patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as attach:
             stdin.isatty.return_value = True
-            with self.assertRaises(SystemExit):
-                main()
-        chdir.assert_called_once_with(self.directory / "review-worktree")
-        execvp.assert_called_once_with("claude", ["claude", "attach", self.declared_row("coverage")["id"]])
+            main()  # `claude attach` exited 0 with the session alive: the operator detached.
+        attach.assert_called_once_with(["claude", "attach", self.declared_row("coverage")["id"]], cwd=self.directory / "review-worktree")
 
     def test_reviewer_panes_are_added_one_at_a_time_as_the_review_node_launches_each_reviewer(self):
         from .interactive import attach_reviewer_panel
@@ -536,12 +537,183 @@ class InteractiveTests(unittest.TestCase):
         self.reviewer_receipt()
         with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "review"]), \
                 patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", return_value=[self.reviewer_row()]), \
-                patch("workflow.interactive.os.chdir") as chdir, patch("workflow.interactive.os.execvp", side_effect=SystemExit(0)) as execvp:
+                patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as attach:
             stdin.isatty.return_value = True
-            with self.assertRaises(SystemExit):
-                main()  # A real execvp replaces the process; the mock ends it the same way.
-        chdir.assert_called_once_with(self.directory / "review-worktree")
-        execvp.assert_called_once_with("claude", ["claude", "attach", self.reviewer_row()["id"]])
+            main()  # `claude attach` exited 0 with the session alive: the operator detached.
+        attach.assert_called_once_with(["claude", "attach", self.reviewer_row()["id"]], cwd=self.directory / "review-worktree")
+
+
+class AttachOneTests(unittest.TestCase):
+    """attach-one keeps a pane attached across a background-service restart, ends on the controller's stop, never restarts a session."""
+
+    STOPPED_AT = "2026-09-23T20:08:49.736893Z"
+
+    def setUp(self):
+        from .sessions import plan_digest
+        InteractiveTests.setUp(self)
+        save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row()["id"],
+                                                           "session_id": self.row()["sessionId"], "node_id": "ui"})
+        self.worktree = Path(self.plan["nodes"]["ui"]["worktree"])
+
+    row = InteractiveTests.row
+
+    def exited(self, code):
+        return subprocess.CompletedProcess(["claude", "attach", self.row()["id"]], code)
+
+    def attach_one(self, attaches, inventory, clock=None):
+        """attach_one for lane ui: `claude attach` ends as `attaches`, the inventory answers `inventory`; the fakes stay on self."""
+        from .interactive import attach_one
+        self.sleep, self.errors = Mock(), io.StringIO()
+        with patch.object(InteractiveSessions, "inventory", side_effect=inventory) as self.inventory, \
+                patch("workflow.interactive.subprocess.run", side_effect=attaches) as self.attaches, contextlib.redirect_stderr(self.errors):
+            return attach_one(self.sessions, "ui", clock=clock or (lambda: 0.0), sleep=self.sleep)
+
+    def main(self, node="ui", attaches=None, inventory=()):
+        """`python -m workflow.interactive attach-one <run> --node <node>` in a terminal; returns the exit status and stderr."""
+        from .interactive import main
+        errors = io.StringIO()
+        with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", node]), \
+                patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", side_effect=inventory) as self.inventory, \
+                patch("workflow.interactive.subprocess.run", side_effect=attaches) as self.attaches, contextlib.redirect_stderr(errors):
+            stdin.isatty.return_value = True
+            try:
+                main()
+            except SystemExit as error:
+                return error.code, errors.getvalue()
+        return 0, errors.getvalue()
+
+    def record_stop(self, node="ui", confirmed=True, events=()):
+        """What the controller's stop leaves: the identity-checked marker, then (once confirmed) the timeline event."""
+        save_json(self.directory / f"{node}.stop.json", {"background_id": self.row()["id"], "session_id": self.row()["sessionId"],
+                                                         "pid": self.row()["pid"], "stopped": confirmed})
+        lines = [{"sequence": index + 1, "time": time, "node": event, "status": status, "message": message}
+                 for index, (time, event, status, message) in enumerate(events)]
+        (self.directory / "events.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+    def test_a_lost_connection_reattaches_the_same_session(self):
+        # A Claude Code update restarts the background service: `claude attach` exits 1 ("Couldn't reconnect to <id> -
+        # background service is unavailable"), the restarted service adopts the live session and the pane attaches it again.
+        self.attach_one([self.exited(1), self.exited(0)], itertools.repeat([self.row()]))
+        attach = call(["claude", "attach", self.row()["id"]], cwd=self.worktree)
+        self.assertEqual(self.attaches.call_args_list, [attach, attach])
+        self.sleep.assert_called_once_with(2)
+        self.assertEqual(self.errors.getvalue(), f"Lost the connection to ui ({self.row()['id']}); the background service may be restarting. "
+                                                 "Reattaching in 2s…\n")
+
+    def test_a_detach_ends_attach_one_quietly(self):
+        # Ctrl+Z, or ← to the agent view: `claude attach` exits 0 and the session keeps running. An attach the
+        # operator interrupted (130, or killed by SIGINT) ends the same way.
+        for code in (0, 130, -2):
+            with self.subTest(code=code):
+                self.assertIsNone(self.attach_one([self.exited(code)], itertools.repeat([self.row()])))
+                self.attaches.assert_called_once_with(["claude", "attach", self.row()["id"]], cwd=self.worktree)
+                self.sleep.assert_not_called()
+                self.assertEqual(self.errors.getvalue(), "")
+
+    def test_a_stop_recorded_by_the_controller_ends_attach_one_without_a_reattach(self):
+        # The freeze stops the session under the attached pane: `claude attach` reports that it exited (0) or loses it (1).
+        stopped = [(self.STOPPED_AT, "freeze", "stopped", "Native workers stopped before snapshot capture: ui, adapter")]
+        for code in (0, 1):
+            with self.subTest(code=code):
+                def stop(*args, **kwargs):
+                    self.record_stop(events=stopped)
+                    return self.exited(code)
+                self.assertIsNone(self.attach_one(stop, [[self.row()], []]))
+                self.assertEqual(self.attaches.call_count, 1)
+                self.sleep.assert_not_called()
+                self.assertEqual(self.errors.getvalue(), "Worker ui was stopped by the controller at 2026-09-23 20:08:49 UTC "
+                                                         "(Native workers stopped before snapshot capture: ui, adapter); nothing to attach.\n")
+                (self.directory / "ui.stop.json").unlink()
+
+    def test_attach_one_after_the_stop_reports_it_once_and_starts_nothing(self):
+        # What a manual reconnect loop turned into endless spam: now one line, exit 0, and not even a listing.
+        self.record_stop(events=[("2026-09-23T20:08:40.000000Z", "controller", "blocked", "Worker ui deadline exhausted; no automatic relaunch"),
+                                 (self.STOPPED_AT, "freeze", "stopped", "Native workers stopped before snapshot capture: ui, adapter")])
+        code, errors = self.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(errors, "Worker ui was stopped by the controller at 2026-09-23 20:08:49 UTC "
+                                 "(the run blocked: Worker ui deadline exhausted; no automatic relaunch); nothing to attach.\n")
+        self.inventory.assert_not_called()
+        self.attaches.assert_not_called()
+        # A reviewer's stop is its own event; an intent the controller has not confirmed yet is still its stop.
+        from .sessions import plan_digest
+        save_json(self.directory / "review.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": "33333333", "node_id": "review"})
+        self.record_stop("review", events=[(self.STOPPED_AT, "review", "stopped", "Reviewer review session stopped; its transcript stays resumable")])
+        self.assertEqual(self.main("review"), (0, "Reviewer review was stopped by the controller at 2026-09-23 20:08:49 UTC "
+                                                  "(Reviewer review session stopped; its transcript stays resumable); nothing to attach.\n"))
+        self.record_stop(confirmed=False)
+        code, errors = self.main()
+        self.assertEqual(code, 0)
+        self.assertRegex(errors, r"^Worker ui was stopped by the controller at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC "
+                                 r"\(stop requested, not yet confirmed\); nothing to attach\.\n$")
+        self.attaches.assert_not_called()
+
+    def test_a_session_gone_without_a_recorded_stop_is_refused_once(self):
+        # The native process ended (a crash, or /exit typed in the pane) and the controller recorded no stop.
+        # `claude attach` would wake it again, so attach-one refuses once and never restarts it.
+        for code, listed in ((1, []), (0, []), (1, None)):
+            with self.subTest(code=code, listed=listed):
+                native = subprocess.Popen(["sleep", "60"])
+                self.addCleanup(native.wait)
+                self.addCleanup(native.kill)
+                row = self.row(pid=native.pid)
+                def ended(*args, **kwargs):
+                    native.kill()  # Left uncollected, as a zombie, until its parent reaps it: it still answers kill(pid, 0).
+                    for _ in range(500):
+                        if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                            break
+                        time.sleep(0.01)
+                    return self.exited(code)
+                # The service may drop the row, or still list it with its dead PID.
+                status, errors = self.main(attaches=ended, inventory=[[row], [row] if listed is None else listed])
+                self.assertEqual(status, 1)
+                refusal = "Native process is unavailable" if listed is None else "Session unavailable"
+                self.assertEqual(errors.count("Blocked:"), 1)
+                self.assertIn(f"Blocked: {refusal}; refusing implicit restart\n", errors)
+                self.assertNotIn("Reattaching", errors)
+                self.assertEqual(self.attaches.call_count, 1)
+
+    def test_a_listing_gap_while_the_process_lives_is_waited_out(self):
+        # Mid-update the CLI is missing and the restarted service lists nothing yet, while the session's process runs on.
+        missing = FileNotFoundError(2, "No such file or directory", "claude")
+        self.attach_one([self.exited(1), missing, self.exited(0)], [[self.row()], missing, [], *[[self.row()]] * 4])
+        self.assertEqual(self.sleep.call_args_list, [call(2), call(4), call(8)])
+        self.assertEqual(self.attaches.call_count, 3)  # The second attach found the CLI missing: retried like a lost connection.
+        self.assertEqual(self.inventory.call_count, 7)
+        waiting = f"The background service does not list ui ({self.row()['id']}) yet; retrying in {{}}s…"
+        lost = f"Lost the connection to ui ({self.row()['id']}); the background service may be restarting. Reattaching in {{}}s…"
+        self.assertEqual(self.errors.getvalue().splitlines(), [lost.format(2), waiting.format(4), lost.format(8)])
+
+    def test_reattaching_backs_off_to_a_cap_and_gives_up_after_the_limit(self):
+        from .interactive import REATTACH_LIMIT
+        with self.assertRaisesRegex(RuntimeError, rf"^Gave up reattaching ui \({self.row()['id']}\) after {REATTACH_LIMIT} attempts in a row"):
+            self.attach_one(itertools.repeat(self.exited(1)), itertools.repeat([self.row()]))
+        delays = [item.args[0] for item in self.sleep.call_args_list]
+        self.assertEqual(delays[:5], [2, 4, 8, 10, 10])
+        self.assertEqual(max(delays), 10)
+        self.assertEqual(len(delays), REATTACH_LIMIT - 1)
+        self.assertEqual(self.attaches.call_count, REATTACH_LIMIT)
+
+    def test_a_connection_that_held_starts_a_new_count(self):
+        # Two quick losses, then an hour attached before the next update: the backoff starts again from its first delay.
+        clock = iter([0.0, 1.0, 10.0, 20.0, 30.0, 3630.0, 3640.0]).__next__
+        self.attach_one([self.exited(1), self.exited(1), self.exited(1), self.exited(0)], itertools.repeat([self.row()]), clock=clock)
+        self.assertEqual(self.sleep.call_args_list, [call(2), call(4), call(2)])
+        self.assertEqual(self.attaches.call_count, 4)
+
+    def test_ctrl_c_ends_attach_one_without_a_traceback_or_a_reattach(self):
+        code, errors = self.main(attaches=KeyboardInterrupt, inventory=itertools.repeat([self.row()]))
+        self.assertEqual(code, 130)
+        self.assertNotIn("Traceback", errors)
+        self.assertIn("the ui session keeps running", errors)
+        self.assertEqual(self.attaches.call_count, 1)
+        # Interrupted while waiting to reattach: nothing more is attached either.
+        from .interactive import attach_one
+        with patch.object(InteractiveSessions, "inventory", return_value=[self.row()]), \
+                patch("workflow.interactive.subprocess.run", return_value=self.exited(1)) as attach, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                attach_one(self.sessions, "ui", clock=lambda: 0.0, sleep=Mock(side_effect=KeyboardInterrupt))
+        self.assertEqual(attach.call_count, 1)
 
 
 if __name__ == "__main__":

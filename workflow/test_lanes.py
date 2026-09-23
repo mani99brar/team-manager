@@ -868,12 +868,10 @@ class Panes(unittest.TestCase):
         self.assertIn("--node must be a lane of this run (ui, adapter, docs) or review", errors.getvalue())
         with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "docs"]), \
                 patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", return_value=[self.row("docs")]), \
-                patch("workflow.interactive.os.chdir") as chdir, patch("workflow.interactive.os.execvp", side_effect=SystemExit(0)) as execvp:
+                patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as attach:
             stdin.isatty.return_value = True
-            with self.assertRaises(SystemExit):
-                main()
-        chdir.assert_called_once_with(Path(self.plan["nodes"]["docs"]["worktree"]))
-        execvp.assert_called_once_with("claude", ["claude", "attach", self.row("docs")["id"]])
+            main()  # `claude attach` exited 0 with the session alive: the operator detached.
+        attach.assert_called_once_with(["claude", "attach", self.row("docs")["id"]], cwd=Path(self.plan["nodes"]["docs"]["worktree"]))
 
 
 if __name__ == "__main__":

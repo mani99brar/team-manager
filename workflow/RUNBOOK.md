@@ -135,6 +135,8 @@ Ctrl+Z detaches without stopping the native terminal. Closing a panel only detac
 "$PY" -m workflow.interactive attach-one "$RUN" --node <lane>
 ```
 
+A pane reattaches by itself, so never wrap `attach-one` in a shell loop. When the connection drops while the session lives (a Claude Code update restarts the background service, which drops every attached pane), it prints `Lost the connection to <lane> (<id>); ... Reattaching in <n>s` and attaches the same session again, backing off from 2 to 10 seconds; it gives up after 30 attempts in a row. Once the controller has stopped the session (`<node>.stop.json`: the freeze, a blocked run, a decided review) it prints `Worker <lane> was stopped by the controller at <time> (<reason>); nothing to attach.` and exits 0. A session gone without a recorded stop is refused once (exit 1), never restarted. Ctrl+C while it waits ends it; the session keeps running.
+
 If `start` was used without `--herdr`, `python -m workflow attach "$RUN"` creates the dedicated tab. Partial/duplicate panel allocations are preserved and reported, not silently replaced. "Interactive panes and session identity" below covers what typing into a pane does and how sessions are bound.
 
 While workers run, do one independent task outside their worktrees and leave `$RUN/return-note.md` describing the run, independent task, current state and next action.
@@ -322,7 +324,7 @@ Nothing launches a Claude session without `--live`. Nothing ever pushes or merge
 | `status` | | | next nodes, pending interrupts, errors, `workers`/`excluded_workers`, the challenge status when there is one; refreshes `report.html` |
 | `export` | | | rebuilds `run-state.json` at the current export version; launches nothing |
 
-`python -m workflow.interactive attach-one "$RUN" --node <lane>|review|review-<reviewer>` reconnects one session in the current terminal; it needs an interactive terminal and refuses to restart a missing session. Native session controls, from the run's receipts:
+`python -m workflow.interactive attach-one "$RUN" --node <lane>|review|review-<reviewer>` reconnects one session in the current terminal; it needs an interactive terminal, reattaches after a lost connection while the session lives, exits 0 once the controller has stopped the session and refuses to restart a missing one. Native session controls, from the run's receipts:
 
 ```bash
 claude agents --json                                  # the run's sessions: workflow-<run-id>-<lane>, workflow-<run-id>-reviewer[-<reviewer>]
