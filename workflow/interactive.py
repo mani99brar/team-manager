@@ -396,7 +396,7 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
 REATTACH_LIMIT = 30          # attempts in a row without a working attach before attach-one gives up
 REATTACH_MAX_DELAY = 10      # seconds; the delay doubles from 2 up to this cap
 ATTACH_STABLE_SECONDS = 60   # an attach that held this long was connected: its loss starts a new count
-DEAD_PID_GRACE_SECONDS = 30  # a row still listing an ended process: how long a respawn's new PID is awaited
+DEAD_PID_GRACE_SECONDS = 30  # an ended process with no new one listed: how long a respawn's new PID is awaited
 # What a restarting service lists for a moment: a row still registering its PID, or in a state between two processes
 # (starting, resuming). A failed listing is waited out whatever its error; a terminal state never is.
 TRANSIENT_REFUSALS = ("No live native PID", "Session is not attachable")
@@ -409,7 +409,7 @@ class SessionGap(RuntimeError):
 
 
 class ProcessEnded(SessionGap):
-    """The row lists a PID whose process ended: waited out for DEAD_PID_GRACE_SECONDS, then refused."""
+    """The attached process ended with no new one listed (its PID, or no row): waited out for DEAD_PID_GRACE_SECONDS, then refused."""
 
 
 def node_title(node: str) -> str:
@@ -498,9 +498,9 @@ def observe(sessions: InteractiveSessions, node: str, attached: dict | None) -> 
     itself fails (a missing CLI, a timeout, a non-zero exit, output it cannot parse) is Claude Code's
     business and every such failure is a gap, as are a row still registering its PID or in a state
     between two processes, a listing without the id while the attached process lives, and (ProcessEnded)
-    a row still listing a PID whose process ended. A first attach, a listing without the id once the
-    attached process ended, a terminal state and every identity refusal fail at once: nothing is
-    attached without a verified live row.
+    a row still listing a PID whose process ended or a listing without the id once it ended. A first
+    attach, a terminal state and every identity refusal fail at once: nothing is attached without a
+    verified live row.
     """
     try:
         rows = sessions.inventory()
@@ -520,8 +520,12 @@ def observe(sessions: InteractiveSessions, node: str, attached: dict | None) -> 
             raise
         raise SessionGap(str(error)) from error
     if row is None:
-        if attached is None or not process_alive(attached["pid"]):
+        if attached is None:
             raise RuntimeError("Session unavailable; refusing implicit restart")
+        if not process_alive(attached["pid"]):
+            # Without --all `claude agents` omits a finished (`done`) session that has no process: an idle one between
+            # the two processes of an update's respawn, or one that ended.
+            raise ProcessEnded("Session unavailable; refusing implicit restart")
         raise SessionGap(f"`claude agents` does not list {attached['id']}")
     if not process_alive(row["pid"]):  # A zombie passes locate's kill(pid, 0).
         raise ProcessEnded(PROCESS_ENDED) if attached is not None else RuntimeError(PROCESS_ENDED)
@@ -547,7 +551,7 @@ def attach_one(sessions: InteractiveSessions, node: str, *, clock=time.monotonic
         try:
             row = observe(sessions, node, attached)
         except ProcessEnded as gap:
-            # A respawn lists its new PID within seconds; a row that keeps listing the ended process is a session that ended.
+            # A respawn lists its new PID within seconds; a session that keeps missing a live process has ended.
             now = clock()
             dead_since = now if dead_since is None else dead_since
             if now - dead_since >= DEAD_PID_GRACE_SECONDS:
