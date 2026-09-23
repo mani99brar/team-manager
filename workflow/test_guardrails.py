@@ -1031,6 +1031,8 @@ class WorkerQuestion(unittest.TestCase):
             "open_assumptions": [], "untested": [], "falsifying_check": "unit", "verify_yourself": "It builds", "question": None, **fields})
 
     def ask(self, text: str):
+        # The scenarios reuse ui after a wait saved its handoff; a real lane is stopped then, and `answer` refuses it.
+        (self.root / "ui.handoff.json").unlink(missing_ok=True)
         self.completion("ui", status="question", question=text, falsifying_check="", verify_yourself="", untested=None)
 
     def wait(self, on_sleep=None):
@@ -1233,6 +1235,80 @@ class WorkerQuestion(unittest.TestCase):
         self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][1]["answer"], "Use option C")
         self.assertIn(("ui", "interactive", "Worker ui question 2 answered; its deadline runs again"), self.events)
 
+    def test_a_completion_signal_written_while_a_question_waits_shows_the_session_worked_again(self):
+        # A reply typed in the pane may never show `working`: the registry can report the whole reply turn as blocked, or
+        # keep done. The next completion signal proves the session worked again: the waiting question gets the placeholder
+        # and its deadline runs again before that signal is recorded or accepted, so only the latest question ever waits.
+        for state, ending in (("blocked", "question"), ("blocked", "completed"), ("done", "question"), ("done", "completed")):
+            with self.subTest(state=state, ending=ending):
+                self.setUp()  # A fresh run for each case.
+                self.states.update(ui=state, adapter="idle")
+                self.completion("adapter")
+                self.ask("Option A or B?")
+
+                def reply_turn_ends():
+                    self.now = 100.0
+                    if ending == "question":
+                        self.ask("Second?")
+                    else:
+                        self.states["ui"] = "done"
+                        self.completion("ui")
+                    # Not read yet: the worker went on from question 1, so `answer` types nothing.
+                    calls, output, code = self.answer("ui", "Use option B")
+                    self.assertEqual((calls, code), ([], 1), output)
+                    self.assertIn("Blocked: Worker ui has no unanswered question: it went on from question 1 (its next completion signal written)", output)
+
+                def answer_second():
+                    self.assertEqual([(entry["n"], entry["answer"]) for entry in read_json(self.root / "ui.questions.json")["questions"]],
+                                     [(1, PANE_ANSWER), (2, None)])
+                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 90.0, "paused_at": "1970-01-01T00:01:40Z"})
+                    self.now = 130.0
+                    calls, output, code = self.answer("ui", "Use option C")
+                    self.assertEqual((len(calls), code), (2, 0), output)
+                    self.states["ui"] = "done"
+                    self.completion("ui")
+                steps = iter([reply_turn_ends, answer_second])
+                self.wait(on_sleep=lambda: next(steps)())
+                questions = read_json(self.root / "ui.questions.json")["questions"]
+                self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
+                self.assertIn(("ui", "interactive", "Worker ui wrote its next completion signal while question 1 waited: it worked again "
+                                                    "(an answer typed in its pane, or a command of its own) though no poll saw it working. "
+                                                    "Its deadline runs again, and `answer` is refused for question 1"), self.events)
+                if ending == "question":
+                    self.assertEqual([(entry["n"], entry["answer"]) for entry in questions], [(1, PANE_ANSWER), (2, "Use option C")])
+                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 120.0, "paused_at": None})
+                    self.assertEqual([message.split(":")[0].split(";")[0] for _, _, message in self.events],
+                                     ["Worker ui asked question 1 of 3", "Worker ui wrote its next completion signal while question 1 waited",
+                                      "Worker ui asked question 2 of 3", "Worker ui question 2 answered"])
+                else:
+                    self.assertEqual([(entry["n"], entry["answer"]) for entry in questions], [(1, PANE_ANSWER)])
+                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 90.0, "paused_at": None})
+                    self.assertEqual(len(self.events), 2)
+
+    def test_answer_types_nothing_once_the_worker_went_on_from_its_question(self):
+        # The operator typed the answer in ui's pane and the controller recorded the placeholder: `answer` may replace it
+        # only while ui is on that question. Not once ui wrote its next completion signal, its handoff was saved or the
+        # controller stopped it: a stopped worker's pane is a shell, which would run the text as a command.
+        self.states["adapter"] = "idle"
+        self.completion("adapter")
+        self.ask("Option A or B?")
+
+        def refused(reason):
+            calls, output, code = self.answer("ui", "Use option B")
+            self.assertEqual((calls, code), ([], 1), output)
+            self.assertIn(f"Blocked: Worker ui has no unanswered question: it went on from question 1 ({reason}); nothing is typed into its pane", output)
+        steps = iter([lambda: self.states.update(ui="working"),
+                      lambda: (self.completion("ui"), refused("its next completion signal written")),  # Still working: not read yet.
+                      lambda: self.states.update(ui="done")])
+        self.wait(on_sleep=lambda: next(steps)())
+        self.assertIn("Worker ui is working again while question 1 waits", self.events[1][2])
+        self.assertIn("until the worker writes its next completion signal", self.events[1][2])
+        refused("its handoff saved")
+        # freeze records the stop intent and stops the worker; its pane is back at a shell.
+        save_json(self.root / "ui.stop.json", {"background_id": "bg-ui", "session_id": "s", "pid": 1, "stopped": True})
+        refused("stopped by the controller")
+        self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][0]["answer"], PANE_ANSWER)
+
 
 class AnswerDelivery(unittest.TestCase):
     """`answer` records first (the deadline restarts, PRD 4.6), then delivers; a failed delivery is retried by rerunning it."""
@@ -1342,6 +1418,21 @@ class AnswerDelivery(unittest.TestCase):
         calls, output, code = self.answer("ui", "Use option B")
         self.assertEqual((calls, code), ([], 1), output)
         self.assertIn("no unanswered question", output)
+
+    def test_a_rerun_types_nothing_once_the_worker_went_on(self):
+        # The delivery failed and the operator typed the answer in the pane: the worker went on. Its next completion
+        # signal, its saved handoff or its stop (its pane a shell then) refuses the rerun, which types nothing.
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        calls, output, code = self.answer("ui", "Use option B", herdr_env=False)
+        self.assertEqual((calls, code), ([], 1), output)
+        for name, reason in (("completion", "its next completion signal written"), ("handoff", "its handoff saved"), ("stop", "stopped by the controller")):
+            save_json(self.root / f"ui.{name}.json", {})
+            for argv in (("ui", "Use option B"), ("ui", "Use option B", "--no-herdr")):
+                calls, output, code = self.answer(*argv)
+                self.assertEqual((calls, code), ([], 1), output)
+                self.assertIn(f"Blocked: Question 1 of ui is answered but that answer was never delivered, and the worker went on from it ({reason}); "
+                              "nothing is typed into its pane", output)
+        self.assertIs(self.entry()["delivered"], False)
 
 
 class ExportSeam(unittest.TestCase):

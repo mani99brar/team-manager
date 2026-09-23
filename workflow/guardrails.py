@@ -731,12 +731,22 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
 PANE_ANSWER = "(no answer recorded: the worker's session worked again in its pane)"
 
 
+def went_on(directory: Path, node: str) -> str | None:
+    """What shows the worker went on from its latest question, or None: record_question moved that question's file away,
+    so a completion file is its next signal; a saved handoff or a stop follows one. A stopped worker's pane is a shell."""
+    for name, reason in (("stop", "stopped by the controller"), ("handoff", "its handoff saved"), ("completion", "its next completion signal written")):
+        if (directory / f"{node}.{name}.json").exists():
+            return reason
+    return None
+
+
 def record_answer(directory: Path, node: str, text: str, clock=None, delivered: bool | None = None) -> dict:
     """The latest question's answer; the deadline restarts now. Refused when no question waits.
 
     `answer` records `delivered: false` and sets it once the text reached the worker, so a failed delivery can be
     retried. It also replaces PANE_ANSWER, which the controller records (without the flag) once the session works
-    again: that deadline already runs, and the text still reaches the worker.
+    again: that deadline already runs, and the text still reaches the worker while it is on that question. Once it
+    went on, the text would reach no question (or a shell), so nothing is recorded.
     """
     if not text.strip():
         raise ValueError("The answer is empty")
@@ -744,6 +754,10 @@ def record_answer(directory: Path, node: str, text: str, clock=None, delivered: 
         questions = load_questions(directory, node)
         if not questions or questions[-1]["answer"] not in {None, PANE_ANSWER}:
             raise ValueError(f"Worker {node} has no unanswered question")
+        reason = went_on(directory, node)
+        if reason:
+            raise ValueError(f"Worker {node} has no unanswered question: it went on from question {questions[-1]['n']} ({reason}); "
+                             "nothing is typed into its pane")
         at = (clock or time.time)()
         questions[-1].update(answer=text, answered_at=iso(at))
         if delivered is not None:
@@ -772,7 +786,8 @@ def record_pane_answer(directory: Path, node: str, clock=None) -> dict | None:
 def undelivered_answer(directory: Path, node: str, text: str) -> dict | None:
     """The latest question when `answer` recorded this text but never delivered it: a rerun delivers it, recording nothing.
 
-    A different text is refused: a question is answered once, and its deadline already runs again.
+    A different text is refused: a question is answered once, and its deadline already runs again. So is any rerun once
+    the worker went on: the text would reach no question (or a shell).
     """
     questions = load_questions(directory, node)
     if not questions or questions[-1]["answer"] is None or questions[-1].get("delivered") is not False:
@@ -781,6 +796,10 @@ def undelivered_answer(directory: Path, node: str, text: str) -> dict | None:
     if entry["answer"] != text:
         raise ValueError(f"Question {entry['n']} of {node} is already answered and that answer was never delivered; "
                          f"rerun answer with the recorded text to deliver it: {entry['answer']!r}")
+    reason = went_on(directory, node)
+    if reason:
+        raise ValueError(f"Question {entry['n']} of {node} is answered but that answer was never delivered, and the worker went on from it "
+                         f"({reason}); nothing is typed into its pane")
     return entry
 
 

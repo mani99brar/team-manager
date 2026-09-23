@@ -186,6 +186,28 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             # The turn is over, so the file is final. A turn that ends on a question reports idle, done or, waiting on
             # the operator, blocked; a `completed` or `blocked` file is still accepted only once idle or done, as before.
             item = read_signal(runtime, node) if row["state"] in {"idle", "done", "blocked"} and path.exists() else None
+            waiting = waiting_question(runtime.directory, node)
+            if waiting and (row["state"] == "working" or item):
+                # Working again while the question waits: its deadline runs again. A reply typed in the pane may never show
+                # `working` (the registry can report the whole reply turn as blocked, or keep done), so the next completion
+                # signal proves it too, before it is recorded or accepted. `answer` may have landed meanwhile (then nothing
+                # is recorded); until that next signal it still records and delivers an answer.
+                record_pane_answer(runtime.directory, node, clock)
+                waiting = None
+            for entry in load_questions(runtime.directory, node):
+                if entry["answer"] is not None and (node, entry["n"]) not in answered:
+                    answered.add((node, entry["n"]))
+                    if entry["answer"] != PANE_ANSWER:
+                        message = f"Worker {node} question {entry['n']} answered; its deadline runs again"
+                    elif item:
+                        message = (f"Worker {node} wrote its next completion signal while question {entry['n']} waited: it worked again (an "
+                                   "answer typed in its pane, or a command of its own) though no poll saw it working. Its deadline runs "
+                                   f"again, and `answer` is refused for question {entry['n']}")
+                    else:
+                        message = (f"Worker {node} is working again while question {entry['n']} waits (an answer typed in its pane, or a "
+                                   "command of its own); its deadline runs again, and `answer` still records and delivers an answer "
+                                   "until the worker writes its next completion signal")
+                    runtime.event(node, "interactive", message)
             if item and item["status"] != "question" and row["state"] != "blocked":
                 handoffs[node] = read_completion(runtime, node)
                 continue  # Its completion signal met the deadline.
@@ -197,18 +219,6 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             if item and item["status"] == "question":
                 record_question(runtime, node, item, clock)
                 continue
-            waiting = waiting_question(runtime.directory, node)
-            if row["state"] == "working" and waiting:
-                # Working again while the question waits: its deadline runs again. `answer` may have landed meanwhile
-                # (then nothing is recorded), and it still records and delivers an answer after this.
-                record_pane_answer(runtime.directory, node, clock)
-            for entry in load_questions(runtime.directory, node):
-                if entry["answer"] is not None and (node, entry["n"]) not in answered:
-                    answered.add((node, entry["n"]))
-                    runtime.event(node, "interactive", (f"Worker {node} is working again while question {entry['n']} waits (an answer typed "
-                                                        "in its pane, or a command of its own); its deadline runs again, and `answer` "
-                                                        "still records and delivers an answer") if entry["answer"] == PANE_ANSWER
-                                  else f"Worker {node} question {entry['n']} answered; its deadline runs again")
             if row["state"] == "blocked" and not waiting and node not in attention:
                 # A native session reports `blocked` when its turn ended needing a human: a question,
                 # a permission prompt or a refusal the harness could not continue past. That is not a
