@@ -96,7 +96,7 @@ The tests use fake workers, a fake reviewer session and mocked native lifecycle 
 - One task file per lane, with distinct responsibilities, declared in `feature.json` (`contracts/workflow/feature.schema.json`).
 - Each lane's owned path prefixes (no globs; pairwise disjoint across all declared lanes, excluded ones included).
 - A verification policy matching `contracts/workflow/verification.schema.json` (1.2.0): the same lane ids as `feature.json`, a `role` label, `checks` and `required_check_kinds` per lane.
-- Tests for the named browser scenarios, following the attachment convention below. These can be part of the workers' deliverables; required test files missing at verification block the run. The pinned task of a lane with a browser check states the rules and the `check-report` command, and the task `init` writes carries both.
+- Tests for the named browser scenarios, following the attachment convention below. These can be part of the workers' deliverables; required test files missing at verification block the run. The pinned task of a lane with a browser check states the rules and ends with the exact `check-report` command; the task `init` writes carries the rules and the Playwright report command.
 
 `contracts/workflow/verification.example.json` is illustrative, not a runnable feature test suite. Replace its commands/scenarios with the chosen feature's actual acceptance criteria.
 
@@ -183,8 +183,11 @@ Before completing, a browser lane runs the spec files it changed with a JSON rep
 ```bash
 WORKFLOW_VERIFICATION_PHASE=<worker|candidate> PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json \
   npx --no-install playwright test --config=<config> --reporter=json <spec files>
-"$PY" -m workflow check-report features/<feature> <lane> <tmp>/report.json   # or a policy.json; --all for a full run
+PYTHONSAFEPATH=1 PYTHONPATH=<md-manager checkout> <its .venv/bin/python> -m workflow check-report \
+  "$(git rev-parse --show-toplevel)/../policy.json" <lane> <tmp>/report.json
 ```
+
+The controller appends this command to the pinned task of every lane with a browser check, spelled out with its own interpreter and checkout: a target's worktree cannot import `workflow`, `python` may not be on the lane's PATH, and `PYTHONSAFEPATH` keeps a target's own `workflow` directory from shadowing the tool's. The policy is the run's pinned `policy.json`, one directory above the lane's worktree (`<run>/worktree-<lane>`), the one the verifier applies, so the command works from anywhere in the worktree. `check-report` also takes a feature directory or any policy file, and `--all` for a full run; it needs jsonschema but not LangGraph, so an operator can run it from any directory: `PYTHONPATH="$HOME/dev/md-manager" "$PY" -m workflow check-report ~/dev/project-B/features/<feature> <lane> report.json`.
 
 `check-report` prints one line per required scenario of the lane's browser checks: `ok`, `not in this report`, or the problem in the verifier's words, then the test counts. It exits 1 on any problem: a misnamed, missing or duplicated `screenshot:<id>`, a duplicated scenario title, a scenario or other test that did not pass, Playwright's global errors. Scenarios of spec files the worker did not run are listed as `not in this report` and fail only with `--all`. It checks that each screenshot file exists, not that it lies in the verifier's output directory, which only the verifier's run has.
 

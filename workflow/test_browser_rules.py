@@ -1,6 +1,9 @@
 """The verifier's browser scenario rules, told to the lanes: `check-report`, the worker-phase gate and the task texts."""
 import io
 import json
+import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -137,17 +140,57 @@ class CheckReport(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("web is not a lane of this policy (ui, api)", output)
 
-    def test_feature_directory_through_python_m_workflow(self):
+    def test_feature_directory_without_langgraph_from_outside_the_tool(self):
+        """A lane's worktree is not the tool's checkout, and its Python may lack LangGraph: check-report needs neither."""
         folder = self.root / "features/rules"
         folder.mkdir(parents=True)
         self.policy.rename(folder / "lanes.json")
         save_json(folder / "feature.json", {"version": "2.0.0", "name": "Rules", "branch_prefix": "feature/rules", "policy": "lanes.json",
                                             "workers": [{"node_id": "ui", "task": "ui-task.md"}, {"node_id": "api", "task": "api-task.md"}]})
-        report = self.report(self.spec("alpha", [self.attachment("screenshot:alpha-file")]), self.spec("beta"))
-        result = subprocess.run([sys.executable, "-m", "workflow", "check-report", str(folder), "ui", str(report)],
-                                cwd=TOOL, capture_output=True, text=True, timeout=120)
+        # `python -m workflow` with every langgraph import failing, as in a Python that only has jsonschema.
+        blocked = "import runpy, sys; sys.modules['langgraph'] = None; runpy.run_module('workflow', run_name='__main__', alter_sys=True)"
+        env = {**os.environ, "PYTHONPATH": str(TOOL)}
+        def run(report: Path) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, "-c", blocked, "check-report", "features/rules", "ui", str(report)],
+                                  cwd=self.root, env=env, capture_output=True, text=True, timeout=120)
+        result = run(self.report(self.spec("alpha", [self.attachment("screenshot:alpha-file")]), self.spec("beta")))
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("ui-browser/alpha: Expected one screenshot attachment for alpha\n", result.stdout)
+        result = run(self.report(self.spec("alpha"), self.spec("beta")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ui-browser/alpha: ok\n", result.stdout)
+        (folder / "feature.json").write_text(json.dumps({"policy": "../../policy.json"}))
+        self.policy.write_text("{}")
+        result = run(self.report(self.spec("alpha"), self.spec("beta")))
+        self.assertEqual((result.returncode, result.stderr), (1, "Blocked: Feature file escapes feature directory\n"))
+
+    def test_pinned_command_runs_anywhere_in_the_lane_worktree(self):
+        """The exact command the pinned task gives: the controller's interpreter and checkout, the run's pinned policy."""
+        run = self.root / "run"
+        worktree = run / "worktree-ui"
+        # A target with its own `workflow` package must not shadow the tool's.
+        (worktree / "workflow").mkdir(parents=True)
+        (worktree / "workflow/__init__.py").write_text("")
+        (worktree / "workflow/__main__.py").write_text("raise SystemExit(3)\n")
+        (worktree / "tests").mkdir()
+        subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+        self.policy.rename(run / "policy.json")
+        ui = browser_policy([])["workers"][0]
+        commands = re.findall(r"`([^`]*check-report[^`]*)`", pinned_task("## Goal\n\nBuild it.\n", ui))
+        self.assertEqual(len(commands), 1)
+        prefix = f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(TOOL))} {shlex.quote(sys.executable)} -m workflow check-report "
+        self.assertTrue(commands[0].startswith(prefix), commands[0])
+        self.assertTrue(commands[0].endswith(" ui <tmp>/report.json"), commands[0])
+        def run_pinned(report: Path, cwd: Path) -> subprocess.CompletedProcess:
+            command = commands[0].replace("<tmp>/report.json", shlex.quote(str(report)))
+            env = {key: value for key, value in os.environ.items() if not key.startswith(("PYTHON", "GIT_"))}
+            return subprocess.run(["bash", "-c", command], cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
+        result = run_pinned(self.report(self.spec("alpha", [self.attachment("screenshot:alpha-file")]), self.spec("beta")), worktree)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("ui-browser/alpha: Expected one screenshot attachment for alpha\n", result.stdout)
+        result = run_pinned(self.report(self.spec("alpha"), self.spec("beta")), worktree / "tests")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ui-browser/beta: ok\n", result.stdout)
 
 
 # A stand-in for `playwright test`: reads the runner's --output flag and PLAYWRIGHT_JSON_OUTPUT_FILE like Playwright,
@@ -237,16 +280,21 @@ class BrowserRulesInTasks(unittest.TestCase):
         ui, api = policy["workers"]
         task = pinned_task("## Goal\n\nBuild it.\n", ui)
         self.assertIn("Approved ownership and checks:\n" + json.dumps(ui), task)
-        for text in ("`[scenario:<id>]`", "`screenshot:<id>`", "PLAYWRIGHT_JSON_OUTPUT_FILE=", "python -m workflow check-report ", " ui <tmp>/report.json"):
+        for text in ("`[scenario:<id>]`", "`screenshot:<id>`", "PLAYWRIGHT_JSON_OUTPUT_FILE=", " ui <tmp>/report.json`",
+                     f"PYTHONPATH={shlex.quote(str(TOOL))} {shlex.quote(sys.executable)} -m workflow check-report "):
             self.assertIn(text, task)
+        # Never the bare `python`: it is not on every PATH, and without the tool on PYTHONPATH a target cannot import `workflow`.
+        self.assertNotIn("`python -m workflow", task)
         self.assertEqual(pinned_task("## Goal\n\nBuild it.\n", api), "## Goal\n\nBuild it.\n\nApproved ownership and checks:\n" + json.dumps(api))
 
     def test_init_task_template_states_the_rules_with_the_exact_commands(self):
         task = feature_files("skeleton")["main-task.md"]
         self.assertEqual(brief_problems(task), [])
         for text in ("`[scenario:<id>]`", "`screenshot:<id>`", "WORKFLOW_VERIFICATION_PHASE=", "--reporter=json",
-                     "python -m workflow check-report features/skeleton main <tmp>/report.json"):
+                     "the exact `check-report` command the controller appends to this task"):
             self.assertIn(text, task)
+        # The template is committed to the target, so it names no interpreter or checkout of this machine; the pinned task does.
+        self.assertNotIn("python -m workflow", task)
         self.assertFalse([line for line in task.splitlines() if "check-report" in line and line.strip().startswith("TODO:")])
 
 

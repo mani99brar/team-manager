@@ -370,11 +370,22 @@ def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
 
 
 def report_policy(source: Path) -> dict:
-    """A policy file, or the policy a feature directory's feature.json names."""
+    """A policy file, or the policy a feature directory's feature.json names.
+
+    feature.json is read here, with launch.feature_file's escape check, rather than through launch, which imports
+    LangGraph: a lane runs check-report in its own worktree, and any Python with jsonschema and this tool on
+    PYTHONPATH must do.
+    """
     from .verification import validate_policy
     if source.is_dir():
-        from .launch import feature_file, load_feature  # launch imports this module through pipeline
-        source = feature_file(source, load_feature(source)["policy"])
+        manifest = json.loads((source / "feature.json").read_text())
+        name = manifest.get("policy") if isinstance(manifest, dict) else None
+        if not isinstance(name, str):
+            raise ValueError(f"{source / 'feature.json'} names no policy")
+        path = (source / name).resolve(strict=True)
+        if not path.is_relative_to(source.resolve()):
+            raise ValueError("Feature file escapes feature directory")
+        source = path
     return validate_policy(json.loads(source.read_text()))
 
 
