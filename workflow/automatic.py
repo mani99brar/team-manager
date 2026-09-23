@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -820,10 +821,91 @@ def advance_failed_checks(runtime, state) -> bool:
     return True
 
 
+TIMELINE_TAIL = 5  # Recent events a starting or resumed supervisor shows before following new ones.
+TIMELINE_POLL_SECONDS = 1.0
+
+
+def timeline_line(event: dict) -> str:
+    """`HH:MM:SS  node  status  message`: the time in UTC whatever the terminal's zone, the message on one line."""
+    try:
+        stamp = time.strftime("%H:%M:%S", datetime.fromisoformat(event["time"]).utctimetuple())
+    except (KeyError, TypeError, ValueError):
+        stamp = "??:??:??"
+    message = " ".join(str(event.get("message", "")).splitlines())
+    return f"{stamp}  {str(event.get('node')):<22} {str(event.get('status')):<12} {message}"
+
+
+class Timeline:
+    """Prints the run's timeline in the supervisor's terminal while it supervises, so a resumed run is visibly alive.
+
+    The automatic-step children and other commands append the events, so this follows events.jsonl rather than an
+    in-process writer. A line counts once its newline is written, and a sequence number prints at most once, however
+    often the controller restarts. Entering prints a header and the last few events; leaving prints whatever the last
+    controller recorded, before the caller's result or error.
+    """
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.path = directory / "events.jsonl"
+        self.offset = 0
+        self.printed = 0  # The highest sequence number shown or skipped.
+        self.stop = threading.Event()
+        self.follower = threading.Thread(target=self.follow, name="timeline", daemon=True)
+
+    def read(self) -> list[dict]:
+        """Events completed since the last read; a partly written last line waits for its newline."""
+        try:
+            with self.path.open("rb") as handle:
+                if os.fstat(handle.fileno()).st_size < self.offset:
+                    self.offset = 0  # Replaced, not appended: the sequence numbers skip what was shown.
+                handle.seek(self.offset)
+                data = handle.read()
+        except OSError:
+            return []
+        data = data[:data.rfind(b"\n") + 1]
+        self.offset += len(data)
+        events = []
+        for line in data.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and type(event.get("sequence")) is int and event["sequence"] > self.printed:
+                events.append(event)
+        return events
+
+    def show(self, events: list[dict]) -> None:
+        for event in events:
+            print(timeline_line(event), flush=True)
+            self.printed = max(self.printed, event["sequence"])
+
+    def poll(self) -> None:
+        self.show(self.read())
+
+    def follow(self) -> None:
+        while not self.stop.wait(TIMELINE_POLL_SECONDS):
+            self.poll()
+
+    def __enter__(self):
+        events = self.read()
+        recent = events[-TIMELINE_TAIL:]
+        print(f"Supervising {self.directory}; timeline in UTC, "
+              + (f"the last {len(recent)} of {len(events)} events:" if events else "no events yet."), flush=True)
+        self.printed = max([self.printed, *(event["sequence"] for event in events)])  # The earlier ones are skipped.
+        self.show(recent)
+        self.follower.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop.set()
+        self.follower.join()
+        self.poll()
+
+
 def supervise(directory: Path) -> None:
     """Each recovery uses a new controller process, not just an in-memory replay."""
     validate_automatic(read_json(directory / "plan.json"))
-    with run_lock(directory, "automatic-supervisor.lock"):
+    with run_lock(directory, "automatic-supervisor.lock"), Timeline(directory):
         for _ in range(45):
             try:
                 result = subprocess.run([sys.executable, "-m", "workflow", "automatic-step", str(directory), "--live"],

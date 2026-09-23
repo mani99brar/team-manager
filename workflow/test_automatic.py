@@ -206,6 +206,113 @@ class CompletionTests(unittest.TestCase):
             validate_automatic(self.plan)
 
 
+class SupervisorTimelineTests(unittest.TestCase):
+    """The supervisor's terminal follows events.jsonl, whoever appends to it, and prints each event once."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        save_json(self.root / "plan.json", {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS)})
+        poll = patch("workflow.automatic.TIMELINE_POLL_SECONDS", 0.01)
+        poll.start()
+        self.addCleanup(poll.stop)
+        self.sequence = 0
+
+    def append(self, node, status, message, at="2026-09-23T20:08:49.123456Z") -> str:
+        """Append one event the way Pipeline.event does; return the line the supervisor should print for it."""
+        self.sequence += 1
+        with (self.root / "events.jsonl").open("a") as handle:
+            handle.write(json.dumps({"sequence": self.sequence, "time": at, "node": node, "status": status, "message": message}) + "\n")
+        return f"{at[11:19]}  {node:<22} {status:<12} {message}"
+
+    def supervise(self, *steps) -> list[str]:
+        """supervise() with fake automatic-step children: each (action, exit code) runs action(output) then exits."""
+        import contextlib
+        import io
+        output = io.StringIO()
+        pending = iter(steps)
+
+        def step(command, **_):
+            action, code = next(pending)
+            action(output)
+            return subprocess.CompletedProcess(command, code)
+        with patch("workflow.automatic.subprocess.run", side_effect=step), contextlib.redirect_stdout(output):
+            supervise(self.root)
+        return output.getvalue().splitlines()
+
+    def printed_while_running(self, output, line):
+        deadline = time.monotonic() + 10
+        while line not in output.getvalue().splitlines():
+            if time.monotonic() > deadline:
+                self.fail(f"Not printed while the step was still running: {line!r}")
+            time.sleep(0.01)
+
+    def test_events_appended_by_the_steps_print_as_they_happen_in_order_exactly_once(self):
+        expected = []
+
+        def first(output):
+            expected.append(self.append("controller", "running", "Automatic checkpoint controller PID 1"))
+            expected.append(self.append("verify_ui", "running", "Attempt 1; revision abc"))
+            self.printed_while_running(output, expected[-1])
+
+        def second(output):
+            expected.append(self.append("controller", "running", "Automatic checkpoint controller PID 2"))
+            expected.append(self.append("verify_ui", "passed", "Required tests and artifacts passed"))
+        printed = self.supervise((first, 75), (lambda output: None, 75), (second, 0))
+        self.assertIn("no events yet", printed[0])
+        self.assertEqual(printed[1:], expected)
+
+    def test_a_resume_prints_the_recent_tail_then_only_new_events(self):
+        from .automatic import TIMELINE_TAIL
+        earlier = [self.append("controller", "blocked", f"Blocked {number}") for number in range(1, TIMELINE_TAIL + 4)]
+        new = []
+        printed = self.supervise((lambda output: new.append(self.append("controller", "running", "Resumed")), 0))
+        self.assertIn(f"last {TIMELINE_TAIL} of {len(earlier)} events", printed[0])
+        self.assertEqual(printed[1:], earlier[-TIMELINE_TAIL:] + new)
+        # Supervising again shows the tail once more as context, and nothing twice.
+        printed = self.supervise((lambda output: None, 0))
+        self.assertEqual(printed[1:], (earlier + new)[-TIMELINE_TAIL:])
+
+    def test_a_partly_written_event_prints_only_once_its_line_is_complete(self):
+        record = json.dumps({"sequence": 1, "time": "2026-09-23T20:08:49Z", "node": "freeze", "status": "succeeded",
+                             "message": "Immutable snapshots captured"}) + "\n"
+        line = f"20:08:49  {'freeze':<22} {'succeeded':<12} Immutable snapshots captured"
+
+        def half(output):
+            with (self.root / "events.jsonl").open("a") as handle:
+                handle.write(record[:30])
+            time.sleep(0.2)  # Many polls see the partial line.
+
+        def rest(output):
+            self.assertEqual(output.getvalue().splitlines()[1:], [])
+            with (self.root / "events.jsonl").open("a") as handle:
+                handle.write(record[30:])
+            self.printed_while_running(output, line)
+        printed = self.supervise((half, 75), (rest, 0))
+        self.assertEqual(printed[1:], [line])
+
+    def test_a_rewritten_timeline_prints_only_events_not_yet_shown(self):
+        shown = [self.append("controller", "running", "A long message " + "x" * 200) for _ in range(3)]
+        events = self.root / "events.jsonl"
+        added = []
+
+        def rewrite(output):
+            # Shorter than what was read: reread from the start, and the sequence numbers skip what was shown.
+            kept = [json.loads(line) for line in events.read_text().splitlines()]
+            events.write_text("".join(json.dumps(dict(event, message="short")) + "\n" for event in kept))
+            self.sequence = len(kept)
+            added.append(self.append("controller", "running", "New after the rewrite"))
+            self.printed_while_running(output, added[-1])
+        printed = self.supervise((rewrite, 0))
+        self.assertEqual(printed[1:], shown + added)
+
+    def test_each_event_is_one_line_in_utc(self):
+        self.append("candidate_ui", "blocked", "Executed check failed:\nbrowser: exit 1", at="2026-09-23T22:24:50.5+02:00")
+        printed = self.supervise((lambda output: None, 0))
+        self.assertEqual(printed[1:], [f"20:24:50  {'candidate_ui':<22} {'blocked':<12} Executed check failed: browser: exit 1"])
+
+
 class ReviewCompletionTests(unittest.TestCase):
     """Unit-level acceptance of a reviewer's completion file and of the wait loop, with the single default reviewer."""
 
