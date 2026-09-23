@@ -1,0 +1,85 @@
+{
+  "version": "1.2.0",
+  "feature": "Portable workflow slice 1",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "controller",
+      "role": "backend",
+      "required_check_kinds": [
+        "contract",
+        "unit"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "features/project-workflows",
+        "features/worker-lanes",
+        "features/parallel-reviewers",
+        "features/parallel-reviewers-align"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "workflow",
+            "-t",
+            "."
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "backend-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "backend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    }
+  ]
+}

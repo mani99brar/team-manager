@@ -13,7 +13,7 @@ from .sessions import read_json, validate_node_id, validate_reviewer_id
 from .verification import validate_schema
 
 
-FEATURES = ("project-workflows", "worker-lanes", "parallel-reviewers", "parallel-reviewers-align", "workflow-audit", "viewer-clarity")
+FEATURES = ("project-workflows", "worker-lanes", "parallel-reviewers", "parallel-reviewers-align", "workflow-audit", "viewer-clarity", "portable-workflow")
 FEATURE_VERSION = "2.0.0"
 DEPRECATED_FEATURE_NOTE = ("feature.json version 1.0.0 (ui_task/adapter_task) is deprecated: it is translated to 2.0.0 "
                            "(workers: [{node_id, task}]); migrate the file. See contracts/workflow/feature.schema.json.")

@@ -1,0 +1,13 @@
+{
+  "version": "2.1.0",
+  "name": "Portable workflow slice 1 (PRD_PORTABLE_WORKFLOW): drive any repository with --repo, scan features, bundled schemas and briefs, registry auto-registration, init, and trimming",
+  "branch_prefix": "feature/portable-workflow",
+  "policy": "policy.json",
+  "workers": [
+    { "node_id": "controller", "task": "controller-task.md" }
+  ],
+  "reviewers": [
+    { "reviewer_id": "general", "prompt": "reviewers/general.md" },
+    { "reviewer_id": "coverage", "prompt": "reviewers/coverage.md" }
+  ]
+}
