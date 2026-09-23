@@ -3,7 +3,7 @@ import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { z } from 'zod'
 import {
-  CHECK_KINDS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
+  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
   type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -22,7 +22,9 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * (adds the `inputs` section pinned from `plan.json`, `policy.json` and the worker receipts), 1.3.0 (worker
  * lanes from configuration: `inputs.workers` is keyed by any lane ID, `inputs` records the selected and excluded
  * lanes, per-lane graph state lives under `lanes` and `packets`) and 1.4.0 (parallel reviewers: the `review`
- * section lists `reviewers` and tags every finding with its `reviewer`). A section is served only when the
+ * section lists `reviewers` and tags every finding with its `reviewer`) and 1.5.0 (the guardrails of feature.json 2.2.0:
+ * `inputs.decisions`, `inputs.challenge`, the completion evidence and `questions` per worker, and a `challenge` graph
+ * node before the launches; older exports serve them as null and `[]`). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -49,7 +51,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /** Node IDs a lane can never take: the fixed graph tail, the finding attributions and the per-lane node prefixes. */
@@ -157,9 +159,39 @@ const workerInputSchema = z.strictObject({
     launcher_invocations: z.number().int().nonnegative(),
     background_id: z.string().nullable(),
   }).nullable(),
-  completion: z.strictObject({ status: z.enum(['completed', 'blocked']), summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
+  completion: z.strictObject({
+    status: z.enum(COMPLETION_STATUSES),
+    summary: z.string().min(1),
+    open_assumptions: assumptions,
+    /** Completion 1.1.0 evidence (export 1.5.0); null for a 1.0.0 completion, absent before 1.5.0. */
+    untested: z.array(z.string()).nullable().optional(),
+    falsifying_check: z.string().nullable().optional(),
+    verify_yourself: z.string().nullable().optional(),
+  }).nullable(),
   handoff: z.strictObject({ summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
   stop: z.strictObject({ stopped: z.boolean(), confirmed_at: zonedTimestamp.nullable() }).nullable(),
+  /** Export 1.5.0: `<lane>.questions.json`; absent before. */
+  questions: z.array(z.strictObject({
+    n: z.number().int().positive(),
+    question: z.string().min(1),
+    asked_at: zonedTimestamp,
+    answer: z.string().nullable(),
+    answered_at: zonedTimestamp.nullable(),
+  })).optional(),
+})
+
+/** Export 1.5.0: the latest `challenge.json` of a feature.json 2.2.0 run, without `run_id` and `version`, plus `attempts`. */
+const challengeSectionSchema = z.strictObject({
+  status: z.enum(CHALLENGE_STATUSES),
+  attempt: z.number().int().nonnegative(),
+  attempts: z.number().int().nonnegative(),
+  session_id: z.string().min(1).nullable(),
+  pinned: z.strictObject({ tasks_sha256: hex64, decisions_sha256: hex64, prd_sha256: hex64.nullable() }),
+  concerns: z.array(z.strictObject({ severity: z.enum(['P0', 'P1', 'P2']), kind: z.enum(CHALLENGE_CONCERN_KINDS), message: z.string().min(1), consequence: z.string().min(1) })),
+  simpler_alternative: z.string().min(1).nullable(),
+  cheap_experiment: z.string().min(1).nullable(),
+  accepted_reason: z.string().min(1).nullable(),
+  decided_at: zonedTimestamp,
 })
 
 /** The export's `inputs` section: what the run was asked to do, pinned from `plan.json`, `policy.json` and receipts. */
@@ -186,6 +218,10 @@ const inputsSectionSchema = z.strictObject({
   excluded_workers: z.array(laneKey).optional(),
   /** Keyed by the selected lanes in policy order: the run's lane list. */
   workers: z.record(laneKey, workerInputSchema).refine(workers => Object.keys(workers).length > 0, 'at least one worker is required'),
+  /** Export 1.5.0: the pinned decisions.md text, null for runs without one; absent before. */
+  decisions: z.string().nullable().optional(),
+  /** Export 1.5.0: the design challenge, null for runs without one; absent before. */
+  challenge: challengeSectionSchema.nullable().optional(),
 })
 
 const exportSchema = z.object({
@@ -275,6 +311,8 @@ export type ArtifactContent = {
 }
 
 /** Fixed graph tail → the LangGraph state key whose presence proves that node completed. */
+/** The design challenge node of a feature.json 2.2.0 run (export 1.5.0), before every launch node. */
+const CHALLENGE_NODE = 'challenge'
 const TAIL_EVIDENCE_KEY: Record<string, string> = { handoff: 'snapshots', candidate: 'bundle', review: 'review', approval: 'approved_bundle', integrate: 'integrated_commit' }
 
 /**
@@ -328,6 +366,8 @@ function nodeEvidence(record: Record<string, unknown>, nodeId: string, map: Lane
 
 const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
   running: 'running', interactive: 'running', blocked: 'failed', succeeded: 'succeeded', passed: 'succeeded', approved: 'succeeded',
+  /** The design challenge found a P0/P1 and no worker was launched: the operator resumes or accepts it. */
+  paused: 'paused',
   /** The controller stepped away (Ctrl-C) while a native session kept running: unresolved until `automatic --live` resumes it. */
   interrupted: 'paused',
 }
@@ -570,12 +610,23 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
       native_started_at: worker.launch.native_started_at === null ? null : new Date(worker.launch.native_started_at).toISOString(),
       observed_state: worker.launch.observed_state, status: worker.launch.status, launcher_invocations: worker.launch.launcher_invocations,
     },
-    completion: worker.completion === null ? null : { status: worker.completion.status, summary: redactPaths(worker.completion.summary), open_assumptions: nonBlank(worker.completion.open_assumptions).map(redactPaths) },
+    completion: worker.completion === null ? null : {
+      status: worker.completion.status, summary: redactPaths(worker.completion.summary), open_assumptions: nonBlank(worker.completion.open_assumptions).map(redactPaths),
+      // A 1.0.0 completion and every export before 1.5.0 carry no evidence: served as null, never guessed.
+      untested: worker.completion.untested == null ? null : nonBlank(worker.completion.untested).map(redactPaths),
+      falsifying_check: falsifyingCheck(worker.completion.falsifying_check, worker.checks),
+      verify_yourself: optionalText(worker.completion.verify_yourself),
+    },
     handoff: worker.handoff === null ? null : { summary: redactPaths(worker.handoff.summary), open_assumptions: nonBlank(worker.handoff.open_assumptions).map(redactPaths) },
     stop: worker.stop === null ? null : { stopped: worker.stop.stopped, confirmed_at: worker.stop.confirmed_at === null ? null : utcTimestamp(worker.stop.confirmed_at) },
+    questions: (worker.questions ?? []).map(question => ({
+      n: question.n, question: redactPaths(question.question), asked_at: utcTimestamp(question.asked_at),
+      answer: optionalText(question.answer), answered_at: question.answered_at === null ? null : utcTimestamp(question.answered_at),
+    })),
   }))
+  const challenge = section.challenge ?? null
   return {
-    contract_version: '1.3.0', run_id: runId, feature: redactPaths(section.feature), base_commit: section.base_commit, source_branch: section.source_branch,
+    contract_version: '1.4.0', run_id: runId, feature: redactPaths(section.feature), base_commit: section.base_commit, source_branch: section.source_branch,
     mode: section.mode, automatic: section.automatic === null ? null : { ...section.automatic },
     setup: section.setup.map(step => ({ command: step.command, timeout_seconds: step.timeout_seconds })),
     max_verification_attempts: section.max_verification_attempts,
@@ -583,7 +634,29 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
     selected_workers: section.selected_workers ? [...section.selected_workers] : Object.keys(section.workers),
     excluded_workers: section.excluded_workers ? [...section.excluded_workers] : [],
     workers,
+    // Exports before 1.5.0, and runs of features before 2.2.0, have neither.
+    decisions: section.decisions == null ? null : redactPaths(section.decisions),
+    challenge: challenge === null ? null : {
+      ...challenge,
+      pinned: { ...challenge.pinned },
+      concerns: challenge.concerns.map(concern => ({ ...concern, message: redactPaths(concern.message), consequence: redactPaths(concern.consequence) })),
+      simpler_alternative: challenge.simpler_alternative === null ? null : redactPaths(challenge.simpler_alternative),
+      cheap_experiment: challenge.cheap_experiment === null ? null : redactPaths(challenge.cheap_experiment),
+      accepted_reason: challenge.accepted_reason === null ? null : redactPaths(challenge.accepted_reason),
+      decided_at: utcTimestamp(challenge.decided_at),
+    },
   }
+}
+
+/** A worker-written text, redacted; null when absent or blank. */
+function optionalText(value: string | null | undefined): string | null {
+  return value == null || !value.trim() ? null : redactPaths(value)
+}
+
+/** The falsifying check verbatim when it names one of the lane's checks (by ID or exact command), so the viewer can link it; redacted text otherwise. */
+function falsifyingCheck(value: string | null | undefined, checks: readonly { id: string; command: string }[]): string | null {
+  if (value == null || !value.trim()) return null
+  return checks.some(check => check.id === value || check.command === value) ? value : redactPaths(value)
 }
 
 /**
@@ -1033,7 +1106,12 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     let status: NodeStatus
     const event = lastEvent.get(node.node_id)
     const eventStatus = event ? EVENT_STATUS[event.status] ?? null : null
-    if (task?.error) status = 'failed'
+    // The design challenge node is decided by the export's challenge record when there is one, never by `values`.
+    const challenge = node.node_id === CHALLENGE_NODE ? state.inputs?.challenge ?? null : null
+    if (challenge) { attempt = challenge.attempts; session_id = challenge.session_id }
+    if (challenge?.status === 'paused') status = 'paused'
+    else if (challenge) status = 'succeeded'
+    else if (task?.error) status = 'failed'
     else if (task && task.interrupts.length > 0) status = 'awaiting_approval'
     else if (hasEvidence(state, node.node_id, map)) {
       if (map.verifyNodes.has(node.node_id)) status = workerPacket?.ok && workerPacket.gate.status === 'passed' ? 'succeeded' : 'paused'

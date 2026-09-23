@@ -102,7 +102,7 @@ export const servedWorkerResult: WorkerResult = {
 
 /** The pinned assignment of the same run: two of three declared lanes selected, one automatic profile, receipts as far as the run got. */
 export const runInputs: RunInputs = {
-  contract_version: '1.3.0', run_id: 'run-001', feature: 'Review verdict and findings in the viewer',
+  contract_version: '1.4.0', run_id: 'run-001', feature: 'Review verdict and findings in the viewer',
   base_commit: 'e'.repeat(40), source_branch: 'feature/review-result/run-001', mode: 'automatic',
   automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 14400, review_timeout_seconds: 1800, reviewer_transport: 'native' },
   setup: [{ command: 'npm ci', timeout_seconds: 600 }],
@@ -120,9 +120,15 @@ export const runInputs: RunInputs = {
         { id: 'review-browser', kind: 'browser', command: 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts', timeout_seconds: 300, scenarios: [{ id: 'review-verdict', description: 'The review node shows the verdict and findings' }] },
       ],
       launch: { session_id: 'ui-session', launch_requested_at: '2026-01-01T12:00:00Z', native_started_at: '2026-01-01T12:00:02Z', observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1 },
-      completion: { status: 'completed', summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'] },
+      completion: {
+        status: 'completed', summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'],
+        untested: ['Findings wider than the viewport'], falsifying_check: 'review-browser', verify_yourself: 'The seeded run matches a real export.',
+      },
       handoff: { summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'] },
       stop: { stopped: true, confirmed_at: '2026-01-01T12:20:00Z' },
+      questions: [
+        { n: 1, question: 'Group findings by severity or by reviewer?', asked_at: '2026-01-01T12:05:00Z', answer: 'By severity.', answered_at: '2026-01-01T12:07:00Z' },
+      ],
     },
     {
       node_id: 'adapter', launch_node_id: 'launch_adapter', role: 'backend', required_check_kinds: ['unit'],
@@ -134,6 +140,20 @@ export const runInputs: RunInputs = {
       completion: null,
       handoff: null,
       stop: null,
+      questions: [{ n: 1, question: 'May the route return 404 for runs without a review?', asked_at: '2026-01-01T12:10:00Z', answer: null, answered_at: null }],
     },
   ],
+  decisions: '# Decisions\n\n## Decisions\n\n- Findings are grouped by severity.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n',
+  challenge: {
+    status: 'accepted', attempt: 1, attempts: 1, session_id: 'challenge-session',
+    pinned: { tasks_sha256: 'a'.repeat(64), decisions_sha256: 'b'.repeat(64), prd_sha256: null },
+    concerns: [
+      { severity: 'P1', kind: 'failure_mode', message: 'Both lanes edit the contract.', consequence: 'The candidate merge conflicts.' },
+      { severity: 'P2', kind: 'complexity', message: 'Two reviewers for a small change.', consequence: 'Review costs twice.' },
+    ],
+    simpler_alternative: 'One lane owns the contract and the adapter.',
+    cheap_experiment: 'Merge the two task texts and count shared paths.',
+    accepted_reason: 'The contract is split by file.',
+    decided_at: '2026-01-01T11:59:00Z',
+  },
 }

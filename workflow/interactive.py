@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .guardrails import decisions_block
 from .herdr import herdr
 from .sessions import ClaudeSessions, git, plan_digest, read_json, review_node, review_nodes, save_json
 
@@ -188,13 +189,7 @@ class InteractiveSessions(ClaudeSessions):
         tools = "Read,Glob,Grep,Edit,Write" if self.plan["allow_edits"] else "Read,Glob,Grep"
         if automatic:
             tools += ",Bash"
-        prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
-                  "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
-                  "Report changed files, checks actually executed, and open assumptions. "
-                  "Completion of a turn is not workflow approval.\n\n" + info["task"])
-        if automatic:
-            from .automatic import completion_prompt
-            prompt += completion_prompt(self.directory, self.plan, node)
+        prompt = worker_prompt(self.directory, self.plan, node)
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         command = [self.executable, "--bg", "--name", self.launch_name(node),
@@ -243,6 +238,18 @@ class InteractiveSessions(ClaudeSessions):
                    "--tools", "Read,Glob,Grep,Write", "--allowedTools", f"Edit(//{completion})",
                    "--add-dir", str(self.directory), "--permission-mode", "dontAsk", prompt]
         return self.launch(node, path, receipt, command, cwd)
+
+
+def worker_prompt(directory: Path, plan: dict, node: str) -> str:
+    """What a native worker session receives: the rules, its pinned task, the run's decisions.md, and in automatic mode the completion protocol."""
+    prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
+              "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
+              "Report changed files, checks actually executed, and open assumptions. "
+              "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + decisions_block(plan))
+    if plan.get("automatic"):
+        from .automatic import completion_prompt
+        prompt += completion_prompt(directory, plan, node)
+    return prompt
 
 
 def write_private(path: Path, text: str) -> None:

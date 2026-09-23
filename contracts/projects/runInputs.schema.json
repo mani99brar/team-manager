@@ -4,7 +4,7 @@
   "properties": {
     "contract_version": {
       "type": "string",
-      "const": "1.3.0"
+      "const": "1.4.0"
     },
     "run_id": {
       "type": "string",
@@ -350,7 +350,8 @@
                     "type": "string",
                     "enum": [
                       "completed",
-                      "blocked"
+                      "blocked",
+                      "question"
                     ]
                   },
                   "summary": {
@@ -363,12 +364,51 @@
                       "type": "string",
                       "minLength": 1
                     }
+                  },
+                  "untested": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "falsifying_check": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "verify_yourself": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
                   "status",
                   "summary",
-                  "open_assumptions"
+                  "open_assumptions",
+                  "untested",
+                  "falsifying_check",
+                  "verify_yourself"
                 ],
                 "additionalProperties": false
               },
@@ -436,6 +476,59 @@
                 "type": "null"
               }
             ]
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "n": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "question": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "asked_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                },
+                "answer": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "answered_at": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "n",
+                "question",
+                "asked_at",
+                "answer",
+                "answered_at"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -450,10 +543,180 @@
           "launch",
           "completion",
           "handoff",
-          "stop"
+          "stop",
+          "questions"
         ],
         "additionalProperties": false
       }
+    },
+    "decisions": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "challenge": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "paused",
+                "accepted",
+                "disabled"
+              ]
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pinned": {
+              "type": "object",
+              "properties": {
+                "tasks_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "decisions_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "prd_sha256": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "tasks_sha256",
+                "decisions_sha256",
+                "prd_sha256"
+              ],
+              "additionalProperties": false
+            },
+            "concerns": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "P0",
+                      "P1",
+                      "P2"
+                    ]
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "assumption",
+                      "failure_mode",
+                      "complexity",
+                      "other"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "consequence": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "severity",
+                  "kind",
+                  "message",
+                  "consequence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "simpler_alternative": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cheap_experiment": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "accepted_reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "decided_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+            }
+          },
+          "required": [
+            "status",
+            "attempt",
+            "attempts",
+            "session_id",
+            "pinned",
+            "concerns",
+            "simpler_alternative",
+            "cheap_experiment",
+            "accepted_reason",
+            "decided_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "required": [
@@ -468,7 +731,9 @@
     "max_verification_attempts",
     "selected_workers",
     "excluded_workers",
-    "workers"
+    "workers",
+    "decisions",
+    "challenge"
   ],
   "additionalProperties": false
 }

@@ -141,7 +141,10 @@ class ExportSectionTests(unittest.TestCase):
         self.assertEqual(ui["launch"], {"session_id": "uuuuuuuu-1111-4111-8111-111111111111", "launch_token": plan["nodes"]["ui"]["session_id"],
                                         "launch_requested_at": "2026-09-21T14:33:25.331982Z", "native_started_at": 1790001207771,
                                         "observed_state": "working", "status": "attached_session_available", "launcher_invocations": 1, "background_id": "uuuuuuuu"})
-        self.assertEqual(ui["completion"], {"status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"]})
+        # A 1.0.0 completion (runs before slice 2) exports the 1.1.0 evidence as nulls, and there are no questions.
+        self.assertEqual(ui["completion"], {"status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
+                                            "untested": None, "falsifying_check": None, "verify_yourself": None})
+        self.assertEqual((ui["questions"], section["decisions"], section["challenge"]), ([], None, None))
         self.assertEqual(ui["handoff"], {"summary": "ui implemented", "open_assumptions": ["assumed"]})
         stop = directory / "ui.stop.json"
         self.assertEqual(ui["stop"], {"stopped": True, "confirmed_at": datetime.fromtimestamp(stop.stat().st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")})
@@ -234,7 +237,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.4.0")
+        self.assertEqual(exported["version"], "1.5.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -263,7 +266,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.4.0")
+        self.assertEqual(exported["version"], "1.5.0")
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -328,10 +331,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.4.0", result.stdout)
+        self.assertIn("version 1.5.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.4.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.5.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")

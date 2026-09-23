@@ -26,6 +26,7 @@ from langgraph.types import Command
 from .automatic import DEFAULTS, advance_failed_checks, automatic_settings, check_finding_lanes, drive, read_review_completion, review_prompt, review_schema
 from .export_state import graph_nodes
 from .interactive import InteractiveSessions, attach_panels
+from .guardrails import migration_note
 from .launch import LEGACY_FEATURE_MESSAGE, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, check_review, digest_file, export_run, graph_config, lane_positions, parse_lane_selection, report, validate_pipeline_policy
 from .sessions import git, plan_digest, prepare, read_json, save_json, validate_node_id
@@ -173,7 +174,7 @@ class ThreeLaneRun(LaneRun):
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.4.0")
+        self.assertEqual(exported["version"], "1.5.0")
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]],
                          ["launch_ui", "launch_adapter", "launch_docs", "handoff", "verify_ui", "verify_adapter", "verify_docs", "candidate", "review", "approval", "integrate"])
         self.assertEqual(exported["definition"]["nodes"][2]["label"], "Launch docs worker")
@@ -711,7 +712,8 @@ class LegacyFeatureAndRun(LaneRun):
         save_json(self.repo / "features/new/feature.json", manifest)
         with self.assertRaises((ValueError, ValidationError)):
             launch_commands(self.repo, "new", "r4", self.run_root, herdr=False)
-        # The finished project-workflows feature (a fixture copy) launches without a note; --workers narrows it.
+        # The finished project-workflows feature (a fixture copy) launches without a drill note; --workers narrows it.
+        # Its only stderr line is the migration note every feature before 2.2.0 prints (PRD_PORTABLE_WORKFLOW 4.3).
         shutil.copytree(TESTDATA / "project-workflows", self.repo / "features/project-workflows")
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--workers", "adapter", "--run-root", str(self.run_root)])
@@ -719,7 +721,7 @@ class LegacyFeatureAndRun(LaneRun):
         printed = json.loads(output.getvalue())
         self.assertEqual((printed["workers"], printed["notes"]), (["adapter"], []))  # The drill names adapter, which is selected.
         self.assertEqual(printed["commands"][2][printed["commands"][2].index("--workers") + 1], "adapter")
-        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(errors.getvalue(), f"Note: {migration_note(read_json(self.repo / 'features/project-workflows/feature.json'))}\n")
 
     def test_legacy_run_exports_at_the_current_version_with_its_stored_definition_and_lane_evidence(self):
         directory = legacy_run(self.root)
@@ -751,7 +753,7 @@ class LegacyFeatureAndRun(LaneRun):
         runtime = ExportRuntime(directory)
         self.assertEqual((runtime.workers, runtime.excluded), (["ui", "adapter"], []))
         exported = export_run(runtime)
-        self.assertEqual(exported["version"], "1.4.0")
+        self.assertEqual(exported["version"], "1.5.0")
         self.assertEqual(exported["definition"], {"name": "Feature implementation", "nodes": old_nodes})  # Stored labels kept.
         self.assertEqual(exported["values"]["lanes"], {"ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"}})
         self.assertEqual(exported["values"]["packets"], {"ui": "/x", "adapter": "/y"})

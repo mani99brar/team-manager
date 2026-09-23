@@ -312,11 +312,14 @@ class InitScaffold(Isolated):
         result = subprocess.run([PY, "-m", "workflow", "init", "skeleton", "--repo", str(target)], cwd=TOOL, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         folder = target / "features/skeleton"
-        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["README.md", "feature.json", "main-task.md", "policy.json"])
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["README.md", "decisions.md", "feature.json", "main-task.md", "policy.json"])
         self.assertTrue((target / "CLAUDE.md").is_file())
         manifest = read_json(folder / "feature.json")
         self.assertEqual((manifest["version"], manifest["branch_prefix"], manifest["reviewers"]),
-                         ("2.1.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
+                         ("2.2.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
+        decisions = (folder / "decisions.md").read_text()
+        for heading in ("## Decisions", "## Assumptions", "## Deferred"):
+            self.assertIn(heading, decisions)
         task = (folder / "main-task.md").read_text()
         for heading in ("## Goal", "## Acceptance", "## Stop"):
             self.assertIn(heading, task)
@@ -333,15 +336,17 @@ class InitScaffold(Isolated):
         shutil.rmtree(target / "features/second")
         # Launch refuses the scaffold and names every placeholder.
         errors = self.refused("skeleton", "--repo", str(target), "--dry-run")
-        expected = [f"{name}:{number}:" for name in ("README.md", "feature.json", "main-task.md", "policy.json")
+        expected = [f"{name}:{number}:" for name in ("README.md", "decisions.md", "feature.json", "main-task.md", "policy.json")
                     for number, line in enumerate((folder / name).read_text().splitlines(), 1) if "TODO:" in line]
-        self.assertEqual(len(expected), 11)
+        self.assertEqual(len(expected), 15)
         self.assertIn(f"still has {len(expected)} placeholder(s)", errors)
         for item in expected:
             self.assertIn(item, errors)
         # Filled in, the dry run passes.
         manifest["name"] = "Skeleton of project B"
+        manifest["prd"] = "app.txt"
         save_json(folder / "feature.json", manifest)
+        (folder / "decisions.md").write_text("# Decisions\n\n## Decisions\n\n- One lane.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n")
         policy = read_json(folder / "policy.json")
         policy["feature"] = "Skeleton"
         policy["workers"][0].update(role="backend", owned_paths=["app.txt"])

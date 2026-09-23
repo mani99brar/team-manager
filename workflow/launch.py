@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -79,7 +80,7 @@ def default_run_root(target: Path, feature: str, tool: Path = TOOL, home: Path |
 def placeholders(folder: Path) -> list[str]:
     """Every placeholder `init` left in the files it writes, as `<file>:<line>: <text>`.
 
-    Only `feature.json`, `policy.json`, `README.md` and the task files `feature.json` names are scanned, and only a
+    Only `feature.json`, `policy.json`, `README.md`, `decisions.md` and the task files `feature.json` names are scanned, and only a
     JSON string value or a Markdown line that begins with `TODO:` counts. Prose that mentions the marker, reviewer
     briefs and any other file are never refused.
     """
@@ -90,7 +91,7 @@ def placeholders(folder: Path) -> list[str]:
         tasks = [worker["task"] for worker in manifest.get("workers", []) if isinstance(worker, dict) and isinstance(worker.get("task"), str)]
     except (OSError, ValueError, AttributeError):
         pass  # load_feature reports a missing or malformed feature file.
-    for name in ["feature.json", "policy.json", "README.md", *tasks]:
+    for name in ["feature.json", "policy.json", "README.md", DECISIONS, *tasks]:
         path = folder / name
         if not path.is_file() or not path.resolve().is_relative_to(folder.resolve()):
             continue
@@ -107,10 +108,11 @@ def placeholders(folder: Path) -> list[str]:
 
 
 def load_feature(folder: Path) -> dict:
-    """The feature file as 2.0.0 or 2.1.0; 1.0.0 files are refused.
+    """The feature file as 2.0.0, 2.1.0 or 2.2.0; 1.0.0 files are refused.
 
     2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
-    A file without `reviewers` (2.0.0 or 2.1.0) runs the single built-in reviewer.
+    A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
+    (workflow/guardrails.py) and adds the optional `challenge` and `prd`.
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -121,6 +123,8 @@ def load_feature(folder: Path) -> dict:
         raise ValueError("feature.json declares a worker lane twice")
     for node in ids:
         validate_node_id(node)
+    if not is_guarded(manifest) and ("challenge" in manifest or "prd" in manifest):
+        raise ValueError("feature.json challenge and prd need version 2.2.0")
     reviewers = manifest.get("reviewers")
     if reviewers is not None:
         if manifest["version"] == "2.0.0":
@@ -178,6 +182,10 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         if not path.is_file() or not path.read_text().strip():
             raise ValueError(f"Task file for lane {worker['node_id']} is missing or empty: {worker['task']}")
         tasks[worker["node_id"]] = path
+    # 2.2.0: outcome briefs, decisions.md and the PRD, all refused here, before any Git action.
+    refused = refusals(repo, folder, manifest, tasks)
+    if refused:
+        raise ValueError(f"features/{feature} does not meet the 2.2.0 guardrails:\n  " + "\n  ".join(refused))
     reviewers = {}
     for reviewer in manifest.get("reviewers") or []:
         path = reviewer_brief(folder, reviewer["prompt"])
@@ -203,6 +211,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         prepare.extend(["--task", f"{node}={tasks[node]}"])
     for reviewer_id, path in reviewers.items():
         prepare.extend(["--reviewer", f"{reviewer_id}={path}"])
+    if is_guarded(manifest):
+        prepare.extend(["--guardrails", "--decisions", str(folder / DECISIONS)])
+        if "prd" in manifest:
+            prepare.extend(["--prd", str(prd_path(repo, manifest["prd"]))])
+        if manifest.get("challenge") is False:
+            prepare.append("--no-challenge")
     commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -219,6 +233,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     if drill and drill["node_id"] not in selected:
         notes.append(f"Failure drill skipped: its lane {drill['node_id']} is not selected (selected: {', '.join(selected)}).")
     return run, commands, notes
+
+
+def challenge_paused(run: Path) -> bool:
+    path = run / "challenge.json"
+    return path.is_file() and read_json(path).get("status") == "paused"
 
 
 def command_cwd(command: list[str], target: Path, tool: Path = TOOL) -> Path:
@@ -255,12 +274,18 @@ def main(argv=None):
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
         registry = registry_path()
         # The registered graph is the feature's (every declared lane), not this launch's `--workers` subset.
-        declared = [worker["node_id"] for worker in load_feature(feature_folder(repo, args.feature))["workers"]]
-        entry = registry_entry(repo, args.feature, run_root.resolve(), declared)
+        manifest = load_feature(feature_folder(repo, args.feature))
+        declared = [worker["node_id"] for worker in manifest["workers"]]
+        challenge = is_guarded(manifest) and manifest.get("challenge", True) is True
+        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge)
+        # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
+        migration = migration_note(manifest)
         if args.dry_run:
             print(json.dumps({"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
-                              "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry}}, indent=2))
-            for note in notes:
+                              "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
+                              "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
+                                             "migration_note": migration}}, indent=2))
+            for note in notes + ([migration] if migration else []):
                 print(f"Note: {note}", file=sys.stderr)
             return
         if not args.live:
@@ -269,7 +294,7 @@ def main(argv=None):
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
         # A malformed registry blocks the launch here, before any Git action; it is never rewritten.
         merge_registry(read_registry(registry), entry)
-        for note in notes:
+        for note in notes + ([migration] if migration else []):
             print(f"Note: {note}", file=sys.stderr)
         try:
             for index, command in enumerate(commands):
@@ -280,6 +305,10 @@ def main(argv=None):
                         print(f"Projects registry {registry}: {register(registry, entry)}", flush=True)
                     except (ValueError, OSError) as error:
                         print(f"Projects registry {registry} not updated: {error}", file=sys.stderr, flush=True)
+                if index == 3 and challenge_paused(run):
+                    # `start` printed the concerns and the resume commands; nothing else runs until the operator decides.
+                    print(f"\nLaunch paused at the design challenge; no worker was launched. Run: {run}")
+                    return
         except KeyboardInterrupt:
             parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
                              f"inspect with: {sys.executable} -m workflow status {run}\n"

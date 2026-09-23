@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Feature file v2.1.0",
-  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. 2.1.0 adds the optional `reviewers`: every reviewer of the run with its brief (a file relative to the feature directory, existing and non-empty, or `builtin:<id>` for a brief bundled in `workflow/prompts/reviewers/`); a file without `reviewers` runs the single built-in reviewer (`workflow/prompts/review.md`) with id `review`. A 1.0.0 file (`ui_task`/`adapter_task`) is refused by `launch` with a message to use 2.x. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy, existing non-empty task and brief files inside the feature directory, unique reviewer ids that are neither a lane id nor a reserved name, and version 2.1.0 whenever `reviewers` is present.",
+  "title": "Feature file v2.2.0",
+  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. 2.1.0 adds the optional `reviewers`: every reviewer of the run with its brief (a file relative to the feature directory, existing and non-empty, or `builtin:<id>` for a brief bundled in `workflow/prompts/reviewers/`); a file without `reviewers` runs the single built-in reviewer (`workflow/prompts/review.md`) with id `review`. A 1.0.0 file (`ui_task`/`adapter_task`) is refused by `launch` with a message to use 2.x. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy, existing non-empty task and brief files inside the feature directory, unique reviewer ids that are neither a lane id nor a reserved name, and version 2.1.0 or later whenever `reviewers` is present. 2.2.0 turns on the guardrails (docs/PRD_PORTABLE_WORKFLOW.md section 4.3): every task must have non-empty `## Goal`, `## Acceptance` and `## Stop` sections, the feature directory must hold a non-empty `decisions.md`, and `prd` must exist in the target; it adds the optional `challenge` (default true: a design challenge runs before any worker) and `prd`. 2.0.0 and 2.1.0 files launch as before, with a note that no guardrail is enforced.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -15,7 +15,8 @@
     "version": {
       "enum": [
         "2.0.0",
-        "2.1.0"
+        "2.1.0",
+        "2.2.0"
       ]
     },
     "name": {
@@ -79,6 +80,16 @@
           }
         }
       }
+    },
+    "challenge": {
+      "type": "boolean",
+      "description": "2.2.0: run the design challenge node before any worker launch (default true). `false` records the challenge as disabled and the run's graph has no challenge node."
+    },
+    "prd": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
+      "description": "2.2.0: the specification the design challenge reads, a path relative to the target repository that must exist."
     }
   }
 }

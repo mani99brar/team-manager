@@ -263,7 +263,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.4.0")
+            self.assertEqual(exported["version"], "1.5.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],

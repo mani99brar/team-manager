@@ -18,6 +18,14 @@ Version 1.4.0 (additive) records the run's reviewers: the `review` section gains
 findings, launch and acceptance times, status) and each combined finding gains
 `reviewer`. A review recorded before parallel reviewers has one reviewer named
 `review`; the export fills the list from the single record it has.
+
+Version 1.5.0 (additive, docs/PRD_PORTABLE_WORKFLOW.md section 4.7) records the
+guardrails of feature.json 2.2.0 runs: `inputs.decisions` (the pinned decisions.md
+text), `inputs.challenge` (the latest `challenge.json` without `run_id` and
+`version`, plus `attempts`), the completion evidence `untested`, `falsifying_check`
+and `verify_yourself` (null for a 1.0.0 completion) with the `question` status, and
+`inputs.workers.<lane>.questions`. Every addition is null or `[]` for older runs.
+The definition of a run with a design challenge starts with the `challenge` node.
 """
 from __future__ import annotations
 
@@ -27,10 +35,11 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .guardrails import decisions_text, has_challenge
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.4.0"
+EXPORT_VERSION = "1.5.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -42,11 +51,19 @@ GRAPH_TAIL = [
 ]
 
 
-def graph_nodes(workers: list[str]) -> list[dict]:
-    """The pinned graph of a run over `workers`: per-lane launch and verify fan-outs around the fixed tail."""
+CHALLENGE_NODE = {"node_id": "challenge", "label": "Design challenge", "kind": "review", "depends_on": []}
+
+
+def graph_nodes(workers: list[str], challenge: bool = False) -> list[dict]:
+    """The pinned graph of a run over `workers`: per-lane launch and verify fan-outs around the fixed tail.
+
+    A 2.2.0 run with its design challenge starts with the `challenge` node, and every launch depends on it.
+    """
     launches = [f"launch_{node}" for node in workers]
     verifies = [f"verify_{node}" for node in workers]
-    nodes = [{"node_id": name, "label": f"Launch {node} worker", "kind": "worker", "depends_on": []} for node, name in zip(workers, launches)]
+    first = [CHALLENGE_NODE["node_id"]] if challenge else []
+    nodes = [dict(CHALLENGE_NODE, depends_on=[])] if challenge else []
+    nodes.extend({"node_id": name, "label": f"Launch {node} worker", "kind": "worker", "depends_on": list(first)} for node, name in zip(workers, launches))
     nodes.append({"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": launches})
     nodes.extend({"node_id": name, "label": f"Verify {node}", "kind": "verification", "depends_on": ["handoff"]} for node, name in zip(workers, verifies))
     for item in GRAPH_TAIL:
@@ -54,9 +71,9 @@ def graph_nodes(workers: list[str]) -> list[dict]:
     return nodes
 
 
-def definition(workers: list[str], previous: dict | None) -> dict:
+def definition(workers: list[str], previous: dict | None, challenge: bool = False) -> dict:
     """A stored definition over the same nodes is kept verbatim (labels included); anything else is rebuilt."""
-    nodes = graph_nodes(workers)
+    nodes = graph_nodes(workers, challenge)
     stored = (previous or {}).get("definition")
     if isinstance(stored, dict) and isinstance(stored.get("nodes"), list) and stored.get("name") and \
             [item.get("node_id") for item in stored["nodes"]] == [item["node_id"] for item in nodes]:
@@ -157,11 +174,55 @@ def launch_receipt(item) -> dict | None:
             "status": item["status"], "launcher_invocations": item["launcher_invocations"], "background_id": optional["background_id"]}
 
 
+def optional_text(value) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def completion_signal(item) -> dict | None:
-    if (not isinstance(item, dict) or item.get("status") not in {"completed", "blocked"} or not isinstance(item.get("summary"), str)
+    """The worker's completion file; the 1.1.0 evidence is null when the file is 1.0.0 (or leaves a field empty)."""
+    if (not isinstance(item, dict) or item.get("status") not in {"completed", "blocked", "question"} or not isinstance(item.get("summary"), str)
             or not item["summary"].strip() or not string_list(item.get("open_assumptions"))):
         return None
-    return {"status": item["status"], "summary": item["summary"], "open_assumptions": list(item["open_assumptions"])}
+    untested = item.get("untested")
+    return {"status": item["status"], "summary": item["summary"], "open_assumptions": list(item["open_assumptions"]),
+            "untested": list(untested) if isinstance(untested, list) and all(isinstance(entry, str) for entry in untested) else None,
+            "falsifying_check": optional_text(item.get("falsifying_check")), "verify_yourself": optional_text(item.get("verify_yourself"))}
+
+
+QUESTION_KEYS = ("n", "question", "asked_at", "answer", "answered_at")
+
+
+def worker_questions(path: Path) -> list:
+    """`<node>.questions.json` as `{n, question, asked_at, answer, answered_at}` entries; `[]` when absent or malformed."""
+    item = load_optional(path)
+    questions = item.get("questions") if isinstance(item, dict) else None
+    if not isinstance(questions, list):
+        return []
+    result = []
+    for entry in questions:
+        if (not isinstance(entry, dict) or type(entry.get("n")) is not int or not optional_text(entry.get("question"))
+                or not isinstance(entry.get("asked_at"), str) or not (entry.get("answer") is None or isinstance(entry.get("answer"), str))
+                or not (entry.get("answered_at") is None or isinstance(entry.get("answered_at"), str))
+                or (entry.get("answer") is None) != (entry.get("answered_at") is None)):
+            return []
+        result.append({key: entry.get(key) for key in QUESTION_KEYS})
+    return result
+
+
+def challenge_section(directory: Path) -> dict | None:
+    """The latest `challenge.json` without `run_id` and `version`, plus `attempts`; null when absent or invalid."""
+    item = load_optional(directory / "challenge.json")
+    if item is None:
+        return None
+    from jsonschema.exceptions import ValidationError
+    from .verification import validate_schema
+    try:
+        validate_schema("challenge", item)
+    except ValidationError:
+        return None
+    section = {key: value for key, value in item.items() if key not in {"run_id", "version"}}
+    section["attempts"] = item["attempt"]
+    return section
 
 
 def accepted_handoff(item) -> dict | None:
@@ -190,7 +251,8 @@ def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> di
             "launch": launch_receipt(load_optional(directory / f"{node}.interactive.json")),
             "completion": completion_signal(load_optional(directory / f"{node}.completion.json")),
             "handoff": accepted_handoff(load_optional(directory / f"{node}.handoff.json")),
-            "stop": stop_confirmation(directory / f"{node}.stop.json")}
+            "stop": stop_confirmation(directory / f"{node}.stop.json"),
+            "questions": worker_questions(directory / f"{node}.questions.json")}
 
 
 def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
@@ -212,6 +274,7 @@ def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
             # A drill naming an excluded lane is pinned as null at prepare; plans before the selection keep the policy's.
             "failure_drill": plan["failure_drill"] if "failure_drill" in plan else policy.get("failure_drill"),
             "selected_workers": list(workers), "excluded_workers": plan_excluded(plan),
+            "decisions": decisions_text(plan), "challenge": challenge_section(directory),
             "workers": {worker["node_id"]: worker_inputs(directory, plan, policy, worker) for worker in policy["workers"] if worker["node_id"] in workers}}
 
 
@@ -232,7 +295,7 @@ def export_state(runtime, state) -> dict:
                         "sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest()})
     policy = getattr(runtime, "policy", None) or load_optional(runtime.directory / "policy.json")
     value = {"version": EXPORT_VERSION, "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
-             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous),
+             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan)),
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
              "verification_packets": packets,
              "review": review_section(runtime.directory),

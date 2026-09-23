@@ -203,7 +203,7 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
     node_id: 'docs', launch_node_id: 'launch_docs', role: 'technical writer', required_check_kinds: ['contract'],
     task: { text: '# Docs worker\n\nDocument the lanes.', truncated: false }, prompt: null, owned_paths: ['docs'],
     checks: [{ id: 'docs-contract', kind: 'contract', command: 'npm run test:contracts', timeout_seconds: 120, scenarios: [] }],
-    launch: null, completion: null, handoff: null, stop: null,
+    launch: null, completion: null, handoff: null, stop: null, questions: [],
   })
   assert.equal(validateRunInputs(three).workers.length, 3)
   const one = structuredClone(examples.runInputs)
@@ -246,5 +246,61 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
     const inputs = structuredClone(examples.runInputs)
     mutate(inputs)
     assert.throws(() => validateRunInputs(inputs), label)
+  }
+})
+
+test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, completion evidence and questions; older runs serve nulls and []', () => {
+  const inputs = validateRunInputs(examples.runInputs)
+  assert.equal(inputs.contract_version, '1.4.0')
+  assert.ok(inputs.decisions?.includes('## Decisions'))
+  assert.deepEqual([inputs.challenge?.status, inputs.challenge?.attempt, inputs.challenge?.attempts, inputs.challenge?.accepted_reason], ['accepted', 1, 1, 'The contract is split by file.'])
+  assert.deepEqual(inputs.workers[0].completion && [inputs.workers[0].completion.untested, inputs.workers[0].completion.falsifying_check], [['Findings wider than the viewport'], 'review-browser'])
+  assert.deepEqual(inputs.workers.map(worker => worker.questions.map(question => question.answer)), [['By severity.'], [null]])
+  // What an export before 1.5.0 (or a feature before 2.2.0) serves: nulls and [] everywhere, still valid.
+  const older = structuredClone(examples.runInputs)
+  older.decisions = null
+  older.challenge = null
+  for (const worker of older.workers) worker.questions = []
+  older.workers[0].completion = { status: 'completed', summary: 'Done.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }
+  validateRunInputs(older)
+  // Each challenge status, a question completion and a disabled challenge are valid.
+  for (const [status, severity, reason] of [['passed', 'P2', null], ['paused', 'P0', null], ['accepted', 'P1', 'Known risk']] as const) {
+    const value = structuredClone(examples.runInputs)
+    value.challenge!.status = status
+    value.challenge!.accepted_reason = reason
+    value.challenge!.concerns = [{ severity, kind: 'other', message: 'm', consequence: 'c' }]
+    validateRunInputs(value)
+  }
+  const disabled = structuredClone(examples.runInputs)
+  disabled.challenge = { ...disabled.challenge!, status: 'disabled', attempt: 0, attempts: 0, session_id: null, concerns: [], simpler_alternative: null, cheap_experiment: null, accepted_reason: null }
+  validateRunInputs(disabled)
+  const asking = structuredClone(examples.runInputs)
+  asking.workers[1].completion = { status: 'question', summary: 'Waiting.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }
+  validateRunInputs(asking)
+  const cases: [string, (value: typeof examples.runInputs) => void][] = [
+    ['decisions missing', value => { delete (value as Record<string, unknown>).decisions }],
+    ['challenge missing', value => { delete (value as Record<string, unknown>).challenge }],
+    ['questions missing', value => { delete (value.workers[0] as Record<string, unknown>).questions }],
+    ['evidence missing', value => { delete (value.workers[0].completion as Record<string, unknown>).falsifying_check }],
+    ['unknown completion status', value => { (value.workers[0].completion as Record<string, unknown>).status = 'asked' }],
+    ['blank falsifying check', value => { value.workers[0].completion!.falsifying_check = '' }],
+    ['unknown challenge status', value => { (value.challenge as Record<string, unknown>).status = 'skipped' }],
+    ['accepted without a reason', value => { value.challenge!.accepted_reason = null }],
+    ['passed with a reason', value => { value.challenge!.status = 'passed' }],
+    ['passed with a P1', value => { value.challenge!.status = 'passed'; value.challenge!.accepted_reason = null }],
+    ['paused without a P0/P1', value => { value.challenge!.status = 'paused'; value.challenge!.accepted_reason = null; value.challenge!.concerns = [] }],
+    ['disabled with a job', value => { value.challenge!.status = 'disabled'; value.challenge!.accepted_reason = null; value.challenge!.concerns = [] }],
+    ['attempt beyond attempts', value => { value.challenge!.attempt = 2 }],
+    ['unknown concern kind', value => { (value.challenge!.concerns[0] as Record<string, unknown>).kind = 'style' }],
+    ['concern without consequence', value => { value.challenge!.concerns[0].consequence = '' }],
+    ['question numbering', value => { value.workers[0].questions[0].n = 2 }],
+    ['answer without time', value => { value.workers[0].questions[0].answered_at = null }],
+    ['earlier question waiting', value => { value.workers[1].questions.push({ n: 2, question: 'q', asked_at: '2026-01-01T12:11:00Z', answer: null, answered_at: null }) }],
+    ['four questions', value => { value.workers[0].questions = [1, 2, 3, 4].map(n => ({ n, question: 'q', asked_at: '2026-01-01T12:11:00Z', answer: 'a', answered_at: '2026-01-01T12:12:00Z' })) }],
+  ]
+  for (const [label, mutate] of cases) {
+    const value = structuredClone(examples.runInputs)
+    mutate(value)
+    assert.throws(() => validateRunInputs(value), label)
   }
 })

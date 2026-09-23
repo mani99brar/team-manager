@@ -716,6 +716,24 @@ def build_pipeline(checkpointer, runtime):
     return graph.compile(checkpointer=checkpointer)
 
 
+def start_workers(runtime, attach: bool = False) -> None:
+    """The first graph step (every launch) after `resume` decided the design challenge; `start` does the same inline."""
+    from .guardrails import challenge_gate
+    if not challenge_gate(runtime):
+        raise RuntimeError("The design challenge has not passed; no worker is launched")
+    config = graph_config(runtime)
+    with SqliteSaver.from_conn_string(str(runtime.directory / "pipeline.sqlite")) as saver:
+        graph = build_pipeline(saver, runtime)
+        if graph.get_state(config).values:
+            raise RuntimeError("Run already started; use status/explicit controls, never start again")
+        try:
+            graph.invoke({"run_id": runtime.plan["run_id"]}, config)
+        finally:
+            print(f"Report: {report(runtime, graph.get_state(config))}")
+    if attach:
+        print(json.dumps(attach_panels(runtime.sessions), indent=2))
+
+
 def graph_config(runtime) -> dict:
     """One LangGraph thread per run; every lane's fan-out step may run concurrently."""
     return {"configurable": {"thread_id": runtime.plan["run_id"]}, "max_concurrency": max(2, len(runtime.workers))}
@@ -768,7 +786,8 @@ def report(runtime: Pipeline, state) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"])
+    parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
+                        help="resume and answer (feature.json 2.2.0 runs) have their own options: python -m workflow resume|answer --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -788,6 +807,11 @@ def main():
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--node", help="retry: the lane whose failed check reruns (validated against the run's lanes)")
     parser.add_argument("--phase", choices=["worker", "candidate"], default="worker")
+    parser.add_argument("--guardrails", action="store_true", help="prepare: a feature.json 2.2.0 run: completion 1.1.0, decisions.md pinned, "
+                                                                  "and the design challenge before any worker launch")
+    parser.add_argument("--decisions", type=Path, help="prepare --guardrails: the feature's decisions.md, pinned into the plan")
+    parser.add_argument("--prd", type=Path, help="prepare --guardrails: the PRD the design challenge reads, copied into the run")
+    parser.add_argument("--no-challenge", action="store_true", help="prepare --guardrails: the feature sets challenge: false")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -827,11 +851,25 @@ def main():
                 parser.error(f"--task must be given exactly once for each selected lane ({', '.join(selected)}); got {', '.join(task_files) or 'none'}")
             if args.automatic and not git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD").startswith("feature/"):
                 raise ValueError("Automatic preparation requires a feature/ branch")
+            from .guardrails import brief_problems, pin_guardrails, pinned_task
+            if args.guardrails:
+                if not args.decisions:
+                    parser.error("prepare --guardrails requires --decisions <decisions.md>")
+                for node, path in task_files.items():
+                    problems = brief_problems(path.read_text())
+                    if problems:
+                        raise ValueError(f"Task {path} for lane {node}: {', '.join(problems)}")
+                if not args.decisions.is_file() or not args.decisions.read_text().strip():
+                    raise ValueError(f"decisions.md is missing or empty: {args.decisions}")
+                if args.prd and not args.prd.is_file():
+                    raise ValueError(f"PRD does not exist: {args.prd}")
+            elif args.decisions or args.prd or args.no_challenge:
+                parser.error("--decisions, --prd and --no-challenge apply to prepare --guardrails (feature.json 2.2.0) only")
             tasks = {}
             for worker in policy["workers"]:
                 node = worker["node_id"]
                 if node in selected:
-                    tasks[node] = task_files[node].read_text() + "\nApproved ownership and checks:\n" + json.dumps(worker)
+                    tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if reviewers:
@@ -840,6 +878,8 @@ def main():
             drill_skipped = bool(drill) and drill["node_id"] not in selected
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
                         failure_drill=None if drill_skipped else drill)
+            if args.guardrails:
+                pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
             if args.automatic:
                 from .automatic import automatic_settings
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
@@ -893,6 +933,12 @@ def main():
                         parser.error("start requires --live; do not use it for offline tests")
                     if state.values:
                         parser.error("Run already started; use status/explicit controls, never start again")
+                    from .guardrails import challenge_gate, paused_message
+                    # A 2.2.0 run's design challenge decides before any worker launch; a pause exits 0 with the resume commands.
+                    if not challenge_gate(runtime):
+                        print(paused_message(directory, args.herdr))
+                        print(f"Report: {report(runtime, state)}")
+                        return
                     value = {"run_id": runtime.plan["run_id"]}
                 elif args.action == "freeze":
                     if pending != ["worker_handoff"]:
@@ -975,8 +1021,11 @@ def main():
                     if args.action == "start" and args.herdr:
                         print(json.dumps(attach_panels(runtime.sessions), indent=2))
                 else:
-                    print(json.dumps({"workers": runtime.workers, "excluded_workers": runtime.excluded, "next": state.next, "pending": pending,
-                                      "errors": [str(task.error) for task in state.tasks if task.error]}, indent=2))
+                    status = {"workers": runtime.workers, "excluded_workers": runtime.excluded, "next": state.next, "pending": pending,
+                              "errors": [str(task.error) for task in state.tasks if task.error]}
+                    if (directory / "challenge.json").exists():
+                        status["challenge"] = read_json(directory / "challenge.json")["status"]
+                    print(json.dumps(status, indent=2))
                     print(f"Report: {report(runtime, state)}")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")

@@ -188,9 +188,10 @@ type WorkerInput = {
   role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
   checks: { id: string; kind: string; argv: string[]; command: string; timeout_seconds: number; scenarios: { id: string; description: string }[] }[]
   launch: { session_id: string | null; launch_token: string; launch_requested_at: string; native_started_at: number | null; observed_state: string | null; status: string; launcher_invocations: number; background_id: string | null } | null
-  completion: { status: string; summary: string; open_assumptions: string[] } | null
+  completion: { status: string; summary: string; open_assumptions: string[]; untested?: string[] | null; falsifying_check?: string | null; verify_yourself?: string | null } | null
   handoff: { summary: string; open_assumptions: string[] } | null
   stop: { stopped: boolean; confirmed_at: string | null } | null
+  questions?: { n: number; question: string; asked_at: string; answer: string | null; answered_at: string | null }[]
 }
 type InputsSection = {
   feature: string; policy_version: string; base_commit: string; source_branch: string | null; mode: string
@@ -200,6 +201,8 @@ type InputsSection = {
   selected_workers?: string[]
   excluded_workers?: string[]
   workers: Record<string, WorkerInput>
+  decisions?: string | null
+  challenge?: Record<string, unknown> | null
 }
 
 const diffRegistration = (content: Buffer | string) => ({ path: 'review.diff', sha256: sha256(content), bytes: Buffer.byteLength(content) })
@@ -1222,7 +1225,7 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.equal(response.status, 200, response.body)
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const inputs = validateRunInputs(response.json())
-    assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.3.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
+    assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.4.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
     assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' })
     assert.deepEqual(inputs.setup, [{ command: 'npm ci', timeout_seconds: 600 }])
     assert.equal(inputs.max_verification_attempts, 3)
@@ -1249,7 +1252,9 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     // Receipts: offsets become Z, epoch milliseconds become timestamps, tokens and background IDs stay private.
     assert.deepEqual(ui.launch, { session_id: 'ui-session-0001', launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: '2026-03-01T10:00:02.771Z', observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1 })
     assert.deepEqual(adapter.launch, { session_id: null, launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: null, observed_state: null, status: 'launching', launcher_invocations: 0 })
-    assert.deepEqual(ui.completion, { status: 'blocked', summary: 'Blocked on <path>', open_assumptions: ['Mock routes only'] })
+    // An export before 1.5.0 has no completion evidence, questions, decisions or challenge: nulls and [].
+    assert.deepEqual(ui.completion, { status: 'blocked', summary: 'Blocked on <path>', open_assumptions: ['Mock routes only'], untested: null, falsifying_check: null, verify_yourself: null })
+    assert.deepEqual([ui.questions, adapter.questions, inputs.decisions, inputs.challenge], [[], [], null, null])
     assert.deepEqual(ui.handoff, { summary: 'ui done', open_assumptions: ['ui assumption'] })
     assert.deepEqual(ui.stop, { stopped: true, confirmed_at: '2026-03-01T10:20:00Z' })
     assert.deepEqual([adapter.completion, adapter.handoff, adapter.stop], [null, null, { stopped: false, confirmed_at: null }])
@@ -1260,6 +1265,84 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.deepEqual([manual.mode, manual.automatic, manual.source_branch], ['manual', null, null])
     assert.deepEqual(manual.workers.map(worker => [worker.node_id, worker.launch_node_id]), [['ui', 'ui'], ['adapter', 'adapter']])
     assert.deepEqual([manual.workers[0].launch, manual.workers[0].completion, manual.workers[0].handoff, manual.workers[0].stop], [null, null, null, null])
+  })
+})
+
+/** A 1.5.0 challenge section exactly as workflow/export_state.py writes it (the latest challenge.json plus `attempts`). */
+function challengeSection(overrides: Record<string, unknown> = {}) {
+  return {
+    status: 'paused', attempt: 2, attempts: 2, session_id: 'challenge-session-2',
+    pinned: { tasks_sha256: 'a'.repeat(64), decisions_sha256: 'b'.repeat(64), prd_sha256: 'c'.repeat(64) },
+    concerns: [
+      { severity: 'P1', kind: 'failure_mode', message: 'Both lanes write /home/op/dev/md-manager/server/projects.ts', consequence: 'The candidate cannot merge.' },
+      { severity: 'P2', kind: 'complexity', message: 'Two reviewers.', consequence: 'Review costs twice.' },
+    ],
+    simpler_alternative: 'One lane.', cheap_experiment: 'Diff the owned paths.', accepted_reason: null, decided_at: '2026-03-01T09:59:00.123456Z',
+    ...overrides,
+  }
+}
+
+test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, completion evidence and questions; older runs stay valid', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const leak = `${root}/runs/alpha/main/guarded/worktree-ui`
+    const definition = { name: 'Feature implementation', nodes: [
+      { node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] },
+      ...GRAPH_NODES.map(node => node.kind === 'worker' ? { ...node, depends_on: ['challenge'] } : node)] }
+    const decisions = `# Decisions\n\n## Decisions\n\n- Serve the fields unchanged; see ${leak} for the run.\n`
+    const section = inputsSection({ decisions, challenge: challengeSection() }, {
+      ui: {
+        completion: { status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens', ' '], falsifying_check: 'project-workflows-browser', verify_yourself: `Open ${leak}/report.html` },
+        questions: [
+          { n: 1, question: 'Group by severity?', asked_at: '2026-03-01T10:01:00+00:00', answer: 'Yes.', answered_at: '2026-03-01T10:02:00Z' },
+          { n: 2, question: `Write to ${leak}?`, asked_at: '2026-03-01T10:03:00Z', answer: null, answered_at: null },
+        ],
+      },
+      adapter: { completion: { status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: '', verify_yourself: null }, questions: [] },
+    })
+    // A paused challenge: nothing launched yet.
+    const paused = [{ sequence: 1, time: T0, node: 'challenge', status: 'running', message: 'Design challenge attempt 2: one print job' },
+      { sequence: 2, time: T0, node: 'challenge', status: 'paused', message: 'Design challenge attempt 2 paused the run' }]
+    await writeRun(rootDir, { runId: 'guarded', version: '1.5.0', definition, next: ['launch_ui', 'launch_adapter'], events: paused, inputs: section })
+    const response = await get(app, url('alpha', 'main', 'guarded', '/inputs'))
+    assert.equal(response.status, 200, response.body)
+    assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
+    const inputs = validateRunInputs(response.json())
+    assert.equal(inputs.contract_version, '1.4.0')
+    assert.equal(inputs.decisions, '# Decisions\n\n## Decisions\n\n- Serve the fields unchanged; see <path> for the run.\n')
+    assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z',
+      concerns: [{ ...challengeSection().concerns[0], message: 'Both lanes write <path>' }, challengeSection().concerns[1]] })
+    const [ui, adapter] = inputs.workers
+    assert.deepEqual(ui.completion, { status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens'], falsifying_check: 'project-workflows-browser', verify_yourself: 'Open <path>' })
+    assert.deepEqual(ui.questions, [
+      { n: 1, question: 'Group by severity?', asked_at: '2026-03-01T10:01:00Z', answer: 'Yes.', answered_at: '2026-03-01T10:02:00Z' },
+      { n: 2, question: 'Write to <path>?', asked_at: '2026-03-01T10:03:00Z', answer: null, answered_at: null }])
+    assert.deepEqual([adapter.completion, adapter.questions], [{ status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }, []])
+    // The graph starts with the challenge node, paused with its attempts and session; no launch node has started.
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'guarded'))).json())
+    assert.deepEqual(detail.definition.nodes[0], { node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] })
+    const nodes = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
+    assert.deepEqual([nodes.get('challenge')!.status, nodes.get('challenge')!.attempt, nodes.get('challenge')!.session_id], ['paused', 2, 'challenge-session-2'])
+    assert.deepEqual([nodes.get('launch_ui')!.status, detail.summary.status], ['pending', 'paused'])
+    // Accepted (or passed) is a succeeded node; the accepted reason is served.
+    await writeRun(rootDir, { runId: 'accepted', version: '1.5.0', definition, next: ['launch_ui', 'launch_adapter'], events: paused,
+      inputs: inputsSection({ decisions, challenge: challengeSection({ status: 'accepted', accepted_reason: 'Split by file.' }) }) })
+    const accepted = validateRunInputs((await get(app, url('alpha', 'main', 'accepted', '/inputs'))).json())
+    assert.deepEqual([accepted.challenge!.status, accepted.challenge!.accepted_reason], ['accepted', 'Split by file.'])
+    const acceptedDetail = validateRunDetail((await get(app, url('alpha', 'main', 'accepted'))).json())
+    assert.equal(acceptedDetail.snapshot.nodes.find(node => node.node_id === 'challenge')!.status, 'succeeded')
+    // A 1.5.0 export of a run before 2.2.0 and a 1.4.0 export both serve nulls and [].
+    await writeRun(rootDir, { runId: 'unguarded', version: '1.5.0', inputs: inputsSection({ decisions: null, challenge: null }, { ui: { questions: [] }, adapter: { questions: [] } }) })
+    await writeRun(rootDir, { runId: 'older', version: '1.4.0', inputs: inputsSection() })
+    for (const runId of ['unguarded', 'older']) {
+      const older = validateRunInputs((await get(app, url('alpha', 'main', runId, '/inputs'))).json())
+      assert.deepEqual([older.decisions, older.challenge, older.workers.map(worker => worker.questions), older.workers[0].completion!.falsifying_check], [null, null, [[], []], null], runId)
+      assert.equal((await get(app, url('alpha', 'main', runId))).status, 200)
+    }
+    // A contradictory challenge or question list fails the run as a whole, naming only the run.
+    await writeRun(rootDir, { runId: 'bad-challenge', version: '1.5.0', inputs: inputsSection({ challenge: challengeSection({ status: 'passed' }) }) })
+    await writeRun(rootDir, { runId: 'bad-question', version: '1.5.0', inputs: inputsSection({}, { ui: { questions: [{ n: 2, question: 'q', asked_at: T0, answer: null, answered_at: null }] } }) })
+    for (const runId of ['bad-challenge', 'bad-question']) assertError(await get(app, url('alpha', 'main', runId, '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
   })
 })
 
@@ -1276,7 +1359,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.5.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.6.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),

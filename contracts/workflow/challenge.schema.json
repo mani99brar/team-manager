@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Design challenge v1.0.0",
+  "description": "`challenge.json` in a run directory of a feature.json 2.2.0 run (docs/PRD_PORTABLE_WORKFLOW.md section 4.5), written only by the controller. One `claude --print` job (Read, Glob and Grep only, a read-only worktree at the base commit) reads the pinned PRD, tasks and decisions.md and returns `$defs.output`; the controller validates it, adds the binding and decides: no P0 or P1 concern is `passed`, a P0 or P1 is `paused` and no worker is launched. `resume --accept-challenge <reason>` rewrites the latest attempt as `accepted` with the reason; `disabled` (attempt 0, no job) is written when the feature sets `challenge: false`. Earlier attempts are kept as `challenge-<attempt>.json`. Hand-written; the controller validates with `workflow.verification.validate_schema(\"challenge\", ...)`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "run_id",
+    "status",
+    "attempt",
+    "session_id",
+    "pinned",
+    "concerns",
+    "simpler_alternative",
+    "cheap_experiment",
+    "accepted_reason",
+    "decided_at"
+  ],
+  "properties": {
+    "version": {
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "paused",
+        "accepted",
+        "disabled"
+      ]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The challenge job this record decides, from 1; 0 only for `disabled`, when no job ran."
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "description": "The print job's session id; null only for `disabled`."
+    },
+    "pinned": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tasks_sha256",
+        "decisions_sha256",
+        "prd_sha256"
+      ],
+      "description": "SHA-256 of the pinned inputs the job read: the lanes' task texts (canonical JSON by lane), decisions.md and the PRD (null without `prd`).",
+      "properties": {
+        "tasks_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "decisions_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "prd_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "concerns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/concern"
+      }
+    },
+    "simpler_alternative": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "cheap_experiment": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "accepted_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "description": "The operator's reason, present exactly when `status` is `accepted`."
+    },
+    "decided_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "accepted"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "accepted_reason": {
+            "type": "string"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "accepted_reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "disabled"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "attempt": {
+            "const": 0
+          },
+          "session_id": {
+            "type": "null"
+          },
+          "concerns": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "attempt": {
+            "minimum": 1
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "simpler_alternative": {
+            "type": "string"
+          },
+          "cheap_experiment": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "concern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "kind",
+        "message",
+        "consequence"
+      ],
+      "properties": {
+        "severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2"
+          ],
+          "description": "P0 or P1 pauses the run before any worker starts; P2 is recorded and the run continues."
+        },
+        "kind": {
+          "enum": [
+            "assumption",
+            "failure_mode",
+            "complexity",
+            "other"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "consequence": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The concrete consequence if the concern is ignored."
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "concerns",
+        "simpler_alternative",
+        "cheap_experiment"
+      ],
+      "description": "What the print job returns (its --json-schema): the concerns, the strongest simpler alternative and one cheap experiment that could change the choice.",
+      "properties": {
+        "concerns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/concern"
+          }
+        },
+        "simpler_alternative": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cheap_experiment": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

@@ -159,7 +159,11 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0'])
+  // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
+  feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
+  for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)
+  assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', challenge: 'no' }).success, false)
 })
 
 test('review completion 1.2.0 binds a file to one reviewer node and attributes findings to a lane id, multiple or none, never both', () => {

@@ -3,9 +3,11 @@ import { artifactSchema, runSnapshotSchema } from '../workflow/v1.js'
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
 const version = z.literal('1.0.0')
-/** Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs) and 1.3.0 (configured worker lanes). */
-const version130 = z.literal('1.3.0')
-/** The review result since 1.4.0 (parallel reviewers): `reviewers` per reviewer and `reviewer` on every finding. */
+/**
+ * Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs), 1.3.0 (configured
+ * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
+ * (decisions, the design challenge, completion evidence and worker questions).
+ */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
 const commit = z.string().regex(/^[a-f0-9]{40}$/)
@@ -131,11 +133,56 @@ export const reviewResultSchema = z.strictObject({
   diff: artifactSchema.nullable(),
 })
 
-// ---- Run inputs (1.2.0, worker lanes from configuration in 1.3.0) ---------------------------------------------
+// ---- Run inputs (1.2.0, worker lanes from configuration in 1.3.0, guardrails in 1.4.0) --------------------------
 
 const boundedText = z.strictObject({ text: z.string(), truncated: z.boolean() })
 const assumptions = z.array(z.string().min(1))
 export const CHECK_KINDS = ['build', 'typecheck', 'unit', 'integration', 'contract', 'browser'] as const
+
+/** The status words of a worker's completion file; `question` (completion 1.1.0) asks the operator before finishing. */
+export const COMPLETION_STATUSES = ['completed', 'blocked', 'question'] as const
+
+/**
+ * One question a worker asked with a `question` completion (1.4.0), in order from `n` 1. The worker's deadline was
+ * paused while it waited; `answer` and `answered_at` are null while it still waits on the operator.
+ */
+export const workerQuestionSchema = z.strictObject({
+  n: z.number().int().positive(),
+  question: z.string().min(1),
+  asked_at: timestamp,
+  answer: z.string().min(1).nullable(),
+  answered_at: timestamp.nullable(),
+})
+
+export const CHALLENGE_STATUSES = ['passed', 'paused', 'accepted', 'disabled'] as const
+export const CHALLENGE_CONCERN_KINDS = ['assumption', 'failure_mode', 'complexity', 'other'] as const
+
+/**
+ * The design challenge of a feature.json 2.2.0 run (1.4.0): the latest `challenge.json` without `run_id` and `version`,
+ * plus `attempts`. `passed` had no P0/P1 concern and launched the workers; `paused` has one and launched none; `accepted`
+ * is a paused attempt the operator overrode with `accepted_reason`; `disabled` (attempt 0, no job) when the feature set
+ * `challenge: false`.
+ */
+export const runChallengeSchema = z.strictObject({
+  status: z.enum(CHALLENGE_STATUSES),
+  /** The challenge job this record decides, from 1; 0 only when disabled. */
+  attempt: z.number().int().nonnegative(),
+  /** How many challenge jobs the run has run (earlier attempts are kept as `challenge-<n>.json`). */
+  attempts: z.number().int().nonnegative(),
+  session_id: z.string().min(1).nullable(),
+  /** SHA-256 of the pinned inputs the job read; `prd_sha256` is null when the feature names no PRD. */
+  pinned: z.strictObject({ tasks_sha256: revision, decisions_sha256: revision, prd_sha256: revision.nullable() }),
+  concerns: z.array(z.strictObject({
+    severity: z.enum(['P0', 'P1', 'P2']),
+    kind: z.enum(CHALLENGE_CONCERN_KINDS),
+    message: z.string().min(1),
+    consequence: z.string().min(1),
+  })),
+  simpler_alternative: z.string().min(1).nullable(),
+  cheap_experiment: z.string().min(1).nullable(),
+  accepted_reason: z.string().min(1).nullable(),
+  decided_at: timestamp,
+})
 
 export const runInputWorkerSchema = z.strictObject({
   /** Logical worker lane (`ui`, `adapter`, `docs`, ...): the ID its results are served under. */
@@ -168,14 +215,25 @@ export const runInputWorkerSchema = z.strictObject({
     status: z.string().min(1),
     launcher_invocations: z.number().int().nonnegative(),
   }).nullable(),
-  completion: z.strictObject({ status: z.enum(['completed', 'blocked']), summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
+  completion: z.strictObject({
+    status: z.enum(COMPLETION_STATUSES),
+    summary: z.string().min(1),
+    open_assumptions: assumptions,
+    /** Completion 1.1.0 evidence; all three are null for a 1.0.0 completion (runs prepared before the guardrails). */
+    untested: z.array(z.string().min(1)).nullable(),
+    /** The check that would fail if the work were wrong: a check ID of this lane or a command. */
+    falsifying_check: z.string().min(1).nullable(),
+    verify_yourself: z.string().min(1).nullable(),
+  }).nullable(),
   handoff: z.strictObject({ summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
   stop: z.strictObject({ stopped: z.boolean(), confirmed_at: timestamp.nullable() }).nullable(),
+  /** Every question the worker asked, oldest first; `[]` when it asked none and for runs before 1.4.0. */
+  questions: z.array(workerQuestionSchema),
 })
 
 /** What a run was asked to do, served at `.../runs/{run_id}/inputs`; pinned from the run's own files. */
 export const runInputsSchema = z.strictObject({
-  contract_version: version130,
+  contract_version: version140,
   run_id: id,
   feature: z.string().min(1),
   base_commit: commit,
@@ -196,6 +254,10 @@ export const runInputsSchema = z.strictObject({
   /** Declared lanes the launch left out; their owned paths stayed off-limits and they have no node in the run. */
   excluded_workers: z.array(laneId),
   workers: z.array(runInputWorkerSchema).min(1),
+  /** The `decisions.md` text pinned at prepare (Markdown); null for runs without one (feature.json before 2.2.0). */
+  decisions: z.string().nullable(),
+  /** The design challenge; null for runs without one (feature.json before 2.2.0). */
+  challenge: runChallengeSchema.nullable(),
 })
 
 export const schemas = {
@@ -215,6 +277,8 @@ export type ReviewFinding = z.infer<typeof reviewFindingSchema>
 export type ReviewerEntry = z.infer<typeof reviewerEntrySchema>
 export type ReviewResult = z.infer<typeof reviewResultSchema>
 export type RunInputWorker = z.infer<typeof runInputWorkerSchema>
+export type WorkerQuestion = z.infer<typeof workerQuestionSchema>
+export type RunChallenge = z.infer<typeof runChallengeSchema>
 export type RunInputs = z.infer<typeof runInputsSchema>
 
 export function validateDefinition(input: unknown): WorkflowDefinition {
@@ -308,6 +372,25 @@ export function validateRunInputs(input: unknown): RunInputs {
       if (new Set(check.scenarios.map(scenario => scenario.id)).size !== check.scenarios.length) throw new Error(`Duplicate scenario IDs in ${check.id}`)
     }
     if (worker.stop !== null && !worker.stop.stopped && worker.stop.confirmed_at !== null) throw new Error('An unconfirmed stop has no confirmation time')
+    worker.questions.forEach((question, index) => {
+      if (question.n !== index + 1) throw new Error(`Questions of ${worker.node_id} must be numbered 1, 2, ... in order`)
+      if ((question.answer === null) !== (question.answered_at === null)) throw new Error(`Question ${question.n} of ${worker.node_id} needs both an answer and its time, or neither`)
+      if (question.answer === null && index !== worker.questions.length - 1) throw new Error(`Only the latest question of ${worker.node_id} can be waiting`)
+    })
+    if (worker.questions.length > 3) throw new Error(`${worker.node_id} has more than three questions; a fourth is treated as blocked`)
+  }
+  const challenge = inputs.challenge
+  if (challenge !== null) {
+    if ((challenge.status === 'accepted') !== (challenge.accepted_reason !== null)) throw new Error('An accepted challenge, and only one, has a reason')
+    if (challenge.status === 'disabled') {
+      if (challenge.attempt !== 0 || challenge.session_id !== null || challenge.concerns.length > 0) throw new Error('A disabled challenge ran no job')
+    } else {
+      if (challenge.attempt < 1 || challenge.session_id === null || challenge.simpler_alternative === null || challenge.cheap_experiment === null) throw new Error('A challenge job has an attempt, a session and its findings')
+      const blocking = challenge.concerns.some(concern => concern.severity === 'P0' || concern.severity === 'P1')
+      if (challenge.status === 'passed' && blocking) throw new Error('A passed challenge has no P0/P1 concern')
+      if (challenge.status !== 'passed' && !blocking) throw new Error(`A ${challenge.status} challenge has a P0/P1 concern`)
+    }
+    if (challenge.attempts < challenge.attempt) throw new Error('A challenge cannot decide an attempt it has not run')
   }
   return inputs
 }

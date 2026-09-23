@@ -18,6 +18,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from .checks import now
+from .guardrails import decisions_block
 from .sessions import DEFAULT_REVIEWER, git, plan_reviewers, plan_workers, read_json, review_node, reviewer_ids, run_lock, save_json, terminate
 from .verification import CONTRACTS
 
@@ -62,9 +63,27 @@ def reviewer_transport(plan: dict) -> str:
 
 
 def completion_prompt(directory: Path, plan: dict, node: str) -> str:
-    example = {"version": "1.0.0", "run_id": plan["run_id"], "node_id": node,
+    from .guardrails import COMPLETION_VERSION, MAX_QUESTIONS, completion_version, stop_rule
+    version = completion_version(plan)
+    example = {"version": version, "run_id": plan["run_id"], "node_id": node,
                "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
                "summary": "Describe actual work and checks executed", "open_assumptions": []}
+    evidence = ""
+    if version == COMPLETION_VERSION:
+        example.update(untested=["A behaviour no executed check covers"], falsifying_check="The check id (or exact command) that would fail if this were wrong",
+                       verify_yourself="One assumption the operator should verify independently", question=None)
+        stop = stop_rule(plan["nodes"][node]["task"])
+        evidence = ("\nCompletion 1.1.0 evidence: for status completed, untested lists the behaviours no executed check covers (it may "
+                    "be empty), falsifying_check names the check that would fail if your implementation were wrong (a check id from "
+                    "your approved checks, or the exact command), verify_yourself names one assumption the operator should verify "
+                    "independently, and question is null; a completed file without them is refused. The commands you ran are not "
+                    "evidence by themselves: the controller reruns the checks.\n"
+                    "Questions: when a decision you cannot make yourself blocks the work, write the same file with status question, "
+                    "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
+                    "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
+                    f"At most {MAX_QUESTIONS} questions for this lane: after the third, decide yourself and record an open assumption; "
+                    "a fourth question is treated as blocked."
+                    + (f"\nStop (from your task, the bound on this work): {' '.join(stop.split())}" if stop else ""))
     return ("\n\nAUTOMATIC MODE: permission checks are bypassed and Bash is available. "
             "Do not wait for a human handoff. Stay within assigned ownership; do not commit, merge, push, "
             "launch agents, change runtime evidence or switch billing/provider. "
@@ -72,26 +91,60 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
             "then finish your turn and do not modify more files. Controller checks and independent review "
-            "still determine acceptance.\n" + json.dumps(example))
+            "still determine acceptance.\n" + json.dumps(example) + evidence)
 
 
-def read_completion(runtime, node: str) -> dict:
+COMPLETION_KEYS = frozenset({"version", "run_id", "node_id", "launch_token", "status", "summary", "open_assumptions"})
+EVIDENCE_KEYS = frozenset({"untested", "falsifying_check", "verify_yourself", "question"})
+
+
+def text_or_none(value, required: bool) -> bool:
+    """A required evidence text is a non-empty string; an optional one is a string or null."""
+    return isinstance(value, str) and bool(value.strip()) if required else value is None or isinstance(value, str)
+
+
+def read_signal(runtime, node: str) -> dict:
+    """The worker's completion file, validated against the version the run pinned: 1.0.0 before slice 2, 1.1.0 for 2.2.0 features."""
+    from .guardrails import COMPLETION_VERSION, completion_version
     path = runtime.directory / f"{node}.completion.json"
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
         raise ValueError(f"Invalid completion file for {node}")
     item = read_json(path)
-    expected = {"version", "run_id", "node_id", "launch_token", "status", "summary", "open_assumptions"}
+    version = completion_version(runtime.plan)
+    evidence = version == COMPLETION_VERSION
+    expected = COMPLETION_KEYS | EVIDENCE_KEYS if evidence else COMPLETION_KEYS
+    if isinstance(item, dict) and item.get("version") in {"1.0.0", COMPLETION_VERSION} and item["version"] != version:
+        raise ValueError(f"Completion version {item['version']} refused: this run is pinned at completion {version}")
     if not isinstance(item, dict) or set(item) != expected:
-        raise ValueError("Malformed completion signal")
-    if (item["version"] != "1.0.0" or item["run_id"] != runtime.plan["run_id"] or item["node_id"] != node
+        raise ValueError("Malformed completion signal" + (": version 1.1.0 needs untested, falsifying_check, verify_yourself and question" if evidence else ""))
+    if (item["version"] != version or item["run_id"] != runtime.plan["run_id"] or item["node_id"] != node
             or item["launch_token"] != runtime.plan["nodes"][node]["session_id"]):
         raise ValueError("Stale or foreign worker completion signal")
-    if item["status"] not in {"completed", "blocked"} or not isinstance(item["summary"], str) or not item["summary"].strip():
+    statuses = {"completed", "blocked", "question"} if evidence else {"completed", "blocked"}
+    if item["status"] not in statuses or not isinstance(item["summary"], str) or not item["summary"].strip():
         raise ValueError("Invalid completion status/summary")
     if not isinstance(item["open_assumptions"], list) or any(not isinstance(x, str) for x in item["open_assumptions"]):
         raise ValueError("Invalid completion assumptions")
+    if evidence:
+        completed = item["status"] == "completed"
+        untested = item["untested"]
+        if not (isinstance(untested, list) and all(isinstance(x, str) for x in untested) or (untested is None and not completed)):
+            raise ValueError("Invalid completion evidence: untested must be a list of strings")
+        if not text_or_none(item["falsifying_check"], completed) or not text_or_none(item["verify_yourself"], completed):
+            raise ValueError("Invalid completion evidence: a completed 1.1.0 completion needs a non-empty falsifying_check and verify_yourself")
+        if item["status"] == "question" and not text_or_none(item["question"], True):
+            raise ValueError("Invalid completion: status question needs a non-empty question")
+        if completed and item["question"] is not None:
+            raise ValueError("Invalid completion: a completed file has question null")
+    return item
+
+
+def read_completion(runtime, node: str) -> dict:
+    item = read_signal(runtime, node)
     if item["status"] == "blocked":
         raise RuntimeError(f"Worker {node} explicitly blocked: {item['summary']}")
+    if item["status"] == "question":
+        raise RuntimeError(f"Worker {node} asked a question that is not recorded yet: {item['question']}")
     return {"summary": item["summary"], "open_assumptions": item["open_assumptions"]}
 
 
@@ -101,7 +154,12 @@ def lanes(runtime) -> list[str]:
 
 
 def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
-    """Idle alone never means completion. Deadlines survive controller restart."""
+    """Idle alone never means completion. Deadlines survive controller restart.
+
+    A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`) until the
+    operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
+    """
+    from .guardrails import PANE_ANSWER, deadline_extension, load_questions, record_answer, record_question, waiting_question
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
     if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
@@ -111,17 +169,27 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
                 raise RuntimeError("Handoff changed after stop intent")
         return
     attention: set[str] = set()
+    # Answers recorded before this controller started need no second event.
+    answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
     while True:
         rows = runtime.sessions.inventory()
         handoffs = {}
         for node in workers:
             receipt = read_json(runtime.directory / f"{node}.interactive.json")
             started = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
-            if clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"]:
+            extension = deadline_extension(runtime.directory, node)  # None while a question waits: that lane has no running deadline.
+            if extension is not None and clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"] + extension:
                 raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
             row = runtime.sessions.locate(node, rows)
             if row is None:
                 raise RuntimeError("Native worker missing; reconciliation required")
+            if row["state"] == "working" and waiting_question(runtime.directory, node):
+                # The operator typed the answer in the pane: the worker is working again, so its deadline runs again.
+                record_answer(runtime.directory, node, PANE_ANSWER, clock)
+            for entry in load_questions(runtime.directory, node):
+                if entry["answer"] is not None and (node, entry["n"]) not in answered:
+                    answered.add((node, entry["n"]))
+                    runtime.event(node, "interactive", f"Worker {node} question {entry['n']} answered; its deadline runs again")
             if row["state"] == "blocked" and node not in attention:
                 # A native session reports `blocked` when its turn ended needing a human: a question,
                 # a permission prompt or a refusal the harness could not continue past. That is not a
@@ -134,6 +202,9 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
                 attention.discard(node)
             path = runtime.directory / f"{node}.completion.json"
             if row["state"] in {"idle", "done"} and path.exists():
+                if read_signal(runtime, node)["status"] == "question":
+                    record_question(runtime, node, read_signal(runtime, node), clock)
+                    continue
                 handoffs[node] = read_completion(runtime, node)
         if set(handoffs) == set(workers):
             for node, value in handoffs.items():
@@ -210,7 +281,8 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"This run's worker lanes are: {', '.join(lanes(runtime))}. "
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
-            "finding relates to, or null when no single requirement applies. Never paraphrase a quote.")
+            "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
+            + decisions_block(runtime.plan))
 
 
 def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidate_commit: str, reviewer_id: str = DEFAULT_REVIEWER) -> str:
@@ -609,6 +681,19 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     return review
 
 
+def print_command(executable: str, session_id: str, schema: dict, add_dirs: list[str]) -> list[str]:
+    """One headless read-only job (Read, Glob and Grep only, no prompts, no MCP) returning `schema` as structured output.
+
+    The print-mode reviewers and the design challenge run through it; the prompt goes to stdin.
+    """
+    command = [executable, "--print", "--output-format", "json", "--session-id", session_id,
+               "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+               "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none"]
+    for directory in add_dirs:
+        command.extend(["--add-dir", directory])
+    return command + ["--json-schema", json.dumps(schema)]
+
+
 def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) -> dict:
     """Headless fallback (--reviewer-transport print): one `claude --print` job per reviewer, in parallel, no pane, no human input."""
     from jsonschema import validate
@@ -633,10 +718,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
             prompt_path = runtime.directory / f"{node}.prompt.txt"
             prompt_path.write_text(review_prompt(runtime, patch, reviewer) + " Return the requested JSON schema.")
             os.chmod(prompt_path, 0o600)
-            command = [runtime.sessions.executable, "--print", "--output-format", "json", "--session-id", status["session_id"],
-                       "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                       "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none",
-                       "--add-dir", str(runtime.directory), "--json-schema", json.dumps(review_schema(runtime))]
+            command = print_command(runtime.sessions.executable, status["session_id"], review_schema(runtime), [str(runtime.directory)])
             with prompt_path.open() as stdin, (runtime.directory / f"{node}.stdout.json").open("w") as output, (runtime.directory / f"{node}.stderr.log").open("w") as errors:
                 process = subprocess.Popen(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
             processes[reviewer_id] = (process, time.monotonic())
