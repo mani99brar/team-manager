@@ -4,8 +4,10 @@
 - Decisions: the feature directory holds a non-empty `decisions.md` (written by the `workflow-grill` skill); it is
   pinned into the plan and every worker and reviewer prompt includes it after the task.
 - Design challenge: one read-only `claude --print` job reads the pinned PRD, tasks and decisions before any worker
-  starts and writes `challenge.json`. A P0 or P1 concern pauses the run; `resume` re-pins the edited feature files
-  and reruns it, `resume --accept-challenge <reason>` records an override.
+  starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
+  before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
+  A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
+  that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
   in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane.
 
@@ -377,25 +379,159 @@ def paused_message(directory: Path, herdr: bool = False) -> str:
     return "\n".join(lines)
 
 
-def repin(directory: Path, plan: dict, policy: dict) -> dict:
-    """Re-read the task files, decisions.md and the PRD from the paths pinned at prepare; the policy is never re-pinned."""
-    workers = {worker["node_id"]: worker for worker in policy["workers"]}
+def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
+    """The lanes' tasks and decisions.md as the paths pinned at prepare hold them now; refused as prepare refuses them."""
+    tasks = {}
     for node in plan_workers(plan):
         path = Path(plan["task_files"][node])
         text = path.read_text()
         problems = brief_problems(text)
         if problems:
             raise ValueError(f"{path}: {', '.join(problems)}")
-        plan["nodes"][node]["task"] = pinned_task(text, workers[node])
+        tasks[node] = text
     decisions = Path(plan["decisions"]["path"])
     text = decisions.read_text()
     if not text.strip():
         raise ValueError(f"{decisions} is empty")
-    plan["decisions"]["text"] = text
+    if plan.get("prd") and not Path(plan["prd"]["path"]).is_file():
+        raise ValueError(f"PRD {plan['prd']['path']} does not exist")
+    return tasks, text
+
+
+def repin(directory: Path, plan: dict, policy: dict) -> dict:
+    """Re-read the task files, decisions.md and the PRD from the paths pinned at prepare; the policy is never re-pinned."""
+    workers = {worker["node_id"]: worker for worker in policy["workers"]}
+    tasks, decisions = read_pinned(plan)
+    for node, text in tasks.items():
+        plan["nodes"][node]["task"] = pinned_task(text, workers[node])
+    plan["decisions"]["text"] = decisions
     if plan.get("prd"):
         plan["prd"] = pin_prd(directory, Path(plan["prd"]["path"]))
     save_json(directory / "plan.json", plan)
     return plan
+
+
+# ---- Revised feature files: `resume` commits them and moves the run to that commit ------------------------------
+
+def pinned_paths(plan: dict) -> set[str]:
+    """The paths `repin` reads (the lanes' task files, decisions.md, the PRD) that lie in the source checkout, repository-relative."""
+    repo = Path(plan["repository"])
+    files = [*plan["task_files"].values(), plan["decisions"]["path"], *([plan["prd"]["path"]] if plan.get("prd") else [])]
+    return {Path(path).relative_to(repo).as_posix() for path in files if Path(path).is_relative_to(repo)}
+
+
+def dirty_paths(repo: Path) -> list[str]:
+    """Every path `git status` reports: staged or unstaged changes (a rename as both of its paths) and untracked files."""
+    output = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], text=True)
+    return sorted({entry[3:] for entry in output.split("\0") if entry})
+
+
+def commits_after(repo: Path, base: str) -> list[str] | None:
+    """The commits of the checked-out branch after `base`, oldest first; None when the branch no longer contains `base`."""
+    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", base, "HEAD"], capture_output=True).returncode != 0:
+        return None
+    return git(repo, "rev-list", "--reverse", f"{base}..HEAD").split()
+
+
+def revision_subject(run_id: str) -> str:
+    return f"Workflow {run_id}: feature files revised"
+
+
+def is_revision(repo: Path, commit: str, plan: dict) -> bool:
+    """A commit `resume` made for this run: one parent, the pipeline's identity and subject, only the pinned feature files."""
+    from .pipeline import commit_env
+    parents = git(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+    author, _, subject = git(repo, "log", "-1", "--format=%an%n%s", commit).partition("\n")
+    paths = subprocess.check_output(["git", "-C", str(repo), "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", "-z", commit], text=True)
+    return (len(parents) == 1 and author == commit_env()["GIT_AUTHOR_NAME"] and subject.startswith(revision_subject(plan["run_id"]))
+            and set(filter(None, paths.split("\0"))) <= pinned_paths(plan))
+
+
+def commit_revision(runtime, answered: int) -> None:
+    """`resume` after an edit: commit the edited feature files on the run's branch, then move the run to that commit.
+
+    Only the paths `repin` reads may be changed. The branch may already carry the revisions of a `resume` interrupted
+    after its commit; the run moves to them without a second commit. No worker launches meanwhile: the challenge stays
+    paused until the rerun decides it, and an override refuses such a branch.
+    """
+    from .pipeline import commit_env
+    plan = runtime.plan
+    repo, base, branch = Path(plan["repository"]), plan["base_commit"], plan["source_branch"]
+    if git(repo, "symbolic-ref", "--short", "HEAD") != branch:
+        raise ValueError(f"The source checkout is not on the run's branch {branch}; switch back before resume")
+    dirty = dirty_paths(repo)
+    others = [path for path in dirty if path not in pinned_paths(plan)]
+    if others:
+        raise ValueError(f"The source checkout has changes resume does not re-pin: {', '.join(others)}. Only the task files, "
+                         "decisions.md and the PRD pinned at prepare may change before resume; stash or revert the rest")
+    earlier = commits_after(repo, base)
+    if earlier is None or not all(is_revision(repo, commit, plan) for commit in earlier):
+        raise ValueError(f"The branch {branch} moved past the run's base {base} with commits resume did not make; resume commits the "
+                         f"revised feature files itself. Reset the branch to the base (git reset --soft {base}) and rerun resume")
+    if dirty:
+        parent = git(repo, "rev-parse", "HEAD")
+        subject = revision_subject(plan["run_id"]) + (f" after design challenge attempt {answered}" if answered else " before the design challenge")
+        command = ["git", "-C", str(repo), "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"]
+        subprocess.run([*command, "add", "-A", "--", *dirty], env=commit_env(), check=True, capture_output=True)
+        subprocess.run([*command, "commit", "-q", "-m", subject, "--", *dirty], env=commit_env(), check=True, capture_output=True)
+        commit = git(repo, "rev-parse", "HEAD")
+        if git(repo, "rev-parse", f"{commit}^") != parent or not is_revision(repo, commit, plan) or git(repo, "status", "--porcelain"):
+            raise RuntimeError(f"Revision commit {commit} is not exactly the edited feature files; reconcile the source checkout before resume")
+        runtime.event(CHALLENGE, "running", f"Revised feature files committed on {branch} as {commit}: {', '.join(dirty)}")
+    target = git(repo, "rev-parse", "HEAD")
+    if target != base:
+        move_base(runtime, target)
+
+
+def run_worktrees(repo: Path, directory: Path) -> list[Path]:
+    """The repository's worktrees inside the run directory: before any launch, the lane worktrees and the challenge worktree."""
+    listing = subprocess.check_output(["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"], text=True)
+    paths = [Path(field[len("worktree "):]) for field in listing.split("\0") if field.startswith("worktree ")]
+    return sorted(path for path in paths if path.resolve().is_relative_to(directory))
+
+
+def move_base(runtime, target: str) -> None:
+    """Check out `target` in every worktree of the run, then pin it as the base and each lane's start commit, as prepare does.
+
+    Every worktree must be a clean checkout of the base, or of `target` when an interrupted move already reached it.
+    """
+    directory, plan = runtime.directory, runtime.plan
+    repo, base = Path(plan["repository"]), plan["base_commit"]
+    worktrees = run_worktrees(repo, directory)
+    lanes = [Path(plan["nodes"][node]["worktree"]).resolve() for node in plan_workers(plan)]
+    missing = [str(path) for path in lanes if path not in [item.resolve() for item in worktrees]]
+    if missing:
+        raise RuntimeError(f"Lane worktrees are not registered in {repo}: {', '.join(missing)}; reconcile before resume")
+    heads = {}
+    for path in worktrees:
+        if not path.is_dir():
+            raise RuntimeError(f"Run worktree {path} is registered but missing; reconcile before resume")
+        heads[path] = git(path, "rev-parse", "HEAD")
+        if heads[path] not in {base, target} or git(path, "status", "--porcelain"):
+            raise RuntimeError(f"Run worktree {path} is not a clean checkout of the base {base}; reconcile before resume")
+    for path, head in heads.items():
+        if head != target:
+            subprocess.run(["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "--detach", target], check=True, capture_output=True)
+        if git(path, "rev-parse", "HEAD") != target or git(path, "status", "--porcelain"):
+            raise RuntimeError(f"Run worktree {path} did not move cleanly to {target}")
+    plan["base_commit"] = target
+    for node in plan_workers(plan):
+        plan["nodes"][node]["observed_start_commit"] = git(Path(plan["nodes"][node]["worktree"]), "rev-parse", "HEAD")
+    save_json(directory / "plan.json", plan)
+    runtime.event(CHALLENGE, "running", f"Run moved from base {base} to {target}: {len(heads)} worktree(s) and plan.json; no worker exists yet")
+
+
+def refuse_unused_edits(plan: dict) -> None:
+    """An override launches the workers on the pinned files as they are: edited or committed-but-unused revisions refuse it."""
+    repo = Path(plan["repository"])
+    edited = [path for path in dirty_paths(repo) if path in pinned_paths(plan)]
+    if edited:
+        raise ValueError(f"Feature files changed since they were pinned ({', '.join(edited)}); the override would launch the workers without "
+                         "them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
+    pending = [commit for commit in commits_after(repo, plan["base_commit"]) or [] if is_revision(repo, commit, plan)]
+    if pending:
+        raise ValueError(f"An interrupted resume committed revised feature files ({', '.join(pending)}) that this run does not use yet; "
+                         "rerun resume without --accept-challenge to finish moving the run to them")
 
 
 def launched_workers(directory: Path, plan: dict) -> list[str]:
@@ -405,7 +541,9 @@ def launched_workers(directory: Path, plan: dict) -> list[str]:
 def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
     """`resume`: rerun the challenge on the re-pinned feature files as the next attempt, or record `accepted` with a reason.
 
-    Only before any worker launch. A challenge that already passed or was accepted is returned as it is.
+    Only before any worker launch. Edited feature files are committed on the run's branch first and the run moves to
+    that commit, so the source checkout stays clean for integration. A challenge that already passed or was accepted
+    is returned as it is.
     """
     directory, plan = runtime.directory, runtime.plan
     if not has_challenge(plan):
@@ -421,12 +559,15 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
             raise ValueError("--accept-challenge needs a non-empty reason")
         if current is None or current["status"] != "paused":
             raise ValueError("Only a paused design challenge can be accepted")
+        refuse_unused_edits(plan)
         record = {**current, "status": "accepted", "accepted_reason": accept_reason.strip(), "decided_at": now()}
         save_challenge(directory, record)
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by the operator: {record['accepted_reason']}")
         return record
     running = directory / "challenge.running.json"
     attempt = max(current["attempt"] if current else 0, read_json(running)["attempt"] if running.exists() else 0) + 1
+    read_pinned(plan)  # A brief that lost a required section is refused before anything is committed.
+    commit_revision(runtime, attempt - 1)
     repin(directory, plan, runtime.policy)
     runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt}")
     return run_challenge(runtime, attempt)
@@ -549,15 +690,19 @@ def resume_main(argv=None):
     parser.add_argument("--herdr", action="store_true", help="Attach the worker panes after the launch")
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
-    from .pipeline import Pipeline, start_workers
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
     try:
         with run_lock(directory):
             runtime = Pipeline(directory)
             record = resume_challenge(runtime, args.accept_challenge)
+            runtime = Pipeline(directory)  # The re-pinned plan on its current base: session receipts bind to its digest.
             if record["status"] == "paused":
                 print(paused_message(directory, args.herdr))
+                with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
+                    state = build_pipeline(saver, runtime).get_state(graph_config(runtime))
+                print(f"Report: {report(runtime, state)}")  # As `start` does: run-state.json shows the new attempt and base.
                 return
-            runtime = Pipeline(directory)  # The re-pinned plan: session receipts bind to its digest.
             start_workers(runtime, attach=args.herdr)
         print(f"Design challenge {record['status']} (attempt {record['attempt']}); workers launched: {', '.join(runtime.workers)}")
         if runtime.plan.get("automatic"):
