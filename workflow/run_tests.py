@@ -1,9 +1,10 @@
 """Run the workflow unit suite with test classes spread over parallel processes.
 
 `python -m workflow.run_tests [--jobs N] [start_dir]` discovers every test class like `unittest discover -s workflow
--t .`, runs each class in its own `python -m unittest` process (at most N at a time, default the CPU count or
-`WORKFLOW_TEST_JOBS`), and prints one unittest-style summary, so the verifier's log parser counts it like a plain run.
-Failed children's output is echoed indented with its counts respelled, so only the final summary is parsed. Classes are the unit of
+-t .`, runs each class in its own process (at most N at a time, default the CPU count or `WORKFLOW_TEST_JOBS`), and
+prints one unittest-style summary, so the verifier's log parser counts it like a plain run. A child is `python -m unittest
+<class>` that also notes a failed command's captured output under its CalledProcessError. Failed children's output is
+echoed indented with its counts respelled, so only the final summary is parsed. Classes are the unit of
 parallelism because each fixture class owns its temporary repositories; tests within a class keep their order.
 """
 import argparse
@@ -35,24 +36,76 @@ def test_classes(start_dir: str) -> list[tuple[str, int]]:
 
 
 def counts(output: str) -> dict:
-    """Totals from one child's unittest summary; a child without a summary counts as one error."""
-    ran = re.search(r"^Ran (\d+) tests? in", output, re.MULTILINE)
-    if not ran or not re.search(r"^(?:OK(?:\s|$)|FAILED\s*\()", output, re.MULTILINE):
+    """Totals from one child's unittest summary; a child without a summary counts as one error.
+
+    Only the status line after the last "Ran" line counts: a traceback or a noted command output may quote "errors=7".
+    """
+    ran = list(re.finditer(r"^Ran (\d+) tests? in", output, re.MULTILINE))
+    status = re.compile(r"^(?:OK(?:\s|$)|FAILED\s*\().*", re.MULTILINE).search(output, ran[-1].end()) if ran else None
+    if not status:
         return {"tests": 0, "failures": 0, "errors": 1, "skipped": 0}
-    found = {key: sum(int(value) for value in re.findall(rf"\b{key}=(\d+)", output)) for key in ("failures", "errors", "skipped")}
-    return {"tests": int(ran[1]), **found}
+    found = {key: sum(int(value) for value in re.findall(rf"\b{key}=(\d+)", status[0])) for key in ("failures", "errors", "skipped")}
+    return {"tests": int(ran[-1][1]), **found}
 
 
 def run_class(name: str) -> tuple[str, int, str]:
-    result = subprocess.run([sys.executable, "-m", "unittest", name], capture_output=True, text=True)
-    return name, result.returncode, result.stdout + result.stderr
+    # One unbuffered stream keeps prints next to the test that wrote them; bytes that are not UTF-8 are replaced,
+    # never allowed to stop the run and lose every later class's traceback.
+    result = subprocess.run([sys.executable, "-m", "workflow.run_tests", "--child", name], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    return name, result.returncode, result.stdout.decode(errors="replace")
+
+
+PROCESS_OUTPUT_LINES = 20
+
+
+def note_process_output(error: BaseException | None) -> None:
+    """Note a failed command's captured output under its exception: CalledProcessError's message omits it, and
+    it holds the cause (git's stderr says why `worktree add` exited 128)."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, subprocess.CalledProcessError):
+            for label, value in (("stdout", error.stdout), ("stderr", error.stderr)):
+                lines = (value.decode(errors="replace") if isinstance(value, bytes) else value or "").rstrip().splitlines()
+                if not lines:
+                    continue
+                shown = f" (last {PROCESS_OUTPUT_LINES} lines)" if len(lines) > PROCESS_OUTPUT_LINES else ""
+                note = f"{label} of the failed command{shown}:\n" + "\n".join(lines[-PROCESS_OUTPUT_LINES:])
+                if note not in getattr(error, "__notes__", []):
+                    error.add_note(note)
+        # The chain the traceback prints: the explicit cause, else the implicit context unless it is suppressed.
+        error = error.__cause__ if error.__cause__ is not None or error.__suppress_context__ else error.__context__
+
+
+class NotedResult(unittest.TextTestResult):
+    def addError(self, test, err):
+        note_process_output(err[1])
+        super().addError(test, err)
+
+    def addFailure(self, test, err):
+        note_process_output(err[1])
+        super().addFailure(test, err)
+
+    def addSubTest(self, test, subtest, err):
+        if err is not None:
+            note_process_output(err[1])
+        super().addSubTest(test, subtest, err)
+
+
+class NotedRunner(unittest.TextTestRunner):
+    resultclass = NotedResult
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("start_dir", nargs="?", default="workflow")
     parser.add_argument("--jobs", type=int, default=int(os.environ.get("WORKFLOW_TEST_JOBS") or os.cpu_count() or 1))
+    parser.add_argument("--child", metavar="CLASS", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.child:
+        # Exactly `python -m unittest <class>` (same output, warnings and exit codes), with the noting result.
+        unittest.main(module=None, argv=["python -m unittest", args.child], testRunner=NotedRunner)
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
     started = time.monotonic()
