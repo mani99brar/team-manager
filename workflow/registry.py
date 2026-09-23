@@ -3,10 +3,14 @@
 `registry_entry` is pure: the project entry for one target, feature, runs root and lane list. `merge_registry`
 is pure too: it splices that entry into the registry text, replacing only the workflow with the same
 `workflow_id` under the same `project_id` (or adding the project), so every other byte of the file is kept.
-`register` writes the result atomically. Nothing here ever removes or rewrites another entry.
+`register` holds a lock on the registry's directory across read, merge and write, so concurrent launches cannot drop
+each other's entries, and writes through a symlinked registry to its target. Nothing here ever removes or rewrites
+another entry.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -35,7 +39,10 @@ def repo_name(target: Path) -> str:
 
 
 def registry_entry(target: Path, feature: str, runs_root: Path, lanes: list[str]) -> dict:
-    """The project entry a launch registers: one workflow named after the feature, over the launched lanes."""
+    """The project entry a launch registers: one workflow named after the feature, over every lane the feature declares.
+
+    The workflow's definition is the feature's graph, not one run's: a `--workers` subset launch registers the same graph.
+    """
     name = repo_name(target)
     if not ID_PATTERN.fullmatch(feature):
         raise ValueError(f"Feature name is not a registry id: {feature}")
@@ -119,8 +126,14 @@ def append_item(text: str, items: list, close: int, value: dict) -> str:
     return text[:close].rstrip() + "\n" + indent + rendered(value, indent) + "\n" + base + text[close:]
 
 
+def nodes_of(workflow: dict) -> list[str]:
+    """The lanes of a registered workflow, from its launch nodes (`launch_<lane>`)."""
+    return [node["node_id"].removeprefix("launch_") for node in workflow["definition"]["nodes"] if node.get("kind") == "worker"]
+
+
 def overlaps(left: str, right: str) -> bool:
-    left, right = os.path.normpath(left), os.path.normpath(right)
+    """Containment after resolving symlinks where the paths exist, as the server's `assertCanonicalRoots` does."""
+    left, right = os.path.realpath(left), os.path.realpath(right)
     return left == right or left.startswith(right.rstrip(os.sep) + os.sep) or right.startswith(left.rstrip(os.sep) + os.sep)
 
 
@@ -164,6 +177,8 @@ def merge_registry(text: str | None, entry: dict) -> tuple[str | None, str]:
         workflows, workflows_close = array_items(text, fields["workflows"][0])
         for (item_start, item_end), existing in zip(workflows, project["workflows"]):
             if existing.get("workflow_id") == workflow["workflow_id"]:
+                # The stored definition is kept verbatim (operator-edited labels included) while its nodes are unchanged.
+                workflow = {**workflow, "definition": definition(nodes_of(workflow), existing)}
                 if existing == workflow:
                     return None, f"Registry already has {where}"
                 indent = indentation(text, item_start)
@@ -191,9 +206,26 @@ def read_registry(path: Path) -> str | None:
     return path.read_text() if path.exists() else None
 
 
+@contextlib.contextmanager
+def locked(directory: Path):
+    """An exclusive lock on the registry's directory, held by every registering launch; it adds no file."""
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(handle)  # Closing releases the lock.
+
+
 def register(path: Path, entry: dict) -> str:
-    """Merge `entry` into the registry at `path` and write it atomically; returns what happened."""
-    text, note = merge_registry(read_registry(path), entry)
-    if text is not None:
-        write_atomic(path, text)
+    """Merge `entry` into the registry at `path` and write it atomically under the lock; returns what happened.
+
+    A symlinked registry (for example a dotfiles-managed file) stays a symlink: its target is what gets replaced.
+    """
+    path = path.resolve() if path.is_symlink() else path
+    with locked(path.parent):
+        text, note = merge_registry(read_registry(path), entry)
+        if text is not None:
+            write_atomic(path, text)
     return note

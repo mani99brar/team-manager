@@ -77,16 +77,32 @@ def default_run_root(target: Path, feature: str, tool: Path = TOOL, home: Path |
 
 
 def placeholders(folder: Path) -> list[str]:
-    """Every `TODO:` line left in the feature directory, as `<file>:<line>: <text>`."""
+    """Every placeholder `init` left in the files it writes, as `<file>:<line>: <text>`.
+
+    Only `feature.json`, `policy.json`, `README.md` and the task files `feature.json` names are scanned, and only a
+    JSON string value or a Markdown line that begins with `TODO:` counts. Prose that mentions the marker, reviewer
+    briefs and any other file are never refused.
+    """
     found = []
-    for path in sorted(folder.rglob("*")):
-        if not path.is_file() or any(part.startswith(".") for part in path.relative_to(folder).parts):
+    tasks = []
+    try:
+        manifest = json.loads((folder / "feature.json").read_text())
+        tasks = [worker["task"] for worker in manifest.get("workers", []) if isinstance(worker, dict) and isinstance(worker.get("task"), str)]
+    except (OSError, ValueError, AttributeError):
+        pass  # load_feature reports a missing or malformed feature file.
+    for name in ["feature.json", "policy.json", "README.md", *tasks]:
+        path = folder / name
+        if not path.is_file() or not path.resolve().is_relative_to(folder.resolve()):
             continue
         try:
             lines = path.read_text().splitlines()
         except (UnicodeDecodeError, OSError):
             continue
-        found.extend(f"{path.relative_to(folder)}:{number}: {line.strip()}" for number, line in enumerate(lines, 1) if PLACEHOLDER in line)
+        json_file = path.suffix == ".json"
+        for number, line in enumerate(lines, 1):
+            text = line.strip()
+            if (f'"{PLACEHOLDER}' in text) if json_file else text.startswith(PLACEHOLDER):
+                found.append(f"{name}:{number}: {text}")
     return found
 
 
@@ -238,7 +254,9 @@ def main(argv=None):
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
         registry = registry_path()
-        entry = registry_entry(repo, args.feature, run_root.resolve(), selected)
+        # The registered graph is the feature's (every declared lane), not this launch's `--workers` subset.
+        declared = [worker["node_id"] for worker in load_feature(feature_folder(repo, args.feature))["workers"]]
+        entry = registry_entry(repo, args.feature, run_root.resolve(), declared)
         if args.dry_run:
             print(json.dumps({"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
                               "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry}}, indent=2))

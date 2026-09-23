@@ -12,6 +12,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -415,3 +417,114 @@ class Trimmed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RegistryFollowUps(Isolated):
+    """Review follow-ups of portable-workflow-001: locking, symlinks, aliases, the feature's graph, placeholders."""
+
+    def test_concurrent_registrations_keep_every_workflow(self):
+        target = make_target(self.root)
+        entries = [registry_entry(target, f"feature-{index}", self.root / f"runs-{index}", ["app"]) for index in range(8)]
+        real_merge = merge_registry
+
+        def slow_merge(text, entry):
+            time.sleep(0.05)  # Widen the read-to-write window so an unlocked register would lose entries.
+            return real_merge(text, entry)
+
+        with patch("workflow.registry.merge_registry", side_effect=slow_merge):
+            threads = [threading.Thread(target=register, args=(self.registry, entry)) for entry in entries]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        document = json.loads(self.registry.read_text())
+        self.assertEqual(sorted(workflow["workflow_id"] for workflow in document["projects"][0]["workflows"]),
+                         sorted(f"feature-{index}" for index in range(8)))
+        self.assertEqual(sorted(path.name for path in self.registry.parent.iterdir()), ["projects.json"])
+
+    def test_a_symlinked_registry_stays_a_symlink_and_its_target_is_updated(self):
+        target = make_target(self.root)
+        dotfiles = self.root / "dotfiles" / "projects.json"
+        dotfiles.parent.mkdir()
+        dotfiles.write_text('{"version": 1, "projects": []}\n')
+        self.registry.parent.mkdir(parents=True)
+        self.registry.symlink_to(dotfiles)
+        entry = registry_entry(target, "skeleton", self.root / "runs", ["app"])
+        self.assertIn("added project", register(self.registry, entry))
+        self.assertTrue(self.registry.is_symlink())
+        self.assertEqual(json.loads(dotfiles.read_text())["projects"], [entry])
+
+    def test_an_aliased_runs_root_counts_as_overlapping(self):
+        target = make_target(self.root)
+        real = self.root / "state" / "runs"
+        real.mkdir(parents=True)
+        alias = self.root / "alias"
+        alias.symlink_to(real)
+        register(self.registry, registry_entry(target, "first", real, ["app"]))
+        text, note = merge_registry(self.registry.read_text(), registry_entry(target, "second", alias / "nested", ["app"]))
+        self.assertIsNone(text)
+        self.assertIn("overlaps", note)
+
+    def test_a_subset_launch_registers_the_features_graph_and_relaunch_keeps_edited_labels(self):
+        target = make_target(self.root)
+        folder = target / "features" / "skeleton"
+        policy = read_json(folder / "policy.json")
+        second = json.loads(json.dumps(policy["workers"][0]))
+        second.update(node_id="api", owned_paths=["api.txt"])
+        policy["workers"].append(second)
+        save_json(folder / "policy.json", policy)
+        (folder / "api-task.md").write_text("## Goal\n\nBuild the api.\n")
+        manifest = read_json(folder / "feature.json")
+        manifest["workers"].append({"node_id": "api", "task": "api-task.md"})
+        save_json(folder / "feature.json", manifest)
+        commit_all(target, "Two lanes")
+        runs_root = self.home / ".local/state/agent-workflows/project-B/skeleton"
+        full = registry_entry(target, "skeleton", runs_root, ["app", "api"])
+        self.assertEqual(self.dry_run("skeleton", "--repo", str(target), "--no-herdr", "--workers", "app")["registry"]["entry"], full)
+        self.live("skeleton", "--repo", str(target), "--no-herdr", "--workers", "app")
+        document = json.loads(self.registry.read_text())
+        self.assertEqual(document["projects"][0], full)
+        # An operator relabels a node; the next launch over the same graph keeps the label.
+        document["projects"][0]["workflows"][0]["definition"]["nodes"][0]["label"] = "Build the app"
+        self.registry.write_text(json.dumps(document, indent=2))
+        self.assertEqual(register(self.registry, full), "Registry already has project-b/skeleton")
+        self.assertEqual(json.loads(self.registry.read_text())["projects"][0]["workflows"][0]["definition"]["nodes"][0]["label"], "Build the app")
+
+    def test_placeholders_are_only_values_and_lines_that_begin_with_the_marker_in_scaffolded_files(self):
+        target = make_target(self.root, reviewers=[{"reviewer_id": "general", "prompt": "reviewers/general.md"}])
+        folder = target / "features" / "skeleton"
+        (folder / "reviewers").mkdir()
+        (folder / "reviewers/general.md").write_text("TODO: in a brief is never a placeholder.\n")
+        (folder / "README.md").write_text("Launch refuses a line that begins with `TODO:` in the scaffolded files.\n")
+        (folder / "app-task.md").write_text("## Goal\n\nKeep the `TODO:` rule working.\n\n## Acceptance\n\nA task that says TODO: mid-line passes.\n")
+        (folder / "notes.txt").write_text("TODO: files init does not write are not scanned.\n")
+        commit_all(target, "Prose")
+        self.assertEqual(self.dry_run("skeleton", "--repo", str(target), "--no-herdr")["workers"], ["app"])
+        (folder / "app-task.md").write_text("## Goal\n\n  TODO: fill this in.\n")
+        manifest = read_json(folder / "feature.json")
+        manifest["name"] = "TODO: name it"
+        save_json(folder / "feature.json", manifest)
+        errors = self.refused("skeleton", "--repo", str(target), "--no-herdr", "--dry-run")
+        self.assertIn("2 placeholder(s)", errors)
+        self.assertIn("app-task.md:3: TODO: fill this in.", errors)
+        self.assertIn('"name": "TODO: name it"', errors)
+
+
+class PortablePrompts(unittest.TestCase):
+    def test_prompts_name_the_tools_absolute_schema_and_carry_no_md_manager_wording(self):
+        from types import SimpleNamespace
+        from .automatic import BUILTIN_REVIEW_BRIEF, REVIEW_COMPLETION_SCHEMA, completion_prompt, completion_protocol_prompt, review_prompt
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "run"
+            plan = {"run_id": "run-1", "workers": ["app"], "nodes": {"app": {"session_id": "token"}}}
+            runtime = SimpleNamespace(directory=directory, plan=plan, workers=["app"])
+            protocol = completion_protocol_prompt(runtime, "token", "d" * 64, "c" * 40)
+            self.assertTrue(REVIEW_COMPLETION_SCHEMA.is_absolute() and REVIEW_COMPLETION_SCHEMA.is_file())
+            self.assertEqual(REVIEW_COMPLETION_SCHEMA.parent, CONTRACTS)
+            self.assertIn(f"(schema: {REVIEW_COMPLETION_SCHEMA})", protocol)
+            prompts = [protocol, review_prompt(runtime, directory / "review.diff"), completion_prompt(directory, plan, "app"),
+                       BUILTIN_REVIEW_BRIEF.read_text(), *[path.read_text() for path in (TOOL / "workflow/prompts/reviewers").glob("*.md")]]
+            for text in prompts:
+                text = text.replace(str(TOOL), "<tool>")  # The tool's own path may name md-manager; the wording may not.
+                for wording in ("this checkout", "this repository", "md-manager", "MD Manager", "Playwright", "npm"):
+                    self.assertNotIn(wording, text)
