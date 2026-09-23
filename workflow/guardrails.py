@@ -306,6 +306,8 @@ def run_challenge(runtime, attempt: int) -> dict:
             result = read_json(stdout)
         except ValueError:
             result = {}
+        if not isinstance(result, dict):  # A JSON array or string is no result either.
+            result = {}
         if process.returncode != 0 or result.get("session_id") != session_id or result.get("is_error") is not False or result.get("subtype") != "success":
             raise RuntimeError(f"Design challenge attempt {attempt} did not succeed; inspect {stdout}. No worker was launched.")
         output = result.get("structured_output")

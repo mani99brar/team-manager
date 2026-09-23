@@ -241,6 +241,111 @@ class DecisionsRequired(GuardedFeature):
         self.assertNotIn("Decisions recorded before launch", worker_prompt(directory, plan, "ui") + review_prompt(runtime, directory / "review.diff"))
 
 
+class FailingChallenge(GuardedFeature):
+    """The design challenge's failure paths (RUNBOOK "The design challenge"): none counts as a pass. Each blocks `start`
+    with a `blocked` event, launches no worker, writes no challenge.json and leaves the run for `resume`."""
+
+    def setUp(self):
+        super().setUp()
+        self.mode = self.root / "challenge-mode"
+        self.mode.write_text("pass")
+        # One fake job per mode; like the default fake it logs its launch first.
+        self.executable.write_text(f'''#!{PY}
+import json, sys, time
+from pathlib import Path
+args = sys.argv
+sys.stdin.read()
+with (Path.cwd().parent / 'fake-launches.log').open('a') as log:
+    log.write('challenge\\n')
+mode = Path({str(self.mode)!r}).read_text()
+output = {{"concerns": [], "simpler_alternative": "One lane", "cheap_experiment": "A spike"}}
+result = {{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success", "structured_output": output}}
+if mode == 'is_error':
+    result.update(is_error=True, subtype='error_during_execution')
+elif mode == 'session':
+    result['session_id'] = '00000000-0000-4000-8000-000000000000'
+elif mode == 'schema':
+    output['concerns'] = [{{"severity": "P3", "kind": "assumption", "message": "m", "consequence": "c"}}]
+elif mode == 'timeout':
+    time.sleep(60)
+elif mode == 'worktree':
+    Path('stray.txt').write_text('A read-only job changed its checkout')
+if mode == 'not-an-object':
+    print('[]')
+elif mode != 'missing':
+    print(json.dumps(result))
+sys.exit(1 if mode == 'exit' else 0)
+''')
+
+    def events(self, directory: Path) -> list:
+        return [(event["node"], event["status"], event["message"]) for event in map(json.loads, (directory / "events.jsonl").read_text().splitlines())]
+
+    def fails(self, run_id: str, mode: str, message: str, jobs: list | None = None) -> Path:
+        """A fresh run whose first challenge job fails in `mode`: blocked, no worker, no decision, and resumable."""
+        jobs = ["challenge"] if jobs is None else jobs
+        self.mode.write_text(mode)
+        directory = self.prepare(run_id)
+        with self.subTest(run_id):
+            output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+            self.assertEqual(code, 1, output)
+            self.assertIn("Blocked:", output)
+            self.assertIn(message, output)
+            self.assertNotIn("Traceback", output)
+            blocked = [event for event in self.events(directory) if event[:2] == ("challenge", "blocked")]
+            self.assertEqual(len(blocked), 1, self.events(directory))
+            self.assertIn(message, blocked[0][2])
+            self.assertNotIn(("challenge", "succeeded"), [event[:2] for event in self.events(directory)])
+            self.assertFalse((directory / "challenge.json").exists())
+            self.assertEqual(read_json(directory / "challenge.running.json")["attempt"], 1)
+            self.assertEqual(self.launches(directory), jobs)
+            self.assertFalse(any(directory.glob("*.interactive.json")))
+            self.assertEqual(self.graph_values(directory), {})
+            # Starting again neither reruns the job nor launches a worker: it points at resume.
+            output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+            self.assertEqual(code, 1)
+            self.assertIn(f"A design challenge job was started and never decided; rerun it with: {PY} -m workflow resume {directory}", output)
+            self.assertEqual(self.launches(directory), jobs)
+        return directory
+
+
+class ChallengeJobFails(FailingChallenge):
+    def test_a_failed_or_malformed_challenge_job_is_never_a_pass(self):
+        runs = {mode: self.fails(f"fail-{number:03}", mode, message) for number, (mode, message) in enumerate((
+            ("exit", "did not succeed"), ("is_error", "did not succeed"), ("session", "did not succeed"), ("missing", "did not succeed"),
+            ("not-an-object", "did not succeed"), ("schema", "output violates challenge.schema.json")), 1)}
+        directory = runs["exit"]
+        self.assertIn(f"inspect {directory / 'challenge-1.stdout.json'}. No worker was launched.", self.events(directory)[-1][2])
+        # The job works again: resume reruns it as attempt 2, which passes, then the workers launch.
+        self.mode.write_text("pass")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        record = read_json(directory / "challenge.json")
+        self.assertEqual((record["status"], record["attempt"]), ("passed", 2))
+        self.assertFalse((directory / "challenge.running.json").exists())
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+
+class ChallengeJobStops(FailingChallenge):
+    def test_a_challenge_job_that_times_out_cannot_start_or_changes_its_worktree_is_never_a_pass(self):
+        with patch("workflow.guardrails.challenge_timeout", return_value=1):
+            self.fails("timeout-001", "timeout", "Design challenge attempt 1 deadline exhausted; no worker was launched")
+        executable, self.executable = self.executable, self.root / "missing-claude"
+        self.fails("missing-cli-001", "pass", f"No such file or directory: '{self.executable}'", jobs=[])
+        self.executable = executable
+        directory = self.fails("worktree-001", "worktree", "Challenge worktree changed during the job; refusing its result")
+        # The changed worktree refuses a rerun until it is reconciled; then resume passes.
+        self.mode.write_text("pass")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1)
+        self.assertIn("Challenge worktree is not the clean base commit; reconcile before rerunning the challenge", output)
+        self.assertEqual(self.launches(directory), ["challenge"])
+        git(directory / "challenge-worktree", "clean", "-fdq")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+
 class ChallengePasses(GuardedFeature):
     def test_challenge_passes_with_only_p2_concerns_then_workers_launch_and_disabled_has_no_node(self):
         """Scenario challenge-passes."""
