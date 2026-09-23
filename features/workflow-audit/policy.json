@@ -1,0 +1,22 @@
+{
+  "version": "1.2.0",
+  "feature": "Workflow audit",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    { "argv": ["npm", "ci"], "timeout_seconds": 600 }
+  ],
+  "workers": [
+    {
+      "node_id": "audit",
+      "role": "documentation",
+      "required_check_kinds": ["contract", "unit"],
+      "owned_paths": ["docs/audit"],
+      "checks": [
+        { "id": "shared-contract", "kind": "contract", "argv": ["npm", "run", "test:contracts"], "timeout_seconds": 120, "scenarios": [] },
+        { "id": "backend-regression", "kind": "unit", "argv": ["npm", "run", "test:unit"], "timeout_seconds": 180, "scenarios": [] }
+      ]
+    }
+  ]
+}

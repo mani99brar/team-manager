@@ -1,0 +1,13 @@
+{
+  "version": "2.1.0",
+  "name": "Workflow audit: answer the operator's questions about the automatic workflow with evidence, reviewed by two independent reviewers",
+  "branch_prefix": "feature/workflow-audit",
+  "policy": "policy.json",
+  "workers": [
+    { "node_id": "audit", "task": "audit-task.md" }
+  ],
+  "reviewers": [
+    { "reviewer_id": "resilience", "prompt": "reviewers/resilience.md" },
+    { "reviewer_id": "safety", "prompt": "reviewers/safety.md" }
+  ]
+}
