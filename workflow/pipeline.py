@@ -30,6 +30,7 @@ from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_revi
 from .sessions import (DEFAULT_REVIEWER, git, plan_excluded, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json,
                        validate_node_id, validate_reviewer_id)
 from .verification import owns, policy_digest, safe_path, validate_policy
+from .worktrees import git_worktree
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 # The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
@@ -485,7 +486,7 @@ class Pipeline:
             cwd = self.directory / "candidate"
             if cwd.exists():
                 raise ValueError("Partial candidate worktree exists; inspect before recovery")
-            subprocess.run(["git", "-C", self.plan["repository"], "worktree", "add", "--detach", str(cwd), self.plan["base_commit"]], check=True, capture_output=True)
+            git_worktree(self.plan["repository"], "add", "--detach", str(cwd), self.plan["base_commit"])
             for node in self.workers:  # Declared order, selected lanes only.
                 commit = state["snapshots"][node]["commit"]
                 if commit != self.plan["base_commit"]:

@@ -22,6 +22,7 @@ from .checks import now
 from .guardrails import decisions_block
 from .sessions import DEFAULT_REVIEWER, git, plan_reviewers, plan_workers, read_json, review_node, reviewer_ids, run_lock, save_json, terminate
 from .verification import CONTRACTS
+from .worktrees import git_worktree
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
             "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native"}
@@ -476,8 +477,7 @@ def review_candidate(runtime) -> dict:
     cwd = runtime.directory / "review-worktree"
     if cwd.exists():
         raise RuntimeError("Partial review worktree exists; reconcile rather than overwrite")
-    subprocess.run(["git", "-C", runtime.plan["repository"], "worktree", "add", "--detach", str(cwd), bundle["candidate_commit"]],
-                   check=True, capture_output=True)
+    git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), bundle["candidate_commit"])
     patch = runtime.directory / "review.diff"
     with patch.open("w") as handle:
         subprocess.run(["git", "-C", str(cwd), "diff", "--binary", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)

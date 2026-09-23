@@ -37,6 +37,7 @@ from pathlib import Path
 from .checks import now
 from .sessions import git, plan_workers, read_json, run_lock, save_json, terminate
 from .verification import CONTRACTS, validate_schema
+from .worktrees import git_worktree
 
 GUARDED_VERSION = "2.2.0"
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
@@ -269,7 +270,7 @@ def challenge_worktree(runtime) -> Path:
     cwd = runtime.directory / "challenge-worktree"
     base = runtime.plan["base_commit"]
     if not cwd.exists():
-        subprocess.run(["git", "-C", runtime.plan["repository"], "worktree", "add", "--detach", str(cwd), base], check=True, capture_output=True)
+        git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), base)
     if git(cwd, "rev-parse", "HEAD") != base or git(cwd, "status", "--porcelain"):
         raise RuntimeError("Challenge worktree is not the clean base commit; reconcile before rerunning the challenge")
     return cwd

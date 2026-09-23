@@ -17,6 +17,8 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .worktrees import git_worktree
+
 TERMINAL = {"succeeded", "failed", "blocked"}
 
 # Worker lanes come from configuration (policy 1.2.0, feature file 2.0.0). A lane id names the
@@ -193,7 +195,7 @@ def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow
         plan["nodes"][node] = {"worktree": str(worktree), "task": tasks[node],
                                "session_id": str(uuid.uuid4()), "observed_start_commit": None}
         save_json(directory / "plan.json", plan)
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), revision], check=True, capture_output=True)
+        git_worktree(repo, "add", "--detach", str(worktree), revision)
         observed = git(worktree, "rev-parse", "HEAD")
         if observed != revision or git(worktree, "status", "--porcelain"):
             raise RuntimeError(f"Unclean or mismatched initial worktree: {worktree}")

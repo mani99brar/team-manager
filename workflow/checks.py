@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .sessions import git, save_json, terminate
 from .verification import evaluate_worker, policy_digest
+from .worktrees import git_worktree
 
 
 def now() -> str:
@@ -199,7 +200,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
         raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
     directory.mkdir(parents=True, mode=0o700)
     worktree = directory / "worktree"
-    subprocess.run(["git", "-C", plan["repository"], "worktree", "add", "--detach", str(worktree), commit], check=True, capture_output=True)
+    git_worktree(plan["repository"], "add", "--detach", str(worktree), commit)
     if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
         raise RuntimeError("Verification worktree did not start clean at expected revision")
     artifacts_dir = directory / "artifacts"

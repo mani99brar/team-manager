@@ -96,4 +96,5 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, unanimous verdict); `prompts/review.md` is the built-in brief, `prompts/reviewers/` the bundled ones.
 - `verification.py`, `checks.py`: policy validation against the bundled `contracts/workflow/` schemas and isolated check execution.
 - `export_state.py`: the versioned `run-state.json` export (1.5.0).
+- `worktrees.py`: every `git worktree` change, one at a time per repository, retrying Git's own lock errors.
 - `requirements.txt` / `requirements.lock`: bounded Python dependencies, installed separately from the Node application.
