@@ -297,7 +297,8 @@ def review_brief(reviewer: dict | None) -> str:
 
 
 def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
-    """The brief followed by the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary."""
+    """The brief followed by the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the lane repairs."""
+    from .repair import repair_note
     return (review_brief(reviewer) + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
             f"Requirements: each worker's task text pinned in {runtime.directory / 'plan.json'} under nodes.<worker>.task, "
@@ -306,7 +307,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
-            + decisions_block(runtime.plan))
+            + repair_note(runtime.directory) + decisions_block(runtime.plan))
 
 
 def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidate_commit: str, reviewer_id: str = DEFAULT_REVIEWER) -> str:
@@ -803,6 +804,12 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
     return review
 
 
+def same_revision(previous: Path, packet: Path) -> bool:
+    """Both attempts checked one revision. A lane repair's new revision starts over; packets without `expected` count as one."""
+    commits = [read_json(path).get("expected", {}).get("output_commit") for path in (previous, packet)]
+    return None in commits or commits[0] == commits[1]
+
+
 def gate_reasons(packet: Path) -> list[str]:
     """A packet's gate reasons with its own attempt directory neutralised.
 
@@ -814,6 +821,7 @@ def gate_reasons(packet: Path) -> list[str]:
 
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, never launches or review."""
+    from .repair import attempt_floor
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
     # tasks with errors are failures to classify.
@@ -831,23 +839,32 @@ def advance_failed_checks(runtime, state) -> bool:
             path = runtime.directory / "verification" / phase / node / str(attempt) / "packet.json"
             if path.exists() and read_json(path)["gate"]["status"] != "passed":
                 previous = runtime.directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
-                if attempt > 1 and previous.exists() and gate_reasons(previous) == gate_reasons(path):
+                if attempt > 1 and previous.exists() and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
                     # Retries rerun immutable code; two identical failures mean the cause is
                     # deterministic (code or environment), and more attempts only burn time.
                     raise RuntimeError(f"{phase}/{node} failed identically on attempts {attempt - 1} and {attempt}; "
-                                       f"not transient, inspect {path}")
+                                       f"not transient, inspect {path}. Before review a code fix is a lane repair (RUNBOOK)")
                 stage_targets.append((phase, node))
         if not stage_targets:
             return False
         targets.extend(stage_targets)
     if not targets:
         return False
-    # Check all bounds before changing any counters.
-    if any(runtime.attempt(p, n) >= runtime.policy.get("max_verification_attempts", 3) for p, n in targets):
+    # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision.
+    if any(runtime.attempt(p, n) >= attempt_floor(runtime.directory, p, n) + runtime.policy.get("max_verification_attempts", 3) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
     for phase, node in targets:
         runtime.retry_check(phase, node)
     return True
+
+
+def advance_or_block(runtime, state) -> bool:
+    """advance_failed_checks; when it stops the run (identical failures, the attempt limit) the timeline says why."""
+    try:
+        return advance_failed_checks(runtime, state)
+    except RuntimeError as error:
+        runtime.event("controller", "blocked", str(error))
+        raise
 
 
 TIMELINE_TAIL = 5  # Recent events a starting or resumed supervisor shows before following new ones.
@@ -1004,7 +1021,9 @@ def resume_interrupted_review(runtime, state) -> bool:
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import build_pipeline, graph_config, report
+    from .repair import refuse_recorded
     validate_automatic(runtime.plan)
+    refuse_recorded(runtime.directory)
     if git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD") != runtime.plan["source_branch"]:
         raise RuntimeError("Source feature branch changed; no automatic continuation")
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
@@ -1053,7 +1072,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                 value = Command(resume={"freeze": True})
             elif pending:
                 raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
-            elif any(task.error for task in state.tasks) and not (advance_failed_checks(runtime, state) or reviewer_stop_pending(runtime, state)
+            elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
                 raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
             try:

@@ -367,6 +367,19 @@ class Pipeline:
         self.stop_session(review_node(reviewer_id))
         self.event(REVIEW, "stopped", f"Reviewer {reviewer_id} session stopped; its transcript stays resumable")
 
+    def check_ownership(self, node: str, changed: list[str]) -> None:
+        """Every changed path is an exact repository path the lane owns: at freeze, and in a lane repair's snapshot."""
+        # Ownership is enforced from the full declared policy: an excluded lane's paths are off-limits to every selected lane.
+        excluded_paths = [(other, safe_path(prefix)) for other in self.excluded for prefix in self.worker_policy(other)["owned_paths"]]
+        worker = self.worker_policy(node)
+        for name in changed:
+            safe_path(name)
+            for other, prefix in excluded_paths:
+                if owns(name, prefix):
+                    raise ValueError(f"Ownership violation: {node} edited {name}, owned by excluded lane {other}")
+            if not any(owns(name, safe_path(prefix)) for prefix in worker["owned_paths"]):
+                raise ValueError(f"{node} edited unowned path: {name}")
+
     def freeze(self) -> dict:
         record = self.directory / "snapshots.json"
         if record.exists():
@@ -381,22 +394,14 @@ class Pipeline:
                 raise ValueError("Malformed worker handoff")
             handoffs[node] = handoff
         self.stop_workers()
-        # Ownership is enforced from the full declared policy: an excluded lane's paths are off-limits to every selected lane.
-        excluded_paths = [(other, safe_path(prefix)) for other in self.excluded for prefix in self.worker_policy(other)["owned_paths"]]
         snapshots = {}
         for node in self.workers:
-            worker = self.worker_policy(node)
             cwd = Path(self.plan["nodes"][node]["worktree"])
             if git(cwd, "rev-parse", "HEAD") != self.plan["base_commit"]:
                 raise ValueError("Worker changed HEAD; reconcile commits rather than silently accepting them")
             changed = changed_files(cwd, self.plan["base_commit"])
+            self.check_ownership(node, changed)
             for name in changed:
-                safe_path(name)
-                for other, prefix in excluded_paths:
-                    if owns(name, prefix):
-                        raise ValueError(f"Ownership violation: {node} edited {name}, owned by excluded lane {other}")
-                if not any(owns(name, safe_path(prefix)) for prefix in worker["owned_paths"]):
-                    raise ValueError(f"{node} edited unowned path: {name}")
                 if (cwd / name).is_symlink():
                     raise ValueError("Symlink changes require manual review before snapshot")
             index = self.directory / f"{node}.snapshot-index"
@@ -424,15 +429,19 @@ class Pipeline:
         return snapshots
 
     def attempt(self, phase: str, node: str) -> int:
+        """The lane's current attempt: from the floor of its revision (1, or the one a lane repair set) to the run's limit past it."""
+        from .repair import attempt_floor
         path = self.directory / "attempts.json"
         value = read_json(path).get(f"{phase}:{node}", 1) if path.exists() else 1
-        if type(value) is not int or value < 1 or value > self.policy.get("max_verification_attempts", 3):
+        floor = attempt_floor(self.directory, phase, node)
+        if type(value) is not int or value < floor or value >= floor + self.policy.get("max_verification_attempts", 3):
             raise ValueError("Verification attempt exceeds the run's hard limit")
         return value
 
     def retry_check(self, phase: str, node: str) -> int:
+        from .repair import attempt_floor
         value = self.attempt(phase, node) + 1
-        if value > self.policy.get("max_verification_attempts", 3):
+        if value >= attempt_floor(self.directory, phase, node) + self.policy.get("max_verification_attempts", 3):
             raise ValueError("Verification attempt limit reached; inspect evidence and create an explicitly revised run")
         path = self.directory / "attempts.json"
         attempts = read_json(path) if path.exists() else {}
@@ -474,17 +483,23 @@ class Pipeline:
         return str(path)
 
     def candidate(self, state: PipelineState) -> str:
+        from .repair import applied_repairs, candidate_paths as generation_paths
         # Validate branch evidence again before combining anything.
         worker_paths = [Path(state["packets"][node]) for node in self.workers]
-        for path in worker_paths:
+        for node, path in zip(self.workers, worker_paths):
             packet = recheck_packet(read_json(path), self.policy, self.directory)
             if packet["gate"]["status"] != "passed":
                 raise ValueError("Worker evidence no longer passes")
-        saved = self.directory / "candidate.json"
+            # The bundle binds these packets to these snapshots: a packet of another revision (a repair written onto a
+            # failed head instead of the freeze boundary would bring the old ones) is never combined or reviewed.
+            if packet["expected"]["output_commit"] != state["snapshots"][node]["commit"]:
+                raise ValueError(f"Worker evidence for {node} is not of its snapshot {state['snapshots'][node]['commit']}; contradictory run state")
+        # One candidate generation per applied lane repair: candidate.json and candidate/ stay generation 0's evidence.
+        repairs = applied_repairs(self.directory)
+        saved, cwd = generation_paths(self.directory, len(repairs))
         if saved.exists():
             candidate = read_json(saved)
         else:
-            cwd = self.directory / "candidate"
             if cwd.exists():
                 raise ValueError("Partial candidate worktree exists; inspect before recovery")
             git_worktree(self.plan["repository"], "add", "--detach", str(cwd), self.plan["base_commit"])
@@ -494,6 +509,9 @@ class Pipeline:
                     subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", commit], env=commit_env(), check=True, capture_output=True)
             candidate = {"commit": git(cwd, "rev-parse", "HEAD"), "worktree": str(cwd)}
             save_json(saved, candidate)
+        expected_tree = repairs[-1]["expected_candidate_tree"] if repairs else None
+        if expected_tree and git(Path(self.plan["repository"]), "rev-parse", f"{candidate['commit']}^{{tree}}") != expected_tree:
+            raise ValueError(f"Candidate {candidate['commit']} differs from the repaired tree of repair {repairs[-1]['n']}; inspect")
         candidate_paths = []
         for node in self.workers:
             attempt = self.attempt("candidate", node)
@@ -781,6 +799,10 @@ def report(runtime: Pipeline, state) -> Path:
     failure_report = runtime.directory / "failure-report.json"
     if failure_report.exists():
         parts.append('<h2>Checkpoint failure drill</h2><pre>' + html.escape(failure_report.read_text()) + '</pre>')
+    repairs = runtime.directory / "repairs.json"
+    if repairs.exists():
+        parts.append('<h2>Repairs</h2><pre>' + html.escape(repairs.read_text()) + '</pre>')
+        parts.extend(f'<p><a href="{path.name}">{html.escape(path.name)}</a></p>' for path in sorted(runtime.directory.glob("repair-*.diff")))
     destination = runtime.directory / "report.html"
     destination.write_text("\n".join(parts))
     return destination
@@ -789,7 +811,7 @@ def report(runtime: Pipeline, state) -> Path:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
-                        help="resume and answer (feature.json 2.2.0 runs) have their own options: python -m workflow resume|answer --help")
+                        help="resume and answer (feature.json 2.2.0 runs) and repair have their own options: python -m workflow resume|answer|repair --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -1015,6 +1037,8 @@ def main():
                                 parser.error("No durable launch intent; cannot reconcile without potentially launching a new agent")
                             runtime.sessions.run(node)  # Existing receipt path never starts a new process.
                 elif args.action == "retry":
+                    from .repair import refuse_recorded
+                    refuse_recorded(directory)  # Its counters and refs may exist already: only rerunning the repair continues.
                     if not state.values or pending or not state.next:
                         parser.error("Retry requires a failed graph step, not an interrupt/completed run")
                     if args.node:
@@ -1039,6 +1063,13 @@ def main():
                               "errors": [str(task.error) for task in state.tasks if task.error]}
                     if (directory / "challenge.json").exists():
                         status["challenge"] = read_json(directory / "challenge.json")["status"]
+                    if (directory / "repairs.json").exists():
+                        from .repair import load_repairs
+                        status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry["source_commit"]}
+                                             for entry in load_repairs(directory)]
+                    workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
+                    if workspaces:
+                        status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
                     print(json.dumps(status, indent=2))
                     print(f"Report: {report(runtime, state)}")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

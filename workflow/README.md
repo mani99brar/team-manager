@@ -20,6 +20,7 @@ PY="$HOME/dev/md-manager/.venv/bin/python"   # run from md-manager's checkout, o
 | `$PY -m workflow <action> "$RUN"` | one pipeline step: `preflight`, `prepare`, `start`, `automatic`, `freeze`, `review`, `approve`, `retry`, `reconcile`, `attach`, `status`, `export` |
 | `$PY -m workflow resume "$RUN" [--accept-challenge "<reason>"] [--herdr]` | 2.2.0: commits the edited feature files on the run's branch and reruns a paused design challenge on them, or accepts it with a reason; then launches the workers (and supervises an automatic run) |
 | `$PY -m workflow answer "$RUN" <lane> "<text>" [--no-herdr]` | 2.2.0: answers a worker's question, restarts its deadline and types the answer into its pane |
+| `$PY -m workflow repair "$RUN" <lane>[,<lane>] --workspace`, then `--commit <sha> --reason "<text>" [--dry-run]` | after freeze and before review: a detached worktree at the failing candidate or lane snapshot, then that fix commit as new lane snapshots with the checkpoint forked at the freeze boundary; launches nothing and runs no check, `automatic --live` (or `retry`) re-verifies (RUNBOOK "Blocked after freeze: repair a lane") |
 | `$PY -m workflow check-report <feature-dir or policy.json> <lane> <report.json> [--all]` | checks a Playwright JSON report against the lane's browser scenarios with the verifier's own rules; exits 1 on any problem (a browser lane's pinned task spells out the command it runs before completing) |
 | `$PY -m workflow.interactive attach-one "$RUN" --node <node>` | reconnects one native session in the current terminal (what the Herdr panes run) |
 
@@ -84,7 +85,7 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_browser_rules.py` `check-report` and the browser scenario rules; `testdata/` holds copies of finished features' files the tests read.
+The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair; `testdata/` holds copies of finished features' files the tests read.
 
 ## Files
 
@@ -94,6 +95,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `sessions.py`: run preparation (one worktree per selected lane), lane id rules, receipts, locking, and the `claude` process helpers (`run_claude`, `popen_claude`: the auto-updater off, an update in progress waited out; `background_settings`: the same setting as `--settings` for `claude --bg` sessions) with the stale-process warning.
 - `interactive.py`: native `claude --bg` launches, Herdr panes (one per lane, reviewers to their right), reconciliation, `attach-one`. `herdr.py`: the Herdr CLI helper.
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
+- `repair.py`: `repair`, lane repair after freeze: `repairs.json`, the deterministic snapshot commits, the attempt floors, the checkpoint fork at the freeze boundary and `--workspace`.
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, unanimous verdict); `prompts/review.md` is the built-in brief, `prompts/reviewers/` the bundled ones.
 - `verification.py`, `checks.py`: policy validation against the bundled `contracts/workflow/` schemas and isolated check execution; `checks.py` also holds the browser scenario rules that the verifier and `check-report` share.
 - `export_state.py`: the versioned `run-state.json` export (1.5.0).
