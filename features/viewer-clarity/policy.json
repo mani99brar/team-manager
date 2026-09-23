@@ -1,0 +1,156 @@
+{
+  "version": "1.2.0",
+  "feature": "Viewer clarity",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "ui",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects",
+        "tests/project-workflows"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": [
+            {
+              "id": "executor-marks",
+              "description": "The graph shows solid worker and review nodes and dashed handoff, verify, candidate, approval and integrate nodes with a legend; each node's accessible name and detail page name its executor"
+            },
+            {
+              "id": "created-file-rendered",
+              "description": "The launch node renders a captured Markdown file, shows a captured source file on demand, lists too-large and binary entries with reasons; a legacy run says files were not captured"
+            },
+            {
+              "id": "output-first-task-collapsed",
+              "description": "The launch node's result and files precede the task, the task disclosure is closed, and a finding's requirement link opens it and highlights the quote"
+            },
+            {
+              "id": "verify-shows-checks-not-files",
+              "description": "The verify node shows checks, gate, deferred checks and screenshots and no created-files section; the launch node shows no checks table"
+            },
+            {
+              "id": "findings-on-files",
+              "description": "A captured file lists exactly the findings whose messages name its path verbatim; a path:N-M finding marks those source lines; review findings naming a captured file link to it"
+            },
+            {
+              "id": "findings-by-reviewer",
+              "description": "A two-reviewer run opens grouped by reviewer in declared order with each verdict and counts; the reviewer filter composes; a single-reviewer run opens by disposition"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "adapter",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts",
+        "server",
+        "features/project-workflows"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "workflow",
+            "-t",
+            "."
+          ],
+          "timeout_seconds": 1200,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "backend-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "backend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    }
+  ]
+}

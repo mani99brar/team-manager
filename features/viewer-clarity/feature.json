@@ -1,0 +1,14 @@
+{
+  "version": "2.1.0",
+  "name": "Viewer clarity (PRD_VIEWER_CLARITY): executor marks, created files with findings, output-first nodes, findings by reviewer",
+  "branch_prefix": "feature/viewer-clarity",
+  "policy": "policy.json",
+  "workers": [
+    { "node_id": "ui", "task": "ui-task.md" },
+    { "node_id": "adapter", "task": "adapter-task.md" }
+  ],
+  "reviewers": [
+    { "reviewer_id": "general", "prompt": "reviewers/general.md" },
+    { "reviewer_id": "coverage", "prompt": "reviewers/coverage.md" }
+  ]
+}
