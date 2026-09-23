@@ -346,6 +346,13 @@
               {
                 "type": "object",
                 "properties": {
+                  "version": {
+                    "type": "string",
+                    "enum": [
+                      "1.0.0",
+                      "1.1.0"
+                    ]
+                  },
                   "status": {
                     "type": "string",
                     "enum": [
@@ -400,15 +407,28 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "question": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
+                  "version",
                   "status",
                   "summary",
                   "open_assumptions",
                   "untested",
                   "falsifying_check",
-                  "verify_yourself"
+                  "verify_yourself",
+                  "question"
                 ],
                 "additionalProperties": false
               },

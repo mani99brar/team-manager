@@ -3,7 +3,7 @@ import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { z } from 'zod'
 import {
-  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
+  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
   type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -23,8 +23,9 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * lanes from configuration: `inputs.workers` is keyed by any lane ID, `inputs` records the selected and excluded
  * lanes, per-lane graph state lives under `lanes` and `packets`) and 1.4.0 (parallel reviewers: the `review`
  * section lists `reviewers` and tags every finding with its `reviewer`) and 1.5.0 (the guardrails of feature.json 2.2.0:
- * `inputs.decisions`, `inputs.challenge`, the completion evidence and `questions` per worker, and a `challenge` graph
- * node before the launches; older exports serve them as null and `[]`). A section is served only when the
+ * `inputs.decisions`, `inputs.challenge`, the completion's version, evidence and unrecorded question and `questions`
+ * per worker, and a `challenge` graph node before the launches; older exports serve them as null and `[]`, and their
+ * completions as 1.0.0). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -160,6 +161,8 @@ const workerInputSchema = z.strictObject({
     background_id: z.string().nullable(),
   }).nullable(),
   completion: z.strictObject({
+    /** Export 1.5.0: the completion version the run pinned; absent before, when every completion was 1.0.0. */
+    version: z.enum(COMPLETION_VERSIONS).optional(),
     status: z.enum(COMPLETION_STATUSES),
     summary: z.string().min(1),
     open_assumptions: assumptions,
@@ -167,6 +170,8 @@ const workerInputSchema = z.strictObject({
     untested: z.array(z.string()).nullable().optional(),
     falsifying_check: z.string().nullable().optional(),
     verify_yourself: z.string().nullable().optional(),
+    /** Export 1.5.0: the text of a question the controller has not recorded (pending, or a fourth served as blocked); absent before. */
+    question: z.string().nullable().optional(),
   }).nullable(),
   handoff: z.strictObject({ summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
   stop: z.strictObject({ stopped: z.boolean(), confirmed_at: zonedTimestamp.nullable() }).nullable(),
@@ -611,11 +616,14 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
       observed_state: worker.launch.observed_state, status: worker.launch.status, launcher_invocations: worker.launch.launcher_invocations,
     },
     completion: worker.completion === null ? null : {
+      // Exports before 1.5.0 carry only 1.0.0 completions: the controllers that wrote them read no other version.
+      version: worker.completion.version ?? '1.0.0',
       status: worker.completion.status, summary: redactPaths(worker.completion.summary), open_assumptions: nonBlank(worker.completion.open_assumptions).map(redactPaths),
       // A 1.0.0 completion and every export before 1.5.0 carry no evidence: served as null, never guessed.
       untested: worker.completion.untested == null ? null : nonBlank(worker.completion.untested).map(redactPaths),
       falsifying_check: falsifyingCheck(worker.completion.falsifying_check, worker.checks),
       verify_yourself: optionalText(worker.completion.verify_yourself),
+      question: optionalText(worker.completion.question),
     },
     handoff: worker.handoff === null ? null : { summary: redactPaths(worker.handoff.summary), open_assumptions: nonBlank(worker.handoff.open_assumptions).map(redactPaths) },
     stop: worker.stop === null ? null : { stopped: worker.stop.stopped, confirmed_at: worker.stop.confirmed_at === null ? null : utcTimestamp(worker.stop.confirmed_at) },

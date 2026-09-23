@@ -249,19 +249,28 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
   }
 })
 
+/** The example run after its ui worker asked a fourth question: three answered, the fourth served as blocked with its text. */
+function fourthQuestion() {
+  const value = structuredClone(examples.runInputs)
+  value.workers[0].questions = [1, 2, 3].map(n => ({ n, question: `Question ${n}?`, asked_at: '2026-01-01T12:05:00Z', answer: 'Yes.', answered_at: '2026-01-01T12:06:00Z' }))
+  value.workers[0].completion = { version: '1.1.0', status: 'blocked', summary: 'Asked a fourth question.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: 'And a fourth?' }
+  return value
+}
+
 test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, completion evidence and questions; older runs serve nulls and []', () => {
   const inputs = validateRunInputs(examples.runInputs)
   assert.equal(inputs.contract_version, '1.4.0')
   assert.ok(inputs.decisions?.includes('## Decisions'))
   assert.deepEqual([inputs.challenge?.status, inputs.challenge?.attempt, inputs.challenge?.attempts, inputs.challenge?.accepted_reason], ['accepted', 1, 1, 'The contract is split by file.'])
-  assert.deepEqual(inputs.workers[0].completion && [inputs.workers[0].completion.untested, inputs.workers[0].completion.falsifying_check], [['Findings wider than the viewport'], 'review-browser'])
+  assert.deepEqual(inputs.workers[0].completion && [inputs.workers[0].completion.version, inputs.workers[0].completion.untested, inputs.workers[0].completion.falsifying_check, inputs.workers[0].completion.question],
+    ['1.1.0', ['Findings wider than the viewport'], 'review-browser', null])
   assert.deepEqual(inputs.workers.map(worker => worker.questions.map(question => question.answer)), [['By severity.'], [null]])
   // What an export before 1.5.0 (or a feature before 2.2.0) serves: nulls and [] everywhere, still valid.
   const older = structuredClone(examples.runInputs)
   older.decisions = null
   older.challenge = null
   for (const worker of older.workers) worker.questions = []
-  older.workers[0].completion = { status: 'completed', summary: 'Done.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }
+  older.workers[0].completion = { version: '1.0.0', status: 'completed', summary: 'Done.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: null }
   validateRunInputs(older)
   // Each challenge status, a question completion and a disabled challenge are valid.
   for (const [status, severity, reason] of [['passed', 'P2', null], ['paused', 'P0', null], ['accepted', 'P1', 'Known risk']] as const) {
@@ -274,9 +283,15 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
   const disabled = structuredClone(examples.runInputs)
   disabled.challenge = { ...disabled.challenge!, status: 'disabled', attempt: 0, attempts: 0, session_id: null, concerns: [], simpler_alternative: null, cheap_experiment: null, accepted_reason: null }
   validateRunInputs(disabled)
+  // A question the controller has not recorded yet carries its text; a fourth one is served as blocked, with its text.
   const asking = structuredClone(examples.runInputs)
-  asking.workers[1].completion = { status: 'question', summary: 'Waiting.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }
+  asking.workers[0].completion = { version: '1.1.0', status: 'question', summary: 'Waiting.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: 'Split the panel?' }
   validateRunInputs(asking)
+  validateRunInputs(fourthQuestion())
+  // A 1.1.0 blocked completion need not carry evidence.
+  const blocked = structuredClone(examples.runInputs)
+  blocked.workers[0].completion = { version: '1.1.0', status: 'blocked', summary: 'Stuck.', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: null }
+  validateRunInputs(blocked)
   const cases: [string, (value: typeof examples.runInputs) => void][] = [
     ['decisions missing', value => { delete (value as Record<string, unknown>).decisions }],
     ['challenge missing', value => { delete (value as Record<string, unknown>).challenge }],
@@ -297,6 +312,15 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
     ['answer without time', value => { value.workers[0].questions[0].answered_at = null }],
     ['earlier question waiting', value => { value.workers[1].questions.push({ n: 2, question: 'q', asked_at: '2026-01-01T12:11:00Z', answer: null, answered_at: null }) }],
     ['four questions', value => { value.workers[0].questions = [1, 2, 3, 4].map(n => ({ n, question: 'q', asked_at: '2026-01-01T12:11:00Z', answer: 'a', answered_at: '2026-01-01T12:12:00Z' })) }],
+    ['completion version missing', value => { delete (value.workers[0].completion as Record<string, unknown>).version }],
+    ['unknown completion version', value => { (value.workers[0].completion as Record<string, unknown>).version = '1.2.0' }],
+    ['question missing', value => { delete (value.workers[0].completion as Record<string, unknown>).question }],
+    ['1.0.0 completion with evidence', value => { value.workers[0].completion!.version = '1.0.0' }],
+    ['1.0.0 question completion', value => { value.workers[0].completion = { version: '1.0.0', status: 'question', summary: 's', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: 'q' } }],
+    ['question completion without its text', value => { Object.assign(value.workers[0].completion!, { status: 'question', question: null }) }],
+    ['question completion after three questions', value => { value.workers[0] = fourthQuestion().workers[0]; value.workers[0].completion!.status = 'question' }],
+    ['completed completion with a question', value => { value.workers[0].completion!.question = 'q' }],
+    ['blocked completion with a question before the third', value => { Object.assign(value.workers[0].completion!, { status: 'blocked', question: 'q' }) }],
   ]
   for (const [label, mutate] of cases) {
     const value = structuredClone(examples.runInputs)

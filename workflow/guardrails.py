@@ -676,7 +676,8 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
         questions = load_questions(directory, node)
         number = len(questions) + 1
         if number > MAX_QUESTIONS:
-            raise RuntimeError(f"Worker {node} asked question {number}; at most {MAX_QUESTIONS} are answered, so it is treated as blocked")
+            raise RuntimeError(f"Worker {node} asked question {number}; at most {MAX_QUESTIONS} are answered, so it is treated as blocked: "
+                               f"{item['question']}")
         at = (clock or time.time)()
         os.replace(directory / f"{node}.completion.json", directory / f"{node}.question-{number}.json")
         entry = {"n": number, "question": item["question"], "asked_at": iso(at), "answer": None, "answered_at": None}

@@ -660,17 +660,20 @@ class CompletionEvidence(unittest.TestCase):
             read_completion(self.runtime, "ui")
         del self.plan["completion_version"]
         self.assertEqual(read_completion(self.runtime, "ui"), {"summary": "Done", "open_assumptions": []})
-        # Export: a valid 1.1.0 file carries the three fields; a 1.0.0 file serves them as nulls.
+        # Export: a valid 1.1.0 file carries the three fields; the run refuses a 1.0.0 file, so it is not served at all.
         directory = legacy_run(self.root)
         plan, policy = read_json(directory / "plan.json"), read_json(directory / "policy.json")
         plan["completion_version"] = "1.1.0"
         save_json(directory / "ui.completion.json", {**read_json(directory / "ui.completion.json"), "version": "1.1.0", "untested": ["Offline pane typing"],
                                                      "falsifying_check": "ui-unit", "verify_yourself": "The pane accepts Enter", "question": None})
         workers = inputs_section(directory, plan, policy)["workers"]
-        self.assertEqual({key: workers["ui"]["completion"][key] for key in ("untested", "falsifying_check", "verify_yourself")},
-                         {"untested": ["Offline pane typing"], "falsifying_check": "ui-unit", "verify_yourself": "The pane accepts Enter"})
-        self.assertEqual({key: workers["adapter"]["completion"][key] for key in ("untested", "falsifying_check", "verify_yourself")},
-                         {"untested": None, "falsifying_check": None, "verify_yourself": None})
+        self.assertEqual({key: workers["ui"]["completion"][key] for key in ("version", "untested", "falsifying_check", "verify_yourself")},
+                         {"version": "1.1.0", "untested": ["Offline pane typing"], "falsifying_check": "ui-unit", "verify_yourself": "The pane accepts Enter"})
+        self.assertIsNone(workers["adapter"]["completion"])
+        # A run prepared before slice 2 exports its 1.0.0 file as 1.0.0 with null evidence.
+        del plan["completion_version"]
+        self.assertEqual({key: inputs_section(directory, plan, policy)["workers"]["adapter"]["completion"][key] for key in ("version", "untested", "falsifying_check", "verify_yourself")},
+                         {"version": "1.0.0", "untested": None, "falsifying_check": None, "verify_yourself": None})
 
 
 class WorkerQuestion(unittest.TestCase):
@@ -789,12 +792,17 @@ class WorkerQuestion(unittest.TestCase):
         calls, output, code = answers[0]
         self.assertEqual((calls, code), ([], 0), output)
         self.assertIn("claude attach bg-ui", output)
-        # A fourth question is treated as blocked; the prompt said so from the start.
+        # A fourth question is treated as blocked, naming the question; the prompt said so from the start.
         self.ask("Fourth?")
-        with self.assertRaisesRegex(RuntimeError, "Worker ui asked question 4; at most 3 are answered, so it is treated as blocked"):
+        with self.assertRaisesRegex(RuntimeError, "Worker ui asked question 4; at most 3 are answered, so it is treated as blocked: Fourth\\?"):
             self.wait()
         self.assertTrue((self.root / "ui.completion.json").exists())
         self.assertEqual(len(read_json(self.root / "ui.questions.json")["questions"]), 3)
+        # The export serves the lane as the controller treats it: blocked, with the refused question's text.
+        for lane in ("ui", "adapter"):
+            self.plan["nodes"][lane]["task"] = BRIEF.format(lane=lane)
+        served = inputs_section(self.root, {**self.plan, "base_commit": "c" * 40}, two_lane_policy())["workers"]["ui"]
+        self.assertEqual((served["completion"]["status"], served["completion"]["question"], len(served["questions"])), ("blocked", "Fourth?", 3))
         from .automatic import completion_prompt
         self.plan["nodes"]["ui"]["task"] = BRIEF.format(lane="ui")
         prompt = completion_prompt(self.root, self.plan, "ui")
@@ -831,8 +839,8 @@ class ExportSeam(unittest.TestCase):
             inputs = exported["inputs"]
             self.assertEqual(inputs["decisions"], DECISIONS)
             self.assertEqual(inputs["challenge"], {**{key: value for key, value in record.items() if key not in {"run_id", "version"}}, "attempts": 2})
-            self.assertEqual(inputs["workers"]["ui"]["completion"], {"status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
-                                                                     "untested": ["x"], "falsifying_check": "unit", "verify_yourself": "y"})
+            self.assertEqual(inputs["workers"]["ui"]["completion"], {"version": "1.1.0", "status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
+                                                                     "untested": ["x"], "falsifying_check": "unit", "verify_yourself": "y", "question": None})
             self.assertEqual([entry["answer"] for entry in inputs["workers"]["ui"]["questions"]], ["B", None])
             self.assertEqual(inputs["workers"]["adapter"]["questions"], [])
             self.assertEqual(exported["definition"]["nodes"][0], {"node_id": "challenge", "label": "Design challenge", "kind": "review", "depends_on": []})

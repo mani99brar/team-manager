@@ -142,8 +142,8 @@ class ExportSectionTests(unittest.TestCase):
                                         "launch_requested_at": "2026-09-21T14:33:25.331982Z", "native_started_at": 1790001207771,
                                         "observed_state": "working", "status": "attached_session_available", "launcher_invocations": 1, "background_id": "uuuuuuuu"})
         # A 1.0.0 completion (runs before slice 2) exports the 1.1.0 evidence as nulls, and there are no questions.
-        self.assertEqual(ui["completion"], {"status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
-                                            "untested": None, "falsifying_check": None, "verify_yourself": None})
+        self.assertEqual(ui["completion"], {"version": "1.0.0", "status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
+                                            "untested": None, "falsifying_check": None, "verify_yourself": None, "question": None})
         self.assertEqual((ui["questions"], section["decisions"], section["challenge"]), ([], None, None))
         self.assertEqual(ui["handoff"], {"summary": "ui implemented", "open_assumptions": ["assumed"]})
         stop = directory / "ui.stop.json"
@@ -190,6 +190,63 @@ class ExportSectionTests(unittest.TestCase):
         exported = export_run(ExportRuntime(directory))
         self.assertIsNone(exported["review"])
         self.assertIsNone(exported["inputs"]["automatic"]["reviewer_transport"])
+
+
+class ServedCompletionTests(unittest.TestCase):
+    """Export 1.5.0: a lane's completion is served only as the controller reads it, with the version the run pinned."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = legacy_run(Path(self.temp.name))
+        self.plan, self.policy = read_json(self.directory / "plan.json"), read_json(self.directory / "policy.json")
+        self.token = self.plan["nodes"]["ui"]["session_id"]
+
+    def served(self):
+        return inputs_section(self.directory, self.plan, self.policy)["workers"]["ui"]["completion"]
+
+    def write(self, **fields):
+        save_json(self.directory / "ui.completion.json", {
+            "version": "1.1.0", "run_id": "legacy-001", "node_id": "ui", "launch_token": self.token, "status": "blocked", "summary": "Stuck",
+            "open_assumptions": [], "untested": None, "falsifying_check": "", "verify_yourself": None, "question": None, **fields})
+
+    def questions(self, count: int):
+        save_json(self.directory / "ui.questions.json", {"node_id": "ui", "questions": [
+            {"n": n, "question": f"Q{n}?", "asked_at": "2026-09-23T10:00:00Z", "answer": "A", "answered_at": "2026-09-23T10:01:00Z"} for n in range(1, count + 1)]})
+
+    def test_a_1_0_0_completion_is_served_as_1_0_0_only_where_the_run_reads_it(self):
+        # A run prepared before slice 2 reads 1.0.0: served with its version and null evidence.
+        self.assertEqual(self.served(), {"version": "1.0.0", "status": "completed", "summary": "ui implemented", "open_assumptions": ["assumed"],
+                                         "untested": None, "falsifying_check": None, "verify_yourself": None, "question": None})
+        # A run pinned at 1.1.0 refuses the same file (read_signal blocks the run on it): it is not the worker's signal.
+        self.plan["completion_version"] = "1.1.0"
+        self.assertIsNone(self.served())
+        # And a 1.1.0 file in a run pinned before slice 2, or a stale launch token, is refused as well.
+        del self.plan["completion_version"]
+        self.write(status="completed")
+        self.assertIsNone(self.served())
+        self.plan["completion_version"] = "1.1.0"
+        self.write(launch_token="another-launch")
+        self.assertIsNone(self.served())
+
+    def test_a_1_1_0_blocked_completion_without_evidence_is_served_as_1_1_0(self):
+        self.plan["completion_version"] = "1.1.0"
+        self.write()
+        self.assertEqual(self.served(), {"version": "1.1.0", "status": "blocked", "summary": "Stuck", "open_assumptions": [],
+                                         "untested": None, "falsifying_check": None, "verify_yourself": None, "question": None})
+
+    def test_a_question_is_served_with_its_text_and_a_fourth_as_blocked(self):
+        self.plan["completion_version"] = "1.1.0"
+        # Not recorded yet (the controller has not polled it): a question with its text.
+        self.write(status="question", question="Option A or B?")
+        self.questions(2)
+        self.assertEqual({key: self.served()[key] for key in ("version", "status", "question")}, {"version": "1.1.0", "status": "question", "question": "Option A or B?"})
+        # After three recorded questions, record_question refuses it and the lane is blocked: served as blocked, with the question.
+        self.questions(3)
+        self.assertEqual({key: self.served()[key] for key in ("status", "summary", "question")}, {"status": "blocked", "summary": "Stuck", "question": "Option A or B?"})
+        # A worker's own blocked file carries no question, whatever it wrote there.
+        self.write(question="Ignored?")
+        self.assertIsNone(self.served()["question"])
 
 
 class ReviewerExportTests(unittest.TestCase):

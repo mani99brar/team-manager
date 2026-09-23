@@ -188,7 +188,7 @@ type WorkerInput = {
   role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
   checks: { id: string; kind: string; argv: string[]; command: string; timeout_seconds: number; scenarios: { id: string; description: string }[] }[]
   launch: { session_id: string | null; launch_token: string; launch_requested_at: string; native_started_at: number | null; observed_state: string | null; status: string; launcher_invocations: number; background_id: string | null } | null
-  completion: { status: string; summary: string; open_assumptions: string[]; untested?: string[] | null; falsifying_check?: string | null; verify_yourself?: string | null } | null
+  completion: { version?: string; status: string; summary: string; open_assumptions: string[]; untested?: string[] | null; falsifying_check?: string | null; verify_yourself?: string | null; question?: string | null } | null
   handoff: { summary: string; open_assumptions: string[] } | null
   stop: { stopped: boolean; confirmed_at: string | null } | null
   questions?: { n: number; question: string; asked_at: string; answer: string | null; answered_at: string | null }[]
@@ -1253,7 +1253,7 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.deepEqual(ui.launch, { session_id: 'ui-session-0001', launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: '2026-03-01T10:00:02.771Z', observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1 })
     assert.deepEqual(adapter.launch, { session_id: null, launch_requested_at: '2026-03-01T10:00:00.331982Z', native_started_at: null, observed_state: null, status: 'launching', launcher_invocations: 0 })
     // An export before 1.5.0 has no completion evidence, questions, decisions or challenge: nulls and [].
-    assert.deepEqual(ui.completion, { status: 'blocked', summary: 'Blocked on <path>', open_assumptions: ['Mock routes only'], untested: null, falsifying_check: null, verify_yourself: null })
+    assert.deepEqual(ui.completion, { version: '1.0.0', status: 'blocked', summary: 'Blocked on <path>', open_assumptions: ['Mock routes only'], untested: null, falsifying_check: null, verify_yourself: null, question: null })
     assert.deepEqual([ui.questions, adapter.questions, inputs.decisions, inputs.challenge], [[], [], null, null])
     assert.deepEqual(ui.handoff, { summary: 'ui done', open_assumptions: ['ui assumption'] })
     assert.deepEqual(ui.stop, { stopped: true, confirmed_at: '2026-03-01T10:20:00Z' })
@@ -1292,13 +1292,14 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     const decisions = `# Decisions\n\n## Decisions\n\n- Serve the fields unchanged; see ${leak} for the run.\n`
     const section = inputsSection({ decisions, challenge: challengeSection() }, {
       ui: {
-        completion: { status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens', ' '], falsifying_check: 'project-workflows-browser', verify_yourself: `Open ${leak}/report.html` },
+        completion: { version: '1.1.0', status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens', ' '], falsifying_check: 'project-workflows-browser', verify_yourself: `Open ${leak}/report.html`, question: null },
         questions: [
           { n: 1, question: 'Group by severity?', asked_at: '2026-03-01T10:01:00+00:00', answer: 'Yes.', answered_at: '2026-03-01T10:02:00Z' },
           { n: 2, question: `Write to ${leak}?`, asked_at: '2026-03-01T10:03:00Z', answer: null, answered_at: null },
         ],
       },
-      adapter: { completion: { status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: '', verify_yourself: null }, questions: [] },
+      // A question the controller has not recorded yet: served with its text, redacted like the recorded ones.
+      adapter: { completion: { version: '1.1.0', status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: '', verify_yourself: null, question: `Read ${leak}?` }, questions: [] },
     })
     // A paused challenge: nothing launched yet.
     const paused = [{ sequence: 1, time: T0, node: 'challenge', status: 'running', message: 'Design challenge attempt 2: one print job' },
@@ -1313,11 +1314,11 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z',
       concerns: [{ ...challengeSection().concerns[0], message: 'Both lanes write <path>' }, challengeSection().concerns[1]] })
     const [ui, adapter] = inputs.workers
-    assert.deepEqual(ui.completion, { status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens'], falsifying_check: 'project-workflows-browser', verify_yourself: 'Open <path>' })
+    assert.deepEqual(ui.completion, { version: '1.1.0', status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens'], falsifying_check: 'project-workflows-browser', verify_yourself: 'Open <path>', question: null })
     assert.deepEqual(ui.questions, [
       { n: 1, question: 'Group by severity?', asked_at: '2026-03-01T10:01:00Z', answer: 'Yes.', answered_at: '2026-03-01T10:02:00Z' },
       { n: 2, question: 'Write to <path>?', asked_at: '2026-03-01T10:03:00Z', answer: null, answered_at: null }])
-    assert.deepEqual([adapter.completion, adapter.questions], [{ status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null }, []])
+    assert.deepEqual([adapter.completion, adapter.questions], [{ version: '1.1.0', status: 'question', summary: 'Waiting', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: 'Read <path>?' }, []])
     // The graph starts with the challenge node, paused with its attempts and session; no launch node has started.
     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'guarded'))).json())
     assert.deepEqual(detail.definition.nodes[0], { node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] })
@@ -1337,12 +1338,22 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     for (const runId of ['unguarded', 'older']) {
       const older = validateRunInputs((await get(app, url('alpha', 'main', runId, '/inputs'))).json())
       assert.deepEqual([older.decisions, older.challenge, older.workers.map(worker => worker.questions), older.workers[0].completion!.falsifying_check], [null, null, [[], []], null], runId)
+      // Exports before 1.5.0 carry only 1.0.0 completions, and say so.
+      assert.deepEqual([older.workers[0].completion!.version, older.workers[0].completion!.question], ['1.0.0', null], runId)
       assert.equal((await get(app, url('alpha', 'main', runId))).status, 200)
     }
+    // A fourth question, served as blocked with its text after three answered questions.
+    const answered = [1, 2, 3].map(n => ({ n, question: `Question ${n}?`, asked_at: T0, answer: 'Yes.', answered_at: T0 }))
+    const fourth = { version: '1.1.0', status: 'blocked', summary: 'Asked again', open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null, question: 'Fourth?' }
+    await writeRun(rootDir, { runId: 'fourth', version: '1.5.0', inputs: inputsSection({ decisions, challenge: null }, { ui: { completion: fourth, questions: answered }, adapter: { questions: [] } }) })
+    const blocked = validateRunInputs((await get(app, url('alpha', 'main', 'fourth', '/inputs'))).json()).workers[0]
+    assert.deepEqual([blocked.completion!.status, blocked.completion!.question, blocked.questions.length], ['blocked', 'Fourth?', 3])
     // A contradictory challenge or question list fails the run as a whole, naming only the run.
     await writeRun(rootDir, { runId: 'bad-challenge', version: '1.5.0', inputs: inputsSection({ challenge: challengeSection({ status: 'passed' }) }) })
     await writeRun(rootDir, { runId: 'bad-question', version: '1.5.0', inputs: inputsSection({}, { ui: { questions: [{ n: 2, question: 'q', asked_at: T0, answer: null, answered_at: null }] } }) })
-    for (const runId of ['bad-challenge', 'bad-question']) assertError(await get(app, url('alpha', 'main', runId, '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+    // A 1.1.0 completion with evidence must say so: an export without its version serves 1.0.0, which carries none.
+    await writeRun(rootDir, { runId: 'bad-version', version: '1.5.0', inputs: inputsSection({}, { ui: { completion: { status: 'completed', summary: 'Done', open_assumptions: [], untested: [], falsifying_check: 'x', verify_yourself: 'y' } } }) })
+    for (const runId of ['bad-challenge', 'bad-question', 'bad-version']) assertError(await get(app, url('alpha', 'main', runId, '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
   })
 })
 

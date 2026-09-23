@@ -13,9 +13,11 @@
  * the legacy single-reviewer run, which is a 1.3.0 export of the same graph without either. The `clarity-flow` run is a
  * 1.4.0 export whose ui worker-phase packet carries the files captured at freeze (`file` artifacts written beside the
  * packet like any artifact, and `files_not_captured` in the packet result); its candidate-phase packet captures nothing.
- * The `guarded-flow` run is a 1.5.0 export (PRD_PORTABLE_WORKFLOW 4.7) whose graph starts with the `challenge` node: its
- * inputs section carries `decisions`, the accepted `challenge`, 1.1.0 completion evidence and each lane's `questions`; the
- * ui lane's worker packet captured a Markdown file, and the adapter lane's first verification was blocked.
+ * The `guarded-flow` runs are 1.5.0 exports (PRD_PORTABLE_WORKFLOW 4.7) whose graph starts with the `challenge` node: their
+ * inputs sections carry `decisions`, the `challenge`, 1.1.0 completions and each lane's `questions`. One is integrated (the
+ * challenge accepted at attempt 2, the ui lane's worker packet captured a Markdown file, the review is attempt 1); two wait at
+ * the handoff interrupt with no packet: one on the adapter's second question, one after the controller blocked on the ui
+ * worker's fourth question (its `controller` event names no graph node).
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -24,6 +26,7 @@ import {
   BASE_COMMIT,
   BLOCKED_MESSAGE,
   CANDIDATE_COMMIT,
+  CHALLENGE_ACCEPTED_REASON,
   CLARITY_NODES,
   CLARITY_WORKFLOW_ID,
   CLARITY_WORKFLOW_NAME,
@@ -32,8 +35,10 @@ import {
   EMPTY_WORKFLOW_ID,
   EMPTY_WORKFLOW_NAME,
   FILE_ARTIFACTS,
+  FOURTH_QUESTION_MESSAGE,
   GUARDED_FILE_ARTIFACTS,
   GUARDED_NODES,
+  GUARDED_QUESTIONS,
   GUARDED_WORKFLOW_ID,
   GUARDED_WORKFLOW_NAME,
   GRAPH_NODES,
@@ -54,6 +59,8 @@ import {
   RUN_FAILED,
   RUN_FILES,
   RUN_GUARDED,
+  RUN_GUARDED_ASKING,
+  RUN_GUARDED_BLOCKED,
   RUN_LEGACY,
   RUN_LEGACY_REVIEWER,
   RUN_ONE_LANE,
@@ -473,34 +480,75 @@ export function seedCandidate(root: string): string {
     inputs: rawInputsSection(RUN_FILES, leakFor(clarityRunsRoot, RUN_FILES)),
   })
 
-  // ---- guarded-flow: a 1.5.0 export whose graph starts with the design challenge (PRD_PORTABLE_WORKFLOW 4.5 to 4.7) ----
+  // ---- guarded-flow: 1.5.0 exports whose graph starts with the design challenge (PRD_PORTABLE_WORKFLOW 4.5 to 4.7) ----
 
-  // The challenge was accepted, ui verified, the adapter's first verification was blocked and its worker is fixing it while
-  // its second question waits on the operator: the adapter has no accepted packet, so its verify node is still running.
-  const guardedDir = join(guardedRunsRoot, RUN_GUARDED)
+  // Finished: the challenge was accepted at attempt 2, both lanes verified (ui captured a Markdown file), the print reviewer
+  // approved at attempt 1 with a finding naming that file, and the candidate was integrated.
   writeRun(guardedRunsRoot, repository, RUN_GUARDED, {
     createdAt: T1, updatedAt: T3, definitionNodes: GUARDED_NODES, definitionName: GUARDED_WORKFLOW_NAME, version: '1.5.0', lanes: TWO_LANES,
-    values: {
-      lanes: Object.fromEntries(TWO_LANES.map(lane => [lane, receipt(lane, guardedDir, LANE_SESSIONS[lane], T1)])),
-      snapshots: Object.fromEntries(TWO_LANES.map(lane => [lane, LANE_OUTPUT_COMMITS[lane]])),
-      packets: { ui: 'verification/worker/ui/1/packet.json' },
-    },
-    next: ['verify_adapter'], tasks: [],
+    values: laneValues(RUN_GUARDED, TWO_LANES, T1, guardedRunsRoot),
+    next: [], tasks: [],
     events: [
-      internalEvent(1, T1, 'challenge', 'succeeded', 'Design challenge accepted by the operator'),
+      internalEvent(1, T1, 'challenge', 'succeeded', `Design challenge attempt 2 accepted by the operator: ${CHALLENGE_ACCEPTED_REASON}`),
       internalEvent(2, T1, 'ui', 'running', 'Launching or reconciling the exact native session'),
       internalEvent(3, T1, 'adapter', 'running', 'Launching or reconciling the exact native session'),
       internalEvent(4, T2, 'freeze', 'succeeded', 'Captured every worker snapshot'),
       internalEvent(5, T2, 'verify_ui', 'succeeded', 'ui verification passed; changed text files captured at freeze'),
-      internalEvent(6, T2, 'verify_adapter', 'blocked', 'Injected gate failure (failure drill); checks preserved'),
-      internalEvent(7, T3, 'verify_adapter', 'running', 'The adapter worker is fixing the failed verification; its question is waiting on the operator'),
+      internalEvent(6, T2, 'verify_adapter', 'succeeded', 'adapter verification passed'),
+      internalEvent(7, T2, 'candidate', 'succeeded', 'Combined candidate checks passed'),
+      internalEvent(8, T3, 'review', 'approved', 'Independent reviewer approved the candidate'),
+      internalEvent(9, T3, 'integrate', 'succeeded', 'Fast-forwarded the feature branch'),
     ],
     packets: runDir => [
       writePacket(runDir, 'worker', 'ui', 1, guardedUiResult(RUN_GUARDED), [...LANE_ARTIFACTS.ui, ...GUARDED_FILE_ARTIFACTS], { status: 'passed', reasons: [] }),
-      writePacket(runDir, 'worker', 'adapter', 1, adapterResult(RUN_GUARDED, true), LANE_ARTIFACTS.adapter, { status: 'blocked', reasons: ['Injected gate failure (failure drill)'] }),
+      writePacket(runDir, 'worker', 'adapter', 1, adapterResult(RUN_GUARDED, false), LANE_ARTIFACTS.adapter, { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'candidate', 'ui', 1, uiResult(RUN_GUARDED), LANE_ARTIFACTS.ui, { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'candidate', 'adapter', 1, adapterResult(RUN_GUARDED, false), LANE_ARTIFACTS.adapter, { status: 'passed', reasons: [] }),
     ],
-    review: null,
+    review: rawReviewSection(RUN_GUARDED, leakFor(guardedRunsRoot, RUN_GUARDED)),
     inputs: rawInputsSection(RUN_GUARDED, leakFor(guardedRunsRoot, RUN_GUARDED)),
+  })
+
+  /** Both sessions launched and the automatic run waits at the handoff interrupt: nothing is frozen or verified yet. */
+  const awaitingHandoffs = (runId: string) => ({
+    values: { lanes: Object.fromEntries(TWO_LANES.map(lane => [lane, receipt(lane, join(guardedRunsRoot, runId), LANE_SESSIONS[lane], T1)])) },
+    next: ['handoff'],
+    tasks: [{ node_id: 'handoff', error: null, interrupts: [{ kind: 'worker_handoff', message: 'Awaiting explicit completion signals and automatic freeze.' }], result: null }],
+  })
+  const guardedLaunchEvents = [
+    internalEvent(1, T1, 'challenge', 'succeeded', 'Design challenge attempt 1 passed (1 P2 concern(s)); launching workers'),
+    internalEvent(2, T1, 'ui', 'running', 'Launching or reconciling the exact native session'),
+    internalEvent(3, T1, 'adapter', 'running', 'Launching or reconciling the exact native session'),
+  ]
+
+  // Waiting on handoffs: ui finished its turn; the adapter's second question waits on the operator (its file was moved).
+  const askingDir = join(guardedRunsRoot, RUN_GUARDED_ASKING)
+  writeRun(guardedRunsRoot, repository, RUN_GUARDED_ASKING, {
+    createdAt: T1, updatedAt: T3, definitionNodes: GUARDED_NODES, definitionName: GUARDED_WORKFLOW_NAME, version: '1.5.0', lanes: TWO_LANES,
+    ...awaitingHandoffs(RUN_GUARDED_ASKING),
+    events: [
+      ...guardedLaunchEvents,
+      internalEvent(4, T2, 'adapter', 'interactive', `Worker adapter asked question 1 of 3; its deadline is paused until \`python -m workflow answer ${askingDir} adapter "<text>"\`: ${GUARDED_QUESTIONS.adapter[0].question}`),
+      internalEvent(5, T2, 'adapter', 'interactive', 'Worker adapter question 1 answered; its deadline runs again'),
+      internalEvent(6, T3, 'adapter', 'interactive', `Worker adapter asked question 2 of 3; its deadline is paused until \`python -m workflow answer ${askingDir} adapter "<text>"\`: ${GUARDED_QUESTIONS.adapter[1].question}`),
+    ],
+    packets: () => [],
+    review: null,
+    inputs: rawInputsSection(RUN_GUARDED_ASKING, leakFor(guardedRunsRoot, RUN_GUARDED_ASKING)),
+  })
+
+  // Blocked in the same wait: the ui worker asked a fourth question, which the controller refused, and it stopped both workers.
+  writeRun(guardedRunsRoot, repository, RUN_GUARDED_BLOCKED, {
+    createdAt: T1, updatedAt: T3, definitionNodes: GUARDED_NODES, definitionName: GUARDED_WORKFLOW_NAME, version: '1.5.0', lanes: TWO_LANES,
+    ...awaitingHandoffs(RUN_GUARDED_BLOCKED),
+    events: [
+      ...guardedLaunchEvents,
+      internalEvent(4, T2, 'ui', 'interactive', 'Worker ui question 3 answered; its deadline runs again'),
+      internalEvent(5, T3, 'controller', 'blocked', FOURTH_QUESTION_MESSAGE),
+    ],
+    packets: () => [],
+    review: null,
+    inputs: rawInputsSection(RUN_GUARDED_BLOCKED, leakFor(guardedRunsRoot, RUN_GUARDED_BLOCKED)),
   })
 
   const registry = {

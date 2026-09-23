@@ -136,7 +136,7 @@ The export moves to `1.5.0`, and the served run inputs to `contract_version` `1.
 
 - `inputs.decisions`: the pinned `decisions.md` text, or `null`.
 - `inputs.challenge`: the latest `challenge.json` without `run_id` and `version`, plus `attempts` (an integer), or `null`.
-- `inputs.workers.<lane>.completion` gains `untested` (a list of strings or `null`), `falsifying_check` (a string or `null`) and `verify_yourself` (a string or `null`). Its `status` enum gains `question`. A 1.0.0 completion serves the three as `null`.
+- `inputs.workers.<lane>.completion` is the completion file as the controller reads it, or `null` when there is none or the controller refuses it (a version other than the one the run pinned, a stale, foreign or malformed file). It gains `version` (`1.0.0` or `1.1.0`, the version the run pinned), `untested` (a list of strings or `null`), `falsifying_check` (a string or `null`), `verify_yourself` (a string or `null`) and `question` (a string or `null`). Its `status` enum gains `question`. A 1.0.0 completion serves the three evidence fields and `question` as `null`; a 1.1.0 `blocked` completion may serve the evidence as `null` too, and `version` tells the two apart. `question` is the text of a `question` completion the controller has not recorded yet. A `question` after the lane's third recorded question is served as `blocked`, as the controller treats it, with its text in `question`; every other completion serves `question: null`. The served inputs give exports before 1.5.0, which only carry 1.0.0 completions, `version` `1.0.0`.
 - `inputs.workers.<lane>.questions`: a list of `{n, question, asked_at, answer, answered_at}`, where `answer` and `answered_at` are `null` while unanswered. It is `[]` for older runs.
 - The definition's challenge node is `{node_id: "challenge", label: "Design challenge", kind: "review", depends_on: []}`.
 
@@ -145,7 +145,7 @@ The export moves to `1.5.0`, and the served run inputs to `contract_version` `1.
 ### 4.8 Slice 2: viewer
 
 - The challenge node's page shows the status, the concerns grouped by severity, each with its consequence, the simpler alternative, the cheap experiment, the attempt count, and the accepted reason when there is one. Its executor reads "one print job".
-- The launch node shows the three evidence fields under the completion. `falsifying_check` links to that check on the verify node when it names a check id. A 1.0.0 completion says the evidence was not recorded for this run. Questions are listed with their answers and times, and an unanswered question is marked as waiting on the operator.
+- The launch node shows the three evidence fields under the completion. `falsifying_check` links to that check on the verify node when it names a check id. A 1.0.0 completion says the evidence was not recorded for this run; a 1.1.0 `blocked` completion without evidence says the worker blocked without recording it. A fourth question shows the lane as blocked with the question's text, and a `question` completion the controller has not recorded yet shows its text. Questions are listed with their answers and times, and an unanswered question is marked as waiting on the operator.
 - The Assignment page shows `decisions.md` rendered as Markdown.
 - All run-served Markdown (captured files and decisions) renders with images and external links inert: no remote fetch, and links shown as text. This closes the open follow-up from the viewer-clarity review.
 

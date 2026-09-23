@@ -121,8 +121,8 @@ export const runInputs: RunInputs = {
       ],
       launch: { session_id: 'ui-session', launch_requested_at: '2026-01-01T12:00:00Z', native_started_at: '2026-01-01T12:00:02Z', observed_state: 'working', status: 'attached_session_available', launcher_invocations: 1 },
       completion: {
-        status: 'completed', summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'],
-        untested: ['Findings wider than the viewport'], falsifying_check: 'review-browser', verify_yourself: 'The seeded run matches a real export.',
+        version: '1.1.0', status: 'completed', summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'],
+        untested: ['Findings wider than the viewport'], falsifying_check: 'review-browser', verify_yourself: 'The seeded run matches a real export.', question: null,
       },
       handoff: { summary: 'Implemented the findings panel.', open_assumptions: ['Candidate mode seeds the review section.'] },
       stop: { stopped: true, confirmed_at: '2026-01-01T12:20:00Z' },

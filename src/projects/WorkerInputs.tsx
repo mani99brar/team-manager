@@ -194,7 +194,8 @@ function FalsifyingCheck({ value, worker, result, checksNode, onNavigate }: {
 /**
  * The evidence a 1.1.0 completion carries (PRD_PORTABLE_WORKFLOW 4.6): what no executed check covers, the check that would
  * fail if the implementation were wrong, and one assumption to verify independently. A 1.0.0 completion serves all three
- * as null, which is stated rather than shown as empty.
+ * as null, which is stated rather than shown as empty; so is a 1.1.0 `blocked` one that recorded none. A question the
+ * controller has not recorded is shown with its text: still pending, or a fourth one the controller treated as blocked.
  */
 function CompletionEvidence({ completion, worker, result, checksNode, onNavigate }: {
   completion: Completion
@@ -204,17 +205,30 @@ function CompletionEvidence({ completion, worker, result, checksNode, onNavigate
   onNavigate: (pathname: string) => void
 }) {
   const { untested, falsifying_check: falsifying, verify_yourself: verify } = completion
-  if (completion.status === 'question') {
+  if (completion.question !== null) {
+    const pending = completion.status === 'question'
     return (
-      <p className="projects-muted" data-testid="completion-evidence-question">
-        No completion evidence yet: the worker ended its turn with a question, listed below with its answer when there is one.
-      </p>
+      <div data-testid={pending ? 'completion-question-pending' : 'completion-question-refused'}>
+        <p className={pending ? 'projects-muted' : 'projects-notice'} role={pending ? undefined : 'note'}>
+          {pending
+            ? 'No completion evidence yet: the worker ended its turn with this question, which the controller has not recorded as a question to the operator yet:'
+            : 'Treated as blocked: the worker asked a fourth question, and at most three are answered, so the controller blocked this lane. The question:'}
+        </p>
+        <p className="worker-question-text" data-testid="completion-question-text">{completion.question}</p>
+      </div>
     )
   }
-  if (untested === null && falsifying === null && verify === null) {
+  if (completion.version === '1.0.0') {
     return (
       <p className="projects-muted" data-testid="completion-evidence-none">
         Completion evidence was not recorded for this run: its completion predates the untested, falsifying-check and verify-yourself fields.
+      </p>
+    )
+  }
+  if (completion.status === 'blocked' && untested === null && falsifying === null && verify === null) {
+    return (
+      <p className="projects-muted" data-testid="completion-evidence-blocked">
+        No completion evidence recorded: the worker blocked, and a blocked completion need not carry it.
       </p>
     )
   }

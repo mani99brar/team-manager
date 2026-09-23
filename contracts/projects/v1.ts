@@ -141,6 +141,8 @@ export const CHECK_KINDS = ['build', 'typecheck', 'unit', 'integration', 'contra
 
 /** The status words of a worker's completion file; `question` (completion 1.1.0) asks the operator before finishing. */
 export const COMPLETION_STATUSES = ['completed', 'blocked', 'question'] as const
+/** Completion file versions: 1.0.0 for runs prepared before the guardrails, 1.1.0 (evidence and questions) for feature.json 2.2.0 runs. */
+export const COMPLETION_VERSIONS = ['1.0.0', '1.1.0'] as const
 
 /**
  * One question a worker asked with a `question` completion (1.4.0), in order from `n` 1. The worker's deadline was
@@ -215,7 +217,11 @@ export const runInputWorkerSchema = z.strictObject({
     status: z.string().min(1),
     launcher_invocations: z.number().int().nonnegative(),
   }).nullable(),
+  /** The worker's completion file as the controller reads it; null when there is none or the controller refuses it. */
   completion: z.strictObject({
+    /** The version the run pinned and the file carries; exports before 1.5.0 only carry 1.0.0 completions. */
+    version: z.enum(COMPLETION_VERSIONS),
+    /** As the controller treats it: a `question` asked after the third is `blocked` (at most three are answered). */
     status: z.enum(COMPLETION_STATUSES),
     summary: z.string().min(1),
     open_assumptions: assumptions,
@@ -224,6 +230,11 @@ export const runInputWorkerSchema = z.strictObject({
     /** The check that would fail if the work were wrong: a check ID of this lane or a command. */
     falsifying_check: z.string().min(1).nullable(),
     verify_yourself: z.string().min(1).nullable(),
+    /**
+     * The text of a question the controller has not recorded in `questions`: a `question` completion it has not polled yet,
+     * or a fourth question, served as `blocked`. Null for every other completion.
+     */
+    question: z.string().min(1).nullable(),
   }).nullable(),
   handoff: z.strictObject({ summary: z.string().min(1), open_assumptions: assumptions }).nullable(),
   stop: z.strictObject({ stopped: z.boolean(), confirmed_at: timestamp.nullable() }).nullable(),
@@ -378,6 +389,18 @@ export function validateRunInputs(input: unknown): RunInputs {
       if (question.answer === null && index !== worker.questions.length - 1) throw new Error(`Only the latest question of ${worker.node_id} can be waiting`)
     })
     if (worker.questions.length > 3) throw new Error(`${worker.node_id} has more than three questions; a fourth is treated as blocked`)
+    const completion = worker.completion
+    if (completion !== null) {
+      if (completion.version === '1.0.0' && (completion.status === 'question' || [completion.untested, completion.falsifying_check, completion.verify_yourself, completion.question].some(value => value !== null))) {
+        throw new Error(`The 1.0.0 completion of ${worker.node_id} has no evidence and no question`)
+      }
+      if (completion.status === 'question' && (completion.question === null || worker.questions.length >= 3)) {
+        throw new Error(`A question completion of ${worker.node_id} has its text and follows fewer than three questions; a fourth is served as blocked`)
+      }
+      if (completion.question !== null && completion.status !== 'question' && !(completion.status === 'blocked' && worker.questions.length === 3)) {
+        throw new Error(`Only a question completion of ${worker.node_id}, or a fourth question served as blocked, has a question`)
+      }
+    }
   }
   const challenge = inputs.challenge
   if (challenge !== null) {

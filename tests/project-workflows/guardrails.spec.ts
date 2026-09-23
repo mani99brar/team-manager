@@ -1,8 +1,9 @@
 /**
  * Workflow guardrails in the viewer (PRD_PORTABLE_WORKFLOW section 6, slice 2, ui lane): the design challenge node's page,
  * the completion evidence and questions on a launch node, `decisions.md` on the Assignment page, and inert run Markdown.
- * The `guarded-flow` run is a 1.5.0 export whose graph starts with the challenge; `clarity-flow`'s run and `feature-flow`'s
- * runs predate the guardrails and stand in for runs without evidence, questions, decisions or a challenge.
+ * The `guarded-flow` runs are 1.5.0 exports whose graph starts with the challenge: an integrated run, one waiting on an
+ * adapter question and one the controller blocked on a fourth ui question. `clarity-flow`'s run and `feature-flow`'s runs
+ * predate the guardrails and stand in for runs without evidence, questions, decisions or a challenge.
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import {
@@ -16,8 +17,13 @@ import {
   CHALLENGE_P2_CONSEQUENCE,
   CHALLENGE_SESSION,
   CLARITY_WORKFLOW_ID,
-  GUARDED_ADAPTER_SUMMARY,
+  DEFAULT_REVIEWER_ID,
+  GUARDED_ANSWERED_QUESTIONS,
+  GUARDED_BLOCKED_ADAPTER_SUMMARY,
   GUARDED_FALSIFYING_CHECK,
+  GUARDED_FILE_FINDING,
+  GUARDED_FOURTH_QUESTION,
+  GUARDED_FOURTH_SUMMARY,
   GUARDED_NOTES_PATH,
   GUARDED_QUESTIONS,
   GUARDED_UNTESTED,
@@ -32,6 +38,8 @@ import {
   REMOTE_LINK_URL,
   RUN_FILES,
   RUN_GUARDED,
+  RUN_GUARDED_ASKING,
+  RUN_GUARDED_BLOCKED,
   RUN_SUCCEEDED,
   TWO_LANES,
 } from './fixtures.ts'
@@ -39,7 +47,7 @@ import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail,
 
 installHooks()
 
-const guardedRunUrl = (nodeId?: string) => runUrl(RUN_GUARDED, nodeId, GUARDED_WORKFLOW_ID)
+const guardedRunUrl = (nodeId?: string, runId: string = RUN_GUARDED) => runUrl(runId, nodeId, GUARDED_WORKFLOW_ID)
 const clarityRunUrl = (runId: string, nodeId?: string) => runUrl(runId, nodeId, CLARITY_WORKFLOW_ID)
 const questionItems = (page: Page) => page.getByTestId('worker-questions').getByTestId('worker-question')
 const UI_BROWSER_COMMAND = 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts'
@@ -162,11 +170,30 @@ test(`[scenario:completion-evidence-shown] The launch node shows untested, the f
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_ui')
   await expect(page.locator('#check-2 .check-command')).toHaveText(UI_BROWSER_COMMAND)
 
-  // A worker that ended its turn with a question has no evidence yet, and says so.
-  await page.goto(guardedRunUrl('launch_adapter'))
-  await expect(page.getByTestId('worker-completion')).toContainText(GUARDED_ADAPTER_SUMMARY)
-  await expect(page.getByTestId('worker-completion').locator('[data-status="question"]')).toBeVisible()
-  await expect(page.getByTestId('completion-evidence-question')).toContainText('ended its turn with a question')
+  // A fourth question is treated as blocked: the lane shows blocked with the refused question's text, not a question in the list.
+  await page.goto(guardedRunUrl('launch_ui', RUN_GUARDED_BLOCKED))
+  const refused = page.getByTestId('worker-completion')
+  await expect(refused).toContainText(GUARDED_FOURTH_SUMMARY)
+  await expect(refused.locator('.status-badge[data-status]')).toHaveAttribute('data-status', 'blocked')
+  await expect(page.getByTestId('completion-question-refused')).toContainText('Treated as blocked: the worker asked a fourth question')
+  await expect(page.getByTestId('completion-question-text')).toHaveText(GUARDED_FOURTH_QUESTION)
+  await expect(page.getByTestId('completion-evidence')).toHaveCount(0)
+  await expect(page.getByTestId('completion-evidence-none')).toHaveCount(0)
+  await expect(nodeDetail(page)).not.toContainText('listed below')
+  await expect(questionItems(page)).toHaveCount(GUARDED_ANSWERED_QUESTIONS.length)
+  await expect(questionItems(page).filter({ hasText: GUARDED_FOURTH_QUESTION })).toHaveCount(0)
+  await expect(page.getByTestId('question-waiting')).toHaveCount(0)
+
+  // A 1.1.0 blocked completion without evidence says the worker blocked; it never claims to predate the evidence fields.
+  await page.goto(guardedRunUrl('launch_adapter', RUN_GUARDED_BLOCKED))
+  await expect(page.getByTestId('worker-completion')).toContainText(GUARDED_BLOCKED_ADAPTER_SUMMARY)
+  await expect(page.getByTestId('completion-evidence-blocked')).toContainText('the worker blocked, and a blocked completion need not carry it')
+  await expect(page.getByTestId('completion-evidence-none')).toHaveCount(0)
+  await expect(page.getByTestId('completion-evidence')).toHaveCount(0)
+
+  // A lane whose question the controller recorded has no completion file (it was moved): no signal, no evidence.
+  await page.goto(guardedRunUrl('launch_adapter', RUN_GUARDED_ASKING))
+  await expect(page.getByTestId('worker-completion')).toContainText('No completion signal recorded.')
   await expect(page.getByTestId('completion-evidence')).toHaveCount(0)
   await expect(nodeDetail(page)).toContainText(ADAPTER_SESSION)
 
@@ -181,7 +208,8 @@ test(`[scenario:completion-evidence-shown] The launch node shows untested, the f
 })
 
 test(`[scenario:worker-questions-shown] Answered and waiting worker questions are listed with their times, and the waiting one is marked (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(guardedRunUrl('launch_adapter'))
+  // A run waiting on handoffs: the adapter's second question waits on the operator.
+  await page.goto(guardedRunUrl('launch_adapter', RUN_GUARDED_ASKING))
   const questions = page.getByTestId('worker-questions')
   await expect(questions.getByRole('heading', { name: 'Questions to the operator' })).toBeVisible()
   await expect(questionItems(page)).toHaveCount(2)
@@ -210,7 +238,7 @@ test(`[scenario:worker-questions-shown] Answered and waiting worker questions ar
   await attach(page, testInfo, 'worker-questions-shown')
 
   // The ui lane's one question was answered: nothing is waiting there.
-  await page.goto(guardedRunUrl('launch_ui'))
+  await page.goto(guardedRunUrl('launch_ui', RUN_GUARDED_ASKING))
   await expect(questionItems(page)).toHaveCount(1)
   await expect(questionItems(page).first()).toHaveAttribute('data-answered', 'true')
   await expect(questionItems(page).first().getByTestId('question-answer')).toContainText(GUARDED_QUESTIONS.ui[0].answer!)
@@ -275,4 +303,21 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
 
   await page.waitForLoadState('networkidle')
   expect(remote, 'rendering run Markdown must not contact any other host').toEqual([])
+})
+
+test(`On a guarded graph the captured files show the independent review's findings, never a review looked up through the design challenge (${phase})`, async ({ page }) => {
+  // Both nodes are of kind review and the challenge comes first; its attempt (2) is not the review's (1), so a lookup through it finds none.
+  await page.goto(guardedRunUrl())
+  await expect(page.locator('[data-testid="run-node-list"] [data-node-id]').first()).toHaveAttribute('data-node-id', 'challenge')
+  await expect(nodeListItem(page, 'challenge')).toContainText('attempt 2')
+  await expect(nodeListItem(page, 'review')).toContainText('attempt 1')
+
+  await page.goto(guardedRunUrl('launch_ui'))
+  const file = page.locator(`[data-testid="captured-file"][data-path="${GUARDED_NOTES_PATH}"]`)
+  const listed = file.getByTestId('file-findings').getByTestId('file-finding')
+  await expect(listed).toHaveCount(1)
+  await expect(listed).toContainText(GUARDED_FILE_FINDING)
+  await expect(listed).toHaveAttribute('data-reviewer', DEFAULT_REVIEWER_ID)
+  await expect(file.getByTestId('file-findings-no-review')).toHaveCount(0)
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
 })

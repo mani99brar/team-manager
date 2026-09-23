@@ -26,6 +26,8 @@ text), `inputs.challenge` (the latest `challenge.json` without `run_id` and
 and `verify_yourself` (null for a 1.0.0 completion) with the `question` status, and
 `inputs.workers.<lane>.questions`. Every addition is null or `[]` for older runs.
 The definition of a run with a design challenge starts with the `challenge` node.
+A completion is served only as the controller reads it, with its `version` and the
+text of a `question` not recorded yet; a fourth question is served as `blocked`.
 """
 from __future__ import annotations
 
@@ -34,8 +36,9 @@ import json
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
-from .guardrails import decisions_text, has_challenge
+from .guardrails import MAX_QUESTIONS, decisions_text, has_challenge
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
@@ -178,15 +181,25 @@ def optional_text(value) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def completion_signal(item) -> dict | None:
-    """The worker's completion file; the 1.1.0 evidence is null when the file is 1.0.0 (or leaves a field empty)."""
-    if (not isinstance(item, dict) or item.get("status") not in {"completed", "blocked", "question"} or not isinstance(item.get("summary"), str)
-            or not item["summary"].strip() or not string_list(item.get("open_assumptions"))):
+def completion_signal(directory: Path, plan: dict, node: str, questions: list) -> dict | None:
+    """The worker's completion file as the controller reads it (`automatic.read_signal`); null when the controller refuses it.
+
+    A missing, malformed, stale or foreign file, or one of another version than the run pinned, is not the worker's signal.
+    `version` is that pinned version: a 1.0.0 completion has no evidence (null), and an empty 1.1.0 field is null too. A
+    `question` after the lane's third recorded question is served as `blocked`, as `record_question` treats it; `question`
+    carries the text of a question the controller has not recorded, and is null for every other completion.
+    """
+    from .automatic import read_signal
+    try:
+        item = read_signal(SimpleNamespace(directory=directory, plan=plan), node)
+    except ValueError:
         return None
+    status = "blocked" if item["status"] == "question" and len(questions) >= MAX_QUESTIONS else item["status"]
     untested = item.get("untested")
-    return {"status": item["status"], "summary": item["summary"], "open_assumptions": list(item["open_assumptions"]),
-            "untested": list(untested) if isinstance(untested, list) and all(isinstance(entry, str) for entry in untested) else None,
-            "falsifying_check": optional_text(item.get("falsifying_check")), "verify_yourself": optional_text(item.get("verify_yourself"))}
+    return {"version": item["version"], "status": status, "summary": item["summary"], "open_assumptions": list(item["open_assumptions"]),
+            "untested": list(untested) if isinstance(untested, list) else None,
+            "falsifying_check": optional_text(item.get("falsifying_check")), "verify_yourself": optional_text(item.get("verify_yourself")),
+            "question": item["question"] if item["status"] == "question" else None}
 
 
 QUESTION_KEYS = ("n", "question", "asked_at", "answer", "answered_at")
@@ -241,6 +254,7 @@ def stop_confirmation(path: Path) -> dict | None:
 def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> dict:
     node = worker["node_id"]
     prompt = directory / f"{node}.prompt.txt"
+    questions = worker_questions(directory / f"{node}.questions.json")
     return {"role": worker["role"], "required_check_kinds": required_kinds(policy, worker), "task": plan["nodes"][node]["task"],
             "prompt": prompt.read_text() if prompt.is_file() and not prompt.is_symlink() else None,
             "owned_paths": list(worker["owned_paths"]),
@@ -249,10 +263,10 @@ def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> di
                         "scenarios": [{"id": scenario["id"], "description": scenario["description"]} for scenario in check["scenarios"]]}
                        for check in worker["checks"]],
             "launch": launch_receipt(load_optional(directory / f"{node}.interactive.json")),
-            "completion": completion_signal(load_optional(directory / f"{node}.completion.json")),
+            "completion": completion_signal(directory, plan, node, questions),
             "handoff": accepted_handoff(load_optional(directory / f"{node}.handoff.json")),
             "stop": stop_confirmation(directory / f"{node}.stop.json"),
-            "questions": worker_questions(directory / f"{node}.questions.json")}
+            "questions": questions}
 
 
 def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
