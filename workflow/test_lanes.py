@@ -84,7 +84,7 @@ class LaneRun(unittest.TestCase):
         self.directory = self.root / "run"
         self.run_root = self.root / "runs"
 
-    def prepare(self, selected: list[str], *, drill: dict | None = None, automatic: bool = False, name: str = "run"):
+    def prepare(self, selected: list[str], *, drill: dict | None = None, automatic: bool = False, name: str = "run", reviewers: list[str] | None = None):
         self.directory = self.root / name
         self.policy = three_lane_policy(self.fail_marker, drill)
         if automatic:
@@ -94,6 +94,8 @@ class LaneRun(unittest.TestCase):
         skipped = bool(drill) and drill["node_id"] not in selected
         self.plan.update(mode="interactive", policy_sha256=policy_digest(self.policy), source_branch=git(self.repo, "symbolic-ref", "--short", "HEAD"),
                          failure_drill=None if skipped else drill)
+        if reviewers:
+            self.plan["reviewers"] = [{"reviewer_id": reviewer_id, "prompt": f"Review the {reviewer_id} aspects."} for reviewer_id in reviewers]
         if automatic:
             self.plan["automatic"] = automatic_settings()
         save_json(self.directory / "plan.json", self.plan)
@@ -126,15 +128,21 @@ class LaneRun(unittest.TestCase):
             report(self.runtime, graph.get_state(self.config))
             return final["integrated_commit"]
 
-    def feature_dir(self, name: str = "lanes", *, drill: dict | None = None) -> Path:
-        """A committed three-lane feature directory in the temporary repository."""
+    def feature_dir(self, name: str = "lanes", *, drill: dict | None = None, reviewers: list[str] | None = None) -> Path:
+        """A committed three-lane feature directory in the temporary repository (2.1.0 with reviewer briefs when asked)."""
         folder = self.repo / "features" / name
         folder.mkdir(parents=True)
         save_json(folder / "policy.json", three_lane_policy(self.fail_marker, drill))
         for node in LANES:
             (folder / f"{node}-task.md").write_text(f"# {node}\n\nDo the {node} work.\n")
-        save_json(folder / "feature.json", {"version": "2.0.0", "name": "Lanes", "branch_prefix": "feature/lanes", "policy": "policy.json",
-                                            "workers": [{"node_id": node, "task": f"{node}-task.md"} for node in LANES]})
+        manifest = {"version": "2.0.0", "name": "Lanes", "branch_prefix": "feature/lanes", "policy": "policy.json",
+                    "workers": [{"node_id": node, "task": f"{node}-task.md"} for node in LANES]}
+        if reviewers:
+            (folder / "reviewers").mkdir()
+            for reviewer_id in reviewers:
+                (folder / "reviewers" / f"{reviewer_id}.md").write_text(f"Review the {reviewer_id} aspects.\n")
+            manifest.update(version="2.1.0", reviewers=[{"reviewer_id": reviewer_id, "prompt": f"reviewers/{reviewer_id}.md"} for reviewer_id in reviewers])
+        save_json(folder / "feature.json", manifest)
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", f"Feature {name}"], check=True)
         return folder
@@ -164,7 +172,7 @@ class ThreeLaneRun(LaneRun):
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.3.0")
+        self.assertEqual(exported["version"], "1.4.0")
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]],
                          ["launch_ui", "launch_adapter", "launch_docs", "handoff", "verify_ui", "verify_adapter", "verify_docs", "candidate", "review", "approval", "integrate"])
         self.assertEqual(exported["definition"]["nodes"][2]["label"], "Launch docs worker")
@@ -323,6 +331,156 @@ class SubsetSelection(LaneRun):
         self.assertTrue((self.directory / "failure-drill.json").exists())
 
 
+class DeclaredReviewers(LaneRun):
+    """PRD_PARALLEL_REVIEWERS: the feature file declares the reviewers; prepare pins their briefs; manual mode imports one review per reviewer."""
+
+    def test_feature_reviewers_are_validated_and_pinned_into_the_plan(self):
+        self.feature_dir(reviewers=["general", "coverage"])
+        run, commands, notes = launch_commands(self.repo, "lanes", "lanes-001", self.run_root, herdr=False)
+        prepare_command = commands[2]
+        briefs = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--reviewer"]
+        self.assertEqual([item.split("=", 1)[0] for item in briefs], ["general", "coverage"])
+        self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))
+        self.assertEqual(notes, [])
+        result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Reviewers: general, coverage", result.stdout)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["reviewers"], [{"reviewer_id": "general", "prompt": "Review the general aspects.\n"}, {"reviewer_id": "coverage", "prompt": "Review the coverage aspects.\n"}])
+        # A 2.0.0 feature, or one without reviewers, pins no list: the plan means the single built-in reviewer.
+        _, commands, _ = launch_commands(self.repo, "lanes", "lanes-002", self.run_root, herdr=False)
+        self.assertIn("--reviewer", commands[2])
+        manifest = read_json(self.repo / "features/lanes/feature.json")
+        for change in (lambda value: value.pop("reviewers"), lambda value: value.update(version="2.0.0", reviewers=None) or value.pop("reviewers")):
+            plain = copy.deepcopy(manifest)
+            change(plain)
+            save_json(self.repo / "features/lanes/feature.json", plain)
+            _, commands, _ = launch_commands(self.repo, "lanes", "lanes-003", self.run_root, herdr=False)
+            self.assertNotIn("--reviewer", commands[2])
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            launch_main(["project-workflows", "--dry-run"])
+        command.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["reviewers"], ["review"])
+        # Refused before any Git action: a reviewer named after a lane, a reserved id, a duplicate, a missing or empty brief, or reviewers on 2.0.0.
+        for label, change in (("lane id", lambda value: value["reviewers"][0].update(reviewer_id="ui")),
+                              ("reserved", lambda value: value["reviewers"][0].update(reviewer_id="review")),
+                              ("duplicate", lambda value: value["reviewers"][1].update(reviewer_id="general")),
+                              ("missing brief", lambda value: value["reviewers"][1].update(prompt="reviewers/missing.md")),
+                              ("empty list", lambda value: value.update(reviewers=[])),
+                              ("2.0.0 with reviewers", lambda value: value.update(version="2.0.0"))):
+            bad = copy.deepcopy(manifest)
+            change(bad)
+            save_json(self.repo / "features/lanes/feature.json", bad)
+            with self.subTest(label):
+                with self.assertRaises((ValueError, OSError, ValidationError)):
+                    launch_commands(self.repo, "lanes", "lanes-004", self.run_root, herdr=False)
+        (self.repo / "features/lanes/reviewers/coverage.md").write_text("  \n")
+        save_json(self.repo / "features/lanes/feature.json", manifest)
+        with self.assertRaisesRegex(ValueError, "missing or empty"):
+            launch_commands(self.repo, "lanes", "lanes-004", self.run_root, herdr=False)
+        self.assertFalse((self.run_root / "lanes-004").exists())
+        # The step-by-step prepare refuses the same ids.
+        for bad in ("ui", "review", "review-x"):
+            result = self.cli("prepare", str(self.run_root / "cli"), "--repo", str(self.repo), "--policy", str(self.repo / "features/lanes/policy.json"),
+                              *[f"--task={node}={self.repo / f'features/lanes/{node}-task.md'}" for node in LANES], "--reviewer", f"{bad}={self.repo / 'features/lanes/reviewers/general.md'}")
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertFalse((self.run_root / "cli").exists())
+
+    def manual_review(self, reviewer_id: str, verdict: str = "approved", findings: list | None = None) -> Path:
+        bundle, digest = self.runtime.validate_bundle()
+        path = self.root / f"{reviewer_id}-review.json"
+        save_json(path, {"run_id": self.plan["run_id"], "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
+                         "reviewer": f"human-{reviewer_id}", "independent": True, "verdict": verdict, "findings": findings or []})
+        return path
+
+    def test_manual_import_requires_every_declared_reviewer_before_approval(self):
+        self.prepare(LANES, reviewers=["general", "coverage"])
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            verified = graph.invoke(Command(resume={"freeze": True}), self.config)
+            self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+        _, digest = self.runtime.validate_bundle()
+        finding = {"severity": "P2", "message": "Nit", "disposition": "open", "worker": "docs", "requirement": None}
+        general = self.manual_review("general", findings=[finding])
+        # Without --reviewer the run cannot tell which reviewer the file is; an unknown id is refused; a blocked file is refused.
+        result = self.cli("review", str(self.directory), "--review-file", str(general))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--reviewer <id> is required: this run declares the reviewers general, coverage", result.stderr)
+        result = self.cli("review", str(self.directory), "--reviewer", "security", "--review-file", str(general))
+        self.assertIn("--reviewer must be one of this run's reviewers (general, coverage)", result.stderr)
+        result = self.cli("review", str(self.directory), "--reviewer", "coverage", "--review-file", str(self.manual_review("coverage", verdict="blocked")))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not approved", result.stderr)
+        self.assertFalse((self.directory / "review-coverage.imported.json").exists())
+        # The first import is stored; the run stays at the review gate and approve is refused, naming what is missing.
+        result = self.cli("review", str(self.directory), "--reviewer", "general", "--review-file", str(general))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Imported the general review; still waiting for: coverage", result.stdout)
+        self.assertEqual(read_json(self.directory / "review-general.imported.json")["review"]["reviewer"], "human-general")
+        self.assertFalse((self.directory / "review.json").exists())
+        result = self.cli("approve", str(self.directory), "--bundle-sha256", digest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("approve needs every declared reviewer imported and approved (reviewers: general, coverage; imported: general)", result.stderr)
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            state = build_pipeline(saver, self.runtime).get_state(self.config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
+        # The second import completes the set: the combined record carries both, tagged findings, and the run moves to approval.
+        result = self.cli("review", str(self.directory), "--reviewer", "coverage", "--review-file", str(self.manual_review("coverage")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        review = read_json(self.directory / "review.json")
+        self.assertEqual((review["verdict"], review["reviewer"]), ("approved", "human-general, human-coverage"))
+        self.assertEqual([(entry["reviewer_id"], entry["session_id"], entry["verdict"]) for entry in review["reviewers"]],
+                         [("general", "human-general", "approved"), ("coverage", "human-coverage", "approved")])
+        self.assertEqual(review["findings"], [{**finding, "reviewer": "general"}])
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            state = build_pipeline(saver, self.runtime).get_state(self.config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["integration_approval"])
+        result = self.cli("approve", str(self.directory), "--bundle-sha256", digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), read_json(self.directory / "run-state.json")["values"]["integrated_commit"])
+        exported = read_json(self.directory / "run-state.json")
+        self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["verdict"]) for entry in exported["review"]["reviewers"]],
+                         [("general", "manual", "approved"), ("coverage", "manual", "approved")])
+        self.assertEqual(sorted(self.sessions.starts), sorted(LANES))  # Manual review: no reviewer session.
+
+    def test_manual_import_of_the_default_reviewer_keeps_the_single_file_flow(self):
+        self.prepare(["adapter"])
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            graph.invoke(Command(resume={"freeze": True}), self.config)
+        _, digest = self.runtime.validate_bundle()
+        result = self.cli("review", str(self.directory), "--review-file", str(self.manual_review("review")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        review = read_json(self.directory / "review.json")
+        self.assertEqual((review["verdict"], review["reviewer"]), ("approved", "human-review"))
+        self.assertEqual([(entry["reviewer_id"], entry["session_id"], entry["verdict"]) for entry in review["reviewers"]], [("review", "human-review", "approved")])
+        self.assertTrue((self.directory / "review.imported.json").exists())
+        result = self.cli("approve", str(self.directory), "--bundle-sha256", digest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_automatic_run_with_declared_reviewers_launches_each_over_the_shared_worktree(self):
+        self.prepare(LANES, automatic=True, reviewers=["general", "coverage"])
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            build_pipeline(saver, self.runtime).invoke({"run_id": self.plan["run_id"]}, self.config)
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "docs", "review-coverage", "review-general", "ui"])
+        for reviewer_id in ("general", "coverage"):
+            receipt = read_json(self.directory / f"review-{reviewer_id}.interactive.json")
+            self.assertEqual((receipt["node_id"], receipt["worktree"]), (f"review-{reviewer_id}", str(self.directory / "review-worktree")))
+            prompt = (self.directory / f"review-{reviewer_id}.prompt.txt").read_text()
+            self.assertTrue(prompt.startswith(f"Review the {reviewer_id} aspects. Diff: "))
+            self.assertIn("ui, adapter, docs, multiple or none", prompt)
+            self.assertIn(f'"node_id": "review-{reviewer_id}"', prompt)
+        self.assertFalse((self.directory / "review.interactive.json").exists())
+        review = read_json(self.directory / "review.json")
+        self.assertEqual([entry["reviewer_id"] for entry in review["reviewers"]], ["general", "coverage"])
+        self.assertEqual(len({entry["session_id"] for entry in review["reviewers"]}), 2)
+
+
 class RetryAnyLane(LaneRun):
     def test_retry_reruns_only_the_failed_lanes_check(self):
         self.prepare(LANES)
@@ -439,38 +597,50 @@ class FindingLanes(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.digest = "b" * 64
 
+    reviewer = "review"  # The default reviewer; the subclass declares one of two.
+
+    @property
+    def node(self):
+        return "review" if self.reviewer == "review" else f"review-{self.reviewer}"
+
     def runtime(self, workers: list[str]):
         plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS), "workers": workers, "excluded_workers": [],
                 "nodes": {node: {"task": f"Do the {node} work."} for node in workers}}
+        if self.reviewer != "review":
+            plan["reviewers"] = [{"reviewer_id": "general", "prompt": "General."}, {"reviewer_id": "coverage", "prompt": "Coverage."}]
         bundle = {"run_id": "test", "candidate_commit": "c" * 40, "snapshots": {node: {"session_id": f"{node}-session"} for node in workers}}
         sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: None, executable="claude")
-        save_json(self.root / "automatic-review.json", {"transport": "native", "launch_token": self.TOKEN, "bundle_sha256": self.digest,
-                                                         "candidate_commit": "c" * 40, "status": "running"})
+        save_json(self.root / f"automatic-{self.node}.json", {"transport": "native", "launch_token": self.TOKEN, "bundle_sha256": self.digest,
+                                                                "candidate_commit": "c" * 40, "status": "running"})
         return SimpleNamespace(directory=self.root, plan=plan, workers=workers, sessions=sessions, validate_bundle=lambda: (bundle, self.digest),
                                event=lambda *args: None), bundle
 
     def completion(self, worker):
-        return {"version": "1.1.0", "run_id": "test", "node_id": "review", "launch_token": self.TOKEN, "bundle_sha256": self.digest,
+        return {"version": "1.2.0", "run_id": "test", "node_id": self.node, "launch_token": self.TOKEN, "bundle_sha256": self.digest,
                 "candidate_commit": "c" * 40, "verdict": "approved",
                 "findings": [{"severity": "P2", "message": "Finding", "disposition": "open", "worker": worker, "requirement": None}]}
+
+    def read(self, runtime):
+        return read_review_completion(runtime, self.reviewer)
 
     def test_finding_lanes_follow_the_runs_selection(self):
         three, bundle = self.runtime(LANES)
         two, _ = self.runtime(["ui", "adapter"])
+        path = self.root / f"{self.node}.completion.json"
         for worker in ("docs", "multiple", "none", "ui"):
-            save_json(self.root / "review.completion.json", self.completion(worker))
-            self.assertEqual(read_review_completion(three)["findings"][0]["worker"], worker)
+            save_json(path, self.completion(worker))
+            self.assertEqual(self.read(three)["findings"][0]["worker"], worker)
         for worker in ("multiple", "none", "adapter"):
-            save_json(self.root / "review.completion.json", self.completion(worker))
-            self.assertEqual(read_review_completion(two)["findings"][0]["worker"], worker)
-        save_json(self.root / "review.completion.json", self.completion("docs"))
+            save_json(path, self.completion(worker))
+            self.assertEqual(self.read(two)["findings"][0]["worker"], worker)
+        save_json(path, self.completion("docs"))
         with self.assertRaisesRegex(RuntimeError, "names worker 'docs', which is not a lane of this run \\(ui, adapter, multiple or none\\)"):
-            read_review_completion(two)
+            self.read(two)
         for runtime in (three, two):
             for worker in ("both", "review", "Docs"):
-                save_json(self.root / "review.completion.json", self.completion(worker))
+                save_json(path, self.completion(worker))
                 with self.assertRaisesRegex(RuntimeError, "schema"):
-                    read_review_completion(runtime)
+                    self.read(runtime)
         check_finding_lanes(three, [{"worker": "docs"}, {"worker": "multiple"}])
         with self.assertRaises(RuntimeError):
             check_finding_lanes(two, [{"worker": "docs"}])
@@ -481,6 +651,7 @@ class FindingLanes(unittest.TestCase):
         self.assertEqual(review_schema(two)["properties"]["findings"]["items"]["properties"]["worker"]["enum"], ["ui", "adapter", "multiple", "none"])
         self.assertIn("(ui, adapter, docs, multiple or none:", review_prompt(three, self.root / "review.diff"))
         self.assertIn("worker lanes are: ui, adapter, docs.", review_prompt(three, self.root / "review.diff"))
+        self.assertIn("worker lanes are: ui, adapter, docs.", review_prompt(three, self.root / "review.diff", {"reviewer_id": "coverage", "prompt": "Coverage only."}))
         # The persisted review is bound to the bundle's lanes; `both` only survives from reviews recorded before configured lanes.
         base = {"run_id": "test", "bundle_sha256": self.digest, "candidate_commit": "c" * 40, "reviewer": "reviewer", "independent": True, "verdict": "approved"}
         finding = {"severity": "P2", "message": "x", "disposition": "open", "requirement": None}
@@ -490,6 +661,11 @@ class FindingLanes(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finding worker"):
             check_review({**base, "findings": [{**finding, "worker": "contracts"}]}, bundle, self.digest)
         check_review({**base, "findings": [{**finding, "worker": "both"}]}, bundle, self.digest, allow_legacy=True)
+
+
+class FindingLanesForADeclaredReviewer(FindingLanes):
+    """The same lane vocabulary applies to a declared reviewer's own completion file."""
+    reviewer = "coverage"
 
 
 class LegacyFeatureAndRun(LaneRun):
@@ -549,7 +725,7 @@ class LegacyFeatureAndRun(LaneRun):
         self.assertEqual(printed["commands"][2][printed["commands"][2].index("--workers") + 1], "adapter")
         self.assertEqual(errors.getvalue(), "")
 
-    def test_legacy_run_exports_at_1_3_0_with_its_stored_definition_and_lane_evidence(self):
+    def test_legacy_run_exports_at_the_current_version_with_its_stored_definition_and_lane_evidence(self):
         directory = legacy_run(self.root)
         stored = read_json(directory / "run-state.json")
         old_nodes = graph_nodes(["ui", "adapter"])
@@ -579,7 +755,7 @@ class LegacyFeatureAndRun(LaneRun):
         runtime = ExportRuntime(directory)
         self.assertEqual((runtime.workers, runtime.excluded), (["ui", "adapter"], []))
         exported = export_run(runtime)
-        self.assertEqual(exported["version"], "1.3.0")
+        self.assertEqual(exported["version"], "1.4.0")
         self.assertEqual(exported["definition"], {"name": "Feature implementation", "nodes": old_nodes})  # Stored labels kept.
         self.assertEqual(exported["values"]["lanes"], {"ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"}})
         self.assertEqual(exported["values"]["packets"], {"ui": "/x", "adapter": "/y"})

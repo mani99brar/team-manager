@@ -27,12 +27,15 @@ from langgraph.types import Command, interrupt
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_reviewer_panel
-from .sessions import git, plan_excluded, plan_workers, prepare, read_json, run_lock, save_json, validate_node_id
+from .sessions import (DEFAULT_REVIEWER, git, plan_excluded, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json,
+                       validate_node_id, validate_reviewer_id)
 from .verification import owns, policy_digest, safe_path, validate_policy
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
+# The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
+REVIEWER_ENTRY_KEYS = frozenset({"reviewer_id", "session_id", "verdict", "accepted_at"})
 FINDING_KEYS = frozenset({"severity", "message", "disposition"})
-FINDING_LINK_KEYS = frozenset({"worker", "requirement"})
+FINDING_LINK_KEYS = frozenset({"worker", "requirement", "reviewer"})
 # A finding names one lane of the run, several (`multiple`) or none. `both` is the legacy spelling of
 # `multiple` from two-lane runs; only reviews recorded before configured lanes may still carry it.
 FINDING_ATTRIBUTIONS = frozenset({"multiple", "none"})
@@ -80,17 +83,63 @@ def parse_lane_files(values: list[str] | None, flag: str) -> dict[str, Path]:
     return result
 
 
+def parse_reviewer_files(values: list[str] | None, lanes: list[str]) -> list[dict]:
+    """`--reviewer id=path` at prepare: each declared reviewer with its brief text, pinned into the plan in the given order."""
+    reviewers = []
+    for item in values or []:
+        reviewer_id, separator, path = item.partition("=")
+        if not separator or not reviewer_id or not path:
+            raise ValueError(f"--reviewer expects <id>=<path>, got {item!r}")
+        validate_reviewer_id(reviewer_id, lanes)
+        if any(existing["reviewer_id"] == reviewer_id for existing in reviewers):
+            raise ValueError(f"--reviewer given twice for {reviewer_id}")
+        text = Path(path).read_text()
+        if not text.strip():
+            raise ValueError(f"Reviewer brief for {reviewer_id} is empty: {path}")
+        reviewers.append({"reviewer_id": reviewer_id, "prompt": text})
+    return reviewers
+
+
 def blocking_findings(findings: list) -> list:
     """A P0/P1 finding blocks integration unless it is resolved; accepting it is not resolving it."""
     return [finding for finding in findings if finding.get("severity") in {"P0", "P1"} and finding.get("disposition") != "resolved"]
 
 
-def check_review(review: dict, bundle: dict, digest: str, *, require_approved: bool = True, allow_legacy: bool = False) -> None:
+def check_reviewers(entries, worker_ids: set, declared: list[str] | None, verdict: str, require_approved: bool) -> list[str]:
+    """The combined record's `reviewers` list: declared order, distinct independent identities, unanimous approval when approved."""
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("Review reviewers must be a non-empty list")
+    ids, sessions = [], []
+    for entry in entries:
+        if (not isinstance(entry, dict) or set(entry) != REVIEWER_ENTRY_KEYS or not isinstance(entry["reviewer_id"], str) or not entry["reviewer_id"].strip()
+                or entry["verdict"] not in {"approved", "blocked", None} or (entry["accepted_at"] is not None and not isinstance(entry["accepted_at"], str))):
+            raise ValueError("Malformed review reviewers entry")
+        session = entry["session_id"]
+        if session is not None and (not isinstance(session, str) or not session.strip() or session in worker_ids or session in sessions):
+            raise ValueError(f"Independent reviewer identity required for reviewer {entry['reviewer_id']}")
+        if session is not None:
+            sessions.append(session)
+        ids.append(entry["reviewer_id"])
+    if len(set(ids)) != len(ids):
+        raise ValueError("Review reviewers must be distinct")
+    if declared is not None and ids != list(declared):
+        raise ValueError(f"Review reviewers ({', '.join(ids)}) are not this run's declared reviewers ({', '.join(declared)})")
+    if verdict == "approved" and any(entry["verdict"] != "approved" for entry in entries):
+        raise ValueError("An approved review requires every reviewer's approval")
+    if require_approved and any(entry["verdict"] != "approved" for entry in entries):
+        raise ValueError("Review is not approved by every reviewer")
+    return ids
+
+
+def check_review(review: dict, bundle: dict, digest: str, *, require_approved: bool = True, allow_legacy: bool = False,
+                 reviewers: list[str] | None = None) -> None:
     """Shape and identity of a persisted review against its exact bundle; approval is checked only when required.
 
     `allow_legacy` accepts the two-lane `both` attribution of reviews recorded before configured lanes (export only).
+    `reviewers` is the run's declared reviewer list: the record must then list exactly those reviewers and tag every
+    finding with one of them. Without it (export), a record without `reviewers` is the single-reviewer shape.
     """
-    if (not isinstance(review, dict) or set(review) != REVIEW_KEYS or review["run_id"] != bundle["run_id"]
+    if (not isinstance(review, dict) or not REVIEW_KEYS <= set(review) <= REVIEW_KEYS | {"reviewers"} or review["run_id"] != bundle["run_id"]
             or review["bundle_sha256"] != digest or review["candidate_commit"] != bundle["candidate_commit"]):
         raise ValueError("Review must reference this exact run, bundle hash and candidate")
     worker_ids = {item["session_id"] for item in bundle["snapshots"].values()}
@@ -100,6 +149,11 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
         raise ValueError("Malformed review verdict or findings")
     if require_approved and review["verdict"] != "approved":
         raise ValueError("Review is not approved")
+    ids = None
+    if "reviewers" in review:
+        ids = check_reviewers(review["reviewers"], worker_ids, reviewers, review["verdict"], require_approved)
+    elif reviewers is not None and list(reviewers) != [DEFAULT_REVIEWER]:
+        raise ValueError(f"Review lacks the reviewers list this run requires ({', '.join(reviewers)})")
     # The bundle's snapshots are exactly the run's selected lanes.
     workers = set(bundle["snapshots"]) | (LEGACY_FINDING_ATTRIBUTIONS if allow_legacy else FINDING_ATTRIBUTIONS)
     for finding in review["findings"]:
@@ -112,8 +166,26 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
         requirement = finding.get("requirement")
         if requirement is not None and (not isinstance(requirement, str) or not requirement.strip()):
             raise ValueError("Malformed review finding requirement")
+        if ids is not None:
+            if finding.get("reviewer") not in ids:
+                raise ValueError(f"Review finding names reviewer {finding.get('reviewer')!r}; expected one of {', '.join(ids)}")
+        elif "reviewer" in finding and (not isinstance(finding["reviewer"], str) or not finding["reviewer"].strip()):
+            raise ValueError("Malformed review finding reviewer")
         if review["verdict"] == "approved" and blocking_findings([finding]):
             raise ValueError("Unresolved blocking review finding")
+
+
+def combine_imported_reviews(bundle: dict, digest: str, imports: dict) -> dict:
+    """Manual mode: one imported single-reviewer file per declared reviewer becomes the combined review.json record."""
+    entries, findings = [], []
+    for reviewer_id, item in imports.items():
+        review = item["review"]
+        entries.append({"reviewer_id": reviewer_id, "session_id": review["reviewer"], "verdict": review["verdict"], "accepted_at": item["imported_at"]})
+        findings.extend({**finding, "reviewer": reviewer_id} for finding in review["findings"])
+    blocked = any(item["review"]["verdict"] != "approved" or blocking_findings(item["review"]["findings"]) for item in imports.values())
+    return {"run_id": bundle["run_id"], "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
+            "reviewer": ", ".join(entry["session_id"] for entry in entries), "independent": True,
+            "verdict": "blocked" if blocked else "approved", "findings": findings, "reviewers": entries}
 
 
 def pid_alive(pid: int) -> bool:
@@ -216,39 +288,41 @@ class Pipeline:
         self.event(node, "interactive", "Awaiting explicit completion signal; idle is not acceptance")
         return receipt
 
-    def launch_reviewer(self, prompt: str, launch_token: str, candidate_commit: str) -> dict:
-        self.event(REVIEW, "running", "Launching the native reviewer session")
+    def launch_reviewer(self, reviewer_id: str, prompt: str, launch_token: str, candidate_commit: str) -> dict:
+        node = review_node(reviewer_id)
+        self.event(REVIEW, "running", f"Launching the native reviewer session {reviewer_id}")
         try:
-            receipt = self.sessions.run_reviewer(prompt, launch_token, candidate_commit)
+            receipt = self.sessions.run_reviewer(reviewer_id, prompt, launch_token, candidate_commit)
         except Exception as error:
-            self.event(REVIEW, "blocked", str(error))
+            self.event(REVIEW, "blocked", f"Reviewer {reviewer_id}: {error}")
             raise
-        self.event(REVIEW, "interactive", f"Reviewer session {receipt['session_id']} launched; awaiting review.completion.json")
+        self.event(REVIEW, "interactive", f"Reviewer {reviewer_id} session {receipt['session_id']} launched; awaiting {node}.completion.json")
         if (self.directory / "terminals.json").exists() and os.environ.get("HERDR_ENV") == "1":
             # The pane is a convenience for the operator; its absence never fails the review. The
             # session is launched by now, so a Ctrl-C here is recorded, then propagated as an
             # interruption (the review node keeps the running session), never as a launch failure.
             try:
                 attach_reviewer_panel(self.sessions)
-                self.event(REVIEW, "running", "Reviewer pane attached")
+                self.event(REVIEW, "running", f"Reviewer {reviewer_id} pane attached")
             except BaseException as error:
-                self.event(REVIEW, "running", f"Reviewer pane not attached: {str(error) or type(error).__name__}")
+                self.event(REVIEW, "running", f"Reviewer {reviewer_id} pane not attached: {str(error) or type(error).__name__}")
                 if not isinstance(error, Exception):
                     raise
         return receipt
 
-    def reconcile_reviewer(self) -> dict:
+    def reconcile_reviewer(self, reviewer_id: str = DEFAULT_REVIEWER) -> dict:
         """Bind the session an interrupted reviewer launch produced; nothing is launched."""
-        path = self.directory / "review.interactive.json"
+        node = review_node(reviewer_id)
+        path = self.directory / f"{node}.interactive.json"
         if not path.exists():
-            raise RuntimeError("No durable reviewer launch intent; cannot reconcile without potentially launching a new reviewer")
-        self.event(REVIEW, "running", "Reconciling the interrupted reviewer launch; nothing is relaunched")
+            raise RuntimeError(f"No durable launch intent for reviewer {reviewer_id}; cannot reconcile without potentially launching a new reviewer")
+        self.event(REVIEW, "running", f"Reconciling the interrupted launch of reviewer {reviewer_id}; nothing is relaunched")
         try:
-            receipt = self.sessions.reconcile(REVIEW, path, read_json(path))
+            receipt = self.sessions.reconcile(node, path, read_json(path))
         except Exception as error:
-            self.event(REVIEW, "blocked", str(error))
+            self.event(REVIEW, "blocked", f"Reviewer {reviewer_id}: {error}")
             raise
-        self.event(REVIEW, "interactive", f"Reviewer session {receipt['session_id']} reconciled; awaiting review.completion.json")
+        self.event(REVIEW, "interactive", f"Reviewer {reviewer_id} session {receipt['session_id']} reconciled; awaiting {node}.completion.json")
         return receipt
 
     def stop_session(self, node: str) -> None:
@@ -287,9 +361,9 @@ class Pipeline:
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")
         self.event("freeze", "stopped", f"Native workers stopped before snapshot capture: {', '.join(self.workers)}")
 
-    def stop_reviewer(self):
-        self.stop_session(REVIEW)
-        self.event(REVIEW, "stopped", "Reviewer session stopped; its transcript stays resumable")
+    def stop_reviewer(self, reviewer_id: str = DEFAULT_REVIEWER):
+        self.stop_session(review_node(reviewer_id))
+        self.event(REVIEW, "stopped", f"Reviewer {reviewer_id} session stopped; its transcript stays resumable")
 
     def freeze(self) -> dict:
         record = self.directory / "snapshots.json"
@@ -462,8 +536,9 @@ class Pipeline:
         return bundle, digest_file(path)
 
     def validate_review(self, review: dict, require_approved: bool = True) -> None:
+        """The combined record must name exactly this run's declared reviewers; approval needs every one of them."""
         bundle, digest = self.validate_bundle()
-        check_review(review, bundle, digest, require_approved=require_approved)
+        check_review(review, bundle, digest, require_approved=require_approved, reviewers=reviewer_ids(self.plan))
 
     def integrate(self, approved: str) -> str:
         bundle, digest = self.validate_bundle()
@@ -699,6 +774,9 @@ def main():
     parser.add_argument("--policy", type=Path)
     parser.add_argument("--workers", help="prepare: comma-separated subset of the policy's lanes to launch (default: every declared lane)")
     parser.add_argument("--task", action="append", metavar="LANE=PATH", help="prepare: task file for one selected lane; repeat once per lane")
+    parser.add_argument("--reviewer", action="append", metavar="ID[=PATH]",
+                        help="prepare: a declared reviewer and its brief file (repeat per reviewer; omitted means the single built-in reviewer). "
+                             "review: the reviewer id an imported review file belongs to")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--automatic", action="store_true", help="Prepare run-scoped permission bypass and automatic feature-branch completion")
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
@@ -754,7 +832,10 @@ def main():
                 node = worker["node_id"]
                 if node in selected:
                     tasks[node] = task_files[node].read_text() + "\nApproved ownership and checks:\n" + json.dumps(worker)
+            reviewers = parse_reviewer_files(args.reviewer, declared)
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
+            if reviewers:
+                plan["reviewers"] = reviewers
             drill = policy.get("failure_drill")
             drill_skipped = bool(drill) and drill["node_id"] not in selected
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
@@ -772,7 +853,8 @@ def main():
                 runtime.event("controller", "running", f"Failure drill skipped: its lane {drill['node_id']} is not selected for this run")
             export_state(runtime, SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in selected), tasks=[]))
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}. Lanes: {', '.join(selected)}"
-                  + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else ""))
+                  + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else "")
+                  + f". Reviewers: {', '.join(reviewer_ids(plan))}")
             return
         if args.action == "automatic":
             if not args.live:
@@ -824,15 +906,44 @@ def main():
                 elif args.action == "review":
                     if pending != ["independent_review"] or not args.review_file:
                         parser.error("Review requires pending review and --review-file")
-                    decision = read_json(args.review_file)
+                    declared = reviewer_ids(runtime.plan)
+                    reviewer_flags = args.reviewer or []
+                    if len(reviewer_flags) > 1 or any("=" in item for item in reviewer_flags):
+                        parser.error("review takes one --reviewer <id>")
+                    reviewer = reviewer_flags[0] if reviewer_flags else (declared[0] if len(declared) == 1 else None)
+                    if reviewer is None:
+                        parser.error(f"--reviewer <id> is required: this run declares the reviewers {', '.join(declared)}")
+                    if reviewer not in declared:
+                        parser.error(f"--reviewer must be one of this run's reviewers ({', '.join(declared)}), got {reviewer!r}")
+                    imported = read_json(args.review_file)
+                    if isinstance(imported, dict) and "reviewers" in imported:
+                        parser.error("--review-file is one reviewer's review (no reviewers list); the controller combines the imports")
+                    bundle, digest = runtime.validate_bundle()
+                    check_review(imported, bundle, digest)  # One reviewer's approved review, bound to the exact bundle.
+                    save_json(directory / f"{review_node(reviewer)}.imported.json", {"reviewer_id": reviewer, "imported_at": now(), "review": imported})
+                    imports = {}
+                    for item in declared:
+                        path = directory / f"{review_node(item)}.imported.json"
+                        if path.exists():
+                            imports[item] = read_json(path)
+                    missing = [item for item in declared if item not in imports]
+                    if missing:
+                        print(f"Imported the {reviewer} review; still waiting for: {', '.join(missing)}. The run stays at the review gate.")
+                        return
+                    decision = combine_imported_reviews(bundle, digest, imports)
                     runtime.validate_review(decision)
                     value = Command(resume=decision)
                 elif args.action == "approve":
+                    if pending == ["independent_review"]:
+                        imported = [item for item in reviewer_ids(runtime.plan) if (directory / f"{review_node(item)}.imported.json").exists()]
+                        parser.error("Run is waiting for independent review: approve needs every declared reviewer imported and approved "
+                                     f"(reviewers: {', '.join(reviewer_ids(runtime.plan))}; imported: {', '.join(imported) or 'none'})")
                     if pending != ["integration_approval"]:
                         parser.error("Run is not waiting for integration approval")
                     _, digest = runtime.validate_bundle()
                     if args.bundle_sha256 != digest:
                         parser.error("Provide the exact --bundle-sha256 displayed at approval")
+                    runtime.validate_review(read_json(directory / "review.json"))  # Every declared reviewer approved.
                     value = Command(resume={"approve": digest})
                 elif args.action == "reconcile":
                     if pending or not state.next or not any(step.startswith("launch_") for step in state.next):

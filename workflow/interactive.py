@@ -18,9 +18,22 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from .observer import herdr
-from .sessions import ClaudeSessions, SessionState, git, plan_digest, prepare, read_json, run_lock, save_json
+from .sessions import ClaudeSessions, SessionState, git, plan_digest, prepare, read_json, review_node, review_nodes, reviewer_of_node, run_lock, save_json
 
 REVIEW = "review"
+
+
+def is_review_node(node: str) -> bool:
+    return node == REVIEW or node.startswith("review-")
+
+
+def pane_label(node: str) -> str:
+    """`Claude: <lane>`, `Claude: reviewer` for the default reviewer, `Claude: reviewer <id>` for a declared one."""
+    if node == REVIEW:
+        return "Claude: reviewer"
+    if node.startswith("review-"):
+        return f"Claude: reviewer {node[len('review-'):]}"
+    return f"Claude: {node}"
 
 
 class InteractiveSessions(ClaudeSessions):
@@ -35,11 +48,16 @@ class InteractiveSessions(ClaudeSessions):
         return rows
 
     def launch_name(self, node: str) -> str:
-        return f"workflow-{self.plan['run_id']}-{'reviewer' if node == REVIEW else node}"
+        """`workflow-<run>-<lane>`, `workflow-<run>-reviewer` for the default reviewer, `workflow-<run>-reviewer-<id>` otherwise."""
+        if node == REVIEW:
+            return f"workflow-{self.plan['run_id']}-reviewer"
+        if node.startswith("review-"):
+            return f"workflow-{self.plan['run_id']}-reviewer-{node[len('review-'):]}"
+        return f"workflow-{self.plan['run_id']}-{node}"
 
     def node_worktree(self, node: str) -> Path:
-        """Workers live in the plan's worktrees; the reviewer in the run's candidate checkout."""
-        if node == REVIEW:
+        """Workers live in the plan's worktrees; every reviewer in the run's shared candidate checkout."""
+        if is_review_node(node):
             return self.directory / "review-worktree"
         return Path(self.plan["nodes"][node]["worktree"])
 
@@ -188,48 +206,49 @@ class InteractiveSessions(ClaudeSessions):
         command.append(prompt)
         return self.launch(node, path, receipt, command, cwd)
 
-    def run_reviewer(self, prompt: str, launch_token: str, candidate_commit: str) -> dict:
-        """Launch (or reconcile) the one native reviewer session for this candidate.
+    def run_reviewer(self, reviewer_id: str, prompt: str, launch_token: str, candidate_commit: str) -> dict:
+        """Launch (or reconcile) one native reviewer session for this candidate.
 
-        The reviewer reads the candidate checkout and the run directory; its only
-        permitted write is the completion file the controller later validates.
+        Every reviewer reads the same candidate checkout and the run directory; its only
+        permitted write is its own completion file, which the controller later validates.
         """
         if self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive run plan")
-        path = self.directory / "review.interactive.json"
+        node = review_node(reviewer_id)
+        path = self.directory / f"{node}.interactive.json"
         if path.exists():
-            return self.reconcile(REVIEW, path, read_json(path))
-        cwd = self.node_worktree(REVIEW)
+            return self.reconcile(node, path, read_json(path))
+        cwd = self.node_worktree(node)
         if not cwd.is_dir():
             raise RuntimeError("Review worktree is missing; the review node creates it before launching a reviewer")
         if git(cwd, "rev-parse", "HEAD") != candidate_commit or git(cwd, "status", "--porcelain"):
             raise RuntimeError("Review worktree is not at the clean candidate commit")
-        if any(row.get("name") == self.launch_name(REVIEW) for row in self.inventory()):
+        if any(row.get("name") == self.launch_name(node) for row in self.inventory()):
             raise RuntimeError("Unowned session already exists with this launch name")
-        receipt = {"node_id": REVIEW, "session_id": None, "launch_token": launch_token, "plan_digest": plan_digest(self.plan),
+        receipt = {"node_id": node, "session_id": None, "launch_token": launch_token, "plan_digest": plan_digest(self.plan),
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"], "candidate_commit": candidate_commit,
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
         save_json(path, receipt)
-        write_private(self.directory / "review.prompt.txt", prompt)
+        write_private(self.directory / f"{node}.prompt.txt", prompt)
         # Claude permission rules spell absolute paths as //absolute/path, and file writes are
         # governed by the Edit rule family (Write, Edit, NotebookEdit): under dontAsk a rule
         # spelled Write(...) never matches and every write is denied (seen live), while
         # Edit(//<path>) allows exactly that file and keeps every other write denied.
-        completion = str(self.directory / "review.completion.json").lstrip("/")
+        completion = str(self.directory / f"{node}.completion.json").lstrip("/")
         # --tools, --allowedTools and --add-dir are variadic: any of them directly before the
         # positional prompt would swallow it (the session would start idle, without a task).
         # The prompt therefore follows --permission-mode, which takes exactly one value.
-        command = [self.executable, "--bg", "--name", self.launch_name(REVIEW),
+        command = [self.executable, "--bg", "--name", self.launch_name(node),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", "Read,Glob,Grep,Write", "--allowedTools", f"Edit(//{completion})",
                    "--add-dir", str(self.directory), "--permission-mode", "dontAsk", prompt]
-        return self.launch(REVIEW, path, receipt, command, cwd)
+        return self.launch(node, path, receipt, command, cwd)
 
     def status(self) -> dict:
         rows = self.inventory()
         result = {}
-        nodes = [*self.workers] + ([REVIEW] if (self.directory / "review.interactive.json").exists() else [])
+        nodes = [*self.workers] + [node for node in review_nodes(self.plan) if (self.directory / f"{node}.interactive.json").exists()]
         for node in nodes:
             path = self.directory / f"{node}.interactive.json"
             row = self.locate(node, rows)
@@ -296,10 +315,11 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
     directory = sessions.directory
     mapping_path = directory / "terminals.json"
     workers = list(sessions.workers)
+    reviewers = review_nodes(sessions.plan)
     if mapping_path.exists():
         mapping = read_json(mapping_path)
-        if set(workers) <= set(mapping) and REVIEW not in mapping and (directory / "review.interactive.json").exists():
-            # The workers' tab exists and the reviewer appeared after it: add only the reviewer pane.
+        if set(workers) <= set(mapping) and any(node not in mapping and (directory / f"{node}.interactive.json").exists() for node in reviewers):
+            # The workers' tab exists and a reviewer appeared after it: add only the missing reviewer panes.
             return attach_reviewer_panel(sessions)
         raise RuntimeError("Terminal mappings already exist; use attach-one inside an available terminal to reconnect")
     rows = sessions.inventory()
@@ -341,21 +361,24 @@ def attach_panels(sessions: InteractiveSessions, reuse_observers: Path | None = 
             split = herdr("pane", "split", "--pane", mapping[previous]["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
             mapping[node] = {"pane_id": split["pane"]["pane_id"], "tab_id": tab_id, "mode": "allocated"}
             save_json(mapping_path, mapping)
-    # A reviewer that already exists (attach after the review node started) gets its pane now;
-    # otherwise the review node adds it through attach_reviewer_panel when it launches.
-    if (directory / "review.interactive.json").exists() and sessions.locate(REVIEW, rows) is not None:
-        allocate_reviewer_pane(sessions, mapping, mapping_path)
+    # Reviewers that already exist (attach after the review node started) get their panes now, in declared
+    # order; otherwise the review node adds them through attach_reviewer_panel as it launches them.
+    for node in reviewers:
+        if (directory / f"{node}.interactive.json").exists() and sessions.locate(node, rows) is not None:
+            allocate_reviewer_pane(sessions, mapping, mapping_path, node)
     for node, entry in mapping.items():
         attach_pane(sessions, mapping, mapping_path, node, sessions.locate(node, rows)["sessionId"])
     return mapping
 
 
-def allocate_reviewer_pane(sessions: InteractiveSessions, mapping: dict, mapping_path: Path) -> None:
-    """The reviewer pane splits right of the last lane's pane."""
+def allocate_reviewer_pane(sessions: InteractiveSessions, mapping: dict, mapping_path: Path, node: str = REVIEW) -> None:
+    """A reviewer pane splits right of the previous pane: the last lane's for the first reviewer, then each reviewer's predecessor."""
     source = Path(__file__).resolve().parents[1]
-    last = mapping[sessions.workers[-1]]
+    reviewers = review_nodes(sessions.plan)
+    earlier = [item for item in reviewers[:reviewers.index(node)] if item in mapping] if node in reviewers else []
+    last = mapping[earlier[-1] if earlier else sessions.workers[-1]]
     split = herdr("pane", "split", "--pane", last["pane_id"], "--direction", "right", "--cwd", str(source), "--no-focus")["result"]
-    mapping[REVIEW] = {"pane_id": split["pane"]["pane_id"], "tab_id": last["tab_id"], "mode": "allocated"}
+    mapping[node] = {"pane_id": split["pane"]["pane_id"], "tab_id": last["tab_id"], "mode": "allocated"}
     save_json(mapping_path, mapping)
 
 
@@ -363,7 +386,7 @@ def attach_pane(sessions: InteractiveSessions, mapping: dict, mapping_path: Path
     source = Path(__file__).resolve().parents[1]
     entry = mapping[node]
     require_shell(entry["pane_id"])
-    herdr("pane", "rename", entry["pane_id"], f"Claude: {'reviewer' if node == REVIEW else node}")
+    herdr("pane", "rename", entry["pane_id"], pane_label(node))
     # Re-check identity in the actual attachment process immediately before exec.
     command = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(sessions.directory), "--node", node])
     command = f"cd {shlex.quote(str(source))} && {command}"
@@ -373,7 +396,7 @@ def attach_pane(sessions: InteractiveSessions, mapping: dict, mapping_path: Path
 
 
 def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
-    """Add the `Claude: reviewer` pane beside the workers' panes once the reviewer session exists."""
+    """Add a `Claude: reviewer <id>` pane beside the workers' panes for every launched reviewer that has none yet, in declared order."""
     directory = sessions.directory
     mapping_path = directory / "terminals.json"
     if not mapping_path.exists():
@@ -381,19 +404,22 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
     mapping = read_json(mapping_path)
     if not set(sessions.workers) <= set(mapping):
         raise RuntimeError("Terminal mappings lack the worker panes; refusing to add a reviewer pane")
-    if REVIEW in mapping:
-        raise RuntimeError("Reviewer pane already allocated; use attach-one --node review inside an available terminal to reconnect")
-    receipt_path = directory / "review.interactive.json"
-    if not receipt_path.exists():
+    reviewers = review_nodes(sessions.plan)
+    launched = [node for node in reviewers if (directory / f"{node}.interactive.json").exists()]
+    if not launched:
         raise RuntimeError("No reviewer session receipt; nothing to attach")
-    if read_json(receipt_path)["plan_digest"] != plan_digest(sessions.plan):
-        raise RuntimeError("Plan changed; cannot attach the reviewer")
+    missing = [node for node in launched if node not in mapping]
+    if not missing:
+        raise RuntimeError(f"Reviewer pane already allocated; use attach-one --node {launched[-1]} inside an available terminal to reconnect")
     rows = sessions.inventory()
-    row = sessions.locate(REVIEW, rows)
-    if row is None:
-        raise RuntimeError("Cannot attach an unverified/missing reviewer session")
-    allocate_reviewer_pane(sessions, mapping, mapping_path)
-    attach_pane(sessions, mapping, mapping_path, REVIEW, row["sessionId"])
+    for node in missing:
+        if read_json(directory / f"{node}.interactive.json")["plan_digest"] != plan_digest(sessions.plan):
+            raise RuntimeError("Plan changed; cannot attach the reviewer")
+        row = sessions.locate(node, rows)
+        if row is None:
+            raise RuntimeError(f"Cannot attach an unverified/missing reviewer session ({node})")
+        allocate_reviewer_pane(sessions, mapping, mapping_path, node)
+        attach_pane(sessions, mapping, mapping_path, node, row["sessionId"])
     return mapping
 
 
@@ -408,7 +434,7 @@ def main():
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--reuse-observers", type=Path)
-    parser.add_argument("--node", help="attach-one: a worker lane of the run, or review")
+    parser.add_argument("--node", help="attach-one: a worker lane of the run, or a reviewer node (review, or review-<id>)")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -431,8 +457,8 @@ def main():
         if args.action == "attach-one":
             if not args.node or not sys.stdin.isatty():
                 parser.error("attach-one requires --node and an interactive terminal")
-            if args.node not in sessions.workers and args.node != REVIEW:
-                parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or review")
+            if args.node not in sessions.workers and args.node not in review_nodes(sessions.plan):
+                parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or {', '.join(review_nodes(sessions.plan))}")
             receipt = read_json(directory / f"{args.node}.interactive.json")
             if receipt["plan_digest"] != plan_digest(sessions.plan):
                 raise RuntimeError("Plan changed; cannot attach")

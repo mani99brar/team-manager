@@ -5,6 +5,8 @@ const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
 const version = z.literal('1.0.0')
 /** Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs) and 1.3.0 (configured worker lanes). */
 const version130 = z.literal('1.3.0')
+/** The review result since 1.4.0 (parallel reviewers): `reviewers` per reviewer and `reviewer` on every finding. */
+const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
 const commit = z.string().regex(/^[a-f0-9]{40}$/)
 const timestamp = z.iso.datetime()
@@ -45,7 +47,7 @@ export const runDetailSchema = z.strictObject({
   snapshot: runSnapshotSchema,
 })
 
-// ---- Review results (1.1.0, finding links added in 1.2.0, lanes from configuration in 1.3.0) ------------------
+// ---- Review results (1.1.0, finding links 1.2.0, lanes from configuration 1.3.0, parallel reviewers 1.4.0) ----
 
 /**
  * A worker lane ID as the verification policy declares it (`contracts/workflow/verification.schema.json` 1.2.0):
@@ -56,6 +58,20 @@ export const LANE_ID_PATTERN = /^[a-z][a-z0-9-]{0,31}$/
 export const laneId = z.string().regex(LANE_ID_PATTERN)
 /** Finding attributions that are not lane IDs. `both` is never written any more but is accepted from old exports. */
 export const FINDING_ATTRIBUTIONS = ['multiple', 'none', 'both'] as const
+
+/**
+ * A reviewer ID as `features/<name>/feature.json` 2.1.0 declares it (same shape as a lane ID). A run without declared
+ * reviewers, and every export recorded before 1.4.0, has exactly one reviewer named `review`.
+ */
+export const reviewerId = laneId
+export const DEFAULT_REVIEWER_ID = 'review'
+export const REVIEW_TRANSPORTS = ['native', 'print', 'manual'] as const
+/**
+ * What became of one reviewer: `accepted` (its file was accepted; with an approved verdict it is part of the approval),
+ * `blocked` (its verdict, an unresolved P0/P1, a rejected file or its deadline blocked the run), `superseded` (the run was
+ * decided while it was still working, and it was stopped) or `pending` (no verdict recorded yet).
+ */
+export const REVIEWER_STATUSES = ['accepted', 'blocked', 'superseded', 'pending'] as const
 
 /** One reviewer finding. `worker`/`requirement` are null for reviews recorded before the reviewer prompt asked for them. */
 export const reviewFindingSchema = z.strictObject({
@@ -68,26 +84,50 @@ export const reviewFindingSchema = z.strictObject({
   requirement: z.string().min(1).nullable(),
   /** The worker lanes whose task text contains `requirement` verbatim; the backend never guesses a match. */
   requirement_found_in: z.array(laneId),
+  /** The reviewer that reported it: one of `reviewers[].reviewer_id` (`review` for a single-reviewer run). Duplicates across reviewers are kept, never merged. */
+  reviewer: reviewerId,
+})
+
+/** One reviewer of the review node (1.4.0). Findings are unioned in the combined list; this entry repeats the reviewer's own. */
+export const reviewerEntrySchema = z.strictObject({
+  reviewer_id: reviewerId,
+  /** The run-wide transport; every reviewer of a run uses the same one. */
+  transport: z.enum(REVIEW_TRANSPORTS),
+  /** The Claude session UUID (native/print) or the operator-stated identity (manual); null only when the reviewer never got a session. */
+  session_id: z.string().min(1).nullable(),
+  /** The reviewer's own verdict; null when it produced none (deadline, superseded, or still working). */
+  verdict: z.enum(['approved', 'blocked']).nullable(),
+  findings: z.array(reviewFindingSchema),
+  launched_at: timestamp.nullable(),
+  accepted_at: timestamp.nullable(),
+  status: z.enum(REVIEWER_STATUSES),
 })
 
 /** The persisted verdict of a run's review node, served at `.../runs/{run_id}/reviews/{attempt}`. */
 export const reviewResultSchema = z.strictObject({
-  contract_version: version130,
+  contract_version: version140,
   run_id: id,
   node_id: z.literal('review'),
   attempt: z.number().int().positive(),
   reviewer: z.strictObject({
-    /** Native/print reviews: the Claude session UUID. Manual reviews: the operator-stated reviewer identity. */
+    /**
+     * Native/print reviews: the Claude session UUID. Manual reviews: the operator-stated reviewer identity. With several
+     * reviewers the combined record lists every session, comma-separated; `reviewers` is the per-reviewer record.
+     */
     session_id: z.string().min(1),
-    transport: z.enum(['native', 'print', 'manual']),
+    transport: z.enum(REVIEW_TRANSPORTS),
     independent: z.literal(true),
   }),
   bundle_sha256: revision,
   candidate_commit: commit,
+  /** Unanimous: `approved` only when every reviewer approved without an unresolved P0/P1. */
   verdict: z.enum(['approved', 'blocked']),
+  /** The union of every reviewer's findings, each tagged with its `reviewer`. */
   findings: z.array(reviewFindingSchema),
+  /** Every reviewer of the run in declared order; exactly one entry named `review` for runs without declared reviewers and for exports before 1.4.0. */
+  reviewers: z.array(reviewerEntrySchema).min(1),
   reviewed_at: timestamp,
-  /** The diff the reviewer saw (`review.diff`), registered as a bounded patch artifact of the run, when present. */
+  /** The diff the reviewers saw (`review.diff`), registered as a bounded patch artifact of the run, when present. */
   diff: artifactSchema.nullable(),
 })
 
@@ -172,6 +212,7 @@ export type WorkflowDefinition = z.infer<typeof definitionSchema>
 export type RunSummary = z.infer<typeof runSummarySchema>
 export type RunDetail = z.infer<typeof runDetailSchema>
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>
+export type ReviewerEntry = z.infer<typeof reviewerEntrySchema>
 export type ReviewResult = z.infer<typeof reviewResultSchema>
 export type RunInputWorker = z.infer<typeof runInputWorkerSchema>
 export type RunInputs = z.infer<typeof runInputsSchema>
@@ -224,7 +265,20 @@ export function validateReviewResult(input: unknown): ReviewResult {
   if (result.verdict === 'approved' && result.findings.some(isBlockingFinding))
     throw new Error('An approved review cannot carry an unresolved P0/P1 finding')
   if (result.diff !== null && result.diff.kind !== 'patch') throw new Error('The review diff must be a patch artifact')
+  const reviewerIds = result.reviewers.map(entry => entry.reviewer_id)
+  if (new Set(reviewerIds).size !== reviewerIds.length) throw new Error('Duplicate reviewer IDs')
+  const sessions = result.reviewers.map(entry => entry.session_id).filter(session => session !== null)
+  if (new Set(sessions).size !== sessions.length) throw new Error('Reviewers must be distinct sessions')
+  if (result.reviewers.some(entry => entry.transport !== result.reviewer.transport)) throw new Error('Every reviewer uses the run-wide transport')
+  if (result.verdict === 'approved' && result.reviewers.some(entry => entry.verdict !== 'approved')) throw new Error('An approved review requires every reviewer\'s approval')
+  for (const entry of result.reviewers) {
+    if (entry.verdict === 'approved' && entry.findings.some(isBlockingFinding) && result.verdict === 'approved') throw new Error(`Reviewer ${entry.reviewer_id} approved with an unresolved P0/P1 finding`)
+    if (entry.status === 'accepted' && entry.verdict === null) throw new Error(`Reviewer ${entry.reviewer_id} was accepted without a verdict`)
+    const own = result.findings.filter(finding => finding.reviewer === entry.reviewer_id)
+    if (JSON.stringify(own) !== JSON.stringify(entry.findings)) throw new Error(`Reviewer ${entry.reviewer_id} findings differ from the combined list`)
+  }
   for (const finding of result.findings) {
+    if (!reviewerIds.includes(finding.reviewer)) throw new Error(`Finding names reviewer "${finding.reviewer}", which is not a reviewer of this review`)
     if (new Set(finding.requirement_found_in).size !== finding.requirement_found_in.length) throw new Error('Duplicate requirement match lanes')
     if (finding.requirement === null && finding.requirement_found_in.length > 0) throw new Error('A finding without a requirement quote cannot match a task')
     if (finding.requirement_found_in.some(lane => (FINDING_ATTRIBUTIONS as readonly string[]).includes(lane))) throw new Error('Requirement matches name lanes, not attributions')

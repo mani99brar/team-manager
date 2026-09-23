@@ -1,4 +1,4 @@
-import type { ReviewResult, RunDetail, RunInputs } from './v1.js'
+import type { ReviewFinding, ReviewResult, RunDetail, RunInputs } from './v1.js'
 
 export const runDetail: RunDetail = {
   summary: {
@@ -30,24 +30,45 @@ export const runList = { runs: [runDetail.summary], next_cursor: null }
 
 const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Show every finding with severity and disposition.\n\nApproved ownership and checks:\n{"node_id": "ui"}'
 
-/** A recorded review with one open finding linked to the UI task, one cross-cutting finding without a quote and one naming several lanes. */
+const GENERAL_FINDINGS: ReviewFinding[] = [
+  {
+    severity: 'P2', message: 'The findings table omits the disposition column on narrow screens.', disposition: 'open',
+    worker: 'ui', requirement: 'Show every finding with severity and disposition.', requirement_found_in: ['ui'], reviewer: 'general',
+  },
+  {
+    severity: 'P2', message: 'The root Playwright suite is not part of the policy check set.', disposition: 'accepted',
+    worker: 'none', requirement: null, requirement_found_in: [], reviewer: 'general',
+  },
+]
+const COVERAGE_FINDINGS: ReviewFinding[] = [
+  {
+    severity: 'P2', message: 'The review route and its panel disagree about the attempt number.', disposition: 'resolved',
+    worker: 'multiple', requirement: null, requirement_found_in: [], reviewer: 'coverage',
+  },
+  {
+    severity: 'P2', message: 'The findings table omits the disposition column on narrow screens.', disposition: 'open',
+    worker: 'ui', requirement: 'Show every finding with severity and disposition.', requirement_found_in: ['ui'], reviewer: 'coverage',
+  },
+]
+
+/**
+ * A recorded review by two reviewers (`general` and `coverage`) over the same bundle: both approved, the combined list is the
+ * union of their findings tagged by reviewer (the same defect reported twice is kept twice), and `reviewers` records each one.
+ */
 export const reviewResult: ReviewResult = {
-  contract_version: '1.3.0', run_id: 'run-001', node_id: 'review', attempt: 1,
-  reviewer: { session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01', transport: 'native', independent: true },
+  contract_version: '1.4.0', run_id: 'run-001', node_id: 'review', attempt: 1,
+  reviewer: { session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01, 7a1d9c02-4b3e-4f60-9d21-0c8e5f6a7b02', transport: 'native', independent: true },
   bundle_sha256: 'b'.repeat(64), candidate_commit: 'c'.repeat(40),
   verdict: 'approved',
-  findings: [
+  findings: [...GENERAL_FINDINGS, ...COVERAGE_FINDINGS],
+  reviewers: [
     {
-      severity: 'P2', message: 'The findings table omits the disposition column on narrow screens.', disposition: 'open',
-      worker: 'ui', requirement: 'Show every finding with severity and disposition.', requirement_found_in: ['ui'],
+      reviewer_id: 'general', transport: 'native', session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01', verdict: 'approved', findings: GENERAL_FINDINGS,
+      launched_at: '2026-01-01T12:10:00Z', accepted_at: '2026-01-01T12:28:00Z', status: 'accepted',
     },
     {
-      severity: 'P2', message: 'The root Playwright suite is not part of the policy check set.', disposition: 'accepted',
-      worker: 'none', requirement: null, requirement_found_in: [],
-    },
-    {
-      severity: 'P2', message: 'The review route and its panel disagree about the attempt number.', disposition: 'resolved',
-      worker: 'multiple', requirement: null, requirement_found_in: [],
+      reviewer_id: 'coverage', transport: 'native', session_id: '7a1d9c02-4b3e-4f60-9d21-0c8e5f6a7b02', verdict: 'approved', findings: COVERAGE_FINDINGS,
+      launched_at: '2026-01-01T12:10:05Z', accepted_at: '2026-01-01T12:30:00Z', status: 'accepted',
     },
   ],
   reviewed_at: '2026-01-01T12:30:00Z',

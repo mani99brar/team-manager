@@ -93,7 +93,7 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   assert.deepEqual(committed.workers.map((item: { node_id: string; required_check_kinds: string[] }) => [item.node_id, item.required_check_kinds]), [['ui', ['build', 'browser']], ['adapter', ['unit']]])
 })
 
-test('feature file 2.0.0 declares every lane with its task file', () => {
+test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the reviewers and their briefs', () => {
   const feature = handWritten('feature')
   const committed = readJson('../../features/project-workflows/feature.json')
   feature.parse(committed)
@@ -107,17 +107,39 @@ test('feature file 2.0.0 declares every lane with its task file', () => {
   reject('reserved lane', value => { value.workers[0].node_id = 'review' })
   reject('blank task', value => { value.workers[0].task = '' })
   reject('unknown key', value => { value.workers[0].role = 'frontend' })
+  // 2.1.0: reviewers with the same id rules as lanes; a file without them still validates (the built-in reviewer).
+  const reviewed = { ...structuredClone(committed), version: '2.1.0', reviewers: [{ reviewer_id: 'general', prompt: 'reviewers/general.md' }, { reviewer_id: 'coverage', prompt: 'reviewers/coverage.md' }] }
+  feature.parse(reviewed)
+  feature.parse({ ...structuredClone(committed), version: '2.1.0' })
+  const rejectReviewed = (label: string, mutate: (value: typeof reviewed) => void) => {
+    const value = structuredClone(reviewed)
+    mutate(value)
+    assert.equal(feature.safeParse(value).success, false, label)
+  }
+  rejectReviewed('no reviewers', value => { value.reviewers = [] })
+  rejectReviewed('blank brief', value => { value.reviewers[0].prompt = '' })
+  rejectReviewed('unknown reviewer key', value => { (value.reviewers[0] as Record<string, unknown>).transport = 'print' })
+  for (const bad of ['review', 'review-x', 'multiple', 'none', 'both', 'launch_x', 'General', '1general', '', 'a'.repeat(33)]) {
+    rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
+  }
+  assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0'])
 })
 
-test('review completion 1.1.0 attributes a finding to a lane id, multiple or none, never both', () => {
+test('review completion 1.2.0 binds a file to one reviewer node and attributes findings to a lane id, multiple or none, never both', () => {
   const completion = handWritten('reviewCompletion')
   const base = {
-    version: '1.1.0', run_id: 'run-001', node_id: 'review', launch_token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    version: '1.2.0', run_id: 'run-001', node_id: 'review', launch_token: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     bundle_sha256: 'b'.repeat(64), candidate_commit: 'c'.repeat(40), verdict: 'approved', findings: [] as Record<string, unknown>[],
   }
-  const withWorker = (worker: string, version = '1.1.0') => ({ ...base, version, findings: [{ severity: 'P2', message: 'x', disposition: 'open', worker, requirement: null }] })
+  const withWorker = (worker: string, version = '1.2.0') => ({ ...base, version, findings: [{ severity: 'P2', message: 'x', disposition: 'open', worker, requirement: null }] })
   for (const worker of ['ui', 'adapter', 'docs', 'multiple', 'none']) completion.parse(withWorker(worker))
   completion.parse(withWorker('docs', '1.0.0'))
+  completion.parse(withWorker('docs', '1.1.0'))
   for (const worker of ['both', 'review', 'candidate', 'review-x', 'launch_x', 'Docs', '']) assert.equal(completion.safeParse(withWorker(worker)).success, false, worker)
   assert.equal(completion.safeParse({ ...base, version: '2.0.0' }).success, false)
+  // The node id names the reviewer: the default `review`, or `review-<reviewer_id>` for a declared reviewer.
+  for (const node_id of ['review', 'review-general', 'review-coverage', 'review-a', `review-${'a'.repeat(32)}`]) completion.parse({ ...base, node_id })
+  for (const node_id of ['reviewer', 'review-', 'review-General', `review-${'a'.repeat(33)}`, 'ui', 'candidate', '']) assert.equal(completion.safeParse({ ...base, node_id }).success, false, node_id)
+  assert.equal(readJson('./reviewCompletion.schema.json').properties.node_id.pattern, '^review(-[a-z0-9-]{1,32})?$')
 })

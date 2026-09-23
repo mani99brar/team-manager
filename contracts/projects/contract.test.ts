@@ -59,14 +59,16 @@ test('project identifiers are opaque keys, never filesystem paths', () => {
 test('review results: legacy findings without links, blocked verdicts, and the blocking rule', () => {
   // Findings recorded before the reviewer prompt asked for worker/requirement export with nulls and no links.
   const legacy = structuredClone(examples.reviewResult)
-  legacy.findings = [{ severity: 'P2', message: 'Legacy finding', disposition: 'open', worker: null, requirement: null, requirement_found_in: [] }]
+  legacy.findings = [{ severity: 'P2', message: 'Legacy finding', disposition: 'open', worker: null, requirement: null, requirement_found_in: [], reviewer: 'review' }]
   legacy.diff = null
   legacy.reviewer = { session_id: 'operator@example', transport: 'manual', independent: true }
+  legacy.reviewers = [{ reviewer_id: 'review', transport: 'manual', session_id: 'operator@example', verdict: 'approved', findings: legacy.findings, launched_at: null, accepted_at: legacy.reviewed_at, status: 'accepted' }]
   validateReviewResult(legacy)
   // A blocked verdict may carry unresolved P1 findings; an approved one may not.
   const blocked = structuredClone(examples.reviewResult)
   blocked.verdict = 'blocked'
   blocked.findings[0] = { ...blocked.findings[0], severity: 'P1', disposition: 'open' }
+  blocked.reviewers[0].findings[0] = blocked.findings[0]
   assert.ok(isBlockingFinding(blocked.findings[0]))
   assert.equal(validateReviewResult(blocked).verdict, 'blocked')
   const contradictory = structuredClone(blocked)
@@ -74,34 +76,81 @@ test('review results: legacy findings without links, blocked verdicts, and the b
   assert.throws(() => validateReviewResult(contradictory), /unresolved P0\/P1/)
   const resolved = structuredClone(contradictory)
   resolved.findings[0].disposition = 'resolved'
+  resolved.reviewers[0].findings[0].disposition = 'resolved'
   validateReviewResult(resolved)
+})
+
+test('review results 1.4.0: every reviewer is listed, findings are tagged by reviewer, and approval is unanimous', () => {
+  const example = examples.reviewResult
+  assert.equal(example.contract_version, '1.4.0')
+  assert.deepEqual(example.reviewers.map(entry => entry.reviewer_id), ['general', 'coverage'])
+  assert.deepEqual(example.findings.map(finding => finding.reviewer), ['general', 'general', 'coverage', 'coverage'])
+  // The same defect reported by two reviewers is kept twice, never merged.
+  assert.equal(example.findings[0].message, example.findings[3].message)
+  // One reviewer blocks: the combined verdict is blocked while the other reviewer's approval is retained.
+  const oneBlocks = structuredClone(example)
+  oneBlocks.verdict = 'blocked'
+  oneBlocks.reviewers[1].verdict = 'blocked'
+  oneBlocks.reviewers[1].status = 'blocked'
+  assert.equal(validateReviewResult(oneBlocks).reviewers[0].verdict, 'approved')
+  // A reviewer that never produced a verdict (deadline, superseded) is listed with nulls and the run is blocked.
+  const timedOut = structuredClone(example)
+  timedOut.verdict = 'blocked'
+  timedOut.reviewers[1] = { ...timedOut.reviewers[1], verdict: null, accepted_at: null, status: 'blocked', findings: [] }
+  timedOut.findings = timedOut.findings.filter(finding => finding.reviewer !== 'coverage')
+  validateReviewResult(timedOut)
+  const superseded = structuredClone(timedOut)
+  superseded.reviewers[1].status = 'superseded'
+  validateReviewResult(superseded)
+  const cases: [string, (result: typeof example) => void][] = [
+    ['approved while a reviewer blocked', result => { result.reviewers[1].verdict = 'blocked' }],
+    ['approved while a reviewer has no verdict', result => { result.reviewers[1].verdict = null; result.reviewers[1].status = 'pending' }],
+    ['no reviewers', result => { result.reviewers = [] }],
+    ['duplicate reviewer', result => { result.reviewers[1].reviewer_id = 'general' }],
+    ['shared session', result => { result.reviewers[1].session_id = result.reviewers[0].session_id }],
+    ['finding from an unknown reviewer', result => { result.findings[0].reviewer = 'security' }],
+    ['reviewer findings differ from the combined list', result => { result.reviewers[0].findings = [] }],
+    ['accepted without a verdict', result => { result.verdict = 'blocked'; result.reviewers[1].verdict = null; result.reviewers[1].findings = []; result.findings = result.findings.slice(0, 2) }],
+    ['per-reviewer transport differs', result => { result.reviewers[1].transport = 'print' }],
+    ['unknown reviewer status', result => { (result.reviewers[0] as Record<string, unknown>).status = 'running' }],
+    ['reviewer id that is not an id', result => { result.reviewers[0].reviewer_id = 'General'; for (const finding of result.reviewers[0].findings) finding.reviewer = 'General'; result.findings[0].reviewer = 'General'; result.findings[1].reviewer = 'General' }],
+    ['finding without a reviewer', result => { delete (result.findings[0] as Record<string, unknown>).reviewer }],
+    ['old contract version', result => { (result as Record<string, unknown>).contract_version = '1.3.0' }],
+  ]
+  for (const [label, mutate] of cases) {
+    const result = structuredClone(example)
+    mutate(result)
+    assert.throws(() => validateReviewResult(result), label)
+  }
 })
 
 test('review findings name any configured lane, multiple, none or the legacy both', () => {
   for (const worker of ['docs', 'contracts-lane', 'multiple', 'none', 'both', null]) {
     const result = structuredClone(examples.reviewResult)
     result.findings[1].worker = worker
+    result.reviewers[0].findings[1].worker = worker
     assert.equal(validateReviewResult(result).findings[1].worker, worker)
   }
   const linked = structuredClone(examples.reviewResult)
   linked.findings[0].worker = 'docs'
   linked.findings[0].requirement_found_in = ['docs', 'ui']
+  linked.reviewers[0].findings[0] = linked.findings[0]
   validateReviewResult(linked)
 })
 
 test('review results reject unknown fields, non-patch diffs, foreign lanes and links without a quote', () => {
   const cases: [string, (result: typeof examples.reviewResult) => void][] = [
     ['unknown field', result => { (result as Record<string, unknown>).summary = 'x' }],
-    ['unknown finding field', result => { (result.findings[0] as Record<string, unknown>).line = 12 }],
+    ['unknown finding field', result => { (result.findings[0] as Record<string, unknown>).line = 12; (result.reviewers[0].findings[0] as Record<string, unknown>).line = 12 }],
     ['wrong node', result => { (result as Record<string, unknown>).node_id = 'candidate' }],
     ['reviewer not independent', result => { (result.reviewer as Record<string, unknown>).independent = false }],
     ['blank reviewer', result => { result.reviewer.session_id = '' }],
     ['short bundle hash', result => { result.bundle_sha256 = 'b'.repeat(63) }],
     ['diff is a log', result => { result.diff!.kind = 'log' }],
-    ['link without a quote', result => { result.findings[1].requirement_found_in = ['ui'] }],
-    ['duplicate link lanes', result => { result.findings[0].requirement_found_in = ['ui', 'ui'] }],
+    ['link without a quote', result => { result.findings[1].requirement_found_in = ['ui']; result.reviewers[0].findings[1].requirement_found_in = ['ui'] }],
+    ['duplicate link lanes', result => { result.findings[0].requirement_found_in = ['ui', 'ui']; result.reviewers[0].findings[0].requirement_found_in = ['ui', 'ui'] }],
     ['lane that is not a lane id', result => { (result.findings[0] as Record<string, unknown>).requirement_found_in = ['Reviewer'] }],
-    ['attribution as a matched lane', result => { result.findings[0].requirement_found_in = ['multiple'] }],
+    ['attribution as a matched lane', result => { result.findings[0].requirement_found_in = ['multiple']; result.reviewers[0].findings[0].requirement_found_in = ['multiple'] }],
     ['worker that is not a lane id', result => { (result.findings[0] as Record<string, unknown>).worker = 'Tester' }],
     ['worker with a path', result => { (result.findings[0] as Record<string, unknown>).worker = 'src/ui' }],
     ['empty quote', result => { result.findings[0].requirement = '' }],

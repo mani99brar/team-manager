@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Feature file v2.0.0",
-  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. A 1.0.0 file (`ui_task`/`adapter_task`) is translated to this shape by `launch` and reported as deprecated. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy and existing, non-empty task files inside the feature directory.",
+  "title": "Feature file v2.1.0",
+  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. 2.1.0 adds the optional `reviewers`: every reviewer of the run with its brief file (relative to the feature directory, existing and non-empty); a file without `reviewers` runs the single built-in reviewer (`workflow/prompts/review.md`) with id `review`. A 1.0.0 file (`ui_task`/`adapter_task`) is translated to the 2.0.0 shape by `launch` and reported as deprecated. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy, existing non-empty task and brief files inside the feature directory, unique reviewer ids that are neither a lane id nor a reserved name, and version 2.1.0 whenever `reviewers` is present.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,10 @@
   ],
   "properties": {
     "version": {
-      "const": "2.0.0"
+      "enum": [
+        "2.0.0",
+        "2.1.0"
+      ]
     },
     "name": {
       "type": "string",
@@ -48,6 +51,31 @@
             "type": "string",
             "minLength": 1,
             "description": "Task file relative to the feature directory."
+          }
+        }
+      }
+    },
+    "reviewers": {
+      "type": "array",
+      "minItems": 1,
+      "description": "2.1.0: the reviewers the review node launches in parallel over the same candidate, in declared order. Each reviewer owns the node `review-<reviewer_id>` and the files `review-<reviewer_id>.*`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reviewer_id",
+          "prompt"
+        ],
+        "properties": {
+          "reviewer_id": {
+            "type": "string",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both)$)(?!(?:launch_|verify_|candidate_|review-))[a-z][a-z0-9-]{0,31}$",
+            "description": "Lower-case, at most 32 characters, unique, never a lane id of the policy nor a reserved graph name, attribution or per-lane prefix."
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Brief file relative to the feature directory; it replaces the built-in brief and states only what to look for (the controller appends the bundle paths, task locations, lane vocabulary and completion protocol)."
           }
         }
       }

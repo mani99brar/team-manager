@@ -4,7 +4,7 @@
   "properties": {
     "contract_version": {
       "type": "string",
-      "const": "1.3.0"
+      "const": "1.4.0"
     },
     "run_id": {
       "type": "string",
@@ -114,6 +114,10 @@
               "type": "string",
               "pattern": "^[a-z][a-z0-9-]{0,31}$"
             }
+          },
+          "reviewer": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,31}$"
           }
         },
         "required": [
@@ -122,7 +126,169 @@
           "disposition",
           "worker",
           "requirement",
-          "requirement_found_in"
+          "requirement_found_in",
+          "reviewer"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "reviewers": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reviewer_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,31}$"
+          },
+          "transport": {
+            "type": "string",
+            "enum": [
+              "native",
+              "print",
+              "manual"
+            ]
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "approved",
+                  "blocked"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "disposition": {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "resolved",
+                    "accepted"
+                  ]
+                },
+                "worker": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requirement": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "requirement_found_in": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,31}$"
+                  }
+                },
+                "reviewer": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{0,31}$"
+                }
+              },
+              "required": [
+                "severity",
+                "message",
+                "disposition",
+                "worker",
+                "requirement",
+                "requirement_found_in",
+                "reviewer"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "launched_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "accepted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "blocked",
+              "superseded",
+              "pending"
+            ]
+          }
+        },
+        "required": [
+          "reviewer_id",
+          "transport",
+          "session_id",
+          "verdict",
+          "findings",
+          "launched_at",
+          "accepted_at",
+          "status"
         ],
         "additionalProperties": false
       }
@@ -184,6 +350,7 @@
     "candidate_commit",
     "verdict",
     "findings",
+    "reviewers",
     "reviewed_at",
     "diff"
   ],

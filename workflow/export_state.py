@@ -12,6 +12,12 @@ lane, `inputs.workers` is keyed by those lanes in policy order with each lane's
 `required_check_kinds`, and `inputs` records `selected_workers` and
 `excluded_workers`. A run exported before keeps its stored definition when it
 names the same nodes, so re-exporting an old run changes no labels.
+
+Version 1.4.0 (additive) records the run's reviewers: the `review` section gains
+`reviewers` (one entry per reviewer: id, transport, session id, verdict, its
+findings, launch and acceptance times, status) and each combined finding gains
+`reviewer`. A review recorded before parallel reviewers has one reviewer named
+`review`; the export fills the list from the single record it has.
 """
 from __future__ import annotations
 
@@ -21,10 +27,12 @@ import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .sessions import plan_excluded, plan_workers, read_json, save_json
+from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.3.0"
+EXPORT_VERSION = "1.4.0"
+# The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
+REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
 GRAPH_TAIL = [
     {"node_id": "candidate", "label": "Verify combined candidate", "kind": "verification"},
@@ -86,11 +94,32 @@ def string_list(value) -> bool:
 
 def recorded_transport(directory: Path) -> str | None:
     """The transport the run's own reviewer receipts record; None when no reviewer has run."""
-    if (directory / "review.interactive.json").exists():
+    if (directory / "review.interactive.json").exists() or any(directory.glob("review-*.interactive.json")):
         return "native"
     if (directory / "automatic-review.json").exists():
         return "print"
     return None
+
+
+def reviewer_entries(directory: Path, review: dict, findings: list, transport: str, reviewed_at: str) -> list[dict]:
+    """One entry per reviewer of the combined record; a record without `reviewers` is the single default reviewer."""
+    recorded = review.get("reviewers")
+    entries = recorded if recorded is not None else [{"reviewer_id": DEFAULT_REVIEWER, "session_id": review["reviewer"], "verdict": review["verdict"], "accepted_at": None}]
+    result = []
+    for entry in entries:
+        node = review_node(entry["reviewer_id"])
+        status_file = load_optional(directory / f"automatic-{node}.json") or {}
+        receipt = load_optional(directory / f"{node}.interactive.json") or {}
+        launched = receipt.get("launch_requested_at")
+        accepted = entry.get("accepted_at")
+        if not isinstance(accepted, str) and entry["verdict"] is not None:
+            accepted = reviewed_at  # A record before per-reviewer acceptance times: the review's own time.
+        status = REVIEWER_STATUS.get(status_file.get("status")) or {"approved": "accepted", "blocked": "blocked"}.get(entry["verdict"]) or "pending"
+        result.append({"reviewer_id": entry["reviewer_id"], "transport": transport, "session_id": entry["session_id"], "verdict": entry["verdict"],
+                       "findings": [finding for finding in findings if finding["reviewer"] == entry["reviewer_id"]],
+                       "launched_at": zulu(launched) if isinstance(launched, str) else None,
+                       "accepted_at": accepted if isinstance(accepted, str) else None, "status": status})
+    return result
 
 
 def review_section(directory: Path) -> dict | None:
@@ -109,10 +138,12 @@ def review_section(directory: Path) -> dict | None:
         with patch.open("rb") as handle:
             diff = {"path": "review.diff", "sha256": hashlib.file_digest(handle, "sha256").hexdigest(), "bytes": patch.stat().st_size}
     findings = [{"severity": finding["severity"], "message": finding["message"], "disposition": finding["disposition"],
-                 "worker": finding.get("worker"), "requirement": finding.get("requirement")} for finding in review["findings"]]
+                 "worker": finding.get("worker"), "requirement": finding.get("requirement"),
+                 "reviewer": finding.get("reviewer", DEFAULT_REVIEWER)} for finding in review["findings"]]
     return {"attempt": 1, "transport": transport, "reviewer_session_id": review["reviewer"], "independent": review["independent"],
             "bundle_sha256": review["bundle_sha256"], "candidate_commit": review["candidate_commit"], "verdict": review["verdict"],
-            "findings": findings, "reviewed_at": reviewed_at, "diff": diff}
+            "findings": findings, "reviewers": reviewer_entries(directory, review, findings, transport, reviewed_at),
+            "reviewed_at": reviewed_at, "diff": diff}
 
 
 def launch_receipt(item) -> dict | None:

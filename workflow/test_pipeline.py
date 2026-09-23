@@ -15,7 +15,7 @@ from langgraph.types import Command
 
 from .checks import execute, now
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
-from .sessions import git, plan_workers, prepare, read_json, save_json
+from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, save_json
 from .verification import CONTRACTS, policy_digest
 
 # What each fake lane writes into its worktree: the two classic lanes edit fixture files the checks read;
@@ -24,7 +24,10 @@ LANE_EDITS = {"ui": ("ui.txt", "after"), "adapter": ("backend.py", "VALUE = 2\n"
 
 
 class FakeSessions:
-    """Offline stand-in for InteractiveSessions. Receipts on disk are its only cross-process state."""
+    """Offline stand-in for InteractiveSessions. Receipts on disk are its only cross-process state.
+
+    Reviewer knobs take either one value for every reviewer or a dict keyed by reviewer id (`review` for the default).
+    """
 
     REVIEWER_UUID = "33333333-3333-4333-8333-333333333333"
 
@@ -34,19 +37,39 @@ class FakeSessions:
         self.edits = dict(LANE_EDITS)          # Per-lane (path, content) a fake worker writes; tests override to violate ownership.
         self.starts = []
         self.reviewer_verdict_file = None  # A file whose text is the fake reviewer's verdict (default approved).
-        self.reviewer_findings = []        # Findings the fake reviewer reports.
-        self.reviewer_mutate = None        # Callable applied to the completion payload before it is written.
-        self.reviewer_writes_file = True   # False: the reviewer idles without ever writing a completion file.
-        self.reviewer_session_id = self.REVIEWER_UUID  # The native UUID the reviewer session reports (a worker's: not independent).
-        self.reviewer_after_file = None    # Callable run right after the completion file is written (dirty the worktree, rewrite the diff).
-        self.reviewer_row_after_file = None  # Once the completion file exists: a dict merged into the located reviewer row, or "missing" for None.
+        self.reviewer_verdicts = {}        # Per-reviewer verdict overriding the file: {"coverage": "blocked"}.
+        self.reviewer_findings = []        # Findings the fake reviewer reports (a list for every reviewer, or a dict per reviewer id).
+        self.reviewer_mutate = None        # Callable applied to the completion payload before it is written (or a dict per reviewer id).
+        self.reviewer_writes_file = True   # False: no reviewer writes a file; a set of ids: only those write one.
+        self.reviewer_session_id = None    # Override of one native UUID for every reviewer (a worker's: not independent), or a dict per reviewer id.
+        self.reviewer_states = {}          # Per-reviewer native state instead of idle: {"general": "working"}.
+        self.reviewer_after_file = None    # Callable run right after a completion file is written (dirty the worktree, rewrite the diff).
+        self.reviewer_row_after_file = None  # Once a completion file exists: a dict merged into the located reviewer row, or "missing" for None.
+
+    def reviewer_nodes(self):
+        return [review_node(reviewer_id) for reviewer_id in reviewer_ids(self.plan)]
+
+    def per_reviewer(self, knob, reviewer_id, default=None):
+        """A knob given as a dict applies per reviewer id; anything else applies to every reviewer."""
+        if isinstance(knob, dict):
+            return knob.get(reviewer_id, default)
+        return knob
 
     def native_id(self, node):
         """The UUID the native registry reports for a session; receipts record it, they do not define it."""
-        return self.reviewer_session_id if node == "review" else self.plan["nodes"][node]["session_id"]
+        if node in self.plan["nodes"]:
+            return self.plan["nodes"][node]["session_id"]
+        reviewer_id = node[len("review-"):] if node.startswith("review-") else "review"
+        override = self.per_reviewer(self.reviewer_session_id, reviewer_id)
+        if override:
+            return override
+        if node == "review":
+            return self.REVIEWER_UUID
+        index = self.reviewer_nodes().index(node) + 1
+        return f"{index:08d}-3333-4333-8333-333333333333"  # Distinct per declared reviewer.
 
     def background_id(self, node):
-        return self.REVIEWER_UUID[:8] if node == "review" else f"fake-{node}"
+        return self.native_id(node)[:8] if node.startswith("review") else f"fake-{node}"
 
     def record(self, node):
         self.starts.append(node)
@@ -66,22 +89,27 @@ class FakeSessions:
         save_json(self.directory / f"{node}.handoff.json", {"summary": "Synthetic implementation for offline test", "open_assumptions": []})
         return receipt
 
-    def run_reviewer(self, prompt, launch_token, candidate_commit):
-        self.record("review")
-        receipt = {"node_id": "review", "session_id": self.native_id("review"), "launch_token": launch_token, "background_id": self.background_id("review"),
+    def run_reviewer(self, reviewer_id, prompt, launch_token, candidate_commit):
+        node = review_node(reviewer_id)
+        self.record(node)
+        receipt = {"node_id": node, "session_id": self.native_id(node), "launch_token": launch_token, "background_id": self.background_id(node),
                    "worktree": str(self.directory / "review-worktree"), "candidate_commit": candidate_commit,
                    "status": "attached_session_available", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": now(), "observed_state": "idle", "native_started_at": None}
-        save_json(self.directory / "review.interactive.json", receipt)
-        (self.directory / "review.prompt.txt").write_text(prompt)
-        if self.reviewer_writes_file:
+        save_json(self.directory / f"{node}.interactive.json", receipt)
+        (self.directory / f"{node}.prompt.txt").write_text(prompt)
+        writes = self.reviewer_writes_file if isinstance(self.reviewer_writes_file, bool) else reviewer_id in self.reviewer_writes_file
+        if writes:
             verdict = Path(self.reviewer_verdict_file).read_text().strip() if self.reviewer_verdict_file else "approved"
-            completion = {"version": "1.0.0", "run_id": self.plan["run_id"], "node_id": "review", "launch_token": launch_token,
+            verdict = self.reviewer_verdicts.get(reviewer_id, verdict)
+            findings = self.reviewer_findings.get(reviewer_id, []) if isinstance(self.reviewer_findings, dict) else self.reviewer_findings
+            completion = {"version": "1.2.0", "run_id": self.plan["run_id"], "node_id": node, "launch_token": launch_token,
                           "bundle_sha256": digest_file(self.directory / "review-bundle.json"), "candidate_commit": candidate_commit,
-                          "verdict": verdict, "findings": copy.deepcopy(self.reviewer_findings)}
-            if self.reviewer_mutate:
-                completion = self.reviewer_mutate(completion)
-            save_json(self.directory / "review.completion.json", completion)
+                          "verdict": verdict, "findings": copy.deepcopy(findings)}
+            mutate = self.per_reviewer(self.reviewer_mutate, reviewer_id)
+            if mutate:
+                completion = mutate(completion)
+            save_json(self.directory / f"{node}.completion.json", completion)
             if self.reviewer_after_file:
                 self.reviewer_after_file()
         return receipt
@@ -98,14 +126,19 @@ class FakeSessions:
 
     def inventory(self):
         """The native registry: one row per session this fake launched, whatever its receipt recorded so far."""
-        return [{"id": self.background_id(node), "sessionId": self.native_id(node), "state": "idle", "pid": os.getpid(), "kind": "background"}
-                for node in (*self.workers, "review") if (self.directory / f"{node}.interactive.json").exists()]
+        rows = []
+        for node in (*self.workers, *self.reviewer_nodes()):
+            if (self.directory / f"{node}.interactive.json").exists():
+                reviewer_id = node[len("review-"):] if node.startswith("review-") else node
+                rows.append({"id": self.background_id(node), "sessionId": self.native_id(node), "state": self.reviewer_states.get(reviewer_id, "idle"),
+                             "pid": os.getpid(), "kind": "background"})
+        return rows
 
     def locate(self, node, rows):
         if not (self.directory / f"{node}.interactive.json").exists():
             return None
         row = next((row for row in rows if row["id"] == self.background_id(node)), None)
-        if node == "review" and row is not None and self.reviewer_row_after_file is not None and (self.directory / "review.completion.json").exists():
+        if node.startswith("review") and row is not None and self.reviewer_row_after_file is not None and (self.directory / f"{node}.completion.json").exists():
             return None if self.reviewer_row_after_file == "missing" else {**row, **self.reviewer_row_after_file}
         return row
 
@@ -114,12 +147,13 @@ class OfflinePipeline(Pipeline):
     def stop_workers(self):
         self.event("freeze", "stopped", "Fake workers have no background processes")
 
-    def stop_reviewer(self):
+    def stop_reviewer(self, reviewer_id="review"):
         # Fake sessions have no process to stop; record the intent the real path would persist.
-        receipt = read_json(self.directory / "review.interactive.json")
-        save_json(self.directory / "review.stop.json", {"background_id": receipt["background_id"], "session_id": receipt["session_id"],
-                                                        "pid": None, "stopped": True, "synthetic": True})
-        self.event("review", "stopped", "Fake reviewer has no background process")
+        node = review_node(reviewer_id)
+        receipt = read_json(self.directory / f"{node}.interactive.json")
+        save_json(self.directory / f"{node}.stop.json", {"background_id": receipt["background_id"], "session_id": receipt["session_id"],
+                                                         "pid": None, "stopped": True, "synthetic": True})
+        self.event("review", "stopped", f"Fake reviewer {reviewer_id} has no background process")
 
 
 class PipelineTests(unittest.TestCase):
@@ -229,8 +263,12 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.3.0")
+            self.assertEqual(exported["version"], "1.4.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
+            # A manual review of the single default reviewer exports one reviewer named `review`.
+            self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
+                             [("review", "manual", "synthetic-test-reviewer", "approved", "accepted", None)])
+            self.assertEqual(exported["review"]["reviewers"][0]["accepted_at"], exported["review"]["reviewed_at"])
             self.assertEqual(exported["inputs"]["mode"], "manual")
             self.assertEqual(exported["inputs"]["workers"]["ui"]["launch"]["session_id"], self.plan["nodes"]["ui"]["session_id"])
             screenshots = list((self.directory / "verification").glob("**/screenshot-*"))
@@ -354,6 +392,31 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             check_review({**base, "verdict": "maybe", "findings": []}, bundle, digest, require_approved=False)
         with self.assertRaisesRegex(ValueError, "exact run"):
             check_review({**base, "candidate_commit": "d" * 40, "verdict": "blocked", "findings": []}, bundle, digest, require_approved=False)
+        # The combined record of declared reviewers lists them in declared order; every finding names one of them.
+        entries = [{"reviewer_id": "general", "session_id": "general-session", "verdict": "approved", "accepted_at": "2026-09-22T10:00:00Z"},
+                   {"reviewer_id": "coverage", "session_id": "coverage-session", "verdict": "approved", "accepted_at": "2026-09-22T10:01:00Z"}]
+        tagged = [{**linked, "reviewer": "general"}, {**unlinked, "reviewer": "coverage"}]
+        combined = {**base, "reviewer": "general-session, coverage-session", "verdict": "approved", "findings": tagged, "reviewers": entries}
+        check_review(combined, bundle, digest, reviewers=["general", "coverage"])
+        check_review(combined, bundle, digest)  # Export: no declared list to match.
+        with self.assertRaisesRegex(ValueError, "declared reviewers"):
+            check_review(combined, bundle, digest, reviewers=["coverage", "general"])
+        with self.assertRaisesRegex(ValueError, "lacks the reviewers list"):
+            check_review({**base, "verdict": "approved", "findings": []}, bundle, digest, reviewers=["general", "coverage"])
+        check_review({**base, "verdict": "approved", "findings": [plain]}, bundle, digest, reviewers=["review"])  # The default reviewer's legacy shape.
+        with self.assertRaisesRegex(ValueError, "names reviewer 'security'"):
+            check_review({**combined, "findings": [{**linked, "reviewer": "security"}]}, bundle, digest)
+        with self.assertRaisesRegex(ValueError, "names reviewer None"):
+            check_review({**combined, "findings": [linked]}, bundle, digest)
+        with self.assertRaisesRegex(ValueError, "every reviewer's approval"):
+            check_review({**combined, "reviewers": [entries[0], {**entries[1], "verdict": "blocked"}]}, bundle, digest, require_approved=False)
+        with self.assertRaisesRegex(ValueError, "not approved"):
+            check_review({**combined, "verdict": "blocked", "reviewers": [entries[0], {**entries[1], "verdict": None, "accepted_at": None}]}, bundle, digest)
+        check_review({**combined, "verdict": "blocked", "reviewers": [entries[0], {**entries[1], "verdict": None, "accepted_at": None}]}, bundle, digest, require_approved=False)
+        for bad_entries in ([], [entries[0], entries[0]], [entries[0], {**entries[1], "session_id": "general-session"}],
+                            [entries[0], {**entries[1], "session_id": "ui-session"}], [{**entries[0], "verdict": "maybe"}], [{**entries[0], "extra": 1}]):
+            with self.assertRaises(ValueError):
+                check_review({**combined, "reviewers": bad_entries, "findings": []}, bundle, digest, require_approved=False)
 
     def native_rows(self):
         return {node: {"id": f"id-{node}", "sessionId": f"session-{node}", "pid": 90000 + index}
@@ -414,8 +477,8 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
     def test_launch_reviewer_pane_is_best_effort_and_launch_failure_is_recorded(self):
         receipt = {"session_id": "33333333-3333-4333-8333-333333333333", "background_id": "33333333", "status": "attached_session_available"}
         launches = []
-        def run_reviewer(prompt, launch_token, candidate_commit):
-            launches.append((prompt, launch_token, candidate_commit))
+        def run_reviewer(reviewer_id, prompt, launch_token, candidate_commit):
+            launches.append((reviewer_id, prompt, launch_token, candidate_commit))
             return dict(receipt)
         self.runtime.sessions = SimpleNamespace(run_reviewer=run_reviewer)
         def review_events():
@@ -423,33 +486,36 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
                     (json.loads(line) for line in (self.directory / "events.jsonl").read_text().splitlines()) if event["node"] == "review"]
         # No terminals.json: nothing to attach to, no attach attempted.
         with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.pipeline.attach_reviewer_panel") as attach:
-            self.assertEqual(self.runtime.launch_reviewer("prompt", "token", "c" * 40), receipt)
+            self.assertEqual(self.runtime.launch_reviewer("review", "prompt", "token", "c" * 40), receipt)
         attach.assert_not_called()
         self.assertEqual([status for status, _ in review_events()], ["running", "interactive"])
         self.assertIn("33333333-3333-4333-8333-333333333333", review_events()[-1][1])
+        self.assertIn("awaiting review.completion.json", review_events()[-1][1])
         # The tab exists but the pane cannot be attached: the launch still succeeds, the reason is on the timeline.
         save_json(self.directory / "terminals.json", {"ui": {"pane_id": "w1:p2"}, "adapter": {"pane_id": "w1:p3"}})
         with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.pipeline.attach_reviewer_panel", side_effect=RuntimeError("Pane w1:p3 is occupied")) as attach:
-            self.assertEqual(self.runtime.launch_reviewer("prompt", "token", "c" * 40), receipt)
+            self.assertEqual(self.runtime.launch_reviewer("coverage", "prompt", "token", "c" * 40), receipt)
         attach.assert_called_once_with(self.runtime.sessions)
-        self.assertIn(("running", "Reviewer pane not attached: Pane w1:p3 is occupied"), review_events())
+        self.assertIn(("running", "Reviewer coverage pane not attached: Pane w1:p3 is occupied"), review_events())
+        self.assertIn("awaiting review-coverage.completion.json", review_events()[-2][1])
         # Ctrl-C during the attach: the session was launched; the interruption is recorded and propagated as such.
         with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.pipeline.attach_reviewer_panel", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
-                self.runtime.launch_reviewer("prompt", "token", "c" * 40)
-        self.assertIn(("running", "Reviewer pane not attached: KeyboardInterrupt"), review_events())
+                self.runtime.launch_reviewer("review", "prompt", "token", "c" * 40)
+        self.assertIn(("running", "Reviewer review pane not attached: KeyboardInterrupt"), review_events())
         # Outside a managed Herdr pane no attach is attempted even with the tab mapping present.
         with patch.dict(os.environ, {"HERDR_ENV": "0"}), patch("workflow.pipeline.attach_reviewer_panel") as attach:
-            self.runtime.launch_reviewer("prompt", "token", "c" * 40)
+            self.runtime.launch_reviewer("review", "prompt", "token", "c" * 40)
         attach.assert_not_called()
         self.assertEqual(len(launches), 4)
+        self.assertEqual([launch[0] for launch in launches], ["review", "coverage", "review", "review"])
         # A launch that fails is a blocked review event; the pane is never touched.
         self.runtime.sessions = SimpleNamespace(run_reviewer=lambda *args: (_ for _ in ()).throw(RuntimeError("Claude background launch exited 1; inspect launch log")))
         with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.pipeline.attach_reviewer_panel") as attach:
             with self.assertRaisesRegex(RuntimeError, "exited 1"):
-                self.runtime.launch_reviewer("prompt", "token", "c" * 40)
+                self.runtime.launch_reviewer("general", "prompt", "token", "c" * 40)
         attach.assert_not_called()
-        self.assertEqual(review_events()[-1], ("blocked", "Claude background launch exited 1; inspect launch log"))
+        self.assertEqual(review_events()[-1], ("blocked", "Reviewer general: Claude background launch exited 1; inspect launch log"))
 
     def test_failed_stop_and_lingering_pid_block_freeze(self):
         live = self.native_rows()

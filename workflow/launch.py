@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
-from .sessions import read_json, validate_node_id
+from .sessions import read_json, validate_node_id, validate_reviewer_id
 from .verification import validate_schema
 
 
@@ -20,7 +20,11 @@ DEPRECATED_FEATURE_NOTE = ("feature.json version 1.0.0 (ui_task/adapter_task) is
 
 
 def load_feature(folder: Path) -> tuple[dict, list[str]]:
-    """The feature file as 2.0.0 plus any deprecation notes; 1.0.0 files are translated in memory."""
+    """The feature file as 2.0.0 or 2.1.0 plus any deprecation notes; 1.0.0 files are translated in memory.
+
+    2.1.0 adds `reviewers`: one entry per reviewer with its brief file. A file without `reviewers` (2.0.0 or
+    2.1.0) runs the single built-in reviewer, so `features/project-workflows` needs no change.
+    """
     manifest = read_json(folder / "feature.json")
     notes = []
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -35,6 +39,15 @@ def load_feature(folder: Path) -> tuple[dict, list[str]]:
         raise ValueError("feature.json declares a worker lane twice")
     for node in ids:
         validate_node_id(node)
+    reviewers = manifest.get("reviewers")
+    if reviewers is not None:
+        if manifest["version"] == "2.0.0":
+            raise ValueError("feature.json reviewers need version 2.1.0")
+        reviewer_ids = [item["reviewer_id"] for item in reviewers]
+        for reviewer_id in reviewer_ids:
+            validate_reviewer_id(reviewer_id, ids)
+        if len(set(reviewer_ids)) != len(reviewer_ids):
+            raise ValueError("feature.json declares a reviewer twice")
     return manifest, notes
 
 
@@ -64,6 +77,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         if not path.is_file() or not path.read_text().strip():
             raise ValueError(f"Task file for lane {worker['node_id']} is missing or empty: {worker['task']}")
         tasks[worker["node_id"]] = path
+    reviewers = {}
+    for reviewer in manifest.get("reviewers") or []:
+        path = feature_file(folder, reviewer["prompt"])
+        if not path.is_file() or not path.read_text().strip():
+            raise ValueError(f"Brief for reviewer {reviewer['reviewer_id']} is missing or empty: {reviewer['prompt']}")
+        reviewers[reviewer["reviewer_id"]] = path
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     run = (run_root / run_id).resolve()
@@ -81,6 +100,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         prepare.extend(["--workers", ",".join(selected)])
     for node in selected:
         prepare.extend(["--task", f"{node}={tasks[node]}"])
+    for reviewer_id, path in reviewers.items():
+        prepare.extend(["--reviewer", f"{reviewer_id}={path}"])
     commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -121,8 +142,9 @@ def main(argv=None):
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
+        reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
         if args.dry_run:
-            print(json.dumps({"run_directory": str(run), "workers": selected, "commands": commands, "executes": False, "notes": notes}, indent=2))
+            print(json.dumps({"run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands, "executes": False, "notes": notes}, indent=2))
             for note in notes:
                 print(f"Deprecation: {note}" if note is DEPRECATED_FEATURE_NOTE else f"Note: {note}", file=sys.stderr)
             return

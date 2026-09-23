@@ -91,6 +91,10 @@ class ExportSectionTests(unittest.TestCase):
         self.assertEqual(section["diff"], {"path": "review.diff", "sha256": digest_file(directory / "review.diff"), "bytes": (directory / "review.diff").stat().st_size})
         self.assertEqual([(finding["worker"], finding["requirement"]) for finding in section["findings"]], [(None, None), (None, None)])
         self.assertEqual(section["findings"][0]["message"], "Stale task error overrides verified success")
+        # A record before parallel reviewers is the single reviewer `review`: one entry, every finding tagged with it.
+        self.assertEqual([finding["reviewer"] for finding in section["findings"]], ["review", "review"])
+        self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"], entry["accepted_at"], len(entry["findings"]))
+                          for entry in section["reviewers"]], [("review", "print", REVIEWER, "approved", "accepted", None, section["reviewed_at"], 2)])
         # Native receipts win over print receipts; accepted_at wins over events; no diff → null.
         save_json(directory / "review.interactive.json", {"node_id": "review"})
         receipt = read_json(directory / "automatic-review.json")
@@ -183,6 +187,61 @@ class ExportSectionTests(unittest.TestCase):
         self.assertIsNone(exported["inputs"]["automatic"]["reviewer_transport"])
 
 
+class ReviewerExportTests(unittest.TestCase):
+    """Export 1.4.0: the review section's per-reviewer entries from the combined record and the reviewers' own files."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_two_reviewer_record_exports_one_entry_per_reviewer_with_its_findings_and_times(self):
+        directory = legacy_run(self.root)
+        plan = read_json(directory / "plan.json")
+        plan["reviewers"] = [{"reviewer_id": "general", "prompt": "General."}, {"reviewer_id": "coverage", "prompt": "Coverage."}]
+        save_json(directory / "plan.json", plan)
+        (directory / "automatic-review.json").unlink()
+        review = read_json(directory / "review.json")
+        general = {"severity": "P2", "message": "Stale task error overrides verified success", "disposition": "open", "worker": "ui", "requirement": None, "reviewer": "general"}
+        coverage = {"severity": "P2", "message": "No test covers the stale error", "disposition": "open", "worker": "ui", "requirement": None, "reviewer": "coverage"}
+        review.update(reviewer=f"{REVIEWER}, 11111111-adec-4efe-bcd4-bbadc3525d95", verdict="blocked", findings=[general, coverage],
+                      reviewers=[{"reviewer_id": "general", "session_id": REVIEWER, "verdict": "approved", "accepted_at": "2026-09-21T15:40:00.000000Z"},
+                                 {"reviewer_id": "coverage", "session_id": "11111111-adec-4efe-bcd4-bbadc3525d95", "verdict": "approved", "accepted_at": "2026-09-21T15:41:00.000000Z"}])
+        save_json(directory / "review.json", review)
+        save_json(directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": ["general", "coverage"], "accepted_at": "2026-09-21T15:41:30.000000Z",
+                                                        "error": "Independent reviewer blocked the candidate (coverage)"})
+        save_json(directory / "automatic-review-general.json", {"reviewer_id": "general", "node_id": "review-general", "transport": "native", "session_id": REVIEWER, "status": "accepted"})
+        save_json(directory / "automatic-review-coverage.json", {"reviewer_id": "coverage", "node_id": "review-coverage", "transport": "native", "session_id": "1111", "status": "blocked"})
+        save_json(directory / "review-general.interactive.json", {"node_id": "review-general", "launch_requested_at": "2026-09-21T15:30:00.100000+00:00"})
+        save_json(directory / "review-coverage.interactive.json", {"node_id": "review-coverage", "launch_requested_at": "2026-09-21T15:30:02+00:00"})
+        section = review_section(directory)
+        self.assertEqual((section["transport"], section["verdict"], section["reviewed_at"]), ("native", "blocked", "2026-09-21T15:41:30.000000Z"))
+        self.assertEqual([finding["reviewer"] for finding in section["findings"]], ["general", "coverage"])
+        self.assertEqual(section["reviewers"], [
+            {"reviewer_id": "general", "transport": "native", "session_id": REVIEWER, "verdict": "approved", "findings": [general],
+             "launched_at": "2026-09-21T15:30:00.100000Z", "accepted_at": "2026-09-21T15:40:00.000000Z", "status": "accepted"},
+            {"reviewer_id": "coverage", "transport": "native", "session_id": "11111111-adec-4efe-bcd4-bbadc3525d95", "verdict": "approved", "findings": [coverage],
+             "launched_at": "2026-09-21T15:30:02Z", "accepted_at": "2026-09-21T15:41:00.000000Z", "status": "blocked"}])
+        # A superseded reviewer without a verdict, and one whose status file is missing, stay pending or superseded, never guessed as accepted.
+        review["reviewers"][1].update(verdict=None, accepted_at=None)
+        review["findings"] = [general]
+        save_json(directory / "review.json", review)
+        save_json(directory / "automatic-review-coverage.json", {"reviewer_id": "coverage", "status": "superseded"})
+        (directory / "automatic-review-general.json").unlink()
+        section = review_section(directory)
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
+                         [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
+        exported = export_run(ExportRuntime(directory))
+        self.assertEqual(exported["version"], "1.4.0")
+        self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
+        self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
+        # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
+        review["reviewers"][0]["reviewer_id"] = "security"
+        save_json(directory / "review.json", review)
+        with self.assertRaisesRegex(ValueError, "names reviewer 'general'"):
+            ExportRuntime(directory)
+
+
 class ExportRunTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -202,7 +261,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.3.0")
+        self.assertEqual(exported["version"], "1.4.0")
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -267,10 +326,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.3.0", result.stdout)
+        self.assertIn("version 1.4.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.3.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.4.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")

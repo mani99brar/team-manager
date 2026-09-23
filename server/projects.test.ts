@@ -174,10 +174,14 @@ const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Sh
 const ADAPTER_TASK = '# Adapter worker\n\nServe the review route from the export section.\n\nApproved ownership and checks:\n{"node_id": "adapter", "owned_paths": ["server"]}'
 const TEXT_LIMIT = 65536
 
-type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null }
+type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null; reviewer?: string | null }
+type ReviewerSection = {
+  reviewer_id: string; transport: 'native' | 'print' | 'manual'; session_id: string | null; verdict: 'approved' | 'blocked' | null; findings: Finding[]
+  launched_at: string | null; accepted_at: string | null; status: 'accepted' | 'blocked' | 'superseded' | 'pending'
+}
 type ReviewSection = {
   attempt: number; transport: 'native' | 'print' | 'manual'; reviewer_session_id: string; independent: true; bundle_sha256: string; candidate_commit: string
-  verdict: 'approved' | 'blocked'; findings: Finding[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
+  verdict: 'approved' | 'blocked'; findings: Finding[]; reviewers?: ReviewerSection[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
 }
 type WorkerInput = {
   role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
@@ -962,11 +966,17 @@ test('a recorded review is served with its reviewer, redacted text, verbatim-onl
     assert.equal(response.status, 200, response.body)
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const review = validateReviewResult(response.json())
-    assert.equal(review.contract_version, '1.3.0')
+    assert.equal(review.contract_version, '1.4.0')
     assert.deepEqual([review.run_id, review.node_id, review.attempt, review.verdict], ['reviewed', 'review', 1, 'approved'])
     assert.deepEqual(review.reviewer, { session_id: REVIEWER, transport: 'native', independent: true })
     assert.deepEqual([review.bundle_sha256, review.candidate_commit, review.reviewed_at], [BUNDLE, OUTPUT, T2])
     assert.equal(review.findings.length, 7)
+    // An export before 1.4.0 has the single reviewer `review`: the adapter fills the list from the section itself.
+    assert.ok(review.findings.every(item => item.reviewer === 'review'))
+    assert.equal(review.reviewers.length, 1)
+    assert.deepEqual([review.reviewers[0].reviewer_id, review.reviewers[0].transport, review.reviewers[0].session_id, review.reviewers[0].verdict, review.reviewers[0].status, review.reviewers[0].launched_at, review.reviewers[0].accepted_at],
+      ['review', 'native', REVIEWER, 'approved', 'accepted', null, T2])
+    assert.deepEqual(review.reviewers[0].findings, review.findings)
     assert.equal(review.findings[0].message, 'The findings table omits the disposition column; see <path> for the fixture.')
     assert.deepEqual(review.findings.map(item => item.requirement_found_in), [['ui'], [], [], ['ui'], [], ['adapter'], []])
     assert.equal(review.findings[3].requirement, 'Write the harness to <path> before anything else.')
@@ -987,6 +997,48 @@ test('a recorded review is served with its reviewer, redacted text, verbatim-onl
     const inputs = validateRunInputs((await get(app, url('alpha', 'main', 'reviewed', '/inputs'))).json())
     assert.ok(inputs.workers[0].task.text.includes('Write the harness to <path> before anything else.'))
     assert.ok(!JSON.stringify(inputs).includes(root))
+  })
+})
+
+test('a two-reviewer export (1.4.0) is served with every reviewer, its findings tagged by reviewer, on the unchanged reviews route', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const general: Finding[] = [finding({ message: 'General finding.', worker: 'ui', requirement: 'Show every finding with severity and disposition.', reviewer: 'general' })]
+    const coverage: Finding[] = [
+      finding({ message: 'No test covers the disposition column.', worker: 'ui', requirement: null, reviewer: 'coverage' }),
+      finding({ message: 'General finding.', worker: 'ui', requirement: 'Show every finding with severity and disposition.', reviewer: 'coverage' }),
+    ]
+    const reviewers: ReviewerSection[] = [
+      { reviewer_id: 'general', transport: 'native', session_id: REVIEWER, verdict: 'approved', findings: general, launched_at: '2026-03-01T10:30:00.100000+00:00', accepted_at: '2026-03-01T10:40:00+00:00', status: 'accepted' },
+      { reviewer_id: 'coverage', transport: 'native', session_id: 'e1e1e1e1-adec-4efe-bcd4-bbadc3525d95', verdict: 'approved', findings: coverage, launched_at: '2026-03-01T10:30:02+00:00', accepted_at: T2, status: 'accepted' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'two', version: '1.4.0', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents,
+      packets: reviewedPackets, review: reviewSection({ reviewer_session_id: `${REVIEWER}, e1e1e1e1-adec-4efe-bcd4-bbadc3525d95`, findings: [...general, ...coverage], reviewers }), inputs: inputsSection(), diffFile: DIFF })
+    const response = await get(app, url('alpha', 'main', 'two', '/reviews/1'))
+    assert.equal(response.status, 200, response.body)
+    const review = validateReviewResult(response.json())
+    assert.equal(review.contract_version, '1.4.0')
+    assert.deepEqual(review.reviewers.map(entry => [entry.reviewer_id, entry.verdict, entry.status, entry.findings.length, entry.launched_at, entry.accepted_at]),
+      [['general', 'approved', 'accepted', 1, '2026-03-01T10:30:00.100000Z', '2026-03-01T10:40:00Z'], ['coverage', 'approved', 'accepted', 2, '2026-03-01T10:30:02Z', T2]])
+    assert.deepEqual(review.findings.map(item => item.reviewer), ['general', 'coverage', 'coverage'])
+    assert.deepEqual(review.findings.map(item => item.requirement_found_in), [['ui'], [], ['ui']])  // The same quote links for every reviewer that wrote it.
+    assert.equal(review.reviewer.session_id, `${REVIEWER}, e1e1e1e1-adec-4efe-bcd4-bbadc3525d95`)
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'two'))).json())
+    const node = detail.snapshot.nodes.find(item => item.node_id === 'review')!
+    assert.deepEqual([node.status, node.result_uri], ['succeeded', '/api/projects/alpha/workflows/main/runs/two/reviews/1'])
+    assert.ok(!response.body.includes(root))
+    // One reviewer blocked while the other was still working: the blocked run keeps both entries, the superseded one without a verdict.
+    const blockedReviewers: ReviewerSection[] = [
+      { ...reviewers[0], verdict: null, accepted_at: null, status: 'superseded', findings: [] },
+      { ...reviewers[1], verdict: 'blocked', status: 'blocked' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'one-blocks', version: '1.4.0', values: reviewedValues(), next: ['review'], events: reviewedEvents,
+      packets: reviewedPackets, review: reviewSection({ verdict: 'blocked', findings: coverage, reviewers: blockedReviewers }), inputs: inputsSection(), diffFile: DIFF })
+    const blocked = validateReviewResult((await get(app, url('alpha', 'main', 'one-blocks', '/reviews/1'))).json())
+    assert.deepEqual(blocked.reviewers.map(entry => [entry.reviewer_id, entry.verdict, entry.status]), [['general', null, 'superseded'], ['coverage', 'blocked', 'blocked']])
+    // A finding naming a reviewer the section does not list is contradictory.
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'foreign', version: '1.4.0', values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents,
+      packets: reviewedPackets, review: reviewSection({ findings: [finding({ reviewer: 'security' })], reviewers: [{ ...reviewers[0], findings: [] }] }), inputs: inputsSection(), diffFile: DIFF })
+    assertError(await get(app, url('alpha', 'main', 'foreign', '/reviews/1')), 500, 'RUN_STORAGE_INVALID', root)
   })
 })
 
@@ -1168,7 +1220,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.4.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.5.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),

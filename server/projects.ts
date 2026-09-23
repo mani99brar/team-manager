@@ -3,8 +3,8 @@ import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { z } from 'zod'
 import {
-  CHECK_KINDS, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, validateReviewResult, validateRunDetail, validateRunInputs,
-  type Project, type ReviewResult, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
+  CHECK_KINDS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
+  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
@@ -19,10 +19,12 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * an error or a paused/failed state, never as success.
  *
  * Export versions: 1.0.0 (graph state only), 1.1.0 (adds the `review` section from `review.json`), 1.2.0
- * (adds the `inputs` section pinned from `plan.json`, `policy.json` and the worker receipts) and 1.3.0 (worker
+ * (adds the `inputs` section pinned from `plan.json`, `policy.json` and the worker receipts), 1.3.0 (worker
  * lanes from configuration: `inputs.workers` is keyed by any lane ID, `inputs` records the selected and excluded
- * lanes, per-lane graph state lives under `lanes` and `packets`). A section is served only when the export
- * carries it; `values` is never mined for either.
+ * lanes, per-lane graph state lives under `lanes` and `packets`) and 1.4.0 (parallel reviewers: the `review`
+ * section lists `reviewers` and tags every finding with its `reviewer`). A section is served only when the
+ * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
+ * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
  * The lane list comes from `inputs.workers` (policy order). Exports without an `inputs` section, which only
  * 1.0.0 and 1.1.0 produce, fall back to the fixed `ui`/`adapter` pair those versions always had. The node map
@@ -47,7 +49,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /** Node IDs a lane can never take: the fixed graph tail, the finding attributions and the per-lane node prefixes. */
@@ -86,22 +88,43 @@ const laneKey = z.string().regex(LANE_ID_PATTERN).refine(lane => !RESERVED_LANE_
 /** A finding attribution: a lane ID, `multiple`, `none` or the legacy `both`; the lane check happens against the run's lanes later. */
 const attribution = z.string().regex(LANE_ID_PATTERN)
 
-/** The export's `review` section: `review.json` plus the reviewer receipt, exactly as workflow/export_state.py writes it. */
+/** A reviewer ID as the plan pins it (`review` for the default reviewer); the same shape as a lane ID. */
+const reviewerKey = z.string().regex(LANE_ID_PATTERN)
+
+const reviewFindingSectionSchema = z.strictObject({
+  severity: z.enum(['P0', 'P1', 'P2']),
+  message: z.string().min(1),
+  disposition: z.enum(['open', 'resolved', 'accepted']),
+  worker: attribution.nullable(),
+  requirement: z.string().min(1).nullable(),
+  /** Present from export 1.4.0; earlier exports have the single reviewer `review`. */
+  reviewer: reviewerKey.nullable().optional(),
+})
+
+/** One reviewer of the review node as export 1.4.0 records it. */
+const reviewerSectionSchema = z.strictObject({
+  reviewer_id: reviewerKey,
+  transport: z.enum(REVIEW_TRANSPORTS),
+  session_id: z.string().min(1).nullable(),
+  verdict: z.enum(['approved', 'blocked']).nullable(),
+  findings: z.array(reviewFindingSectionSchema),
+  launched_at: zonedTimestamp.nullable(),
+  accepted_at: zonedTimestamp.nullable(),
+  status: z.enum(REVIEWER_STATUSES),
+})
+
+/** The export's `review` section: `review.json` plus the reviewer receipts, exactly as workflow/export_state.py writes it. */
 const reviewSectionSchema = z.strictObject({
   attempt: z.number().int().positive(),
-  transport: z.enum(['native', 'print', 'manual']),
+  transport: z.enum(REVIEW_TRANSPORTS),
   reviewer_session_id: z.string().min(1),
   independent: z.literal(true),
   bundle_sha256: hex64,
   candidate_commit: commit,
   verdict: z.enum(['approved', 'blocked']),
-  findings: z.array(z.strictObject({
-    severity: z.enum(['P0', 'P1', 'P2']),
-    message: z.string().min(1),
-    disposition: z.enum(['open', 'resolved', 'accepted']),
-    worker: attribution.nullable(),
-    requirement: z.string().min(1).nullable(),
-  })),
+  findings: z.array(reviewFindingSectionSchema),
+  /** Absent before 1.4.0: the single reviewer `review`, filled from the section itself. */
+  reviewers: z.array(reviewerSectionSchema).min(1).optional(),
   reviewed_at: zonedTimestamp,
   diff: z.strictObject({ path: z.literal(REVIEW_DIFF_FILE), sha256: hex64, bytes: z.number().int().nonnegative() }).nullable(),
 })
@@ -473,17 +496,46 @@ function lanesQuoting(requirement: string | null, inputs: InputsSection | null):
   }).map(([lane]) => lane)
 }
 
+type FindingSection = z.infer<typeof reviewFindingSectionSchema>
+
+/** One persisted finding onto the contract: redacted texts, verbatim task links, and its reviewer (`review` before export 1.4.0). */
+function projectFinding(finding: FindingSection, inputs: InputsSection | null): ReviewFinding {
+  return {
+    severity: finding.severity, message: redactPaths(finding.message), disposition: finding.disposition, worker: finding.worker,
+    requirement: finding.requirement === null ? null : redactPaths(finding.requirement),
+    requirement_found_in: lanesQuoting(finding.requirement, inputs),
+    reviewer: finding.reviewer ?? DEFAULT_REVIEWER_ID,
+  }
+}
+
+/**
+ * The reviewers of a review: export 1.4.0 records them; an older export is the single reviewer `review`, filled from
+ * the section itself (its session, verdict, every finding and the review time), so the viewer has one code path.
+ */
+function projectReviewers(section: ReviewSection, findings: ReviewFinding[], inputs: InputsSection | null): ReviewerEntry[] {
+  if (section.reviewers) {
+    return section.reviewers.map(entry => ({
+      reviewer_id: entry.reviewer_id, transport: entry.transport, session_id: entry.session_id === null ? null : redactPaths(entry.session_id),
+      verdict: entry.verdict, findings: entry.findings.map(finding => projectFinding({ ...finding, reviewer: finding.reviewer ?? entry.reviewer_id }, inputs)),
+      launched_at: entry.launched_at === null ? null : utcTimestamp(entry.launched_at),
+      accepted_at: entry.accepted_at === null ? null : utcTimestamp(entry.accepted_at), status: entry.status,
+    }))
+  }
+  return [{
+    reviewer_id: DEFAULT_REVIEWER_ID, transport: section.transport, session_id: redactPaths(section.reviewer_session_id), verdict: section.verdict,
+    findings, launched_at: null, accepted_at: utcTimestamp(section.reviewed_at), status: section.verdict === 'approved' ? 'accepted' : 'blocked',
+  }]
+}
+
 /** Projects the export's review section onto the review-result contract; the caller applies the cross-field rules. */
 function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null): ReviewResult {
+  const findings = section.findings.map(finding => projectFinding(finding, inputs))
   return {
-    contract_version: '1.3.0', run_id: runId, node_id: 'review', attempt: section.attempt,
+    contract_version: '1.4.0', run_id: runId, node_id: 'review', attempt: section.attempt,
     reviewer: { session_id: redactPaths(section.reviewer_session_id), transport: section.transport, independent: true },
     bundle_sha256: section.bundle_sha256, candidate_commit: section.candidate_commit, verdict: section.verdict,
-    findings: section.findings.map(finding => ({
-      severity: finding.severity, message: redactPaths(finding.message), disposition: finding.disposition, worker: finding.worker,
-      requirement: finding.requirement === null ? null : redactPaths(finding.requirement),
-      requirement_found_in: lanesQuoting(finding.requirement, inputs),
-    })),
+    findings,
+    reviewers: projectReviewers(section, findings, inputs),
     reviewed_at: utcTimestamp(section.reviewed_at),
     diff: section.diff === null ? null : reviewDiffArtifact(scope, runId, section.diff.sha256),
   }

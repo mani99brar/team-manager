@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Review completion signal v1.1.0",
-  "description": "Written once by the native reviewer session to <run>/review.completion.json. The controller accepts it only when it validates here, its bindings match the run (run_id, review node, launch_token from the reviewer prompt, bundle SHA-256 and candidate commit from review-bundle.json) and the reviewer session is idle or done. A verdict of blocked, or any P0/P1 finding that is not resolved, ends the run; no second reviewer is launched. 1.1.0: a finding's `worker` is a lane id of the run (`^[a-z][a-z0-9-]{0,31}$`), `multiple` or `none`; the controller additionally rejects a lane id the run did not select. The legacy `both` is not accepted any more. Files spelling version 1.0.0 are still accepted under the same rules.",
+  "title": "Review completion signal v1.2.0",
+  "description": "Written once by a native reviewer session to <run>/<node>.completion.json, where <node> is `review` for the default reviewer and `review-<reviewer_id>` for a reviewer declared in feature.json 2.1.0. The controller accepts it only when it validates here, its bindings match the run (run_id, that reviewer's node id, the launch_token from that reviewer's prompt, bundle SHA-256 and candidate commit from review-bundle.json) and the reviewer session is idle or done; a file whose node_id names another reviewer is rejected. Every declared reviewer must approve: a verdict of blocked, or any P0/P1 finding that is not resolved, from any reviewer ends the run and no reviewer is relaunched. 1.2.0: node_id follows `^review(-[a-z0-9-]{1,32})?$`. 1.1.0: a finding's `worker` is a lane id of the run (`^[a-z][a-z0-9-]{0,31}$`), `multiple` or `none`; the controller additionally rejects a lane id the run did not select. The legacy `both` is not accepted any more. Files spelling version 1.0.0 or 1.1.0 are still accepted under the same rules.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,8 @@
     "version": {
       "enum": [
         "1.0.0",
-        "1.1.0"
+        "1.1.0",
+        "1.2.0"
       ]
     },
     "run_id": {
@@ -26,7 +27,9 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     },
     "node_id": {
-      "const": "review"
+      "type": "string",
+      "pattern": "^review(-[a-z0-9-]{1,32})?$",
+      "description": "`review` for the default reviewer, `review-<reviewer_id>` for a declared reviewer; the controller binds it to the reviewer the prompt named."
     },
     "launch_token": {
       "type": "string",

@@ -39,6 +39,61 @@ def validate_node_id(node) -> str:
     return node
 
 
+# Reviewers come from configuration too (feature file 2.1.0 `reviewers`). A plan without `reviewers` runs
+# the single default reviewer, whose id is the fixed review node itself: its files keep the unprefixed
+# names (`review.completion.json`, ...). A declared reviewer `<id>` owns the node `review-<id>` and the
+# files `review-<id>.*`, so its id follows the lane rules and can never be a lane id or a reserved name.
+DEFAULT_REVIEWER = "review"
+
+
+def validate_reviewer_id(value, lanes: list[str] | None = None) -> str:
+    if not isinstance(value, str) or not NODE_ID_PATTERN.fullmatch(value):
+        raise ValueError(f"Reviewer id must match {NODE_ID_PATTERN.pattern}: {value!r}")
+    if value in RESERVED_NODE_IDS or value.startswith(RESERVED_NODE_PREFIXES):
+        raise ValueError(f"Reviewer id is reserved: {value}")
+    if lanes and value in lanes:
+        raise ValueError(f"Reviewer id {value} is a worker lane of this run")
+    return value
+
+
+def review_node(reviewer_id: str) -> str:
+    """The completion-file node id and file prefix of a reviewer: `review` for the default, `review-<id>` otherwise."""
+    return DEFAULT_REVIEWER if reviewer_id == DEFAULT_REVIEWER else f"review-{reviewer_id}"
+
+
+def plan_reviewers(plan: dict) -> list[dict]:
+    """The reviewers a run launches, in declared order: `{reviewer_id, prompt}` with `prompt` None for the built-in brief."""
+    reviewers = plan.get("reviewers")
+    if reviewers is None:
+        return [{"reviewer_id": DEFAULT_REVIEWER, "prompt": None}]
+    if not isinstance(reviewers, list) or not reviewers:
+        raise ValueError("Plan reviewers must be a non-empty list")
+    lanes = [*plan_workers(plan), *plan.get("excluded_workers", [])]
+    result = []
+    for item in reviewers:
+        if not isinstance(item, dict) or set(item) != {"reviewer_id", "prompt"} or not isinstance(item["prompt"], str) or not item["prompt"].strip():
+            raise ValueError("Plan reviewers need reviewer_id and a non-empty prompt")
+        validate_reviewer_id(item["reviewer_id"], lanes)
+        result.append({"reviewer_id": item["reviewer_id"], "prompt": item["prompt"]})
+    ids = [item["reviewer_id"] for item in result]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Plan reviewers must be distinct")
+    return result
+
+
+def reviewer_ids(plan: dict) -> list[str]:
+    return [item["reviewer_id"] for item in plan_reviewers(plan)]
+
+
+def review_nodes(plan: dict) -> list[str]:
+    return [review_node(reviewer_id) for reviewer_id in reviewer_ids(plan)]
+
+
+def reviewer_of_node(plan: dict, node: str) -> str | None:
+    """The reviewer id behind a review node of this plan, or None when the node is not one of its reviewers."""
+    return next((reviewer_id for reviewer_id in reviewer_ids(plan) if review_node(reviewer_id) == node), None)
+
+
 def plan_workers(plan: dict) -> list[str]:
     """The lanes a run launches, in declared order. Plans without `workers` mean the legacy pair."""
     workers = plan.get("workers")

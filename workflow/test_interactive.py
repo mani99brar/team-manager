@@ -1,3 +1,5 @@
+import contextlib
+import io
 import os
 import subprocess
 import unittest
@@ -220,9 +222,9 @@ class InteractiveTests(unittest.TestCase):
         with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()], [self.reviewer_row()]]), \
                 patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                 patch("workflow.interactive.subprocess.run", side_effect=self.started) as launch:
-            receipt = self.sessions.run_reviewer("Review this candidate.", self.TOKEN, candidate)
+            receipt = self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
             # A second call reconciles the same session and never launches again.
-            self.assertEqual(self.sessions.run_reviewer("Review this candidate.", self.TOKEN, candidate)["status"], "attached_session_available")
+            self.assertEqual(self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)["status"], "attached_session_available")
         self.assertEqual(launch.call_count, 1)
         self.assertEqual(self.sessions.launch_name("review"), f"workflow-{self.plan['run_id']}-reviewer")
         self.assertEqual((receipt["node_id"], receipt["session_id"], receipt["launch_token"], receipt["candidate_commit"]),
@@ -263,7 +265,7 @@ class InteractiveTests(unittest.TestCase):
                 patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                 patch("workflow.interactive.subprocess.run", side_effect=self.started) as launch, \
                 patch("workflow.interactive.time.sleep") as sleep:
-            result = self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+            result = self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
         self.assertEqual((result["status"], result["background_id"]), ("attached_session_available", self.reviewer_row()["id"]))
         self.assertEqual((launch.call_count, inventory.call_count, sleep.call_count), (1, 5, 3))
         # A reviewer whose PID never registers is left for reconciliation, never relaunched.
@@ -273,31 +275,31 @@ class InteractiveTests(unittest.TestCase):
                 patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                 patch("workflow.interactive.subprocess.run", side_effect=self.started) as launch:
             with self.assertRaisesRegex(RuntimeError, "No live native PID"):
-                self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
         self.assertEqual(launch.call_count, 1)
         receipt = read_json(self.directory / "review.interactive.json")
         self.assertEqual(receipt["status"], "needs_reconciliation")
         with patch.object(self.sessions, "inventory", return_value=[]), patch("workflow.interactive.subprocess.run") as launch:
             with self.assertRaisesRegex(RuntimeError, "reconcile|relaunch"):
-                self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
             launch.assert_not_called()
 
     def test_reviewer_launch_requires_the_clean_candidate_worktree(self):
         candidate = self.plan["base_commit"]
         with patch("workflow.interactive.subprocess.run") as launch:
             with self.assertRaisesRegex(RuntimeError, "worktree"):
-                self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
             (self.directory / "review-worktree").mkdir()
             with patch("workflow.interactive.git", side_effect=["0" * 40, ""]):
                 with self.assertRaisesRegex(RuntimeError, "candidate"):
-                    self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                    self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
             with patch("workflow.interactive.git", side_effect=[candidate, " M file"]):
                 with self.assertRaisesRegex(RuntimeError, "candidate"):
-                    self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                    self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
             with patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                     patch.object(self.sessions, "inventory", return_value=[self.reviewer_row()]):
                 with self.assertRaisesRegex(RuntimeError, "launch name"):
-                    self.sessions.run_reviewer("prompt", self.TOKEN, candidate)
+                    self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
             launch.assert_not_called()
         self.assertFalse((self.directory / "review.interactive.json").exists())
 
@@ -403,6 +405,146 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(runs[0][2], "w1:p3")
         self.assertIn("workflow.interactive attach-one", runs[0][3])
         self.assertIn("--node review", runs[0][3])
+
+    # ---- Declared reviewers: one session, one pane and one completion file per reviewer ---------------------
+
+    REVIEWERS = ["general", "coverage"]
+
+    def declare_reviewers(self):
+        self.plan["reviewers"] = [{"reviewer_id": reviewer_id, "prompt": f"Look at {reviewer_id}."} for reviewer_id in self.REVIEWERS]
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+
+    def declared_row(self, reviewer_id, **updates):
+        uuid = {"general": "55555555-5555-4555-8555-555555555555", "coverage": "66666666-6666-4666-8666-666666666666"}[reviewer_id]
+        return {"sessionId": uuid, "id": uuid[:8], "name": self.sessions.launch_name(f"review-{reviewer_id}"), "kind": "background",
+                "cwd": str(self.directory / "review-worktree"), "state": "idle", "pid": os.getpid(), **updates}
+
+    def declared_receipt(self, reviewer_id):
+        from .sessions import plan_digest
+        row = self.declared_row(reviewer_id)
+        save_json(self.directory / f"review-{reviewer_id}.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": row["id"],
+                                                                                "session_id": row["sessionId"], "node_id": f"review-{reviewer_id}"})
+
+    def test_declared_reviewer_launches_under_its_own_node_name_and_files(self):
+        self.declare_reviewers()
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.declared_row('coverage')['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.declared_row("coverage")], [self.declared_row("coverage")]]), \
+                patch("workflow.interactive.git", side_effect=[candidate, ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            receipt = self.sessions.run_reviewer("coverage", "Coverage brief.", self.TOKEN, candidate)
+            self.assertEqual(self.sessions.run_reviewer("coverage", "Coverage brief.", self.TOKEN, candidate)["status"], "attached_session_available")
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual((receipt["node_id"], receipt["session_id"], receipt["worktree"]), ("review-coverage", self.declared_row("coverage")["sessionId"], str(self.directory / "review-worktree")))
+        command = launch.call_args.args[0]
+        self.assertEqual(command[command.index("--name") + 1], f"workflow-{self.plan['run_id']}-reviewer-coverage")
+        self.assertEqual(self.sessions.launch_name("review-coverage"), f"workflow-{self.plan['run_id']}-reviewer-coverage")
+        self.assertEqual(self.sessions.launch_name("review"), f"workflow-{self.plan['run_id']}-reviewer")
+        self.assertEqual(command[command.index("--allowedTools") + 1], f"Edit(//{str(self.directory / 'review-coverage.completion.json').lstrip('/')})")
+        self.assertEqual(command[-1], "Coverage brief.")
+        self.assertEqual((self.directory / "review-coverage.prompt.txt").read_text(), "Coverage brief.")
+        self.assertIn("claude attach", (self.directory / "review-coverage.launch.log").read_text())
+        self.assertFalse((self.directory / "review.interactive.json").exists())
+        self.assertEqual(self.sessions.node_worktree("review-coverage"), self.directory / "review-worktree")
+        # The other reviewer's session is not this one: locate binds by the exact background id and name.
+        self.assertIsNone(self.sessions.locate("review-general", [self.declared_row("coverage")]))
+        with self.assertRaises(RuntimeError):
+            self.sessions.locate("review-coverage", [self.declared_row("coverage", name=self.sessions.launch_name("review-general"))])
+        self.assertEqual(self.sessions.status()["review-coverage"]["receipt"]["node_id"], "review-coverage")
+        self.assertNotIn("review-general", self.sessions.status())
+
+    def test_declared_reviewers_get_one_pane_each_in_declared_order_right_of_the_workers(self):
+        from .sessions import plan_digest
+        self.declare_reviewers()
+        for node in ("ui", "adapter"):
+            save_json(self.directory / f"{node}.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row(node)["id"], "session_id": self.row(node)["sessionId"]})
+        for reviewer_id in self.REVIEWERS:
+            self.declared_receipt(reviewer_id)
+        calls = []
+        splits = iter(["w1:p3", "w1:p4", "w1:p5"])
+        def herdr(*args):
+            calls.append(args)
+            if args[:2] == ("pane", "current"):
+                return {"result": {"pane": {"workspace_id": "w1", "tab_id": "w1:t1"}}}
+            if args[:2] == ("tab", "create"):
+                return {"result": {"tab": {"tab_id": "w1:t2"}, "root_pane": {"pane_id": "w1:p2"}}}
+            if args[:2] == ("pane", "split"):
+                return {"result": {"pane": {"pane_id": next(splits)}}}
+            if args[:2] == ("pane", "process-info"):
+                return {"result": {"process_info": {"shell_pid": 1, "foreground_processes": [{"pid": 1}]}}}
+            return {}
+        rows = [self.row(), self.row("adapter"), self.declared_row("general"), self.declared_row("coverage")]
+        with patch.object(self.sessions, "inventory", return_value=rows), patch("workflow.interactive.herdr", side_effect=herdr):
+            mapping = attach_panels(self.sessions)
+        self.assertEqual(list(mapping), ["ui", "adapter", "review-general", "review-coverage"])
+        self.assertEqual([entry["pane_id"] for entry in mapping.values()], ["w1:p2", "w1:p3", "w1:p4", "w1:p5"])
+        splits_made = [(call[call.index("--pane") + 1], call[call.index("--direction") + 1]) for call in calls if call[:2] == ("pane", "split")]
+        self.assertEqual(splits_made, [("w1:p2", "right"), ("w1:p3", "right"), ("w1:p4", "right")])
+        self.assertIn(("pane", "rename", "w1:p4", "Claude: reviewer general"), calls)
+        self.assertIn(("pane", "rename", "w1:p5", "Claude: reviewer coverage"), calls)
+        runs = [call for call in calls if call[:2] == ("pane", "run")]
+        self.assertIn("--node review-general", runs[2][3])
+        self.assertIn("--node review-coverage", runs[3][3])
+        self.assertEqual(mapping["review-coverage"]["session_id"], self.declared_row("coverage")["sessionId"])
+        # attach-one accepts every reviewer node of the plan and reconnects it in the shared review worktree.
+        from .interactive import main
+        with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "review"]), \
+                patch("workflow.interactive.sys.stdin") as stdin, contextlib.redirect_stderr(io.StringIO()) as errors:
+            stdin.isatty.return_value = True
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertIn("--node must be a lane of this run (ui, adapter) or review-general, review-coverage", errors.getvalue())
+        with patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "review-coverage"]), \
+                patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", return_value=[self.declared_row("coverage")]), \
+                patch("workflow.interactive.os.chdir") as chdir, patch("workflow.interactive.os.execvp", side_effect=SystemExit(0)) as execvp:
+            stdin.isatty.return_value = True
+            with self.assertRaises(SystemExit):
+                main()
+        chdir.assert_called_once_with(self.directory / "review-worktree")
+        execvp.assert_called_once_with("claude", ["claude", "attach", self.declared_row("coverage")["id"]])
+
+    def test_reviewer_panes_are_added_one_at_a_time_as_the_review_node_launches_each_reviewer(self):
+        from .interactive import attach_reviewer_panel
+        self.declare_reviewers()
+        mapping = {"ui": {"pane_id": "w1:p2", "tab_id": "w1:t2", "mode": "attach_requested", "session_id": self.row()["sessionId"]},
+                   "adapter": {"pane_id": "w1:p3", "tab_id": "w1:t2", "mode": "attach_requested", "session_id": self.row("adapter")["sessionId"]}}
+        save_json(self.directory / "terminals.json", mapping)
+        calls = []
+        splits = iter(["w1:p4", "w1:p5"])
+        def herdr(*args):
+            calls.append(args)
+            if args[:2] == ("pane", "split"):
+                return {"result": {"pane": {"pane_id": next(splits)}}}
+            if args[:2] == ("pane", "process-info"):
+                return {"result": {"process_info": {"shell_pid": 1, "foreground_processes": [{"pid": 1}]}}}
+            return {}
+        rows = [self.row(), self.row("adapter"), self.declared_row("general"), self.declared_row("coverage")]
+        with patch("workflow.interactive.herdr", side_effect=herdr), patch.object(self.sessions, "inventory", return_value=rows):
+            with self.assertRaisesRegex(RuntimeError, "No reviewer session receipt"):
+                attach_reviewer_panel(self.sessions)
+            self.declared_receipt("general")  # The review node launched the first reviewer.
+            first = attach_reviewer_panel(self.sessions)
+            self.assertEqual(list(first), ["ui", "adapter", "review-general"])
+            self.assertEqual(first["review-general"]["pane_id"], "w1:p4")
+            with self.assertRaisesRegex(RuntimeError, "already allocated; use attach-one --node review-general"):
+                attach_reviewer_panel(self.sessions)
+            self.declared_receipt("coverage")  # Then the second: its pane splits right of the first reviewer's.
+            second = attach_reviewer_panel(self.sessions)
+            self.assertEqual(list(second), ["ui", "adapter", "review-general", "review-coverage"])
+            self.assertEqual(second["review-coverage"]["pane_id"], "w1:p5")
+            with self.assertRaisesRegex(RuntimeError, "already allocated"):
+                attach_reviewer_panel(self.sessions)
+            with self.assertRaisesRegex(RuntimeError, "already exist"):
+                attach_panels(self.sessions)
+        splits_made = [(call[call.index("--pane") + 1], call[call.index("--direction") + 1]) for call in calls if call[:2] == ("pane", "split")]
+        self.assertEqual(splits_made, [("w1:p3", "right"), ("w1:p4", "right")])
+        self.assertIn(("pane", "rename", "w1:p4", "Claude: reviewer general"), calls)
+        self.assertIn(("pane", "rename", "w1:p5", "Claude: reviewer coverage"), calls)
+        self.assertEqual(read_json(self.directory / "terminals.json"), second)
 
     def test_attach_one_reconnects_the_reviewer_in_its_worktree(self):
         from .interactive import main
