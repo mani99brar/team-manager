@@ -140,10 +140,6 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
         self.assertFalse((self.directory / "starts.log").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RunClaudeTests(unittest.TestCase):
     def test_a_briefly_missing_executable_is_retried_and_a_lasting_one_raises(self):
         from unittest.mock import patch
@@ -199,9 +195,31 @@ class RunClaudeTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].kwargs["cwd"], "/work")
         self.assertEqual(env, {"TMPDIR": "/tmp/lane"})  # The caller's own mapping is not modified.
 
+    def test_a_timeout_is_repeated_only_for_a_command_that_only_reads(self):
+        # A listing that hangs while the background service restarts is asked again, each timeout spending its own
+        # seconds of the grace; then the timeout is raised. A launch or a stop that timed out ran, so it never runs twice.
+        from .sessions import run_claude
+        done = subprocess.CompletedProcess(["claude"], 0, "[]", "")
+        hung = subprocess.TimeoutExpired(["claude", "agents", "--json"], 15)
+        listing = {"retry_output": lambda result: False, "timeout": 15}
+        sleeps = []
+        with patch("workflow.sessions.subprocess.run", side_effect=[hung, done]) as run:
+            self.assertIs(run_claude(["claude", "agents", "--json"], sleep=sleeps.append, **listing), done)
+        self.assertEqual((run.call_count, sleeps), (2, [2]))
+        sleeps = []
+        with patch("workflow.sessions.subprocess.run", side_effect=hung) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_claude(["claude", "agents", "--json"], sleep=sleeps.append, **listing)
+        self.assertEqual((run.call_count, sleeps), (4, [2, 2, 2]))  # 15 + 2 + 15 + 2 + 15 + 2 + 15 seconds: the 60s grace.
+        for command in (["claude", "--bg", "task"], ["claude", "stop", "abcd1234"]):
+            with patch("workflow.sessions.subprocess.run", side_effect=subprocess.TimeoutExpired(command, 45)) as run:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_claude(command, sleep=lambda seconds: self.fail("Unexpected wait"), timeout=45)
+            self.assertEqual(run.call_count, 1)
+
 
 class ClaudeLaunchTests(unittest.TestCase):
-    """popen_claude (print jobs) and exec_claude (attach) wait out an update only while the exec fails, with the auto-updater off."""
+    """popen_claude (print jobs) waits out an update only while the exec fails, with the auto-updater off."""
 
     def test_a_print_job_is_started_again_only_when_its_exec_failed(self):
         import errno
@@ -226,21 +244,6 @@ class ClaudeLaunchTests(unittest.TestCase):
             with self.assertRaises(TransientInfraError):
                 popen_claude(["claude", "--print"], grace=2, sleep=lambda seconds: None)
         self.assertEqual(popen.call_count, 2)
-
-    def test_attach_execs_claude_with_the_auto_updater_off_after_an_update(self):
-        import errno
-        from .sessions import exec_claude
-        seen = []
-        def execvp(file, args):
-            seen.append((file, args, os.environ.get("DISABLE_AUTOUPDATER")))
-            if len(seen) == 1:
-                raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
-            raise SystemExit(0)  # A real exec replaces the process; the mock ends it the same way.
-        with patch.dict(os.environ), patch("workflow.sessions.os.execvp", side_effect=execvp):
-            os.environ.pop("DISABLE_AUTOUPDATER", None)
-            with self.assertRaises(SystemExit):
-                exec_claude(["claude", "attach", "abcd1234"], sleep=lambda seconds: None)
-        self.assertEqual(seen, [("claude", ["claude", "attach", "abcd1234"], "1")] * 2)
 
 
 class StaleClaudeTests(unittest.TestCase):
@@ -277,3 +280,7 @@ class StaleClaudeTests(unittest.TestCase):
         self.assertEqual(warning.splitlines()[1:], ["  pid 206 in /work/vea: claude --resume abc", "  pid 1107463 in /work/md-manager: claude"])
         # No /proc (not Linux): nothing to report and nothing refused.
         self.assertEqual((stale_claude_processes(proc / "absent"), stale_claude_warning(proc / "absent")), ([], ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

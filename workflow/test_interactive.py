@@ -155,51 +155,59 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(launch.call_count, 31)
         self.assertEqual(read_json(self.directory / "adapter.interactive.json")["status"], "needs_reconciliation")
 
-    def test_a_failing_inventory_is_claude_code_unavailable_not_a_session_verdict(self):
+    def test_a_failing_inventory_is_asked_again_and_then_claude_code_unavailable_not_a_session_verdict(self):
+        # A reinstall restarts the background service: for a moment the listing exits nonzero, prints nothing or no list,
+        # or hangs. It only reads, so it is asked again within the grace; a launch, a print job or a stop never is.
+        import json
         from .sessions import TransientInfraError
         listing = subprocess.CompletedProcess(["claude"], 0, json.dumps([self.row()]), "")
         with patch("workflow.interactive.subprocess.run", return_value=listing) as run:
             self.assertEqual(self.sessions.inventory(), [self.row()])
         self.assertEqual(run.call_args.kwargs["env"]["DISABLE_AUTOUPDATER"], "1")
-        failures = {"timed out": subprocess.TimeoutExpired(["claude", "agents", "--json"], 15, output=b"partial", stderr=b"slow"),
-                    "exited nonzero": subprocess.CalledProcessError(1, ["claude", "agents", "--json"], "", "Couldn't reach the background service"),
-                    "unparseable": subprocess.CompletedProcess(["claude"], 0, "{not json", "")}
-        for name, failure in failures.items():
-            with self.subTest(name), patch("workflow.interactive.subprocess.run", side_effect=[failure]), patch("workflow.sessions.time.sleep"):
-                with self.assertRaisesRegex(TransientInfraError, "Claude session inventory unavailable") as raised:
+        answers = {"exited nonzero": subprocess.CompletedProcess(["claude"], 1, "", "Couldn't reach the background service"),
+                   "empty": subprocess.CompletedProcess(["claude"], 0, "", ""),
+                   "unparseable": subprocess.CompletedProcess(["claude"], 0, "{not json", ""),
+                   "not a list": subprocess.CompletedProcess(["claude"], 0, "{}", "")}
+        hung = subprocess.TimeoutExpired(["claude", "agents", "--json"], 15, output=b"partial", stderr=b"slow")
+        with patch("workflow.interactive.subprocess.run", side_effect=[hung, *answers.values(), listing]) as run, \
+                patch("workflow.sessions.time.sleep") as sleep:
+            self.assertEqual(self.sessions.inventory(), [self.row()])
+        self.assertEqual((run.call_count, sleep.call_count), (6, 5))
+        # An answer that stays unavailable for the whole grace (60s, every 2s) is Claude Code unavailable, by type.
+        for name, answer in answers.items():
+            with self.subTest(name), patch("workflow.interactive.subprocess.run", return_value=answer) as run, patch("workflow.sessions.time.sleep"):
+                with self.assertRaisesRegex(TransientInfraError, "Claude session inventory unavailable for 60s") as raised:
                     self.sessions.inventory()
-                if name == "exited nonzero":
-                    self.assertIn("background service", str(raised.exception))
-        # An empty listing is retried through the grace, then reported the same way.
-        with patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess(["claude"], 0, "", "")) as run, patch("workflow.sessions.time.sleep"):
-            with self.assertRaises(TransientInfraError):
+            self.assertEqual(run.call_count, 31)
+            if name == "exited nonzero":
+                self.assertIn("exited 1: Couldn't reach the background service", str(raised.exception))
+        # A listing that keeps hanging spends 15 seconds of the grace per attempt.
+        with patch("workflow.interactive.subprocess.run", side_effect=hung) as run, patch("workflow.sessions.time.sleep"):
+            with self.assertRaisesRegex(TransientInfraError, "timed out after 15 seconds"):
                 self.sessions.inventory()
-        self.assertEqual(run.call_count, 31)
-        # A parsed answer that is not a list is a changed CLI, not an outage.
-        with patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess(["claude"], 0, "{}", "")):
-            with self.assertRaises(RuntimeError) as raised:
-                self.sessions.inventory()
-        self.assertNotIsInstance(raised.exception, TransientInfraError)
+        self.assertEqual(run.call_count, 4)
 
-    def test_attach_one_waits_out_a_claude_update_with_the_auto_updater_off(self):
-        import errno
+    def test_attach_one_starts_claude_attach_with_the_auto_updater_off(self):
+        # However attach-one starts `claude attach` (an exec, or a child it reattaches), the auto-updater is off for it.
         from .interactive import main
         from .sessions import plan_digest
         save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row()["id"], "session_id": self.row()["sessionId"]})
         seen = []
         def execvp(file, args):
             seen.append((args, os.environ.get("DISABLE_AUTOUPDATER")))
-            if len(seen) == 1:
-                raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
             raise SystemExit(0)  # A real exec replaces the process; the mock ends it the same way.
+        def run(args, **kwargs):
+            seen.append((args, (kwargs.get("env") or os.environ).get("DISABLE_AUTOUPDATER")))
+            return subprocess.CompletedProcess(args, 0)  # The operator detached.
         with patch.dict(os.environ), patch("workflow.interactive.sys.argv", ["interactive", "attach-one", str(self.directory), "--node", "ui"]), \
                 patch("workflow.interactive.sys.stdin") as stdin, patch.object(InteractiveSessions, "inventory", return_value=[self.row()]), \
-                patch("workflow.interactive.os.chdir"), patch("workflow.interactive.os.execvp", side_effect=execvp), patch("workflow.sessions.time.sleep"):
+                patch("workflow.interactive.os.chdir"), patch("workflow.interactive.os.execvp", side_effect=execvp), \
+                patch("workflow.interactive.subprocess.run", side_effect=run):
             os.environ.pop("DISABLE_AUTOUPDATER", None)
             stdin.isatty.return_value = True
-            with self.assertRaises(SystemExit):
+            with contextlib.suppress(SystemExit):
                 main()
-        self.assertEqual(seen, [(["claude", "attach", self.row()["id"]], "1")] * 2)
+        self.assertEqual(seen, [(["claude", "attach", self.row()["id"]], "1")])
 
     def test_launch_intent_can_reconcile_exact_surviving_session(self):
         from .sessions import plan_digest

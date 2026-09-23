@@ -19,8 +19,8 @@ from pathlib import Path
 
 from .guardrails import decisions_block
 from .herdr import herdr
-from .sessions import (ClaudeSessions, TransientInfraError, exec_claude, git, plan_digest, run_claude, read_json, review_node, review_nodes,
-                       save_json)
+from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, claude_env, git, plan_digest, read_json, review_node,
+                       review_nodes, run_claude, save_json)
 
 REVIEW = "review"
 
@@ -38,21 +38,36 @@ def pane_label(node: str) -> str:
     return f"Claude: {node}"
 
 
+def listed_rows(result: subprocess.CompletedProcess) -> list | None:
+    """The rows of one `claude agents --json` answer, or None when it is not a listing: a nonzero exit, or output that is not a JSON list."""
+    if result.returncode != 0:
+        return None
+    try:
+        rows = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        return None
+    return rows if isinstance(rows, list) else None
+
+
 class InteractiveSessions(ClaudeSessions):
     """Native Claude background sessions, not print-mode jobs or Herdr-owned agents."""
 
     def inventory(self) -> list[dict]:
+        """`claude agents --json`. The listing only reads, so while the background service restarts (it exits nonzero,
+        prints no list or hangs) it is asked again for the grace; a listing that stays unavailable is TransientInfraError.
+        """
         try:
-            response = run_claude([self.executable, "agents", "--json"], capture_output=True, text=True, check=True, timeout=15,
-                                  retry_output=lambda result: not result.stdout.strip())
-            rows = json.loads(response.stdout)
-        except (subprocess.SubprocessError, ValueError) as error:
-            # The listing itself failed (it timed out, exited nonzero or printed nothing parseable while the background
-            # service restarts): Claude Code is unavailable, which says nothing about any session.
-            detail = error.stderr.strip()[-300:] if isinstance(getattr(error, "stderr", None), str) else ""
-            raise TransientInfraError(f"Claude session inventory unavailable: {error}" + (f" {detail}" if detail else "")) from error
-        if not isinstance(rows, list):
-            raise RuntimeError("Unexpected Claude inventory response")
+            response = run_claude([self.executable, "agents", "--json"], capture_output=True, text=True, timeout=15,
+                                  retry_output=lambda result: listed_rows(result) is None)
+        except subprocess.TimeoutExpired as error:
+            raise TransientInfraError(f"Claude session inventory unavailable for {CLAUDE_MISSING_GRACE_SECONDS}s: {error}") from error
+        rows = listed_rows(response)
+        if rows is None:
+            # Claude Code is unavailable, which says nothing about any session.
+            answer = f"exited {response.returncode}" if response.returncode else "printed no session list"
+            detail = ((response.stderr or "").strip() or (response.stdout or "").strip())[-300:]
+            raise TransientInfraError(f"Claude session inventory unavailable for {CLAUDE_MISSING_GRACE_SECONDS}s: "
+                                      f"`claude agents --json` {answer}" + (f": {detail}" if detail else ""))
         return rows
 
     def launch_name(self, node: str) -> str:
@@ -527,6 +542,8 @@ def main():
     parser.add_argument("--node", help="attach-one: a worker lane of the run, or a reviewer node (review, or review-<id>)")
     args = parser.parse_args()
     directory = args.directory.resolve()
+    # Every `claude` this process starts (the listing, `claude attach`) inherits the auto-updater off.
+    os.environ.update(claude_env())
     try:
         sessions = InteractiveSessions(directory, timeout=45)
         if sessions.plan.get("mode") != "interactive":

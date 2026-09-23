@@ -233,14 +233,15 @@ def claude_env(env: dict | None = None) -> dict:
 
 
 def wait_out_update(start, grace: float, sleep=None, retry_output=None):
-    """`start()` (it runs, starts or execs one `claude` command), repeated while a Claude Code update is in progress.
+    """`start()` (it runs or starts one `claude` command), repeated while a Claude Code update is in progress.
 
     An update replaces the installed binary: for a moment the command is missing (ENOENT), half written (ENOEXEC)
     or busy (ETXTBSY), and the exec fails before anything runs. That is repeated every 2 seconds for `grace`
-    seconds, then raised as TransientInfraError. `retry_output`, when given, also repeats a command that ran but
-    printed output it rejects (an empty inventory from a restarting background service); the last output is
-    returned once the grace is spent. Any other failure is raised at once, and a command that ran is never
-    repeated without `retry_output`: a launch or a print job never starts twice.
+    seconds, then raised as TransientInfraError. `retry_output`, when given, marks a command that only reads (the
+    session inventory), so running it again is harmless: an answer it rejects (the restarting background service
+    exits nonzero or lists nothing) and a timeout are repeated too, a timeout spending its own seconds of the
+    grace; once the grace is spent the last answer is returned, or the timeout raised. Any other failure is raised
+    at once, and a command that ran is never repeated without `retry_output`: a launch or a print job never starts twice.
     """
     sleep = sleep or time.sleep
     waited = 0.0
@@ -252,6 +253,10 @@ def wait_out_update(start, grace: float, sleep=None, retry_output=None):
                 raise
             if waited >= grace:
                 raise TransientInfraError(f"Claude Code unavailable for {grace:g}s ({error}); an update may be replacing it") from error
+        except subprocess.TimeoutExpired as error:
+            waited += error.timeout
+            if retry_output is None or waited >= grace:
+                raise
         else:
             if retry_output is None or not retry_output(result) or waited >= grace:
                 return result
@@ -270,12 +275,6 @@ def popen_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECO
     """`subprocess.Popen` for a `claude` print job, like run_claude: only a failed exec is repeated, a started job never."""
     kwargs["env"] = claude_env(kwargs.get("env"))
     return wait_out_update(lambda: subprocess.Popen(command, **kwargs), grace, sleep)
-
-
-def exec_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=None) -> None:
-    """Replace this process with a `claude` command (`claude attach`), with the auto-updater off, like run_claude."""
-    os.environ.update(claude_env())  # The exec passes this process's environment on.
-    wait_out_update(lambda: os.execvp(command[0], command), grace, sleep)
 
 
 def stale_claude_processes(proc: Path = Path("/proc")) -> list[dict]:
