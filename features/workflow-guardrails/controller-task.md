@@ -28,7 +28,7 @@ A feature at `feature.json` 2.2.0 can only run when its tasks are outcome briefs
 - `workflow init` writes a 2.2.0 feature with a `decisions.md` placeholder and brief-form tasks, and the placeholder refusal still names every placeholder.
 - `workflow/skills/workflow-grill/SKILL.md` exists with valid skill frontmatter (`name`, `description`) and follows PRD 4.4; the README says how to link it into `~/.claude/skills/`.
 - README and RUNBOOK describe 2.2.0, the challenge (pause, `resume`, `--accept-challenge`), `workflow answer`, completion 1.1.0 and the export 1.5.0 fields.
-- Run every check in this worktree before signalling completion: `/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests`, `npm run test:contracts`, `npx tsx --test server/projects.test.ts`, `npm run test:unit`, `npm run build`. While iterating, run only the affected test modules; run the full suite once at the end. Report each check with its result.
+- Run targeted tests only: the test modules and classes for the code you changed or that import it (for example `/home/agentops/dev/md-manager/.venv/bin/python -m unittest workflow.test_portable workflow.test_automatic.AutomaticGraphTests`), `npm run test:contracts` when you change `contracts/`, `npx tsx --test server/projects.test.ts` when you change `server/`, and `npm run build` when you change TypeScript. Do not run the full workflow suite: the trusted verifier runs every policy check on your snapshot and again on the combined candidate. Report exactly what you ran, with results, and list anything you did not run in `untested`.
 
 ## Stop
 

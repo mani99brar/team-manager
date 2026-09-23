@@ -22,7 +22,7 @@ An operator reading a guarded run in the Projects viewer sees the design challen
 
 - A seeded guarded run in `fixtures.ts` and `seed.ts`: a challenge node with an accepted P1 and a P2 concern, a lane with a 1.1.0 completion whose `falsifying_check` names a real check id, one answered and one waiting question, `decisions.md` with a remote image and an external link, and a captured Markdown file with the same. Keep a legacy run without any of these.
 - One browser test per scenario id, each title containing `[scenario:<id>]`: `challenge-node-page`, `completion-evidence-shown`, `worker-questions-shown`, `decisions-shown`, `inert-markdown`. Each asserts what PRD section 6 lists, in both phases. `inert-markdown` fails the test on any request to a non-local host.
-- Run these in this worktree before signalling completion: `npm run build`, `npm run test:unit`, and the project-workflows browser suite with `WORKFLOW_VERIFICATION_PHASE=worker` and with `WORKFLOW_VERIFICATION_PHASE=candidate`. Report each with its result.
+- Run targeted tests only: `npm run build`, and the browser spec files you added or changed (pass them to `npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts <files>`) with `WORKFLOW_VERIFICATION_PHASE=worker` and with `WORKFLOW_VERIFICATION_PHASE=candidate`. Do not run the whole browser suite or `npm run test:unit`: the trusted verifier runs every policy check on your snapshot and again on the combined candidate. Report exactly what you ran, with results.
 
 ## Stop
 
