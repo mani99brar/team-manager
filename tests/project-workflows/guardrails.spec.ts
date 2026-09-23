@@ -260,6 +260,7 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
   // A bare URL is autolinked by GFM and just as inert; raw HTML stays literal text.
   await expect(fileRendered.locator(`[data-inert-link="${REMOTE_AUTOLINK_URL}"]`)).toBeVisible()
   await expect(fileRendered).toContainText(`<img src="${REMOTE_HTML_IMAGE_URL}" alt="pixel">`)
+  // A supporting screenshot; the verifier's evidence for the scenario is the single `screenshot:inert-markdown` below.
   await attach(page, testInfo, 'inert-markdown-file')
 
   // decisions.md on the Assignment page.
@@ -270,7 +271,7 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
   await expectInert(decisions)
   // Worker tasks come from run data too and are rendered by the same inert Markdown.
   await expect(page.getByTestId('assignment-task').first().locator('.markdown')).toHaveAttribute('data-inert', 'true')
-  await attach(page, testInfo, 'inert-markdown-decisions')
+  await attach(page, testInfo, 'inert-markdown')
 
   await page.waitForLoadState('networkidle')
   expect(remote, 'rendering run Markdown must not contact any other host').toEqual([])
