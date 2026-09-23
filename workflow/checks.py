@@ -243,6 +243,10 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             tests, scenarios = None, []
             try:
                 if check["kind"] == "browser":
+                    if not browser_report.exists():
+                        # Playwright writes its report only once the suite starts; a config or fixture
+                        # error leaves none. Say so without quoting a path that differs per attempt.
+                        raise ValueError(f"no Playwright report written (exit {code}); the suite did not start")
                     # Keep structured results separate from npm/Node warnings in logs.
                     tests, scenarios = browser_evidence(browser_report, browser_output, check, capture)
                     capture.add(browser_report, "test_report")

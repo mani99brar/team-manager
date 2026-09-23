@@ -26,7 +26,9 @@ class CompletionTests(unittest.TestCase):
         self.plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS),
                      "nodes": {node: {"session_id": node + "-token"} for node in ("ui", "adapter")}}
         sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": "idle"})
-        self.runtime = SimpleNamespace(directory=self.root, plan=self.plan, sessions=sessions)
+        self.events = []
+        self.runtime = SimpleNamespace(directory=self.root, plan=self.plan, sessions=sessions,
+                                       event=lambda node, status, message: self.events.append((node, status, message)))
         for node in self.plan["nodes"]:
             save_json(self.root / f"{node}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00"})
 
@@ -57,6 +59,29 @@ class CompletionTests(unittest.TestCase):
         save_json(self.root / "ui.completion.json", item)
         with self.assertRaisesRegex(RuntimeError, "explicitly blocked"):
             read_completion(self.runtime, "ui")
+
+    def test_blocked_worker_waits_for_attention_instead_of_ending_the_run(self):
+        # A native session reports `blocked` when its turn ended needing a human (a question, a permission
+        # prompt, a refusal the harness could not continue past). The run waits until that lane's deadline,
+        # records the need for attention once, and never stops the other lanes because of it.
+        states = {"ui": "blocked", "adapter": "working"}
+        self.runtime.sessions.locate = lambda node, rows: {"state": states[node]}
+        ticks = iter([1] * 6 + [DEFAULTS["worker_timeout_seconds"] + 1])
+        with self.assertRaisesRegex(RuntimeError, "Worker ui deadline exhausted"):
+            wait_handoffs(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
+        self.assertEqual(self.events, [("ui", "interactive", "Worker ui needs attention in its pane (native state blocked); waiting until its deadline")])
+        self.assertFalse((self.root / "ui.handoff.json").exists())
+        # Answered in the pane, the worker finishes: its completion file is accepted once its session is idle.
+        for node in self.plan["nodes"]:
+            save_json(self.root / f"{node}.completion.json", self.completion(node))
+        self.events.clear()
+        sequence = iter(["blocked", "blocked", "idle"])
+        states["adapter"] = "idle"
+        def settle(_seconds):
+            states["ui"] = next(sequence)
+        wait_handoffs(self.runtime, clock=lambda: 1, sleep=settle)
+        self.assertEqual(read_json(self.root / "ui.handoff.json")["summary"], "Synthetic work")
+        self.assertEqual([event[1] for event in self.events], ["interactive"])
 
     def test_completion_while_working_is_not_accepted(self):
         for node in self.plan["nodes"]:
@@ -115,11 +140,13 @@ class CompletionTests(unittest.TestCase):
                                   attempt=lambda phase, node: attempts.get(f"{phase}:{node}", 1),
                                   retry_check=lambda phase, node: bumped.append((phase, node)))
         state = SimpleNamespace(next=("verify_adapter",), tasks=[SimpleNamespace(name="verify_adapter", error="blocked")])
-        reasons = ["backend-unit: exit 1", "backend-unit: no passing test evidence or failed tests"]
         for attempt in (1, 2):
-            (self.root / "verification" / "worker" / "adapter" / str(attempt)).mkdir(parents=True)
-            save_json(self.root / "verification" / "worker" / "adapter" / str(attempt) / "packet.json",
-                      {"gate": {"status": "blocked", "reasons": list(reasons)}})
+            directory = self.root / "verification" / "worker" / "adapter" / str(attempt)
+            directory.mkdir(parents=True)
+            # A reason may quote a path inside its own attempt directory; that must not make the attempts look different.
+            reasons = ["backend-unit: exit 1", "backend-unit: no passing test evidence or failed tests",
+                       f"browser: [Errno 2] No such file or directory: '{directory / 'browser-report-2.json'}'"]
+            save_json(directory / "packet.json", {"gate": {"status": "blocked", "reasons": reasons}})
         with self.assertRaisesRegex(RuntimeError, "failed identically on attempts 1 and 2"):
             advance_failed_checks(runtime, state)
         self.assertEqual(bumped, [])

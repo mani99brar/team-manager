@@ -34,7 +34,7 @@ The original two-lane stub lab (`graph.py`, `demo.py`) and the headless print-mo
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, unanimous verdict) and their per-run finding vocabulary; `prompts/review.md` is the built-in brief.
 - `verification.py`, `checks.py`: policy validation (required check kinds) and isolated check execution.
-- `export_state.py`: the versioned `run-state.json` export (1.3.0) the Projects viewer reads.
+- `export_state.py`: the versioned `run-state.json` export (1.4.0) the Projects viewer reads.
 - `launch.py`: one-command launch of a committed feature.
 - `requirements.txt` / `requirements.lock`: bounded Python dependencies, installed separately from the Node application.
 

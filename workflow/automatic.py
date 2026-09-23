@@ -109,6 +109,7 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             if read_completion(runtime, node) != read_json(runtime.directory / f"{node}.handoff.json"):
                 raise RuntimeError("Handoff changed after stop intent")
         return
+    attention: set[str] = set()
     while True:
         rows = runtime.sessions.inventory()
         handoffs = {}
@@ -120,8 +121,16 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             row = runtime.sessions.locate(node, rows)
             if row is None:
                 raise RuntimeError("Native worker missing; reconciliation required")
-            if row["state"] == "blocked":
-                raise RuntimeError(f"Worker {node} blocked; inspect quota or native error. No billing/provider fallback.")
+            if row["state"] == "blocked" and node not in attention:
+                # A native session reports `blocked` when its turn ended needing a human: a question,
+                # a permission prompt or a refusal the harness could not continue past. That is not a
+                # failure of the lane, and the other lanes keep working. The operator may answer in the
+                # pane; the worker deadline bounds the wait. No billing/provider fallback.
+                attention.add(node)
+                runtime.event(node, "interactive", f"Worker {node} needs attention in its pane (native state blocked); "
+                                                   "waiting until its deadline")
+            elif row["state"] != "blocked":
+                attention.discard(node)
             path = runtime.directory / f"{node}.completion.json"
             if row["state"] in {"idle", "done"} and path.exists():
                 handoffs[node] = read_completion(runtime, node)
@@ -679,6 +688,15 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
     return review
 
 
+def gate_reasons(packet: Path) -> list[str]:
+    """A packet's gate reasons with its own attempt directory neutralised.
+
+    A reason may quote a path inside the attempt directory (a report the check never wrote),
+    which would make every attempt look different from the last and defeat the identical-failure stop.
+    """
+    return [reason.replace(str(packet.parent), "<attempt>") for reason in read_json(packet)["gate"]["reasons"]]
+
+
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, never launches or review."""
     # A checkpoint can carry an error from an earlier attempt of a task that has since
@@ -698,7 +716,7 @@ def advance_failed_checks(runtime, state) -> bool:
             path = runtime.directory / "verification" / phase / node / str(attempt) / "packet.json"
             if path.exists() and read_json(path)["gate"]["status"] != "passed":
                 previous = runtime.directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
-                if attempt > 1 and previous.exists() and read_json(previous)["gate"]["reasons"] == read_json(path)["gate"]["reasons"]:
+                if attempt > 1 and previous.exists() and gate_reasons(previous) == gate_reasons(path):
                     # Retries rerun immutable code; two identical failures mean the cause is
                     # deterministic (code or environment), and more attempts only burn time.
                     raise RuntimeError(f"{phase}/{node} failed identically on attempts {attempt - 1} and {attempt}; "
