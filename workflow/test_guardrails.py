@@ -23,7 +23,7 @@ from . import pipeline
 from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wait_handoffs
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
-from .guardrails import answer_main, brief_problems, resume_main
+from .guardrails import answer_main, brief_problems, repin, resume_main
 from .interactive import worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
@@ -495,8 +495,16 @@ class ChallengeRevision(GuardedFeature):
         self.assertIn("without --accept-challenge", output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("paused", base))
         self.assertEqual(self.launches(directory), ["challenge"])
-        # Reverted, the override behaves as before: accepted, nothing committed or moved, the workers launch on the base.
+        # Committed by hand, the checkout is clean but the plan still pins the old text: compared by content, refused.
         git(self.repo, "checkout", "--", f"features/{FEATURE}/decisions.md")
+        self.edit_task()
+        commit_all(self.repo, "My own edit")
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Feature files changed since they were pinned (features/{FEATURE}/ui-task.md)", output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], self.launches(directory)), ("paused", ["challenge"]))
+        git(self.repo, "reset", "-q", "--hard", base)
+        # Reverted, the override behaves as before: accepted, nothing committed or moved, the workers launch on the base.
         output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
@@ -516,20 +524,103 @@ class ChallengeRevision(GuardedFeature):
         # Interrupted again while moving: one lane worktree is already on the revision.
         git(directory / "worktree-ui", "checkout", "-q", "--detach", revision)
         # Neither start nor an override launches a worker on the half-moved run.
-        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
-        self.assertEqual(code, 1, output)
-        self.assertIn("paused this run", output)
-        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
-        self.assertEqual(code, 1, output)
-        self.assertIn(f"An interrupted resume committed revised feature files ({revision})", output)
-        self.assertEqual(self.launches(directory), ["challenge"])
+        self.assert_unfinished(directory)
         # The rerun continues from the commit it made: no second commit, the rest of the run moves, then the challenge and the workers.
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 0, output)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), revision)
         self.assert_moved(directory, revision)
+        self.assertFalse((directory / "challenge-revision.json").exists())
         self.assertEqual(read_json(directory / "challenge.json")["attempt"], 2)
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+    def assert_unfinished(self, directory: Path) -> None:
+        """Neither start nor an override launches a worker while an interrupted resume has not finished moving the run."""
+        launches = self.launches(directory)
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("An interrupted resume has not finished moving this run", output)
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("An interrupted resume has not finished moving this run", output)
+        self.assertIn("without --accept-challenge", output)
+        self.assertEqual(self.launches(directory), launches)
+
+    def test_an_override_waits_for_a_resume_interrupted_around_its_single_plan_write(self):
+        directory, base = self.paused("half-moved-001")
+        self.edit_task()
+        # Interrupted after the worktrees moved, before the re-pin: plan.json still pins the old base and the old task together.
+        with patch("workflow.guardrails.repin", side_effect=RuntimeError("Interrupted before the re-pin")):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        revision = git(self.repo, "rev-parse", "HEAD")
+        plan = read_json(directory / "plan.json")
+        self.assertEqual((plan["base_commit"], {lane: plan["nodes"][lane]["observed_start_commit"] for lane in LANES}), (base, dict.fromkeys(LANES, base)))
+        self.assertNotIn("the adapter lane owns backend.py", plan["nodes"]["ui"]["task"])
+        self.assertEqual({git(path, "rev-parse", "HEAD") for path in self.run_worktrees(directory)}, {revision})
+        self.assert_unfinished(directory)
+        # Interrupted after the re-pin saved plan.json: base, start commits and task moved in one write; only the intent is left.
+        def repin_then_interrupt(*args):
+            repin(*args)
+            raise RuntimeError("Interrupted after the re-pin")
+        with patch("workflow.guardrails.repin", side_effect=repin_then_interrupt):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assert_moved(directory, revision)
+        self.assertIn("the adapter lane owns backend.py", read_json(directory / "plan.json")["nodes"]["ui"]["task"])
+        self.assertEqual(read_json(directory / "challenge-revision.json")["base_commit"], base)
+        self.assert_unfinished(directory)
+        # The rerun finishes it: the same commit, attempt 2 on the revised task, then the workers on the revision.
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), revision)
+        self.assert_moved(directory, revision)
+        self.assertFalse((directory / "challenge-revision.json").exists())
+        self.assertIn("the adapter lane owns backend.py", self.challenge_calls()[-1]["prompt"])
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+    def test_start_waits_for_a_resume_before_the_first_challenge_that_was_interrupted_after_its_commit(self):
+        directory = self.prepare("early-001")
+        base = read_json(directory / "plan.json")["base_commit"]
+        self.edit_task()
+        with patch("workflow.guardrails.move_base", side_effect=RuntimeError("Interrupted after the commit")):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        revision = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(git(self.repo, "log", "-1", "--format=%s", revision), "Workflow early-001: feature files revised before the design challenge")
+        # start would otherwise run attempt 1 and launch the workers on the old base, one commit behind the branch.
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("An interrupted resume has not finished moving this run", output)
+        self.assertEqual((self.launches(directory), (directory / "challenge.json").exists()), ([], False))
+        self.assertEqual(read_json(directory / "plan.json")["base_commit"], base)
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assert_moved(directory, revision)
+        self.assertEqual(read_json(directory / "challenge.json")["attempt"], 1)
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+    def test_a_run_worktree_that_is_not_the_clean_base_refuses_resume_before_anything_is_committed(self):
+        directory, base = self.paused("dirty-worktree-001")
+        task = self.edit_task()
+        (directory / "worktree-ui/scratch.txt").write_text("scratch\n")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Run worktree {directory / 'worktree-ui'} is not a clean checkout of the base {base}", output)
+        # A plain refusal: nothing committed or moved, the edit stays in the checkout and no resume is left to finish.
+        self.assertEqual((git(self.repo, "rev-parse", "HEAD"), read_json(directory / "plan.json")["base_commit"]), (base, base))
+        self.assertEqual(git(self.repo, "diff", "--name-only"), f"features/{FEATURE}/ui-task.md")
+        self.assertIn("the adapter lane owns backend.py", task.read_text())
+        self.assertFalse((directory / "challenge-revision.json").exists())
+        self.assertEqual(len(self.challenge_calls()), 1)
+        # So the override is still available once the edit is reverted.
+        (directory / "worktree-ui/scratch.txt").unlink()
+        git(self.repo, "checkout", "--", f"features/{FEATURE}/ui-task.md")
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
 
 
 class CompletionEvidence(unittest.TestCase):

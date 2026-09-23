@@ -46,6 +46,8 @@ CHALLENGE = "challenge"
 BLOCKING = frozenset({"P0", "P1"})
 DEFAULT_CHALLENGE_TIMEOUT = 1800
 CHALLENGE_SCHEMA = CONTRACTS / "challenge.schema.json"
+REVISION_INTENT = "challenge-revision.json"  # `resume` is moving the run to revised feature files; see commit_revision.
+UNFINISHED_REVISION = f"An interrupted resume has not finished moving this run to the revised feature files ({REVISION_INTENT})"
 MIGRATION_NOTE = ("feature.json {version}: no guardrail is enforced (outcome-brief headings, decisions.md, design challenge, "
                   "completion evidence). To migrate, set \"version\": \"2.2.0\", give every task non-empty ## Goal, ## Acceptance "
                   "and ## Stop sections, and write decisions.md with the workflow-grill skill (workflow/README.md).")
@@ -343,6 +345,8 @@ def challenge_gate(runtime) -> bool:
     plan, directory = runtime.plan, runtime.directory
     if "challenge" not in plan:
         return True
+    if (directory / REVISION_INTENT).exists():
+        raise RuntimeError(f"{UNFINISHED_REVISION}; no worker launches before it does. Rerun it with: {resume_command(directory)}")
     current = load_challenge(directory)
     if plan["challenge"] is False:
         if current is None:
@@ -399,7 +403,10 @@ def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
 
 
 def repin(directory: Path, plan: dict, policy: dict) -> dict:
-    """Re-read the task files, decisions.md and the PRD from the paths pinned at prepare; the policy is never re-pinned."""
+    """Re-read the task files, decisions.md and the PRD from the paths pinned at prepare; the policy is never re-pinned.
+
+    One plan.json write, which also saves the base `move_base` set in `plan`: the base and the pinned files move together.
+    """
     workers = {worker["node_id"]: worker for worker in policy["workers"]}
     tasks, decisions = read_pinned(plan)
     for node, text in tasks.items():
@@ -448,14 +455,15 @@ def is_revision(repo: Path, commit: str, plan: dict) -> bool:
 
 
 def commit_revision(runtime, answered: int) -> None:
-    """`resume` after an edit: commit the edited feature files on the run's branch, then move the run to that commit.
+    """`resume` after an edit: commit the edited feature files on the run's branch, then move the run's worktrees to that commit.
 
-    Only the paths `repin` reads may be changed. The branch may already carry the revisions of a `resume` interrupted
-    after its commit; the run moves to them without a second commit. No worker launches meanwhile: the challenge stays
-    paused until the rerun decides it, and an override refuses such a branch.
+    Only the paths `repin` reads may be changed and every run worktree must be a clean checkout of the base; anything
+    else is refused before anything is written. Then `challenge-revision.json` records the move until `repin` has
+    pinned its result: while it exists `start` and `--accept-challenge` refuse, so no worker launches on a half-moved
+    run, and a rerun continues from the revisions the branch already carries without a second commit.
     """
     from .pipeline import commit_env
-    plan = runtime.plan
+    directory, plan = runtime.directory, runtime.plan
     repo, base, branch = Path(plan["repository"]), plan["base_commit"], plan["source_branch"]
     if git(repo, "symbolic-ref", "--short", "HEAD") != branch:
         raise ValueError(f"The source checkout is not on the run's branch {branch}; switch back before resume")
@@ -468,6 +476,10 @@ def commit_revision(runtime, answered: int) -> None:
     if earlier is None or not all(is_revision(repo, commit, plan) for commit in earlier):
         raise ValueError(f"The branch {branch} moved past the run's base {base} with commits resume did not make; resume commits the "
                          f"revised feature files itself. Reset the branch to the base (git reset --soft {base}) and rerun resume")
+    check_run_worktrees(runtime, {base, *earlier})  # Before the commit: a refusal leaves the branch and the edits as they were.
+    intent = directory / REVISION_INTENT
+    previous = read_json(intent) if intent.exists() else {"base_commit": base, "paths": []}
+    save_json(intent, {"base_commit": previous["base_commit"], "paths": sorted({*previous["paths"], *dirty})})
     if dirty:
         parent = git(repo, "rev-parse", "HEAD")
         subject = revision_subject(plan["run_id"]) + (f" after design challenge attempt {answered}" if answered else " before the design challenge")
@@ -480,7 +492,7 @@ def commit_revision(runtime, answered: int) -> None:
         runtime.event(CHALLENGE, "running", f"Revised feature files committed on {branch} as {commit}: {', '.join(dirty)}")
     target = git(repo, "rev-parse", "HEAD")
     if target != base:
-        move_base(runtime, target)
+        move_base(runtime, target, {base, *earlier})
 
 
 def run_worktrees(repo: Path, directory: Path) -> list[Path]:
@@ -490,11 +502,8 @@ def run_worktrees(repo: Path, directory: Path) -> list[Path]:
     return sorted(path for path in paths if path.resolve().is_relative_to(directory))
 
 
-def move_base(runtime, target: str) -> None:
-    """Check out `target` in every worktree of the run, then pin it as the base and each lane's start commit, as prepare does.
-
-    Every worktree must be a clean checkout of the base, or of `target` when an interrupted move already reached it.
-    """
+def check_run_worktrees(runtime, heads: set[str]) -> dict[Path, str]:
+    """Every worktree of the run (the lanes' and the challenge's) registered, present and a clean checkout of one of `heads`; their heads."""
     directory, plan = runtime.directory, runtime.plan
     repo, base = Path(plan["repository"]), plan["base_commit"]
     worktrees = run_worktrees(repo, directory)
@@ -502,14 +511,26 @@ def move_base(runtime, target: str) -> None:
     missing = [str(path) for path in lanes if path not in [item.resolve() for item in worktrees]]
     if missing:
         raise RuntimeError(f"Lane worktrees are not registered in {repo}: {', '.join(missing)}; reconcile before resume")
-    heads = {}
+    found = {}
     for path in worktrees:
         if not path.is_dir():
             raise RuntimeError(f"Run worktree {path} is registered but missing; reconcile before resume")
-        heads[path] = git(path, "rev-parse", "HEAD")
-        if heads[path] not in {base, target} or git(path, "status", "--porcelain"):
+        found[path] = git(path, "rev-parse", "HEAD")
+        if found[path] not in heads or git(path, "status", "--porcelain"):
             raise RuntimeError(f"Run worktree {path} is not a clean checkout of the base {base}; reconcile before resume")
-    for path, head in heads.items():
+    return found
+
+
+def move_base(runtime, target: str, heads: set[str]) -> None:
+    """Check out `target` in every worktree of the run and set it as the plan's base and each lane's start commit, as prepare does.
+
+    `repin` saves them in the same plan.json write as the re-pinned files. Every worktree must be a clean checkout of
+    one of `heads` (the base and the revisions), or of `target` when an interrupted move already reached it.
+    """
+    plan = runtime.plan
+    base = plan["base_commit"]
+    found = check_run_worktrees(runtime, {*heads, target})
+    for path, head in found.items():
         if head != target:
             subprocess.run(["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "--detach", target], check=True, capture_output=True)
         if git(path, "rev-parse", "HEAD") != target or git(path, "status", "--porcelain"):
@@ -517,21 +538,41 @@ def move_base(runtime, target: str) -> None:
     plan["base_commit"] = target
     for node in plan_workers(plan):
         plan["nodes"][node]["observed_start_commit"] = git(Path(plan["nodes"][node]["worktree"]), "rev-parse", "HEAD")
-    save_json(directory / "plan.json", plan)
-    runtime.event(CHALLENGE, "running", f"Run moved from base {base} to {target}: {len(heads)} worktree(s) and plan.json; no worker exists yet")
+    runtime.event(CHALLENGE, "running", f"Run worktrees moved from base {base} to {target} ({len(found)}); plan.json pins it with the "
+                                        "re-pinned files next; no worker exists yet")
 
 
-def refuse_unused_edits(plan: dict) -> None:
-    """An override launches the workers on the pinned files as they are: edited or committed-but-unused revisions refuse it."""
+def changed_pins(plan: dict, policy: dict) -> list[Path]:
+    """The pinned feature files that no longer hold the plan's copies: edited, committed without `resume`, or removed."""
+    workers = {worker["node_id"]: worker for worker in policy["workers"]}
+    changed = []
+    for node in plan_workers(plan):
+        path = Path(plan["task_files"][node])
+        if not path.is_file() or pinned_task(path.read_text(), workers[node]) != plan["nodes"][node]["task"]:
+            changed.append(path)
+    decisions = Path(plan["decisions"]["path"])
+    if not decisions.is_file() or decisions.read_text() != plan["decisions"]["text"]:
+        changed.append(decisions)
+    prd = plan.get("prd")
+    if prd and (not Path(prd["path"]).is_file() or digest_bytes(Path(prd["path"]).read_bytes()) != prd["sha256"]):
+        changed.append(Path(prd["path"]))
+    return changed
+
+
+def refuse_unused_edits(directory: Path, plan: dict, policy: dict) -> None:
+    """An override launches the workers on the plan's pinned copies at its base; an unfinished resume, an unused revision or a changed pin refuses it."""
     repo = Path(plan["repository"])
-    edited = [path for path in dirty_paths(repo) if path in pinned_paths(plan)]
-    if edited:
-        raise ValueError(f"Feature files changed since they were pinned ({', '.join(edited)}); the override would launch the workers without "
-                         "them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
+    if (directory / REVISION_INTENT).exists():
+        raise ValueError(f"{UNFINISHED_REVISION}; rerun resume without --accept-challenge to finish it")
     pending = [commit for commit in commits_after(repo, plan["base_commit"]) or [] if is_revision(repo, commit, plan)]
     if pending:
         raise ValueError(f"An interrupted resume committed revised feature files ({', '.join(pending)}) that this run does not use yet; "
                          "rerun resume without --accept-challenge to finish moving the run to them")
+    edited = {path for path in dirty_paths(repo) if path in pinned_paths(plan)}
+    edited |= {path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path) for path in changed_pins(plan, policy)}
+    if edited:
+        raise ValueError(f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers "
+                         "without them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
 
 
 def launched_workers(directory: Path, plan: dict) -> list[str]:
@@ -559,7 +600,7 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
             raise ValueError("--accept-challenge needs a non-empty reason")
         if current is None or current["status"] != "paused":
             raise ValueError("Only a paused design challenge can be accepted")
-        refuse_unused_edits(plan)
+        refuse_unused_edits(directory, plan, runtime.policy)
         record = {**current, "status": "accepted", "accepted_reason": accept_reason.strip(), "decided_at": now()}
         save_challenge(directory, record)
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by the operator: {record['accepted_reason']}")
@@ -568,8 +609,9 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
     attempt = max(current["attempt"] if current else 0, read_json(running)["attempt"] if running.exists() else 0) + 1
     read_pinned(plan)  # A brief that lost a required section is refused before anything is committed.
     commit_revision(runtime, attempt - 1)
-    repin(directory, plan, runtime.policy)
-    runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt}")
+    repin(directory, plan, runtime.policy)  # The moved base and the re-pinned files in one plan.json write.
+    (directory / REVISION_INTENT).unlink()
+    runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt} on base {plan['base_commit']}")
     return run_challenge(runtime, attempt)
 
 
