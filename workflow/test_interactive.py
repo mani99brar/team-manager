@@ -684,6 +684,28 @@ class AttachOneTests(unittest.TestCase):
         lost = f"Lost the connection to ui ({self.row()['id']}); the background service may be restarting. Reattaching in {{}}s…"
         self.assertEqual(self.errors.getvalue().splitlines(), [lost.format(2), waiting.format(4), lost.format(8)])
 
+    def test_every_listing_failure_while_the_process_lives_is_waited_out(self):
+        # How the listing fails while the service restarts is Claude Code's business (a timeout, a non-zero exit,
+        # output it cannot parse, raised as whatever error it chooses): while the attached process lives, each is a gap.
+        class Unavailable(RuntimeError):
+            pass
+        unavailable = Unavailable("Claude session inventory unavailable: Command '['claude', 'agents', '--json']' returned non-zero exit status 1.")
+        self.attach_one([self.exited(1), self.exited(0)], [[self.row()], unavailable, unavailable, [self.row()], [self.row()]])
+        attach = call(["claude", "attach", self.row()["id"]], cwd=self.worktree)
+        self.assertEqual(self.attaches.call_args_list, [attach, attach])
+        self.assertEqual(self.sleep.call_args_list, [call(2), call(4)])
+        self.assertEqual(self.errors.getvalue().splitlines(),
+                         [f"Lost the connection to ui ({self.row()['id']}); the background service may be restarting. Reattaching in 2s…",
+                          f"The background service does not list ui ({self.row()['id']}) yet; retrying in 4s…"])
+        # A first attach has no process to wait for: the listing's failure is raised at once, as before.
+        with self.assertRaises(Unavailable):
+            self.attach_one([], [unavailable])
+        self.attaches.assert_not_called()
+        # A refusal of the session's identity is a verdict, not a gap: raised at once, even while the process lives.
+        with self.assertRaisesRegex(RuntimeError, "identity/worktree mismatch"):
+            self.attach_one([self.exited(1)], [[self.row()], [self.row(cwd=str(self.root))]])
+        self.sleep.assert_not_called()
+
     def test_reattaching_backs_off_to_a_cap_and_gives_up_after_the_limit(self):
         from .interactive import REATTACH_LIMIT
         with self.assertRaisesRegex(RuntimeError, rf"^Gave up reattaching ui \({self.row()['id']}\) after {REATTACH_LIMIT} attempts in a row"):

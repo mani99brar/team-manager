@@ -372,8 +372,8 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
 REATTACH_LIMIT = 30          # attempts in a row without a working attach before attach-one gives up
 REATTACH_MAX_DELAY = 10      # seconds; the delay doubles from 2 up to this cap
 ATTACH_STABLE_SECONDS = 60   # an attach that held this long was connected: its loss starts a new count
-# What a restarting service answers for a moment: no listing, or a row still registering its PID.
-TRANSIENT_REFUSALS = ("Unexpected Claude inventory response", "No live native PID", "Session is not attachable")
+# What a restarting service lists for a moment: a row still registering its PID. A failed listing is waited out whatever its error.
+TRANSIENT_REFUSALS = ("No live native PID", "Session is not attachable")
 
 
 def node_title(node: str) -> str:
@@ -442,15 +442,19 @@ def observe(sessions: InteractiveSessions, node: str, pid) -> dict | None:
     """The session's verified row, or None while a restarting service cannot confirm it yet.
 
     Only the process attached before (its PID still alive) earns that wait. A first attach, a session
-    whose process ended and every identity refusal fail at once, exactly as before.
+    whose process ended and every identity refusal fail at once, exactly as before. How the listing
+    itself fails (a missing CLI, a timeout, a non-zero exit, output it cannot parse) is Claude Code's
+    business and every such failure is a gap: nothing is attached without a verified live row.
     """
     waiting = process_alive(pid)
     try:
-        row = sessions.locate(node, sessions.inventory())
-    except (OSError, ValueError, subprocess.SubprocessError):
+        rows = sessions.inventory()
+    except Exception:
         if not waiting:
             raise
         return None
+    try:
+        row = sessions.locate(node, rows)
     except RuntimeError as error:
         if not waiting or not str(error).startswith(TRANSIENT_REFUSALS):
             raise
