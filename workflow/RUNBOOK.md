@@ -54,9 +54,11 @@ python3 -m venv .venv
 npm ci
 npx --no-install playwright install chromium
 
-.venv/bin/python -m unittest discover -s workflow -t . -v
+.venv/bin/python -m workflow.run_tests   # parallel by test class; or: -m unittest discover -s workflow -t . -v
 npm run test:contracts
 ```
+
+`workflow.run_tests` runs each test class in its own process, as many at a time as there are CPUs (`--jobs N` or `WORKFLOW_TEST_JOBS` to change it), and prints one unittest summary the verifier parses like a plain run; on 4 cores it takes about 3.5 minutes instead of 9.5. Use it as a policy check's argv (`["<venv>/bin/python", "-m", "workflow.run_tests"]`) so the verifier runs the suite in parallel too. Test classes must not share state outside their own temporary directories.
 
 The tests use fake workers, a fake reviewer session and mocked native lifecycle controls. `workflow.test_lanes` covers lanes from configuration: a three-lane run, a one-lane run, a pinned subset, excluded-lane ownership, refused selections, required check kinds, reserved ids, retrying any lane, a skipped drill, finding attribution per lane, the refused 1.0.0 feature file and the export of a run recorded before configured lanes. `workflow.test_portable` covers targets other than md-manager (PRD_PORTABLE_WORKFLOW section 6): `--repo`, the cwd rule, feature scanning, a target without `contracts/`, md-manager's unchanged commands, the registry entry, `init` and the bundled briefs. The end-to-end test uses real temporary Git worktrees, Python unit tests, headless Chromium, screenshot files, review/approval interrupts and a fast-forward of a **temporary test repository**. It makes no Claude model calls. A second test injects a check failure, reopens checkpoints and verifies that only the failed verification attempt reruns. The automatic tests run once with the native reviewer protocol and once with the print-mode fallback, each with the single built-in reviewer and with two declared reviewers, including a controller interrupted while waiting for the reviewers and every rejected completion file; `ParallelReviewerScenarios` covers PRD_PARALLEL_REVIEWERS section 6 (two approve, one blocks, a P1 anywhere, one times out, a file naming the other reviewer, a shared session UUID, an interrupted second launch) and `test_lanes` the manual import per reviewer.
 

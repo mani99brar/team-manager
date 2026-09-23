@@ -447,7 +447,8 @@ assert args[args.index('--tools') + 1] == 'Read,Glob,Grep'
 assert '--dangerously-skip-permissions' not in args
 assert '--bg' not in args
 counter = Path({str(self.counter)!r})
-counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')
+with counter.open('a') as handle:  # One appended line per launch: parallel jobs cannot lose a count.
+    handle.write('launch\\n')
 verdict = Path({str(self.verdict)!r}).read_text()
 findings_file = Path({str(self.findings)!r})
 findings = json.loads(findings_file.read_text()) if findings_file.exists() else []
@@ -463,7 +464,7 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
 
     def reviewer_launches(self) -> int:
         if self.transport == "print":
-            return int(self.counter.read_text()) if self.counter.exists() else 0
+            return len(self.counter.read_text().splitlines()) if self.counter.exists() else 0
         log = self.fixture.directory / "fake-launches.log"
         return sum(log.read_text().split().count(self.node(reviewer_id)) for reviewer_id in self.ids) if log.exists() else 0
 
@@ -648,9 +649,13 @@ class PrintReviewerTests(SharedGraphTests):
             self.assertNotIn("decision", self.status(reviewer_id))
         self.assertFalse((f.directory / "review.json").exists())
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        # The first rejection stops the other jobs, which under load may be killed before the fake records itself,
+        # so the count after the first drive is at most one per reviewer; the second drive must launch none.
+        launched = self.reviewer_launches()
+        self.assertTrue(1 <= launched <= len(self.ids), launched)
         with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
-        self.assertEqual(self.reviewer_launches(), len(self.ids))
+        self.assertEqual(self.reviewer_launches(), launched)
         self.assertEqual([node for node in f.sessions.starts if node.startswith("review")], [])
 
 

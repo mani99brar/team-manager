@@ -51,7 +51,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r workflow/requirements.lock
 npm ci
 npx --no-install playwright install chromium
-.venv/bin/python -m unittest discover -s workflow -t . -v
+.venv/bin/python -m workflow.run_tests   # parallel by test class; or: -m unittest discover -s workflow -t . -v
 npm run test:contracts
 ```
 
