@@ -380,6 +380,57 @@ class WorkerPhaseRepair(RepairFixture):
         self.assertEqual(git(self.repo, "show", "HEAD:backend.py"), "VALUE = 2")
 
 
+class RepairAfterWorkerRefailure(RepairFixture):
+    """A repair whose continuation fails the lane's own check again: a failed verify writes no checkpoint, so the head
+    stays the repair's fork with the error pending, and that is a continued run a second repair may fork from."""
+
+    def test_second_repair_after_the_first_fails_its_worker_check(self):
+        directory = self.directory
+        self.sessions.edits.update(adapter=("backend.py", "VALUE = 5\n"), ui=("ui.txt", "after"))
+        self.start()
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "worker/adapter failed identically on attempts 1 and 2"):
+            drive(self.runtime)
+        wrong = self.commit_on(self.snapshot("adapter"), {"backend.py": "VALUE = 3\n"})
+        self.assertEqual(self.cli("adapter", "--commit", wrong, "--reason", "first try")[0], 0)
+        first = self.entries()[0]
+        # Not continued yet: an applied repair is not replaced, and there is nothing to make a workspace for.
+        before = self.untouched()
+        for arguments in (("adapter", "--commit", self.commit_on(self.snapshot("adapter"), {"backend.py": "VALUE = 2\n"}), "--reason", "again"),
+                          ("adapter", "--workspace")):
+            code, _, err = self.cli(*arguments)
+            self.assertEqual(code, 1)
+            self.assertIn("Repair 1 is applied and the run has not continued from it", err)
+        self.assertEqual(self.untouched(), before)
+        self.assertFalse((directory / "repair-workspace-1").exists())
+
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "worker/adapter failed identically on attempts 3 and 4"):
+            drive(self.runtime)
+        self.assertEqual(self.head(), first["head_after"])  # The failed verify superstep left the fork as the head.
+        code, out, err = self.cli("adapter", "--workspace")
+        self.assertEqual(code, 0, err)
+        workspace = directory / "repair-workspace-1"
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), first["lanes"]["adapter"]["commit"])
+        (workspace / "backend.py").write_text("VALUE = 2\n")
+        git(workspace, "commit", "-qam", "adapter: VALUE is 2")
+        fix = git(workspace, "rev-parse", "HEAD")
+        code, out, err = self.cli("adapter", "--commit", fix, "--reason", "second try")
+        self.assertEqual(code, 0, err)
+        second = self.entries()[1]
+        self.assertEqual((second["fork_from"], second["base_kind"], second["base_commit"], second["attempt_targets"]),
+                         (first["head_after"], "snapshot", first["lanes"]["adapter"]["commit"], {"worker:adapter": 5}))
+        with self.graph() as (graph, config):
+            head = graph.get_state(config)
+            self.assertEqual((set(head.next), [task.error for task in head.tasks if task.error]), (FAN_OUT, []))
+
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        packet = read_json(directory / "verification/worker/adapter/5/packet.json")
+        self.assertEqual((packet["expected"]["output_commit"], packet["gate"]["status"]), (second["lanes"]["adapter"]["commit"], "passed"))
+        self.assertEqual(read_json(directory / "candidate-2.json")["commit"], commit)
+        self.assertEqual(git(self.repo, "show", "HEAD:backend.py"), "VALUE = 2")
+        self.assertIn("(repair 2: second try)", (directory / "review.prompt.txt").read_text())
+
+
 class SnapshotBaseAndSpanningFixes(RepairFixture):
     automatic = False
 

@@ -216,7 +216,9 @@ def blocked_run(runtime, graph, config, applied: list[dict]) -> tuple:
     check_before_review(runtime, state)
     if len(applied) >= MAX_REPAIRS:
         raise ValueError(f"{len(applied)} repairs are already applied to this run (at most {MAX_REPAIRS}); start a revised run")
-    if applied and state.config["configurable"]["checkpoint_id"] == applied[-1]["head_after"]:
+    # A failed verify superstep writes no checkpoint: a continuation that failed a lane's check again leaves the fork as
+    # the head with the error pending. Only a fork nothing has failed from is a repair not yet continued.
+    if applied and state.config["configurable"]["checkpoint_id"] == applied[-1]["head_after"] and not any(task.error for task in state.tasks):
         raise ValueError(f"Repair {applied[-1]['n']} is applied and the run has not continued from it; an applied repair is not "
                          f"replaced. Continue with: {continuation(runtime)}")
     blocked = blocked_step(runtime, state)
