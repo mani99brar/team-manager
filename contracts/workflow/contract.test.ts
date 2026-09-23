@@ -52,6 +52,39 @@ test('rejects unknown versions, fields, invalid attempts and unsafe file paths',
   ]) assert.throws(() => validateWorkerResult({ ...examples.workerResult, ...change }))
 })
 
+test('captured files: a file artifact carries a safe repo-relative path; older results without them stay valid', () => {
+  const legacy: Record<string, unknown> = structuredClone(examples.workerResult)
+  delete legacy.files_not_captured
+  legacy.artifacts = examples.workerResult.artifacts.filter(a => a.kind !== 'file')
+  validateWorkerResult(legacy)
+  for (const reason of ['binary', 'too_large', 'missing', 'budget'] as const)
+    validateWorkerResult({ ...examples.workerResult, files_not_captured: [{ path: 'public/viewer.png', reason }] })
+  const file = examples.workerResult.artifacts[1]
+  const withArtifact = (artifact: Record<string, unknown>) => ({ ...examples.workerResult, artifacts: [examples.workerResult.artifacts[0], artifact] })
+  const rejected = [
+    withArtifact({ ...file, path: undefined }),
+    withArtifact({ ...examples.workerResult.artifacts[0], artifact_id: 'x', path: 'src/workflow/Viewer.tsx' }),
+    ...['/etc/passwd', '../secret', 'src/../../secret', 'C:/secret', 'src\\secret', ''].map(path => withArtifact({ ...file, path })),
+    { ...examples.workerResult, files_not_captured: [{ path: 'public/viewer.png', reason: 'unreadable' }] },
+    { ...examples.workerResult, files_not_captured: [{ path: '../viewer.png', reason: 'binary' }] },
+    { ...examples.workerResult, files_not_captured: [{ path: 'public/viewer.png' }] },
+  ]
+  for (const value of rejected) assert.throws(() => validateWorkerResult(value))
+  // The exported schema states "path exactly when kind is file" for jsonschema consumers (exercised in workflow/test_checks.py).
+  const artifact = readJson('./workerResult.schema.json').properties.artifacts.items
+  assert.deepEqual(artifact.properties.kind.enum, ['patch', 'log', 'screenshot', 'test_report', 'other', 'file'])
+  assert.equal(artifact.required.includes('path'), false)
+  assert.deepEqual(artifact.anyOf, [
+    { properties: { kind: { const: 'file' } }, required: ['path'] },
+    { properties: { kind: { enum: ['patch', 'log', 'screenshot', 'test_report', 'other'] }, path: { not: {} } } },
+  ])
+  assert.deepEqual(readJson('./workerResult.schema.json').properties.files_not_captured.items.properties.reason.enum, ['binary', 'too_large', 'missing', 'budget'])
+  // Cross-field: every captured or uncaptured path is a changed file, and each appears once.
+  assert.throws(() => validateWorkerResult({ ...examples.workerResult, files_not_captured: [{ path: 'src/other.ts', reason: 'missing' }] }))
+  assert.throws(() => validateWorkerResult({ ...examples.workerResult, files_not_captured: [{ path: 'docs/VIEWER.md', reason: 'too_large' }] }))
+  assert.throws(() => validateWorkerResult(withArtifact({ ...file, path: 'src/unchanged.ts' })))
+})
+
 test('records unsuccessful checks without pretending that worker completion is acceptance', () => {
   const result = structuredClone(examples.workerResult)
   result.checks[0].exit_code = 1

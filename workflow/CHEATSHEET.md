@@ -131,6 +131,8 @@ MD_MANAGER_API_PORT=3010 npm run dev:api                 # API alone on another 
 
 The Projects viewer reads registered run roots from the projects registry file named by `MD_MANAGER_PROJECTS_CONFIG`; `config/projects.example.json` shows the shape. Unset means no projects. Sources come from `MD_MANAGER_CONFIG`. The adapter accepts exports 1.0.0 to 1.4.0, derives the run's lanes from `inputs.workers` (the fixed `ui`/`adapter` pair for exports without `inputs`) and serves one reviewer named `review` for exports before 1.4.0.
 
+Created files: worker-phase verification copies each changed text file (UTF-8, no NUL byte) into the packet before any check runs, as a `file` artifact with its repo-relative `path`. Caps: 512 KiB per file, 8 MiB per packet (`FILE_CAPTURE_LIMIT`, `PACKET_FILE_CAPTURE_LIMIT` in `workflow/checks.py`). Other changed paths are listed in `files_not_captured` as `binary`, `too_large`, `missing` (deleted, renamed away or not a regular file) or `budget` (over the packet cap). The candidate phase captures nothing. The viewer opens captured files through the artifact route (`text/plain`); runs verified before capture say the files were not captured.
+
 ## 7. Files in a run directory
 
 | File | Written by | Meaning |
@@ -147,7 +149,7 @@ The Projects viewer reads registered run roots from the projects registry file n
 | `review.completion.json`, `review-<reviewer>.completion.json` | each reviewer | its bound verdict file (`node_id` names the reviewer) |
 | `<node>.imported.json` | `review --reviewer` | a manually imported review, one per reviewer |
 | `automatic-review.json`, `automatic-review-<reviewer>.json`, `review.json` | controller | combined review status, each declared reviewer's status (launch token, session, decision, `accepted`/`blocked`/`superseded`), and the combined verdict: `reviewers` entries plus unioned findings tagged by `reviewer` |
-| `verification/<phase>/<node>/<attempt>/packet.json` | checks | check evidence and screenshots |
+| `verification/<phase>/<node>/<attempt>/packet.json` | checks | check evidence and screenshots; worker phase also the changed text files (`file` artifacts with `path`) and `files_not_captured` |
 | `report.html`, `events.jsonl`, `terminals.json` | controller | local report, timeline, Herdr pane map |
 | `controller.lock`, `pipeline.sqlite` | controller | lock and LangGraph checkpoint |
 

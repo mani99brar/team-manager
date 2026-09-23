@@ -79,10 +79,11 @@ class Capture:
         self.artifacts = []
         self.paths = {}
 
-    def add(self, source: Path, kind: str) -> str:
+    def add(self, source: Path, kind: str, path: str | None = None, content: bytes | None = None) -> str:
         if not source.is_file() or source.is_symlink():
             raise ValueError("Evidence must be a regular file")
-        content = source.read_bytes()
+        if content is None:
+            content = source.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
         artifact_id = f"{kind}-{len(self.artifacts)}-{digest[:12]}"
         destination = self.directory / artifact_id
@@ -91,10 +92,55 @@ class Capture:
             handle.flush()
             os.fsync(handle.fileno())
         destination.chmod(0o400)
-        self.artifacts.append({"artifact_id": artifact_id, "kind": kind,
+        self.artifacts.append({"artifact_id": artifact_id, "kind": kind, **({"path": path} if path is not None else {}),
                                "uri": destination.name, "sha256": digest})
         self.paths[artifact_id] = destination
         return artifact_id
+
+
+FILE_CAPTURE_LIMIT = 512 * 1024              # Bytes of one changed file captured as a `file` artifact.
+PACKET_FILE_CAPTURE_LIMIT = 8 * 1024 * 1024  # Bytes of captured files per worker-phase packet.
+
+
+def is_text(content: bytes) -> bool:
+    """Text is UTF-8 without a NUL byte."""
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in content
+
+
+def capture_changed_files(worktree: Path, changed: list[str], capture: Capture) -> list[dict]:
+    """Copy each changed text file of the snapshot into the packet as a `file` artifact, in order.
+
+    Returns `files_not_captured`: every other changed path with its reason. `missing` covers anything that is not
+    a regular file inside the worktree (deleted, renamed away, a symbolic link or a submodule).
+    """
+    root = worktree.resolve()
+    skipped, total = [], 0
+    for path in changed:
+        source = worktree / path
+        try:
+            regular = not source.is_symlink() and source.is_file() and source.resolve(strict=True).is_relative_to(root)
+        except OSError:
+            regular = False
+        if not regular:
+            skipped.append({"path": path, "reason": "missing"})
+            continue
+        with source.open("rb") as handle:
+            content = handle.read(FILE_CAPTURE_LIMIT + 1)
+        if len(content) > FILE_CAPTURE_LIMIT:
+            skipped.append({"path": path, "reason": "too_large"})
+            continue
+        if not is_text(content):
+            skipped.append({"path": path, "reason": "binary"})
+        elif total + len(content) > PACKET_FILE_CAPTURE_LIMIT:
+            skipped.append({"path": path, "reason": "budget"})
+        else:
+            capture.add(source, "file", path=path, content=content)
+            total += len(content)
+    return skipped
 
 
 def browser_evidence(report_path: Path, output_root: Path, requirement: dict, capture: Capture) -> tuple[dict, list]:
@@ -159,6 +205,9 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     artifacts_dir = directory / "artifacts"
     artifacts_dir.mkdir()
     capture = Capture(artifacts_dir)
+    # Captured before any check runs, so a check that rewrites a file cannot change what is recorded; the
+    # post-check cleanliness rule below invalidates the evidence if one does. The candidate phase captures nothing.
+    files_not_captured = capture_changed_files(worktree, changed, capture) if phase == "worker" else None
     env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
     for key in list(env):
         if key.startswith("PLAYWRIGHT_JSON_OUTPUT"):
@@ -191,7 +240,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     result = {"contract_version": "1.0.0", **{key: value for key, value in expected.items() if key != "verification_cwd"},
               "session_id": session_id, "status": "succeeded", "changed_files": changed,
               "checks": executions, "open_assumptions": [], "artifacts": capture.artifacts,
-              "summary": f"Trusted {phase} check capture; not integration approval", "error": None}
+              "summary": f"Trusted {phase} check capture; not integration approval", "error": None,
+              **({"files_not_captured": files_not_captured} if files_not_captured is not None else {})}
     evidence = {"version": "1.0.0", "policy_sha256": policy_digest(policy),
                 **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
     packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,

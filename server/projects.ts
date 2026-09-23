@@ -268,7 +268,7 @@ export type LoadedRun = {
 
 export type ArtifactContent = {
   artifact_id: string
-  kind: 'patch' | 'log' | 'screenshot' | 'test_report' | 'other'
+  kind: 'patch' | 'log' | 'screenshot' | 'test_report' | 'other' | 'file'
   contentType: string
   disposition: 'inline' | 'attachment'
   bytes: Buffer
@@ -334,6 +334,8 @@ const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
 const CONTENT_TYPES: Record<ArtifactContent['kind'], string> = {
   log: 'text/plain; charset=utf-8', patch: 'text/plain; charset=utf-8', test_report: 'application/json; charset=utf-8',
   screenshot: 'image/png', other: 'application/octet-stream',
+  /** A changed text file captured from the snapshot (UTF-8 by the capture rule), served verbatim like a log. */
+  file: 'text/plain; charset=utf-8',
 }
 
 export function encodeCursor(scope: { project_id: string; workflow_id: string }, run: { updated_at: string; run_id: string }): string {
@@ -928,7 +930,7 @@ export class RunStore {
 
 const artifactRegistrationSchema = z.object({
   artifact_id: z.string().min(1),
-  kind: z.enum(['patch', 'log', 'screenshot', 'test_report', 'other']),
+  kind: z.enum(['patch', 'log', 'screenshot', 'test_report', 'other', 'file']),
   /** Producer registries store the artifact's basename beside the packet; anything else is not followed. */
   uri: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/),
   sha256: hex64,
@@ -1084,6 +1086,8 @@ function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet
     status: passed ? raw.status : 'failed', base_commit: raw.base_commit, output_commit: raw.output_commit,
     changed_files: raw.changed_files, checks, open_assumptions: assumptions, artifacts,
     ...(packet.deferred.length > 0 ? { deferred_checks: packet.deferred } : {}),
+    // Worker-phase captures list the changed paths not copied as `file` artifacts; older and candidate-phase results carry none.
+    ...(raw.files_not_captured !== undefined ? { files_not_captured: raw.files_not_captured } : {}),
     summary: typeof raw.summary === 'string' ? redactPaths(raw.summary) : raw.summary,
     error: passed ? raw.error : { code: 'VERIFICATION_BLOCKED', message: redactPaths(packet.gate.reasons.join('; ')) || 'Verification did not pass.', retryable: true },
   }

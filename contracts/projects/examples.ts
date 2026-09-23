@@ -1,3 +1,4 @@
+import type { WorkerResult } from '../workflow/v1.js'
 import type { ReviewFinding, ReviewResult, RunDetail, RunInputs } from './v1.js'
 
 export const runDetail: RunDetail = {
@@ -73,6 +74,30 @@ export const reviewResult: ReviewResult = {
   ],
   reviewed_at: '2026-01-01T12:30:00Z',
   diff: { artifact_id: 'patch-review-2bb474561d3e', kind: 'patch', uri: '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts/patch-review-2bb474561d3e', sha256: 'd'.repeat(64) },
+}
+
+const ARTIFACTS = '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts'
+
+/**
+ * The served worker-phase result of the `ui` lane (`.../results/verify_ui/1`), validated by workflow v1 `workerResult`:
+ * scoped artifact links, the changed text files captured as `file` artifacts with their repo-relative `path`, and
+ * the changed paths that were not captured with the reason. Results recorded before capture carry neither.
+ */
+export const servedWorkerResult: WorkerResult = {
+  contract_version: '1.0.0', run_id: 'run-001', node_id: 'verify_ui', attempt: 1, session_id: 'ui-session', status: 'succeeded',
+  base_commit: 'a'.repeat(40), output_commit: 'b'.repeat(40),
+  changed_files: ['src/projects/NodeDetail.tsx', 'docs/VIEWER.md', 'public/graph.png', 'fixtures/large.json', 'src/projects/Old.tsx'],
+  checks: [{ command: 'npm run build', cwd: 'verification/worker/ui/1/worktree', started_at: '2026-01-01T12:01:00Z', finished_at: '2026-01-01T12:02:00Z', exit_code: 0, log_artifact_id: 'log-2-3c1f0e9a2b4d' }],
+  open_assumptions: [],
+  artifacts: [
+    { artifact_id: 'file-0-9d2e4c1b7a60', kind: 'file', path: 'src/projects/NodeDetail.tsx', uri: `${ARTIFACTS}/file-0-9d2e4c1b7a60`, sha256: '9'.repeat(64) },
+    { artifact_id: 'file-1-5b8a3f0c2e17', kind: 'file', path: 'docs/VIEWER.md', uri: `${ARTIFACTS}/file-1-5b8a3f0c2e17`, sha256: '5'.repeat(64) },
+    { artifact_id: 'log-2-3c1f0e9a2b4d', kind: 'log', uri: `${ARTIFACTS}/log-2-3c1f0e9a2b4d`, sha256: '3'.repeat(64) },
+  ],
+  files_not_captured: [
+    { path: 'public/graph.png', reason: 'binary' }, { path: 'fixtures/large.json', reason: 'too_large' }, { path: 'src/projects/Old.tsx', reason: 'missing' },
+  ],
+  summary: 'Trusted worker check capture; not integration approval', error: null,
 }
 
 /** The pinned assignment of the same run: two of three declared lanes selected, one automatic profile, receipts as far as the run got. */

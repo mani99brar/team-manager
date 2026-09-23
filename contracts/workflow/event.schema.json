@@ -90,7 +90,8 @@
                 "log",
                 "screenshot",
                 "test_report",
-                "other"
+                "other",
+                "file"
               ]
             },
             "uri": {
@@ -100,6 +101,11 @@
             "sha256": {
               "type": "string",
               "pattern": "^[a-f0-9]{64}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.(?:\\/|$)).+$"
             }
           },
           "required": [
@@ -108,7 +114,35 @@
             "uri",
             "sha256"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "kind": {
+                  "const": "file"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            },
+            {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "patch",
+                    "log",
+                    "screenshot",
+                    "test_report",
+                    "other"
+                  ]
+                },
+                "path": {
+                  "not": {}
+                }
+              }
+            }
+          ]
         },
         {
           "type": "null"

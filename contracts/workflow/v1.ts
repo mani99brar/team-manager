@@ -8,12 +8,27 @@ const relativePath = z.string().min(1).regex(/^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*(
 const status = z.enum(['pending', 'running', 'awaiting_approval', 'paused', 'succeeded', 'failed', 'cancelled'])
 const envelope = { contract_version: z.literal('1.0.0'), run_id: id }
 
+export const ARTIFACT_KINDS = ['patch', 'log', 'screenshot', 'test_report', 'other', 'file'] as const
+
+/**
+ * A durable artifact. A `file` artifact is a changed text file the trusted verifier copied from the frozen snapshot
+ * before any check ran; `path` is its repo-relative path and is present exactly when `kind` is `file`. The refinement
+ * enforces that here; the exported JSON Schema states the same rule as `anyOf` for non-TypeScript consumers.
+ */
 export const artifactSchema = z.strictObject({
   artifact_id: id,
-  kind: z.enum(['patch', 'log', 'screenshot', 'test_report', 'other']),
+  kind: z.enum(ARTIFACT_KINDS),
   uri: z.string().min(1),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
-})
+  path: relativePath.optional(),
+}).refine(artifact => (artifact.kind === 'file') === (artifact.path !== undefined), { message: 'An artifact has a path exactly when its kind is file', path: ['path'] })
+  .meta({ anyOf: [
+    { properties: { kind: { const: 'file' } }, required: ['path'] },
+    { properties: { kind: { enum: ARTIFACT_KINDS.filter(kind => kind !== 'file') }, path: { not: {} } } },
+  ] })
+
+/** Why a changed path has no `file` artifact: not UTF-8 text, over the per-file cap, absent from the snapshot, or over the packet cap. */
+export const fileNotCapturedSchema = z.strictObject({ path: relativePath, reason: z.enum(['binary', 'too_large', 'missing', 'budget']) })
 
 export const checkSchema = z.strictObject({
   command: z.string().min(1),
@@ -47,6 +62,8 @@ export const workerResultSchema = z.strictObject({
   error: z.strictObject({ code: id, message: z.string().min(1), retryable: z.boolean() }).nullable(),
   /** Set by the serving adapter from the packet's gate; absent from the immutable capture and when nothing was deferred. */
   deferred_checks: z.array(deferredCheckSchema).optional(),
+  /** Changed paths the worker-phase capture did not copy as `file` artifacts, with the reason; absent on older results and candidate-phase captures. */
+  files_not_captured: z.array(fileNotCapturedSchema).optional(),
 })
 
 export const runSpecSchema = z.strictObject({
@@ -124,6 +141,8 @@ export type WorkerResult = z.infer<typeof workerResultSchema>
 export type RunSnapshot = z.infer<typeof runSnapshotSchema>
 export type WorkflowEvent = z.infer<typeof eventSchema>
 export type ControlRequest = z.infer<typeof controlRequestSchema>
+export type Artifact = z.infer<typeof artifactSchema>
+export type FileNotCaptured = z.infer<typeof fileNotCapturedSchema>
 
 // Cross-field rules must also be implemented by non-TypeScript consumers.
 export function validateRunSpec(input: unknown): RunSpec {
@@ -147,6 +166,13 @@ export function validateWorkerResult(input: unknown): WorkerResult {
     if (Date.parse(check.finished_at) < Date.parse(check.started_at))
       throw new Error('Check finish time precedes start time')
   }
+  const captured = result.artifacts.flatMap(a => a.kind === 'file' && a.path !== undefined ? [a.path] : [])
+  const uncaptured = (result.files_not_captured ?? []).map(f => f.path)
+  const changed = new Set(result.changed_files)
+  if (new Set([...captured, ...uncaptured]).size !== captured.length + uncaptured.length)
+    throw new Error('A changed file is captured or listed as not captured at most once')
+  if ([...captured, ...uncaptured].some(path => !changed.has(path)))
+    throw new Error('Captured and uncaptured files must be changed files')
   if (result.status === 'failed' && result.error === null)
     throw new Error('Failed results require an error')
   if (result.status === 'succeeded' && result.error !== null)

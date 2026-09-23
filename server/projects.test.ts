@@ -58,7 +58,8 @@ type PacketSpec = {
   node: string
   attempt?: number
   gate?: { status: 'passed' | 'blocked'; reasons: string[] }
-  artifacts?: { id: string; kind: 'log' | 'screenshot' | 'test_report' | 'patch' | 'other'; content: Buffer | string; uri?: string; registeredSha?: string; skipWrite?: boolean }[]
+  /** `path` is the repo-relative path of a `file` artifact (a changed file captured from the snapshot). */
+  artifacts?: { id: string; kind: 'log' | 'screenshot' | 'test_report' | 'patch' | 'other' | 'file'; content: Buffer | string; uri?: string; registeredSha?: string; skipWrite?: boolean; path?: string }[]
   session?: string
   summary?: string
   assumptions?: string[]
@@ -114,7 +115,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
       const content = Buffer.isBuffer(artifact.content) ? artifact.content : Buffer.from(artifact.content)
       const uri = artifact.uri ?? artifact.id
       if (!artifact.skipWrite) await writeFile(join(artifactsDir, uri), content)
-      artifacts.push({ artifact_id: artifact.id, kind: artifact.kind, uri, sha256: artifact.registeredSha ?? sha256(content) })
+      artifacts.push({ artifact_id: artifact.id, kind: artifact.kind, ...(artifact.path !== undefined ? { path: artifact.path } : {}), uri, sha256: artifact.registeredSha ?? sha256(content) })
       paths[artifact.id] = join(artifactsDir, uri)
     }
     const logs = artifacts.filter(item => item.kind === 'log')
@@ -928,6 +929,61 @@ test('registered artifacts are served with safe content types; unknown, tampered
       assertError(await get(app, url('alpha', 'main', 'art', '/artifacts')), 404, 'NOT_FOUND', root)
     }, undefined, { runStore: { artifactByteLimit: 512 } })
   } finally { await rm(outside, { recursive: true, force: true }) }
+})
+
+test('[scenario:served-files] captured files are served as file artifacts with their path and the uncaptured reasons; older results still validate', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const markdown = '# Guide\n\nSee `src/app.ts:1`.\n<script>alert(1)</script>\n'
+    const source = "export const greeting = 'h\u00e9llo'\n"
+    const changed = ['docs/GUIDE.md', 'src/app.ts', 'assets/logo.png', 'docs/large.txt', 'docs/OLD.md']
+    const notCaptured = [{ path: 'assets/logo.png', reason: 'binary' }, { path: 'docs/large.txt', reason: 'too_large' }, { path: 'docs/OLD.md', reason: 'missing' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'files', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events: launchEvents,
+      packets: [
+        { node: 'ui', changed, artifacts: [
+          { id: 'file-0-111111111111', kind: 'file', path: 'docs/GUIDE.md', content: markdown },
+          { id: 'file-1-222222222222', kind: 'file', path: 'src/app.ts', content: source },
+          { id: 'log-2-333333333333', kind: 'log', content: 'ok\n' }],
+          mutate: packet => { (packet.result as Record<string, unknown>).files_not_captured = notCaptured } },
+        { node: 'adapter', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'ok\n' }] },
+      ] })
+    const served = await get(app, url('alpha', 'main', 'files', '/results/ui/1'))
+    assert.equal(served.status, 200, served.body)
+    const result = validateWorkerResult(served.json())
+    assert.deepEqual(result.changed_files, changed)
+    assert.deepEqual(result.artifacts.filter(artifact => artifact.kind === 'file').map(({ artifact_id, path, uri, sha256: digest }) => ({ artifact_id, path, uri, sha256: digest })), [
+      { artifact_id: 'file-0-111111111111', path: 'docs/GUIDE.md', uri: '/api/projects/alpha/workflows/main/runs/files/artifacts/file-0-111111111111', sha256: sha256(markdown) },
+      { artifact_id: 'file-1-222222222222', path: 'src/app.ts', uri: '/api/projects/alpha/workflows/main/runs/files/artifacts/file-1-222222222222', sha256: sha256(source) },
+    ])
+    assert.deepEqual(result.files_not_captured, notCaptured)
+    assert.ok(!served.body.includes(root))
+    // A result recorded before capture carries neither field and still validates.
+    const legacy = await get(app, url('alpha', 'main', 'files', '/results/adapter/1'))
+    assert.equal(legacy.status, 200, legacy.body)
+    const legacyResult = validateWorkerResult(legacy.json())
+    assert.equal('files_not_captured' in legacyResult, false)
+    assert.deepEqual(legacyResult.artifacts.map(artifact => artifact.kind), ['log'])
+    // The artifact route serves the captured bytes verbatim as text, never as HTML.
+    const file = await get(app, url('alpha', 'main', 'files', '/artifacts/file-0-111111111111'))
+    assert.equal(file.status, 200, file.body)
+    assert.equal(file.headers['content-type'], 'text/plain; charset=utf-8')
+    assert.equal(file.headers['x-content-type-options'], 'nosniff')
+    assert.match(String(file.headers['content-disposition']), /^inline; filename="file-0-111111111111"$/)
+    assert.equal(file.body, markdown)
+    assert.equal((await get(app, url('alpha', 'main', 'files', '/artifacts/file-1-222222222222'))).body, source)
+  })
+})
+
+test('a file artifact without a path, or an uncaptured entry that is not a changed file, is refused rather than served', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'badfiles', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events: launchEvents,
+      packets: [
+        { node: 'ui', changed: ['docs/GUIDE.md'], artifacts: [{ id: 'file-0-111111111111', kind: 'file', content: '# Guide\n' }, { id: 'log-1-222222222222', kind: 'log', content: 'ok\n' }] },
+        { node: 'adapter', artifacts: [{ id: 'log-0-333333333333', kind: 'log', content: 'ok\n' }],
+          mutate: packet => { (packet.result as Record<string, unknown>).files_not_captured = [{ path: 'src/elsewhere.ts', reason: 'missing' }] } },
+      ] })
+    assertError(await get(app, url('alpha', 'main', 'badfiles', '/results/ui/1')), 500, 'RESULT_INVALID', root)
+    assertError(await get(app, url('alpha', 'main', 'badfiles', '/results/adapter/1')), 500, 'RESULT_INVALID', root)
+  })
 })
 
 test('the same artifact ID registered twice is served only when both registrations agree on content', async () => {

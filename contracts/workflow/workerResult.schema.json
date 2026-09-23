@@ -121,7 +121,8 @@
               "log",
               "screenshot",
               "test_report",
-              "other"
+              "other",
+              "file"
             ]
           },
           "uri": {
@@ -131,6 +132,11 @@
           "sha256": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.(?:\\/|$)).+$"
           }
         },
         "required": [
@@ -139,7 +145,35 @@
           "uri",
           "sha256"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "anyOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          },
+          {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "patch",
+                  "log",
+                  "screenshot",
+                  "test_report",
+                  "other"
+                ]
+              },
+              "path": {
+                "not": {}
+              }
+            }
+          }
+        ]
       }
     },
     "summary": {
@@ -193,6 +227,33 @@
         "required": [
           "id",
           "check_index"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "files_not_captured": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.(?:\\/|$)).+$"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "binary",
+              "too_large",
+              "missing",
+              "budget"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "reason"
         ],
         "additionalProperties": false
       }

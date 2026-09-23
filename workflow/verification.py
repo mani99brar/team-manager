@@ -141,6 +141,11 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
             if digest != artifact["sha256"]:
                 raise ValueError(f"Artifact hash mismatch: {artifact_id}")
             resolved[artifact_id] = path
+        # Captured files (PRD_VIEWER_CLARITY 4.1): each changed path at most once, captured or listed with a reason.
+        accounted = [artifact["path"] for artifact in artifacts.values() if artifact["kind"] == "file"]
+        accounted += [entry["path"] for entry in result.get("files_not_captured", [])]
+        if len(set(accounted)) != len(accounted) or not set(accounted) <= set(result["changed_files"]):
+            raise ValueError("Captured files must be distinct changed files")
         supplied = unique(evidence["checks"], "id")
         required = {check["id"]: check for check in worker["checks"]}
         if set(supplied) != set(required):

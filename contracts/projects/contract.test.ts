@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
+import { validateWorkerResult } from '../workflow/v1.js'
 import { isBlockingFinding, schemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs } from './v1.js'
 
 test('project examples and generated schemas agree', () => {
@@ -161,6 +162,20 @@ test('review results reject unknown fields, non-patch diffs, foreign lanes and l
     mutate(result)
     assert.throws(() => validateReviewResult(result), label)
   }
+})
+
+test('served worker results carry captured files and uncaptured reasons; results recorded without them stay valid', () => {
+  const served = validateWorkerResult(examples.servedWorkerResult)
+  assert.deepEqual(served.artifacts.flatMap(a => a.kind === 'file' ? [a.path] : []), ['src/projects/NodeDetail.tsx', 'docs/VIEWER.md'])
+  assert.deepEqual(served.files_not_captured?.map(f => f.reason), ['binary', 'too_large', 'missing'])
+  const legacy: Record<string, unknown> = structuredClone(examples.servedWorkerResult)
+  delete legacy.files_not_captured
+  legacy.artifacts = examples.servedWorkerResult.artifacts.filter(a => a.kind !== 'file')
+  validateWorkerResult(legacy)
+  // The review diff stays a patch: a captured file is never the review's diff.
+  const result = structuredClone(examples.reviewResult)
+  result.diff = { ...examples.servedWorkerResult.artifacts[0] }
+  assert.throws(() => validateReviewResult(result))
 })
 
 test('run inputs: manual runs, absent receipts and truncated text are valid; contradictions are not', () => {

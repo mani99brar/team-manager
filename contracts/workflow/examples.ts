@@ -15,10 +15,15 @@ export const runSpec: RunSpec = {
 export const workerResult: WorkerResult = {
   contract_version: '1.0.0', run_id: 'demo-001', node_id: 'ui', attempt: 1,
   session_id: 'claude-ui-001', status: 'succeeded', base_commit: base,
-  output_commit: 'b'.repeat(40), changed_files: ['src/workflow/Viewer.tsx'],
+  output_commit: 'b'.repeat(40), changed_files: ['src/workflow/Viewer.tsx', 'docs/VIEWER.md', 'public/viewer.png'],
   checks: [{ command: 'npm run test:workflow', cwd: '/worktrees/ui', started_at: '2026-01-01T12:00:00Z', finished_at: '2026-01-01T12:01:00Z', exit_code: 0, log_artifact_id: 'tests-ui-1' }],
   open_assumptions: ['Browser gate runs separately before acceptance'],
-  artifacts: [{ artifact_id: 'tests-ui-1', kind: 'log', uri: 'artifact://demo-001/ui/1/tests.log', sha256: 'c'.repeat(64) }],
+  artifacts: [
+    { artifact_id: 'tests-ui-1', kind: 'log', uri: 'artifact://demo-001/ui/1/tests.log', sha256: 'c'.repeat(64) },
+    { artifact_id: 'file-1-viewer-tsx', kind: 'file', path: 'src/workflow/Viewer.tsx', uri: 'artifact://demo-001/ui/1/file-1', sha256: 'd'.repeat(64) },
+    { artifact_id: 'file-2-viewer-md', kind: 'file', path: 'docs/VIEWER.md', uri: 'artifact://demo-001/ui/1/file-2', sha256: 'e'.repeat(64) },
+  ],
+  files_not_captured: [{ path: 'public/viewer.png', reason: 'binary' }],
   summary: 'Viewer implemented against fixtures', error: null,
 }
 export const runSnapshot: RunSnapshot = {
