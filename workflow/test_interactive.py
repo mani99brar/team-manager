@@ -688,6 +688,35 @@ class AttachOneTests(unittest.TestCase):
     def exited(self, code):
         return subprocess.CompletedProcess(["claude", "attach", self.row()["id"]], code)
 
+    def process(self):
+        """A live process for a row to list as the session's PID; killed and reaped at cleanup."""
+        native = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(native.wait)
+        self.addCleanup(native.kill)
+        return native
+
+    def respawned(self, code, native, reap=True):
+        """`claude attach` ends as `code` while the service ends the attached process `native` (reaped, or left a zombie)."""
+        def attach(*args, **kwargs):
+            native.kill()
+            if reap:
+                native.wait()
+            else:
+                for _ in range(500):  # Uncollected: it still answers kill(pid, 0) until its parent reaps it.
+                    if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                        break
+                    time.sleep(0.01)
+            return self.exited(code)
+        return attach
+
+    def in_turn(self, *ends):
+        """`claude attach` ends as each of `ends` in turn: a result, or a callable that is that attach (a respawn)."""
+        ends = iter(ends)
+        def attach(*args, **kwargs):
+            end = next(ends)
+            return end(*args, **kwargs) if callable(end) else end
+        return attach
+
     def attach_one(self, attaches, inventory, clock=None):
         """attach_one for lane ui: `claude attach` ends as `attaches`, the inventory answers `inventory`; the fakes stay on self."""
         from .interactive import attach_one
@@ -772,14 +801,15 @@ class AttachOneTests(unittest.TestCase):
         self.record_stop(confirmed=False)
         code, errors = self.main()
         self.assertEqual(code, 0)
-        self.assertRegex(errors, r"^Worker ui was stopped by the controller at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC "
-                                 r"\(stop requested, not yet confirmed\); nothing to attach\.\n$")
+        self.assertRegex(errors, r"^The controller is stopping ui \(requested at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC, not yet confirmed\); "
+                                 rf"not attaching\. Inspect it with `claude logs {self.row()['id']}` or `claude attach {self.row()['id']}`\.\n$")
         self.attaches.assert_not_called()
 
     def test_a_session_gone_without_a_recorded_stop_is_refused_once(self):
         # The native process ended (a crash, or /exit typed in the pane) and the controller recorded no stop.
-        # `claude attach` would wake it again, so attach-one refuses once and never restarts it.
-        for code, listed in ((1, []), (0, []), (1, None)):
+        # `claude attach` would wake it again, so attach-one refuses once and never restarts it. A row that still
+        # lists the dead PID is refused after a short grace (test_a_row_that_keeps_listing_the_ended_pid_is_refused_after_a_grace).
+        for code, listed in ((1, []), (0, [])):
             with self.subTest(code=code, listed=listed):
                 native = subprocess.Popen(["sleep", "60"])
                 self.addCleanup(native.wait)
@@ -792,12 +822,10 @@ class AttachOneTests(unittest.TestCase):
                             break
                         time.sleep(0.01)
                     return self.exited(code)
-                # The service may drop the row, or still list it with its dead PID.
-                status, errors = self.main(attaches=ended, inventory=[[row], [row] if listed is None else listed])
+                status, errors = self.main(attaches=ended, inventory=[[row], listed])
                 self.assertEqual(status, 1)
-                refusal = "Native process is unavailable" if listed is None else "Session unavailable"
                 self.assertEqual(errors.count("Blocked:"), 1)
-                self.assertIn(f"Blocked: {refusal}; refusing implicit restart\n", errors)
+                self.assertIn("Blocked: Session unavailable; refusing implicit restart\n", errors)
                 self.assertNotIn("Reattaching", errors)
                 self.assertEqual(self.attaches.call_count, 1)
 
@@ -834,9 +862,98 @@ class AttachOneTests(unittest.TestCase):
             self.attach_one([self.exited(1)], [[self.row()], [self.row(cwd=str(self.root))]])
         self.sleep.assert_not_called()
 
+    def test_a_session_respawned_under_a_new_pid_is_reattached(self):
+        # About 15 seconds after an update restarts the background service, it respawns each idle session onto the new binary:
+        # the attached process ends and the same background id comes back under a new PID. On the way `claude attach` exits 1,
+        # or 0 ("Session <id> has exited."), and the listing (A) lists the row without a PID yet, (B) fails, (C) already lists
+        # the new PID, or (D) still lists the ended one. Each is followed to the new process; the pane is never left dead.
+        from .sessions import TransientInfraError
+        unavailable = TransientInfraError("Claude session inventory unavailable for 60s: `claude agents --json` exited 1")
+        for case, code in (("A", 1), ("B", 1), ("C", 0), ("D", 1)):
+            with self.subTest(case=case):
+                old, new = self.process(), self.process()
+                between = {"A": [[self.row(pid=None)], [self.row(state="starting", pid=None)]], "B": [unavailable],
+                           "C": [], "D": [[self.row(pid=old.pid)]]}[case]
+                self.attach_one(self.in_turn(self.respawned(code, old), self.exited(0)),
+                                itertools.chain([[self.row(pid=old.pid)]], between, itertools.repeat([self.row(pid=new.pid)])))
+                attach = call(["claude", "attach", self.row()["id"]], cwd=self.worktree)
+                self.assertEqual(self.attaches.call_args_list, [attach, attach])
+                self.assertEqual(self.sleep.call_args_list, [call(2), call(4)][:max(len(between), 1)])
+                if case == "C":
+                    self.assertEqual(self.errors.getvalue(), f"The background service respawned ui ({self.row()['id']}) as PID {new.pid}; "
+                                                             "reattaching in 2s…\n")
+
+    def test_an_attach_that_ends_cleanly_under_a_changed_pid_is_reattached(self):
+        # An operator's detach (exit 0) never changes the session's PID, so a live row under a new PID after it is the service
+        # moving the session, even while the old process lingers. The detach that follows ends attach-one quietly.
+        new = self.process()
+        self.attach_one([self.exited(0), self.exited(0)], itertools.chain([[self.row()]], itertools.repeat([self.row(pid=new.pid)])))
+        self.assertEqual(self.attaches.call_count, 2)
+        self.sleep.assert_called_once_with(2)
+        self.assertEqual(self.inventory.call_count, 4)
+
+    def test_a_row_that_keeps_listing_the_ended_pid_is_refused_after_a_grace(self):
+        # A respawn lists its new PID within seconds. A row that still lists the ended process (reaped, or a zombie that locate's
+        # kill(pid, 0) still answers for) after DEAD_PID_GRACE_SECONDS is a session that ended: refused, never restarted.
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        for reap in (True, False):
+            with self.subTest(reap=reap):
+                old = self.process()
+                elapsed = lambda: float(sum(item.args[0] for item in self.sleep.call_args_list))
+                with self.assertRaisesRegex(RuntimeError, r"^Native process is unavailable; refusing implicit restart$"):
+                    self.attach_one(self.respawned(1, old, reap=reap), itertools.repeat([self.row(pid=old.pid)]), clock=elapsed)
+                delays = [item.args[0] for item in self.sleep.call_args_list]
+                self.assertEqual(delays, [2, 4, 8, 10, 10])
+                self.assertLess(sum(delays[:-1]), DEAD_PID_GRACE_SECONDS)
+                self.assertGreaterEqual(sum(delays), DEAD_PID_GRACE_SECONDS)
+                self.assertEqual(self.attaches.call_count, 1)
+
+    def test_a_vanished_session_or_a_terminal_state_is_refused_at_once(self):
+        # Not gaps, whatever became of the attached process: a listing that answers without the id once that process ended,
+        # and a row the service reports stopped or failed. Refused at once, never waited for, never restarted.
+        old = self.process()
+        with self.assertRaisesRegex(RuntimeError, r"^Session unavailable; refusing implicit restart$"):
+            self.attach_one(self.respawned(1, old), [[self.row(pid=old.pid)], []])
+        self.sleep.assert_not_called()
+        for state in ("stopped", "failed"):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(RuntimeError, rf"^Session is not attachable: '{state}'"):
+                    self.attach_one([self.exited(1)], [[self.row()], [self.row(state=state, pid=None)]])
+                self.sleep.assert_not_called()
+                self.assertEqual(self.attaches.call_count, 1)
+
+    def test_a_stop_recorded_while_the_session_is_listed_is_honoured_before_the_attach(self):
+        # The freeze writes its intent while attach-one looks the session up: the records are read again right before
+        # `claude attach`, which would otherwise attach a session the controller is stopping.
+        for lost in (False, True):
+            with self.subTest(lost=lost):
+                listings = []
+                def listed():
+                    listings.append(None)
+                    if len(listings) == (3 if lost else 1):
+                        self.record_stop(confirmed=False)
+                    return [self.row()]
+                self.assertIsNone(self.attach_one([self.exited(1)], listed))
+                self.assertEqual(self.attaches.call_count, 1 if lost else 0)
+                last = self.errors.getvalue().splitlines()[-1]
+                self.assertRegex(last, r"^The controller is stopping ui \(requested at .* UTC, not yet confirmed\); not attaching\. "
+                                       r"Inspect it with `claude logs 11111111` or `claude attach 11111111`\.$")
+                (self.directory / "ui.stop.json").unlink()
+
+    def test_giving_up_names_the_last_error(self):
+        from .interactive import REATTACH_LIMIT
+        from .sessions import TransientInfraError
+        unavailable = TransientInfraError("Claude session inventory unavailable for 60s: `claude agents --json` exited 1: "
+                                          "Couldn't reach the background service")
+        with self.assertRaises(RuntimeError) as raised:
+            self.attach_one([self.exited(1)], itertools.chain([[self.row()]], itertools.repeat(unavailable)))
+        self.assertEqual(str(raised.exception), f"Gave up reattaching ui ({self.row()['id']}) after {REATTACH_LIMIT} attempts in a row; the session "
+                                                f"may still be running. Rerun attach-one once `claude agents` lists it again; last error: {unavailable}")
+
     def test_reattaching_backs_off_to_a_cap_and_gives_up_after_the_limit(self):
         from .interactive import REATTACH_LIMIT
-        with self.assertRaisesRegex(RuntimeError, rf"^Gave up reattaching ui \({self.row()['id']}\) after {REATTACH_LIMIT} attempts in a row"):
+        with self.assertRaisesRegex(RuntimeError, rf"^Gave up reattaching ui \({self.row()['id']}\) after {REATTACH_LIMIT} attempts in a row; "
+                                                  r".*; last error: `claude attach` exited 1$"):
             self.attach_one(itertools.repeat(self.exited(1)), itertools.repeat([self.row()]))
         delays = [item.args[0] for item in self.sleep.call_args_list]
         self.assertEqual(delays[:5], [2, 4, 8, 10, 10])
@@ -846,7 +963,7 @@ class AttachOneTests(unittest.TestCase):
 
     def test_a_connection_that_held_starts_a_new_count(self):
         # Two quick losses, then an hour attached before the next update: the backoff starts again from its first delay.
-        clock = iter([0.0, 1.0, 10.0, 20.0, 30.0, 3630.0, 3640.0]).__next__
+        clock = iter([0.0, 1.0, 10.0, 20.0, 30.0, 3630.0, 3640.0, 3650.0]).__next__
         self.attach_one([self.exited(1), self.exited(1), self.exited(1), self.exited(0)], itertools.repeat([self.row()]), clock=clock)
         self.assertEqual(self.sleep.call_args_list, [call(2), call(4), call(2)])
         self.assertEqual(self.attaches.call_count, 4)
