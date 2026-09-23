@@ -339,11 +339,65 @@ class ChallengeJobStops(FailingChallenge):
         self.assertEqual(code, 1)
         self.assertIn("Challenge worktree is not the clean base commit; reconcile before rerunning the challenge", output)
         self.assertEqual(self.launches(directory), ["challenge"])
+        # The refused rerun is the challenge node's last status, not the re-pin's `running`.
+        self.assertEqual([event for event in self.events(directory) if event[0] == "challenge"][-1],
+                         ("challenge", "blocked", "Challenge worktree is not the clean base commit; reconcile before rerunning the challenge"))
         git(directory / "challenge-worktree", "clean", "-fdq")
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 0, output)
         self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+
+class ChallengeCheckoutFails(FailingChallenge):
+    def test_a_challenge_checkout_that_cannot_be_created_blocks_start_and_a_later_start_reruns_it(self):
+        directory = self.prepare("checkout-001")
+        (directory / "challenge-worktree").symlink_to(self.root / "nowhere")  # `git worktree add` refuses an existing path.
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked:", output)
+        self.assertNotIn("Traceback", output)
+        [event] = [event for event in self.events(directory) if event[0] == "challenge"]
+        self.assertEqual(event[1], "blocked")
+        self.assertIn("worktree", event[2])
+        self.assertFalse((directory / "challenge.json").exists() or (directory / "challenge.running.json").exists())
+        self.assertEqual(self.launches(directory), [])
+        # No job ran, so nothing is left undecided: once the path is free, start runs attempt 1.
+        (directory / "challenge-worktree").unlink()
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 1))
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+
+class LaneNamedLikeARunFile(GuardedFeature):
+    """Lanes `plan` and `policy` share their names with the run's plan.json and policy.json: neither is a launch receipt."""
+
+    def setUp(self):
+        super().setUp()
+        policy = two_lane_policy()
+        for worker, lane in zip(policy["workers"], ("plan", "policy")):
+            worker["node_id"] = lane
+            (self.folder / f"{lane}-task.md").write_text(BRIEF.format(lane=lane))
+        save_json(self.folder / "policy.json", policy)
+        save_json(self.folder / "feature.json", {**self.manifest, "workers": [{"node_id": lane, "task": f"{lane}-task.md"} for lane in ("plan", "policy")]})
+        commit_all(self.repo, "Lanes plan and policy")
+
+    def test_lanes_named_plan_and_policy_resume_a_paused_challenge_then_launch(self):
+        directory = self.prepare("lanes-001")
+        self.assertTrue((directory / "plan.json").exists() and (directory / "policy.json").exists())
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "plan", "policy"])
+        # Their launch receipts, not the run files, make resume refuse once they run.
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1)
+        self.assertIn("Workers already launched (plan, policy)", output)
 
 
 class ChallengePasses(GuardedFeature):

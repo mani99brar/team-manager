@@ -279,7 +279,11 @@ def run_challenge(runtime, attempt: int) -> dict:
     """One print job, validated and decided: `passed` without a P0/P1 concern, `paused` with one. No worker is launched here."""
     from .automatic import print_command
     directory, plan = runtime.directory, runtime.plan
-    cwd = challenge_worktree(runtime)
+    try:
+        cwd = challenge_worktree(runtime)
+    except BaseException as error:  # No job ran; the node must not keep a re-pin's `running` as its last status.
+        runtime.event(CHALLENGE, "blocked", str(error) or type(error).__name__)
+        raise
     session_id = str(uuid.uuid4())
     running = directory / "challenge.running.json"
     save_json(running, {"attempt": attempt, "session_id": session_id, "started_at": now()})
@@ -580,7 +584,9 @@ def refuse_unused_edits(directory: Path, plan: dict, policy: dict) -> None:
 
 
 def launched_workers(directory: Path, plan: dict) -> list[str]:
-    return [node for node in plan_workers(plan) if (directory / f"{node}.interactive.json").exists() or (directory / f"{node}.json").exists()]
+    """Lanes with a launch receipt, which InteractiveSessions saves before `claude --bg`. `<lane>.json` is none: only the
+    legacy print workers write it, and a lane may share its name with a run file (plan.json, policy.json, terminals.json)."""
+    return [node for node in plan_workers(plan) if (directory / f"{node}.interactive.json").exists()]
 
 
 def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
