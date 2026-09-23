@@ -91,7 +91,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `launch.py`: target resolution, feature scanning, validation (placeholders, bundled briefs, the 2.2.0 guardrails) and the one-command launch.
 - `guardrails.py`: outcome briefs, decisions pinning, the design challenge and `resume`, worker questions, the persisted deadline pause and `answer`. `skills/workflow-grill/`: the interview skill.
 - `scaffold.py`: `init`. `registry.py`: the Projects registry entry and its atomic merge.
-- `sessions.py`: run preparation (one worktree per selected lane), lane id rules, receipts, locking, and the `claude` process helpers (`run_claude`, `popen_claude`: the auto-updater off, an update in progress waited out) with the stale-process warning.
+- `sessions.py`: run preparation (one worktree per selected lane), lane id rules, receipts, locking, and the `claude` process helpers (`run_claude`, `popen_claude`: the auto-updater off, an update in progress waited out; `background_settings`: the same setting as `--settings` for `claude --bg` sessions) with the stale-process warning.
 - `interactive.py`: native `claude --bg` launches, Herdr panes (one per lane, reviewers to their right), reconciliation, `attach-one`. `herdr.py`: the Herdr CLI helper.
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, unanimous verdict); `prompts/review.md` is the built-in brief, `prompts/reviewers/` the bundled ones.

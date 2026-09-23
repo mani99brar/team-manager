@@ -337,6 +337,43 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(prompt.stat().st_mode & 0o777, 0o600)
         self.assertIn("claude attach", (self.directory / "review.launch.log").read_text())
 
+    def test_background_sessions_get_the_auto_updater_off_in_their_arguments(self):
+        # `claude --bg` only hands its session to Claude Code's background service, which starts it with the service's own
+        # environment and an allowlist of the helper's: DISABLE_AUTOUPDATER on the helper never reaches the session (seen
+        # live: workers showed "Update installed" mid-run). The helper's arguments do, so every --bg command carries it.
+        from .automatic import DEFAULTS
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        ids = {row["name"]: row["id"] for row in (self.row(), self.reviewer_row(), self.row("adapter"))}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.dict(os.environ, {"HERDR_PANE_ID": "w1:p1"}), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]):
+                self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
+            self.plan.update(automatic=dict(DEFAULTS), source_branch="feature/test")
+            save_json(self.directory / "plan.json", self.plan)
+            self.sessions = InteractiveSessions(self.directory, executable="claude")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row("adapter")]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("adapter")
+        self.assertEqual(launch.call_count, 3)
+        for call in launch.call_args_list:
+            command = call.args[0]
+            with self.subTest(command[command.index("--name") + 1]):
+                self.assertEqual(command[:2], ["claude", "--bg"])
+                self.assertEqual(command.count("--settings"), 1)
+                self.assertEqual(json.loads(command[command.index("--settings") + 1]), {"env": {"DISABLE_AUTOUPDATER": "1"}})
+                # The helper itself still runs with the auto-updater off and without the controller's Herdr variables.
+                self.assertEqual(call.kwargs["env"]["DISABLE_AUTOUPDATER"], "1")
+                self.assertFalse(any(key.startswith("HERDR_") for key in call.kwargs["env"]))
+        # The prompts still come last, after the permission options.
+        worker, reviewer, automatic = (call.args[0] for call in launch.call_args_list)
+        self.assertEqual(worker[-2], "manual")
+        self.assertEqual(reviewer[-3:], ["--permission-mode", "dontAsk", "Review this candidate."])
+        self.assertEqual(automatic[-3:-1], ["bypassPermissions", "--dangerously-skip-permissions"])
+
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
         candidate = self.plan["base_commit"]

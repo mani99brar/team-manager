@@ -827,7 +827,8 @@ def main():
                 if not shutil.which(executable):
                     raise ValueError(f"Missing executable: {executable}")
             help_text = run_claude(["claude", "--help"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout
-            required_flags = ["--bg", "--safe-mode", "--tools", "--permission-mode"]
+            # Every --bg launch passes --settings: the auto-updater off inside its session (sessions.background_settings).
+            required_flags = ["--bg", "--settings", "--safe-mode", "--tools", "--permission-mode"]
             if args.automatic:
                 # Workers: --dangerously-skip-permissions. Native reviewer: --add-dir and --allowedTools.
                 # Print-mode reviewer (--reviewer-transport print): --json-schema, --print, --permission-prompts.

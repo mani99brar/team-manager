@@ -223,13 +223,28 @@ class TransientInfraError(RuntimeError):
     """
 
 
+AUTOUPDATER_OFF = {"DISABLE_AUTOUPDATER": "1"}
+
+
 def claude_env(env: dict | None = None) -> dict:
     """The environment of every Claude process the controller starts: `env` (default: this process's) with the auto-updater off.
 
     An update replaces the binary under every running session and restarts the background service, so a run never
-    updates Claude Code underneath itself; operators update between runs.
+    updates Claude Code underneath itself; operators update between runs. A `claude --bg` session is not started by
+    the controller: it takes the setting from background_settings.
     """
-    return {**(os.environ if env is None else env), "DISABLE_AUTOUPDATER": "1"}
+    return {**(os.environ if env is None else env), **AUTOUPDATER_OFF}
+
+
+def background_settings() -> list[str]:
+    """`--settings` for every `claude --bg` command: the auto-updater off inside the session it starts.
+
+    The short `--bg` helper only hands the session to Claude Code's background service, which starts it with the
+    service's own environment plus an allowlist of the helper's (provider, model, config, endpoint and PATH variables),
+    so claude_env reaches the session only when this run happened to start the service. The helper's arguments do
+    reach it, and settings given there are merged over the user's and the project's.
+    """
+    return ["--settings", json.dumps({"env": AUTOUPDATER_OFF})]
 
 
 def wait_out_update(start, grace: float, sleep=None, retry_output=None):

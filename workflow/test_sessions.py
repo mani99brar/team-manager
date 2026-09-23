@@ -195,6 +195,15 @@ class RunClaudeTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].kwargs["cwd"], "/work")
         self.assertEqual(env, {"TMPDIR": "/tmp/lane"})  # The caller's own mapping is not modified.
 
+    def test_a_background_session_gets_the_same_setting_in_its_arguments(self):
+        # `claude --bg` only hands its session to the background service, which starts it with the service's own
+        # environment: the helper's DISABLE_AUTOUPDATER never reaches it. The helper's arguments do, as --settings.
+        import json
+        from .sessions import background_settings, claude_env
+        flag, value = background_settings()
+        self.assertEqual((flag, json.loads(value)), ("--settings", {"env": {"DISABLE_AUTOUPDATER": "1"}}))
+        self.assertEqual(json.loads(value)["env"], claude_env({}))
+
     def test_a_timeout_is_repeated_only_for_a_command_that_only_reads(self):
         # A listing that hangs while the background service restarts is asked again, each timeout spending its own
         # seconds of the grace; then the timeout is raised. A launch or a stop that timed out ran, so it never runs twice.

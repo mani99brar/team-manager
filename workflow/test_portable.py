@@ -189,7 +189,7 @@ class NoTargetSchema(LaneRun):
         # Preflight needs a Claude CLI; a stand-in answers --help and auth status, nothing else.
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --tools --permission-mode'; "
+        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --tools --permission-mode --settings'; "
                                         "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
         (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
         for item in bin_dir.iterdir():
@@ -209,6 +209,32 @@ class NoTargetSchema(LaneRun):
         for node in LANES:
             self.assertEqual(read_json(run / f"verification/worker/{node}/1/packet.json")["gate"]["status"], "passed")
         self.assertFalse((self.repo / "contracts").exists())
+
+
+class PreflightClaudeFlags(Isolated):
+    def test_preflight_refuses_a_claude_cli_without_settings(self):
+        """Every `claude --bg` command passes --settings (the auto-updater off inside its session): a CLI without it is refused."""
+        target = make_target(self.root)
+        run = self.root / "runs/skeleton-001"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        preflight = [PY, "-m", "workflow", "preflight", str(run), "--repo", str(target), "--policy", str(target / "features/skeleton/policy.json")]
+        for flags, code in (("--bg --safe-mode --tools --permission-mode --settings", 0), ("--bg --safe-mode --tools --permission-mode", 1)):
+            # A stand-in answers --help with exactly these flags, and auth status; nothing else.
+            (bin_dir / "claude").write_text(f"#!/bin/sh\nif [ \"$1\" = --help ]; then echo '{flags}'; "
+                                            "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
+            for item in bin_dir.iterdir():
+                item.chmod(0o755)
+            with self.subTest(flags):
+                result = subprocess.run(preflight, cwd=TOOL, env=env, capture_output=True, text=True, timeout=120)
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code:
+                    self.assertIn("Installed Claude CLI lacks required flags", result.stderr)
+                else:
+                    self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
+        self.assertFalse(run.exists())  # The preflight writes nothing.
 
 
 class MdManagerDefaults(Isolated):
