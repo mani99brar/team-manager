@@ -70,13 +70,84 @@ The rule that run storage is outside the repository applies to the target.
 
 A pure function builds the entry from the target, feature, runs root and lanes; a separate function merges it into the registry document and writes it atomically. Merging replaces only the workflow with the same `workflow_id` (the feature name) under the same `project_id`, and adds the project if absent. A golden example of the entry is checked in as `contracts/workflow/examples/registry-entry.json`; the Python test compares the builder's output with it, and the contract test parses it with the server's registry schema (`server/projectsConfig.ts`) so both sides agree.
 
-### 4.3 Slice 2: challenge node
+### 4.3 Slice 2: which features the guardrails apply to
 
-`challenge` is a node of kind `review` in the stored definition, labelled "Design challenge", placed between preparation and the launch nodes. It uses the print transport and the existing `claude --print` job runner, with Read, Glob and Grep only. `challenge.json` has its own schema, `contracts/workflow/challenge.schema.json`. The viewer shows it with the existing review components where they fit; its executor label reads "one print job".
+The guardrails apply to features at `feature.json` 2.2.0, which `init` writes from slice 2 on. A 2.1.0 feature (md-manager's existing ones) still launches as today, with a note that no guardrail is enforced and how to migrate. Resuming, retrying and exporting runs are never affected. 2.2.0 adds two optional fields: `challenge` (boolean, default true) and `prd` (a path relative to the target, read by the challenge).
 
-### 4.4 Slice 2: questions and deadlines
+For a 2.2.0 feature, launch refuses before any Git action:
 
-The deadline pause is persisted: the controller records `paused_at` and the accumulated pause time per worker in the run directory, so a controller restart keeps the correct deadline. `workflow answer` validates the run, the node, and that the node's latest completion is an unanswered `question`, writes `<node>.answer.json`, and the controller delivers it into the native session.
+- a lane task without non-empty `## Goal`, `## Acceptance` and `## Stop` sections (a heading followed by at least one non-blank line before the next `## `), naming the file and the missing headings;
+- a feature directory without a non-empty `decisions.md`;
+- a `prd` that does not exist in the target.
+
+`decisions.md` is pinned into `plan.json` at prepare like the task text, and every worker and reviewer prompt includes it after the task.
+
+### 4.4 Slice 2: the interview skill
+
+The skill ships with the tool at `workflow/skills/workflow-grill/SKILL.md`, and the README says how to link it once into `~/.claude/skills/`. It interviews the operator about the feature named in its argument: it reads the PRD and the lane tasks, asks at most five questions one at a time, each with a recommended default and its consequence, then writes `features/<feature>/decisions.md` with three sections: `## Decisions`, `## Assumptions` and `## Deferred`. It never writes code, and it resolves or defers anything still open after the fifth question.
+
+### 4.5 Slice 2: challenge node
+
+`challenge` is the first node of a 2.2.0 run's graph: kind `review`, label "Design challenge", `depends_on: []`. Every launch node depends on it. A run whose feature sets `challenge: false`, and every 2.1.0 run, has no challenge node, so its graph is unchanged. `export_state.graph_nodes` takes the flag from the plan.
+
+The challenge runs inside `start`, before any worker session is launched. It is one `claude --print` job with Read, Glob and Grep only, run in a read-only worktree at the base commit, using the existing print-job runner, with its output validated against `contracts/workflow/challenge.schema.json`. The controller writes `challenge.json` in the run directory:
+
+```json
+{
+  "version": "1.0.0",
+  "run_id": "…",
+  "status": "passed | paused | accepted | disabled",
+  "attempt": 1,
+  "session_id": "…",
+  "pinned": { "tasks_sha256": "…", "decisions_sha256": "…", "prd_sha256": "… or null" },
+  "concerns": [
+    { "severity": "P0 | P1 | P2", "kind": "assumption | failure_mode | complexity | other", "message": "…", "consequence": "…" }
+  ],
+  "simpler_alternative": "…",
+  "cheap_experiment": "…",
+  "accepted_reason": null,
+  "decided_at": "…"
+}
+```
+
+No P0 or P1 concern: `status` is `passed`, and `start` launches the workers. A P0 or P1: `status` is `paused`, no worker is launched, the timeline records the pause, and the launch exits 0 with the concerns and the resume commands printed. `python -m workflow resume <run>` re-reads the task files, `decisions.md` and the PRD from the paths pinned at prepare, updates the plan's pinned copies, and reruns the challenge as the next attempt. `resume <run> --accept-challenge "<reason>"` records `accepted` with the reason and continues without rerunning. The policy is never re-pinned; changing it needs a new run. `disabled` is written when the feature turns the challenge off. Earlier attempts are kept as `challenge-<attempt>.json`.
+
+### 4.6 Slice 2: completion 1.1.0 and questions
+
+The worker completion file moves to version `1.1.0`:
+
+```json
+{
+  "version": "1.1.0", "run_id": "…", "node_id": "…", "launch_token": "…",
+  "status": "completed | blocked | question",
+  "summary": "…", "open_assumptions": ["…"],
+  "untested": ["…"], "falsifying_check": "…", "verify_yourself": "…",
+  "question": null
+}
+```
+
+For `completed`, `untested` is a list (it may be empty), and `falsifying_check` and `verify_yourself` are non-empty. For `question`, `question` is non-empty and the evidence fields may be empty. A 1.0.0 file is still read for runs that were prepared before slice 2, and only for them: a run pinned at 1.1.0 refuses a 1.0.0 file.
+
+On `question`, the controller moves the file to `<node>.question-<n>.json`, appends `{n, question, asked_at}` to `<node>.questions.json`, records an event and pauses that worker's deadline. The pause is persisted: `paused_seconds` accumulates in `<node>.deadline.json`, so a controller restart computes the same deadline. `python -m workflow answer <run> <node> "<text>"` checks that the node's latest question is unanswered, records `{answer, answered_at}`, and delivers the text to the worker's Herdr pane (`herdr pane send-text` and then Enter). With `--no-herdr` it prints the `claude attach <id>` command for the operator to type the answer. The deadline restarts when the answer is recorded. A fourth question is treated as `blocked`, and the worker prompt says so from the start.
+
+### 4.7 Slice 2: the export seam (both lanes build against exactly this)
+
+The export moves to `1.5.0`, and the served run inputs to `contract_version` `1.4.0`. Every addition is nullable or an empty list, so older exports stay valid:
+
+- `inputs.decisions`: the pinned `decisions.md` text, or `null`.
+- `inputs.challenge`: the latest `challenge.json` without `run_id` and `version`, plus `attempts` (an integer), or `null`.
+- `inputs.workers.<lane>.completion` gains `untested` (a list of strings or `null`), `falsifying_check` (a string or `null`) and `verify_yourself` (a string or `null`). Its `status` enum gains `question`. A 1.0.0 completion serves the three as `null`.
+- `inputs.workers.<lane>.questions`: a list of `{n, question, asked_at, answer, answered_at}`, where `answer` and `answered_at` are `null` while unanswered. It is `[]` for older runs.
+- The definition's challenge node is `{node_id: "challenge", label: "Design challenge", kind: "review", depends_on: []}`.
+
+`contracts/projects/v1.ts` and `server/projects.ts` pass these through unchanged. The ui lane builds its fixtures from this section, not from the controller lane's worktree.
+
+### 4.8 Slice 2: viewer
+
+- The challenge node's page shows the status, the concerns grouped by severity, each with its consequence, the simpler alternative, the cheap experiment, the attempt count, and the accepted reason when there is one. Its executor reads "one print job".
+- The launch node shows the three evidence fields under the completion. `falsifying_check` links to that check on the verify node when it names a check id. A 1.0.0 completion says the evidence was not recorded for this run. Questions are listed with their answers and times, and an unanswered question is marked as waiting on the operator.
+- The Assignment page shows `decisions.md` rendered as Markdown.
+- All run-served Markdown (captured files and decisions) renders with images and external links inert: no remote fetch, and links shown as text. This closes the open follow-up from the viewer-clarity review.
 
 ## 5. Work items
 
@@ -89,13 +160,14 @@ The deadline pause is persisted: the controller records `paused_at` and the accu
 5. Trimming as in section 2; test fixtures moved to `workflow/testdata/`.
 6. Docs folded into README and RUNBOOK, with a "Use it in another project" section that walks through `init`, `--repo`, the registry and the one-time `claude --dangerously-skip-permissions` acceptance.
 
-### Slice 2 (feature to be written after slice 1 lands)
+### Slice 2 (feature `workflow-guardrails`, lanes `controller` and `ui`)
 
-1. Outcome-brief validation and the `init` template in brief form.
-2. The `workflow-grill` skill, `decisions.md` enforcement and its inclusion in prompts.
-3. The `challenge` node, schema, pause, `resume` re-pin and `--accept-challenge`.
-4. Completion 1.1.0 and the `question` status with `workflow answer` and the persisted deadline pause.
-5. Viewer: challenge node, completion evidence fields and question events.
+1. controller: feature 2.2.0 schema and validation (brief headings, `decisions.md`, `prd`); `init` writes 2.2.0 with a `decisions.md` placeholder; decisions pinned and included in the prompts.
+2. controller: `workflow/skills/workflow-grill/SKILL.md`.
+3. controller: the challenge node, `challenge.schema.json`, the pause, `resume` with the re-pin, and `--accept-challenge`.
+4. controller: completion 1.1.0, the `question` status, `workflow answer`, the persisted deadline pause, and delivery through the pane.
+5. controller: export 1.5.0, served inputs 1.4.0 (section 4.7), with contracts, server pass-through and tests.
+6. ui: the challenge node page, completion evidence, questions, decisions on the Assignment page, inert Markdown, fixtures and browser scenarios.
 
 ### Slice 3 (after slice 2, needs the spec PDF)
 
@@ -119,17 +191,42 @@ The deadline pause is persisted: the controller records `paused_at` and the accu
 | legacy-feature-refused | a 1.0.0 `feature.json` is refused with a message to use 2.x |
 | trimmed | `workflow/observer.py` and the five folded docs are gone; the four finished feature directories are gone; the unit suite passes with fixtures from `workflow/testdata/`; old runs still export |
 
-### Slice 2 and slice 3
+### Slice 2
 
-Listed in their own feature directories when they are written, from section 2 and section 5.
+| Scenario id | Lane | Asserts |
+| --- | --- | --- |
+| brief-headings | controller (unit) | a 2.2.0 task missing `## Stop`, or with an empty `## Acceptance`, is refused, naming the file and headings; three one-line sections pass; a 2.1.0 feature launches with the migration note |
+| decisions-required | controller (unit) | a 2.2.0 feature without `decisions.md` is refused before Git; its text is pinned in the plan and appears in every worker and reviewer prompt |
+| challenge-passes | controller (unit) | a fake challenge with only P2 concerns writes `passed`, and workers launch after it; the graph starts with the challenge node; `challenge: false` writes `disabled` with no node |
+| challenge-pauses | controller (unit) | a P1 concern writes `paused`, launches no worker session, and exits 0; `resume` after editing a task re-pins it and reruns as attempt 2, keeping `challenge-1.json`; `--accept-challenge "r"` records `accepted` with the reason and launches the workers |
+| completion-evidence | controller (unit) | a 1.1.0 `completed` file without `falsifying_check` or `verify_yourself` is refused; a valid one is exported with the three fields; a run pinned before slice 2 still accepts 1.0.0 and exports `null`s |
+| worker-question | controller (unit) | a `question` completion pauses only that lane's deadline, which survives a controller restart; `answer` records and delivers it (a fake Herdr receives send-text then Enter), and the deadline resumes; a fourth question blocks |
+| export-seam | controller (contract) | a 1.5.0 export with decisions, challenge, evidence and questions validates and serves as inputs 1.4.0; a 1.4.0 export serves `null`s and `[]` |
+| served-inputs | controller (server) | `server/projects.test.ts` serves the new fields and keeps older runs valid |
+| challenge-node-page | ui (browser) | the seeded run's graph starts with "Design challenge"; its page shows the status, the concerns by severity with consequences, the alternative, the experiment and an accepted reason |
+| completion-evidence-shown | ui (browser) | the launch node shows untested, falsifying check (linked to the verify node's check) and verify-yourself; the legacy run says evidence was not recorded |
+| worker-questions-shown | ui (browser) | answered and waiting questions are listed with times; the waiting one is marked |
+| decisions-shown | ui (browser) | the Assignment page renders decisions.md; a run without it says so |
+| inert-markdown | ui (browser) | a captured Markdown file and decisions.md with a remote image and an external link make no network request, and the link renders as text |
+
+### Slice 3
+
+Listed in its own feature directory once the spec PDF is in place.
 
 ## 7. Open questions
 
 - Whether `init` should also write a starter `.gitignore` entry for run artifacts. Default: no; runs live outside the target.
 - Whether the challenge should also run on a retry after verification failures. Default: no; it runs once per run, and again only on `resume` after an edit.
+- Reusing a lane's worker-phase check results at the candidate phase when the candidate's tree equals that lane's snapshot tree (single-lane runs). It would save one full test run per single-lane run, but it changes the verifier's evidence format and gate, so it gets its own slice after slice 2 rather than a patch.
 - Whether `decisions.md` should be versioned per run rather than per feature. Default: per feature; the run pins its hash like the other feature files.
 
 ## 8. How to run
+
+Slice 2, from md-manager's main checkout after slice 1 is on main, in a new Herdr tab:
+
+```
+ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch workflow-guardrails --live --automatic --reviewer-transport print --worker-timeout-seconds 7200 --review-timeout-seconds 3600
+```
 
 Slice 1, from md-manager's main checkout in a new Herdr tab, with two print reviewers (this run is also the live smoke test of the print transport, which no run has exercised yet):
 

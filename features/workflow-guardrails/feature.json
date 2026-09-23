@@ -1,0 +1,26 @@
+{
+  "version": "2.1.0",
+  "name": "Workflow guardrails (PRD_PORTABLE_WORKFLOW slice 2): outcome briefs, decisions and the grill skill, design challenge, completion evidence and worker questions, shown in the viewer",
+  "branch_prefix": "feature/workflow-guardrails",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "controller",
+      "task": "controller-task.md"
+    },
+    {
+      "node_id": "ui",
+      "task": "ui-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ]
+}

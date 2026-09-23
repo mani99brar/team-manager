@@ -1,0 +1,161 @@
+{
+  "version": "1.2.0",
+  "feature": "Workflow guardrails",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "controller",
+      "role": "backend",
+      "required_check_kinds": [
+        "contract",
+        "unit"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts",
+        "server"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 900,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 120,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "backend-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "backend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "ui",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects",
+        "tests/project-workflows",
+        "src/document/Markdown.tsx"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 420,
+          "scenarios": [
+            {
+              "id": "challenge-node-page",
+              "description": "The graph starts with Design challenge; its page shows status, concerns by severity with consequences, the simpler alternative, the cheap experiment and an accepted reason"
+            },
+            {
+              "id": "completion-evidence-shown",
+              "description": "The launch node shows untested, the falsifying check linked to the verify node's check, and verify-yourself; a legacy run says evidence was not recorded"
+            },
+            {
+              "id": "worker-questions-shown",
+              "description": "Answered and waiting worker questions are listed with their times, and the waiting one is marked"
+            },
+            {
+              "id": "decisions-shown",
+              "description": "The Assignment page renders decisions.md as Markdown; a run without it says so"
+            },
+            {
+              "id": "inert-markdown",
+              "description": "Captured Markdown and decisions.md with a remote image and an external link make no network request, and the link renders as text"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
