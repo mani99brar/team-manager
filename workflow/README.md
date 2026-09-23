@@ -20,6 +20,7 @@ PY="$HOME/dev/md-manager/.venv/bin/python"   # run from md-manager's checkout, o
 | `$PY -m workflow <action> "$RUN"` | one pipeline step: `preflight`, `prepare`, `start`, `automatic`, `freeze`, `review`, `approve`, `retry`, `reconcile`, `attach`, `status`, `export` |
 | `$PY -m workflow resume "$RUN" [--accept-challenge "<reason>"] [--herdr]` | 2.2.0: commits the edited feature files on the run's branch and reruns a paused design challenge on them, or accepts it with a reason; then launches the workers (and supervises an automatic run) |
 | `$PY -m workflow answer "$RUN" <lane> "<text>" [--no-herdr]` | 2.2.0: answers a worker's question, restarts its deadline and types the answer into its pane |
+| `$PY -m workflow check-report <feature-dir or policy.json> <lane> <report.json> [--all]` | checks a Playwright JSON report against the lane's browser scenarios with the verifier's own rules; exits 1 on any problem (what a browser lane runs before completing) |
 | `$PY -m workflow.interactive attach-one "$RUN" --node <node>` | reconnects one native session in the current terminal (what the Herdr panes run) |
 
 The target is `--repo`, else the current directory when it is a Git repository with a `features/` directory, else md-manager itself; the run records it in `plan.json` (`repository`), so later actions need no flag. A feature is any directory under `<target>/features/` that holds a `feature.json`. Flags, actions and the files of a run directory are listed in [RUNBOOK.md](RUNBOOK.md#command-reference).
@@ -35,7 +36,7 @@ The target is `--repo`, else the current directory when it is a Git repository w
 
    This writes `features/my-feature/` with a 2.2.0 `feature.json` (one lane `main`, the bundled `general` and `coverage` reviewers, a `prd` to name or delete), a 1.2.0 `policy.json` with a placeholder check, `main-task.md` in outcome-brief form (`## Goal`, `## Context`, `## Constraints`, `## Acceptance`, `## Stop`), a `decisions.md` placeholder and a `README.md`. Every value to decide is a `TODO:` placeholder; `launch` refuses the feature and names each one until none is left. It checks only the files `init` writes (`feature.json`, `policy.json`, `README.md`, `decisions.md` and the task files), and only JSON values or Markdown lines that begin with `TODO:`, so prose that mentions the marker is fine. Add lanes by adding a `workers` entry to both files and a task file per lane.
 3. **Interview.** Run the `workflow-grill` skill (below) in Claude Code in the target: `/workflow-grill my-feature`. It asks at most five questions and writes `decisions.md`.
-4. **Fill in and commit.** Give each lane its owned paths and the checks the controller runs independently (`kind` `unit` needs a Python unittest or Node TAP/spec summary; see "Verification policy and evidence" in the runbook). A reviewer's `prompt` is a feature file or `builtin:general` / `builtin:coverage` (the briefs in `workflow/prompts/reviewers/`). Commit: preparation refuses a dirty tree.
+4. **Fill in and commit.** Give each lane its owned paths and the checks the controller runs independently (`kind` `unit` needs a Python unittest or Node TAP/spec summary; see "Verification policy and evidence" in the runbook). A `browser` check names its `scenarios`: each id must appear in exactly one test title as `[scenario:<id>]`, and that test, when it passes, must attach exactly one `image/png` named `screenshot:<id>` (other attachments are fine). The task `init` writes states this with the commands a browser lane runs before completing, a Playwright JSON report and `check-report` (see "Playwright evidence convention" in the runbook); delete it for a lane without browser checks. A reviewer's `prompt` is a feature file or `builtin:general` / `builtin:coverage` (the briefs in `workflow/prompts/reviewers/`). Commit: preparation refuses a dirty tree.
 5. **Accept permission bypass once.** Automatic workers start with `--dangerously-skip-permissions`, which Claude asks you to accept interactively the first time. Do it once before the first automatic run, in the target: `cd ~/dev/project-B && claude --dangerously-skip-permissions`, accept, then exit.
 6. **Dry run, then launch** from a Herdr pane:
 
@@ -83,7 +84,7 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr); `testdata/` holds copies of finished features' files the tests read.
+The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_browser_rules.py` `check-report` and the browser scenario rules; `testdata/` holds copies of finished features' files the tests read.
 
 ## Files
 
@@ -94,7 +95,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `interactive.py`: native `claude --bg` launches, Herdr panes (one per lane, reviewers to their right), reconciliation, `attach-one`. `herdr.py`: the Herdr CLI helper.
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, unanimous verdict); `prompts/review.md` is the built-in brief, `prompts/reviewers/` the bundled ones.
-- `verification.py`, `checks.py`: policy validation against the bundled `contracts/workflow/` schemas and isolated check execution.
+- `verification.py`, `checks.py`: policy validation against the bundled `contracts/workflow/` schemas and isolated check execution; `checks.py` also holds the browser scenario rules that the verifier and `check-report` share.
 - `export_state.py`: the versioned `run-state.json` export (1.5.0).
 - `worktrees.py`: every `git worktree` change, one at a time per repository, retrying Git's own lock errors.
 - `requirements.txt` / `requirements.lock`: bounded Python dependencies, installed separately from the Node application.

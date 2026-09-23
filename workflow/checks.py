@@ -144,17 +144,32 @@ def capture_changed_files(worktree: Path, changed: list[str], capture: Capture) 
     return skipped
 
 
-def browser_evidence(report_path: Path, output_root: Path, requirement: dict, capture: Capture) -> tuple[dict, list]:
-    report = json.loads(report_path.read_text())
+SCENARIO_TITLE = re.compile(r"\[scenario:([^\]]+)\]")
+NOT_COVERED = "Playwright report does not cover every required scenario"
+
+
+def scenario_evidence(report: dict, required: set[str], screenshot) -> tuple[dict, dict, list[tuple[str | None, str]]]:
+    """The verifier's scenario rules for a parsed Playwright JSON report; `check-report` applies the same function.
+
+    Each required scenario id appears in exactly one test title as `[scenario:<id>]`, and its test, when it passed
+    (status expected, one result, no retries), has exactly one image/png attachment named `screenshot:<id>`; other
+    attachments are ignored. `screenshot(scenario_id, path)` gets that attachment's path, in report order, and returns
+    what the scenario records; a ValueError or OSError it raises is that scenario's problem.
+
+    Returns the test counts, the scenarios found by id (`{id, status, screenshot}`) and every problem in report order
+    as (scenario id, message). Report-wide problems have no scenario id: global errors first, NOT_COVERED last. A
+    scenario's own problems concern only its test's title and screenshot, which are the lane's own work whatever
+    another lane changes; a failed or skipped scenario is no problem here, the gate reports it.
+    """
+    problems = []
     if report.get("errors"):
-        raise ValueError("Playwright reported global errors")
+        problems.append((None, "Playwright reported global errors"))
     specs = []
     def walk(suite):
         specs.extend(suite.get("specs", []))
         for child in suite.get("suites", []):
             walk(child)
     walk(report)
-    required = {case["id"] for case in requirement["scenarios"]}
     found = {}
     counts = {"passed": 0, "failed": 0, "skipped": 0}
     for spec in specs:
@@ -164,25 +179,49 @@ def browser_evidence(report_path: Path, output_root: Path, requirement: dict, ca
             passed = test.get("status") == "expected" and test.get("expectedStatus") == "passed" and len(results) == 1 and results[0].get("status") == "passed"
             skipped = test.get("status") == "skipped"
             counts["passed" if passed else "skipped" if skipped else "failed"] += 1
-            matches = set(re.findall(r"\[scenario:([^\]]+)\]", spec.get("title", ""))) & required
+            matches = set(SCENARIO_TITLE.findall(spec.get("title", ""))) & required
             for scenario_id in matches:
                 if scenario_id in found:
-                    raise ValueError(f"Duplicate browser scenario/project result: {scenario_id}")
-                screenshot = None
+                    problems.append((scenario_id, f"Duplicate browser scenario/project result: {scenario_id}"))
+                    continue
+                recorded = None
                 if passed:
                     attachments = [item for item in results[0].get("attachments", [])
                                    if item.get("name") == f"screenshot:{scenario_id}" and item.get("contentType") == "image/png"]
                     if len(attachments) != 1:
-                        raise ValueError(f"Expected one screenshot attachment for {scenario_id}")
-                    path = Path(attachments[0].get("path", "")).resolve(strict=True)
-                    if not path.is_relative_to(output_root.resolve()):
-                        raise ValueError("Screenshot attachment outside isolated browser output directory")
-                    screenshot = capture.add(path, "screenshot")
+                        problems.append((scenario_id, f"Expected one screenshot attachment for {scenario_id}"))
+                    else:
+                        try:
+                            recorded = screenshot(scenario_id, attachments[0].get("path", ""))
+                        except (ValueError, OSError) as error:
+                            problems.append((scenario_id, str(error)))
                 found[scenario_id] = {"id": scenario_id, "status": "passed" if passed else "skipped" if skipped else "failed",
-                                      "screenshot_artifact_id": screenshot}
+                                      "screenshot": recorded}
     if set(found) != required:
-        raise ValueError("Playwright report does not cover every required scenario")
-    return counts, list(found.values())
+        problems.append((None, NOT_COVERED))
+    return counts, found, problems
+
+
+class BrowserEvidenceError(ValueError):
+    """A report that breaks the scenario rules. The message is the first problem, the one the verifier has always
+    recorded; `scenario_problems` are the problems of single scenarios' tests (see scenario_evidence)."""
+
+    def __init__(self, problems: list[tuple[str | None, str]]):
+        super().__init__(problems[0][1])
+        self.scenario_problems = [message for scenario_id, message in problems if scenario_id is not None]
+
+
+def browser_evidence(report_path: Path, output_root: Path, requirement: dict, capture: Capture) -> tuple[dict, list]:
+    report = json.loads(report_path.read_text())
+    def screenshot(scenario_id, attachment):
+        path = Path(attachment).resolve(strict=True)
+        if not path.is_relative_to(output_root.resolve()):
+            raise ValueError("Screenshot attachment outside isolated browser output directory")
+        return capture.add(path, "screenshot")
+    counts, found, problems = scenario_evidence(report, {case["id"] for case in requirement["scenarios"]}, screenshot)
+    if problems:
+        raise BrowserEvidenceError(problems)
+    return counts, [{"id": item["id"], "status": item["status"], "screenshot_artifact_id": item["screenshot"]} for item in found.values()]
 
 
 def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
@@ -228,9 +267,9 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     # holds no evidence, and is removed once the checks finish.
     tmpdir = lane_tmpdir()
     env["TMPDIR"] = str(tmpdir)
-    executions, receipts, errors, effective_commands = [], [], [], []
+    executions, receipts, errors, effective_commands, scenario_errors = [], [], [], [], []
     try:
-        run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands)
+        run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands, scenario_errors)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     # Source edits by checks invalidate the evidence. Ignored caches are allowed.
@@ -247,7 +286,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
                 **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
     packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,
               "artifact_root": str(artifacts_dir), "artifact_paths": {key: str(path) for key, path in capture.paths.items()},
-              "capture_errors": errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir)}
+              "capture_errors": errors, "scenario_errors": scenario_errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir)}
     packet = recheck_packet(packet, policy, run)
     save_json(packet_path, packet)
     return packet
@@ -267,7 +306,7 @@ def lane_tmpdir() -> Path:
 
 
 def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Path, env: dict, capture: "Capture",
-                      executions: list, receipts: list, errors: list, effective_commands: list) -> None:
+                      executions: list, receipts: list, errors: list, effective_commands: list, scenario_errors: list) -> None:
     for index, setup in enumerate(policy.get("setup", [])):
         log = directory / f"setup-{index}.log"
         code, _, _ = execute(setup["argv"], worktree, log, setup["timeout_seconds"], env)
@@ -307,6 +346,7 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
                     errors.append(f"{check['id']}: exit {code}")
             except (ValueError, OSError, KeyError, TypeError) as error:
                 errors.append(f"{check['id']}: {error}")
+                scenario_errors.extend(f"{check['id']}: {problem}" for problem in getattr(error, "scenario_problems", []))
             receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": scenarios})
 
 
@@ -320,7 +360,86 @@ def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
     # Capture errors are prefixed with their check id; a deferred check's errors are evidence, not a gate.
     deferred_prefixes = tuple(f"{check_id}{separator}" for check_id in gate["deferred_checks"] for separator in (":", "/"))
     gate["reasons"].extend(error for error in packet["capture_errors"] if not error.startswith(deferred_prefixes))
+    # Except a passed scenario test's title and screenshot: the lane's own work, whatever another lane changes.
+    # Other phases gate on these through the capture error already. Packets before this key have none.
+    gate["reasons"].extend(error for error in packet.get("scenario_errors", []) if error.startswith(deferred_prefixes))
     if gate["reasons"]:
         gate["status"] = "blocked"
     packet["gate"] = gate
     return packet
+
+
+def report_policy(source: Path) -> dict:
+    """A policy file, or the policy a feature directory's feature.json names."""
+    from .verification import validate_policy
+    if source.is_dir():
+        from .launch import feature_file, load_feature  # launch imports this module through pipeline
+        source = feature_file(source, load_feature(source)["policy"])
+    return validate_policy(json.loads(source.read_text()))
+
+
+def check_report(policy: dict, lane: str, report: dict, require_all: bool = False) -> tuple[list[str], bool]:
+    """`check-report`: a line per required scenario of the lane's browser checks and whether the report passes.
+
+    The rules are the verifier's (scenario_evidence), with its wording. A scenario the report does not include
+    fails only with `require_all`, since a worker may run only some spec files. A screenshot must exist, but may
+    live anywhere: the verifier also requires its own output directory, which only its run has.
+    """
+    workers = {worker["node_id"]: worker for worker in policy["workers"]}
+    if lane not in workers:
+        raise ValueError(f"{lane} is not a lane of this policy ({', '.join(workers)})")
+    browser = [check for check in workers[lane]["checks"] if check["kind"] == "browser"]
+    if not browser:
+        raise ValueError(f"Lane {lane} has no browser check, so it has no scenarios to check")
+    def screenshot(scenario_id, attachment):
+        path = Path(attachment).resolve(strict=True)
+        if not path.is_file():
+            raise ValueError("Evidence must be a regular file")
+        return str(path)
+    lines, passed = [], True
+    for check in browser:
+        counts, found, problems = scenario_evidence(report, {scenario["id"] for scenario in check["scenarios"]}, screenshot)
+        for scenario_id, message in problems:
+            if scenario_id is None and message != NOT_COVERED:
+                lines.append(f"{check['id']}: {message}")
+                passed = False
+        for scenario in check["scenarios"]:
+            prefix = f"{check['id']}/{scenario['id']}"
+            own = [message for scenario_id, message in problems if scenario_id == scenario["id"]]
+            if own:
+                lines.extend(f"{prefix}: {message}" for message in own)
+                passed = False
+            elif scenario["id"] not in found:
+                lines.append(f"{prefix}: not in this report")
+                passed = passed and not require_all
+            elif found[scenario["id"]]["status"] != "passed":
+                lines.append(f"{prefix}: browser scenario did not pass")
+                passed = False
+            else:
+                lines.append(f"{prefix}: ok")
+        lines.append(f"{check['id']}: {counts['passed']} passed, {counts['failed']} failed, {counts['skipped']} skipped")
+        if counts["passed"] < 1 or counts["failed"] > 0:
+            lines.append(f"{check['id']}: no passing test evidence or failed tests")
+            passed = False
+    return lines, passed
+
+
+def check_report_main(argv=None):
+    import argparse
+    from jsonschema.exceptions import ValidationError
+    parser = argparse.ArgumentParser(prog="python -m workflow check-report", description="Check a Playwright JSON report against a "
+                                     "lane's browser scenarios with the verifier's own rules, before completing the lane.")
+    parser.add_argument("policy", type=Path, help="The feature directory, or a policy.json")
+    parser.add_argument("lane")
+    parser.add_argument("report", type=Path, help="The report written with --reporter=json to PLAYWRIGHT_JSON_OUTPUT_FILE")
+    parser.add_argument("--all", action="store_true", help="Also fail on required scenarios this report does not include")
+    args = parser.parse_args(argv)
+    try:
+        lines, passed = check_report(report_policy(args.policy), args.lane, json.loads(args.report.read_text()), args.all)
+    except (ValueError, OSError, KeyError, TypeError, ValidationError) as error:
+        parser.exit(1, f"Blocked: {getattr(error, 'message', error)}\n")
+    print("\n".join(lines))
+    if not passed:
+        print("Blocked: the verifier would refuse this report for the reasons above")
+        sys.exit(1)
+    print("The scenarios in this report follow the verifier's rules")

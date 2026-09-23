@@ -1,7 +1,8 @@
 """`workflow init <feature> [--repo X]`: write a feature directory to fill in; never overwrite a file.
 
 The scaffold is a 2.2.0 `feature.json` with one lane, the bundled reviewers and a `prd` to name, a 1.2.0
-`policy.json` with a placeholder check, the lane's task in outcome-brief form, a `decisions.md` for the
+`policy.json` with a placeholder check, the lane's task in outcome-brief form (with the browser scenario rules
+and the `check-report` command, to delete for a lane without browser checks), a `decisions.md` for the
 workflow-grill skill to fill in and a `README.md`, plus a starter `CLAUDE.md` in the target root when it
 has none. Every value to decide is a `TODO:` placeholder, and `launch` refuses the feature, naming each
 one, until none is left; the 2.2.0 guardrails then apply (workflow/guardrails.py).
@@ -36,6 +37,15 @@ def feature_files(feature: str) -> dict[str, str]:
             "## Context\n\nTODO: where to start reading, or delete this section.\n\n"
             "## Constraints\n\nTODO: what the lane must not change, or delete this section.\n\n"
             "## Acceptance\n\nTODO: the observable results and the checks that prove them.\n\n"
+            "Browser checks (delete this and the commands below if the lane has none): each scenario id appears in exactly one test title as "
+            "`[scenario:<id>]`, and that test, when it passes, attaches exactly one image/png named `screenshot:<id>` (other "
+            "attachments are fine). The verifier refuses anything else. Before completing, run the spec files you changed and "
+            "check the report with the verifier's own rules:\n\n"
+            "```bash\n"
+            "WORKFLOW_VERIFICATION_PHASE=<worker|candidate> PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json \\\n"
+            "  npx --no-install playwright test --config=<config> --reporter=json <spec files>\n"
+            f"python -m workflow check-report features/{feature} {LANE} <tmp>/report.json\n"
+            "```\n\n"
             "## Stop\n\nTODO: when to stop and report `blocked` instead of continuing.\n")
     decisions = (f"# Decisions: {feature}\n\n"
                  f"Written with the workflow-grill skill (`/workflow-grill {feature}`) before launch. Every worker and reviewer "

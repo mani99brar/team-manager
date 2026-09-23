@@ -135,9 +135,21 @@ def refusals(target: Path, folder: Path, manifest: dict, tasks: dict[str, Path])
     return found
 
 
+BROWSER_RULES = ("\nBrowser scenarios: each scenario id of your browser checks appears in exactly one test title as `[scenario:<id>]`, "
+                 "and that test, when it passes, attaches exactly one image/png named `screenshot:<id>` (other attachments are fine); "
+                 "before completing, run the spec files you changed with `WORKFLOW_VERIFICATION_PHASE=<worker|candidate> "
+                 "PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json npx --no-install playwright test --config=<config> --reporter=json "
+                 "<spec files>` and check the report with the verifier's own rules: `python -m workflow check-report "
+                 "<feature directory or its policy.json> {lane} <tmp>/report.json`.")
+
+
 def pinned_task(text: str, worker: dict) -> str:
-    """A lane's task as the plan pins it: the authored text plus the approved ownership and checks."""
-    return text + "\nApproved ownership and checks:\n" + json.dumps(worker)
+    """A lane's task as the plan pins it: the authored text plus the approved ownership and checks, and for a lane
+    with browser checks the scenario rules the verifier applies and the command that applies them to a report."""
+    task = text + "\nApproved ownership and checks:\n" + json.dumps(worker)
+    if any(check["kind"] == "browser" for check in worker["checks"]):
+        task += BROWSER_RULES.format(lane=worker["node_id"])
+    return task
 
 
 def pin_guardrails(plan: dict, directory: Path, task_files: dict[str, Path], decisions: Path, prd: Path | None, challenge: bool) -> None:

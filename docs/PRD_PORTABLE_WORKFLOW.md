@@ -176,6 +176,13 @@ The export moves to `1.5.0`, and the served run inputs to `contract_version` `1.
 
 ## 6. Acceptance scenarios
 
+Rows marked `(browser)` follow the verifier's scenario rules: each scenario id appears in exactly one test title as `[scenario:<id>]`, and that test, when it passes, attaches exactly one `image/png` named `screenshot:<id>` (other attachments are fine, but a test attaching `screenshot:<id>-file` and `screenshot:<id>-decisions` instead is refused). The lane checks its report before completing, with the verifier's own rules:
+
+```
+WORKFLOW_VERIFICATION_PHASE=<worker|candidate> PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json npx --no-install playwright test --config=<config> --reporter=json <spec files>
+python -m workflow check-report features/<feature> <lane> <tmp>/report.json
+```
+
 ### Slice 1
 
 | Scenario id | Asserts |
