@@ -790,12 +790,17 @@ def resume_main(argv=None):
     try:
         with run_lock(directory):
             runtime = Pipeline(directory)
+            moved = lambda: tuple(path.read_bytes() if path.exists() else None for path in
+                                  (directory / "plan.json", directory / "challenge.json", directory / "challenge.running.json"))
+            before = moved()
             try:
                 record = resume_challenge(runtime, args.accept_challenge)
             except BaseException:
                 # A rerun that failed after its re-pin has moved the base and the files: the viewer refuses an export
-                # whose base is not plan.json's, and shows the failed attempt's event.
-                print(f"Report: {export(Pipeline(directory))}")
+                # whose base is not plan.json's, and shows the failed attempt's event. A refusal that changed nothing
+                # keeps the lock short, so a supervisor's next step is not refused for it.
+                if moved() != before:
+                    print(f"Report: {export(Pipeline(directory))}")
                 raise
             runtime = Pipeline(directory)  # The re-pinned plan on its current base: session receipts bind to its digest.
             if record["status"] == "paused":

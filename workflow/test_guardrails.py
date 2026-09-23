@@ -523,10 +523,13 @@ class ChallengePauses(GuardedFeature):
         self.assertIn("the adapter lane owns backend.py", self.given["ui"]["prompt"])
         self.assertTrue(all("DECISION-MARKER-43" in self.given[lane]["prompt"] for lane in LANES))
         self.assertIn("the adapter lane owns backend.py", read_json(directory / "run-state.json")["inputs"]["workers"]["ui"]["task"])
-        # Once workers run, resume refuses.
+        # Once workers run, resume refuses, and a refusal that changed nothing does not rewrite the export under the lock.
+        exported = (directory / "run-state.json").read_bytes()
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 1)
         self.assertIn("Workers already launched", output)
+        self.assertNotIn("Report:", output)
+        self.assertEqual((directory / "run-state.json").read_bytes(), exported)
         # --accept-challenge records the override with its reason, reruns nothing and launches the workers.
         self.challenge_says([concern("P0", "Cannot work")])
         self.assertEqual(git(self.repo, "status", "--porcelain"), "")  # resume committed the edit, so prepare finds a clean source.
