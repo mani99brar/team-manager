@@ -27,7 +27,7 @@ from langgraph.types import Command, interrupt
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, git, plan_excluded, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json,
+from .sessions import (DEFAULT_REVIEWER, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json,
                        validate_node_id, validate_reviewer_id)
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import git_worktree
@@ -344,7 +344,7 @@ class Pipeline:
                 row = self.sessions.locate(node, rows)
                 if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
                     raise RuntimeError(f"Native {node} session identity changed after stop intent; reconcile manually")
-                result = subprocess.run([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
+                result = run_claude([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
                 if result.returncode != 0:
                     raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
             # Recover stop-before-receipt without issuing another stop command.

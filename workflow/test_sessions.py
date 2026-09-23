@@ -125,3 +125,34 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunClaudeTests(unittest.TestCase):
+    def test_a_briefly_missing_executable_is_retried_and_a_lasting_one_raises(self):
+        from unittest.mock import patch
+        from .sessions import run_claude
+        done = subprocess.CompletedProcess(["claude"], 0, "[]", "")
+        sleeps = []
+        with patch("workflow.sessions.subprocess.run", side_effect=[FileNotFoundError("claude"), FileNotFoundError("claude"), done]) as run:
+            self.assertIs(run_claude(["claude", "agents", "--json"], sleep=sleeps.append, capture_output=True), done)
+        self.assertEqual((run.call_count, sleeps), (3, [2, 2]))
+        with patch("workflow.sessions.subprocess.run", side_effect=FileNotFoundError("claude")) as run:
+            with self.assertRaises(FileNotFoundError):
+                run_claude(["claude", "agents", "--json"], grace=4, sleep=lambda seconds: None)
+        self.assertEqual(run.call_count, 3)
+        # A binary half written by an update (ENOEXEC) is retried too; an empty inventory is retried when asked.
+        import errno as errnos
+        with patch("workflow.sessions.subprocess.run", side_effect=[OSError(errnos.ENOEXEC, "Exec format error"), done]) as run:
+            self.assertIs(run_claude(["claude", "agents", "--json"], sleep=lambda seconds: None), done)
+        empty = subprocess.CompletedProcess(["claude"], 0, "", "")
+        with patch("workflow.sessions.subprocess.run", side_effect=[empty, done]) as run:
+            self.assertIs(run_claude(["claude", "agents", "--json"], sleep=lambda seconds: None, retry_output=lambda result: not result.stdout.strip()), done)
+        with patch("workflow.sessions.subprocess.run", side_effect=OSError(errnos.EACCES, "Permission denied")) as run:
+            with self.assertRaises(PermissionError):
+                run_claude(["claude"], sleep=lambda seconds: None)
+        self.assertEqual(run.call_count, 1)
+        # A command that started and failed is not retried.
+        with patch("workflow.sessions.subprocess.run", side_effect=subprocess.CalledProcessError(1, "claude")) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_claude(["claude", "stop", "x"], sleep=lambda seconds: None, check=True)
+        self.assertEqual(run.call_count, 1)

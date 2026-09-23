@@ -5,6 +5,7 @@ or failed launches require operator reconciliation; this module never retries th
 """
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -206,6 +208,33 @@ def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow
 
 def plan_digest(plan: dict) -> str:
     return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+
+
+CLAUDE_MISSING_GRACE_SECONDS = 60
+UPDATE_ERRNOS = {errno.ENOENT, errno.ENOEXEC, errno.ETXTBSY}
+
+
+def run_claude(command: list[str], *, grace: float = CLAUDE_MISSING_GRACE_SECONDS, sleep=time.sleep, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for a `claude` command that waits out a Claude Code update in progress.
+
+    An update replaces the installed binary: for a moment the command is missing (ENOENT), half written
+    (ENOEXEC) or busy (ETXTBSY), and the call fails before anything runs. That is retried every 2 seconds for
+    `grace` seconds, so an update during a run does not block it. `retry_output`, when given, also retries a
+    command that ran but printed output it rejects (an empty inventory from a restarting background service).
+    Any other failure is not retried.
+    """
+    retry_output = kwargs.pop("retry_output", None)
+    waited = 0.0
+    while True:
+        try:
+            result = subprocess.run(command, **kwargs)
+            if retry_output is None or not retry_output(result) or waited >= grace:
+                return result
+        except OSError as error:
+            if not (isinstance(error, FileNotFoundError) or error.errno in UPDATE_ERRNOS) or waited >= grace:
+                raise
+            sleep(2)
+            waited += 2
 
 
 def terminate(process: subprocess.Popen) -> None:
