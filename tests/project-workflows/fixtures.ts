@@ -10,10 +10,14 @@
  * pass a real absolute path under the temporary root so the adapter's redaction is exercised, the mocks
  * use the already-redacted marker `<path>`, so both phases render the same text.
  *
- * Two workflows: `feature-flow` holds the two-lane runs exactly as they were exported before worker lanes
+ * Three workflows: `feature-flow` holds the two-lane runs exactly as they were exported before worker lanes
  * came from configuration (export 1.2.0 and one 1.0.0 export; these fixtures are deliberately unchanged so
- * the legacy scenario is honest), and `lanes-flow` holds runs exported at 1.3.0 from a policy declaring the
- * lanes `ui`, `adapter` and `docs`: one run that selected all three and one that selected `docs` alone.
+ * the legacy scenario is honest), `lanes-flow` holds runs exported at 1.3.0 from a policy declaring the
+ * lanes `ui`, `adapter` and `docs` (one run that selected all three and one that selected `docs` alone), and
+ * `reviewers-flow` holds the parallel-reviewer runs (PRD_PARALLEL_REVIEWERS section 4): two 1.4.0 exports of a
+ * feature declaring the reviewers `general` and `coverage` (one where both approved, one where `coverage`
+ * blocked while `general` was superseded) and one 1.3.0 export of the same graph reviewed by the single
+ * default reviewer, whose projection carries a one-entry `reviewers` list named `review`.
  */
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
@@ -32,6 +36,11 @@ export const LANES_WORKFLOW_ID = 'lanes-flow'
 export const LANES_WORKFLOW_NAME = 'Lanes flow'
 export const EMPTY_WORKFLOW_ID = 'empty-flow'
 export const EMPTY_WORKFLOW_NAME = 'Empty flow'
+/** The workflow whose feature declares two reviewers; its runs are exported at 1.4.0 (plus one legacy 1.3.0 export). */
+export const REVIEWERS_WORKFLOW_ID = 'reviewers-flow'
+export const REVIEWERS_WORKFLOW_NAME = 'Reviewers flow'
+/** The projects contract version every projected review result and run inputs payload carries. */
+export const CONTRACT_VERSION = '1.4.0'
 export const RUN_SUCCEEDED = 'run-succeeded'
 export const RUN_FAILED = 'run-failed'
 export const RUN_AWAITING = 'run-awaiting'
@@ -43,9 +52,21 @@ export const RUN_LEGACY = 'run-legacy'
 export const RUN_THREE_LANES = 'run-three-lanes'
 /** A 1.3.0 export of a run launched with `--workers docs`: one lane selected, `ui` and `adapter` excluded. */
 export const RUN_ONE_LANE = 'run-one-lane'
+/** A 1.4.0 export reviewed by `general` and `coverage`: both approved, `coverage` with findings, one finding raised by both. */
+export const RUN_TWO_REVIEWERS = 'run-two-reviewers'
+/** A 1.4.0 export where `coverage` blocked the candidate while `general` was still working and was superseded (stopped, no verdict). */
+export const RUN_REVIEWER_BLOCKED = 'run-reviewer-blocked'
+/** A 1.3.0 export of the same graph reviewed by the single default reviewer: no `reviewers` in the section, the adapter fills one named `review`. */
+export const RUN_LEGACY_REVIEWER = 'run-legacy-reviewer'
 /** Every lane the `lanes-flow` policy declares, in policy order. */
 export const THREE_LANES = ['ui', 'adapter', 'docs'] as const
 export const ONE_LANE = ['docs'] as const
+/** The lanes the `reviewers-flow` policy declares. */
+export const TWO_LANES = ['ui', 'adapter'] as const
+/** The reviewers the `reviewers-flow` feature declares, in declared order. */
+export const TWO_REVIEWERS = ['general', 'coverage'] as const
+/** The id the adapter gives the single reviewer of an export that predates `reviewers`. */
+export const DEFAULT_REVIEWER_ID = 'review'
 export const PINNED_LABEL = 'Verify UI (pinned r1)'
 export const CURRENT_LABEL = 'Verify UI'
 export const BASE_COMMIT = '1234567890abcdef1234567890abcdef12345678'
@@ -63,8 +84,15 @@ export const LOG_TEXT_PREFIX = 'synthetic check log:'
 export const PATH_TOKEN = '<path>'
 export const FEATURE_NAME = 'Review visibility and run inputs in the viewer'
 export const LANES_FEATURE_NAME = 'Worker lanes from configuration'
+export const REVIEWERS_FEATURE_NAME = 'Parallel reviewers'
 export const REVIEWER_SESSION = '33333333-3333-4333-8333-333333333333'
 export const PRINT_REVIEWER_SESSION = '44444444-4444-4444-8444-444444444444'
+export const GENERAL_REVIEWER_SESSION = '66666666-6666-4666-8666-666666666666'
+export const COVERAGE_REVIEWER_SESSION = '77777777-7777-4777-8777-777777777777'
+export const LEGACY_REVIEWER_SESSION = '88888888-8888-4888-8888-888888888888'
+export const REVIEWER_SESSIONS: Record<string, string> = { general: GENERAL_REVIEWER_SESSION, coverage: COVERAGE_REVIEWER_SESSION }
+/** What `review.json` records as `reviewer` for a two-reviewer run: every reviewer's session, joined. */
+export const JOINED_REVIEWER_SESSIONS = `${GENERAL_REVIEWER_SESSION}, ${COVERAGE_REVIEWER_SESSION}`
 export const REVIEW_DIFF = [
   'diff --git a/src/projects/NodeDetail.tsx b/src/projects/NodeDetail.tsx',
   '--- a/src/projects/NodeDetail.tsx',
@@ -113,6 +141,8 @@ export function laneGraphNodes(lanes: readonly string[]): DefinitionNode[] {
 
 export const THREE_LANE_NODES = laneGraphNodes(THREE_LANES)
 export const ONE_LANE_NODES = laneGraphNodes(ONE_LANE)
+/** The reviewers workflow pins the plain two-lane graph; reviewers share the one `review` node, so the graph does not change with them. */
+export const REVIEWERS_NODES = laneGraphNodes(TWO_LANES)
 
 /** Definition revision exactly as the contract specifies: SHA-256 of canonical JSON without `definition_revision`. */
 export function definitionRevision(definition: { contract_version: string; project_id: string; workflow_id: string; name: string; nodes: DefinitionNode[] }): string {
@@ -138,10 +168,11 @@ export const EMPTY_WORKFLOW_DEFINITION = definition(PROJECT.project_id, EMPTY_WO
 /** The lanes workflow's current definition is the full three-lane graph; the one-lane run pins the graph of its own selection. */
 export const LANES_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID, LANES_WORKFLOW_NAME, THREE_LANE_NODES)
 export const ONE_LANE_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID, LANES_WORKFLOW_NAME, ONE_LANE_NODES)
+export const REVIEWERS_DEFINITION = definition(PROJECT.project_id, REVIEWERS_WORKFLOW_ID, REVIEWERS_WORKFLOW_NAME, REVIEWERS_NODES)
 
 export const projectList = { projects: [PROJECT, EMPTY_PROJECT] }
 export const workflowLists: Record<string, { workflows: WorkflowDefinition[] }> = {
-  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION] },
+  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION] },
   [EMPTY_PROJECT.project_id]: { workflows: [] },
 }
 
@@ -377,10 +408,20 @@ export const runDetails: Record<string, RunDetail> = {
   [RUN_ONE_LANE]: runDetail(RUN_ONE_LANE, 'succeeded', ONE_LANE_DEFINITION, T2, T3, {
     ...lanesVerified(ONE_LANE), review: { status: 'succeeded', attempt: 1, session: REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
   }, 8),
+  // A snapshot node holds one session id, so the review node names the first declared reviewer's; every reviewer is listed in the review result itself.
+  [RUN_TWO_REVIEWERS]: runDetail(RUN_TWO_REVIEWERS, 'succeeded', REVIEWERS_DEFINITION, T1, T3, {
+    ...lanesVerified(TWO_LANES), review: { status: 'succeeded', attempt: 1, session: GENERAL_REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
+  }, 11),
+  [RUN_REVIEWER_BLOCKED]: runDetail(RUN_REVIEWER_BLOCKED, 'failed', REVIEWERS_DEFINITION, T2, T3, {
+    ...lanesVerified(TWO_LANES), review: { status: 'failed', attempt: 1, session: GENERAL_REVIEWER_SESSION, review: 1 },
+  }, 9),
+  [RUN_LEGACY_REVIEWER]: runDetail(RUN_LEGACY_REVIEWER, 'succeeded', REVIEWERS_DEFINITION, T0, T2, {
+    ...lanesVerified(TWO_LANES), review: { status: 'succeeded', attempt: 1, session: LEGACY_REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
+  }, 9),
 }
 
 /** Each workflow's runs sorted by `updated_at` descending then `run_id` ascending, as the contract requires. */
-export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID].map(workflowId => [workflowId, {
+export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID].map(workflowId => [workflowId, {
   runs: Object.values(runDetails).map(detail => detail.summary).filter(summary => summary.workflow_id === workflowId)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.run_id.localeCompare(b.run_id)),
   next_cursor: null,
@@ -397,6 +438,9 @@ export const workerResults: Record<string, Record<string, WorkerResult>> = {
   [RUN_LEGACY]: { 'ui/1': uiResult(RUN_LEGACY), 'adapter/1': adapterResult(RUN_LEGACY, false), ...candidateResults(RUN_LEGACY, ['ui', 'adapter']) },
   [RUN_THREE_LANES]: { ...Object.fromEntries(THREE_LANES.map(lane => [`${lane}/1`, laneResult(lane, RUN_THREE_LANES)])), ...candidateResults(RUN_THREE_LANES, THREE_LANES) },
   [RUN_ONE_LANE]: { ...Object.fromEntries(ONE_LANE.map(lane => [`${lane}/1`, laneResult(lane, RUN_ONE_LANE)])), ...candidateResults(RUN_ONE_LANE, ONE_LANE) },
+  ...Object.fromEntries([RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER].map(runId => [runId, {
+    ...Object.fromEntries(TWO_LANES.map(lane => [`${lane}/1`, laneResult(lane, runId)])), ...candidateResults(runId, TWO_LANES),
+  }])),
 }
 
 function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {
@@ -411,6 +455,7 @@ function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> &
 export const REUSE_MESSAGE = 'Reused the successful UI verification from attempt 1; only the adapter lane was rerun.'
 export const APPROVAL_MESSAGE = 'Independent review required before integration; awaiting the recorded review verdict.'
 export const BLOCKED_MESSAGE = 'Independent reviewer blocked the candidate'
+export const REVIEWER_BLOCKED_MESSAGE = 'Reviewer coverage blocked the candidate; reviewer general was stopped and superseded'
 
 export const runEvents: Record<string, WorkflowEvent[]> = {
   [RUN_SUCCEEDED]: [
@@ -450,6 +495,24 @@ export const runEvents: Record<string, WorkflowEvent[]> = {
     event(RUN_ONE_LANE, 2, { type: 'log', message: 'Failure drill skipped: its lane adapter was not selected' }),
     event(RUN_ONE_LANE, 3, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
   ],
+  [RUN_TWO_REVIEWERS]: [
+    ...TWO_LANES.map((lane, index) => event(RUN_TWO_REVIEWERS, index + 1, { type: 'status_changed', node_id: `launch_${lane}`, attempt: 1, status: 'succeeded', message: `Native ${lane} session launched and its turn ended; not implementation completion` })),
+    event(RUN_TWO_REVIEWERS, 3, { type: 'status_changed', node_id: 'candidate', attempt: 1, status: 'succeeded', message: 'Combined candidate checks passed' }),
+    event(RUN_TWO_REVIEWERS, 4, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'running', message: 'Launching reviewers general and coverage over the same bundle' }),
+    event(RUN_TWO_REVIEWERS, 5, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'succeeded', message: `Reviewer general (${GENERAL_REVIEWER_SESSION}) and reviewer coverage (${COVERAGE_REVIEWER_SESSION}) approved the candidate` }),
+    event(RUN_TWO_REVIEWERS, 6, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
+  ],
+  [RUN_REVIEWER_BLOCKED]: [
+    ...TWO_LANES.map((lane, index) => event(RUN_REVIEWER_BLOCKED, index + 1, { type: 'status_changed', node_id: `launch_${lane}`, attempt: 1, status: 'succeeded', message: `Native ${lane} session launched and its turn ended; not implementation completion` })),
+    event(RUN_REVIEWER_BLOCKED, 3, { type: 'status_changed', node_id: 'candidate', attempt: 1, status: 'succeeded', message: 'Combined candidate checks passed' }),
+    event(RUN_REVIEWER_BLOCKED, 4, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'running', message: 'Launching reviewers general and coverage over the same bundle' }),
+    event(RUN_REVIEWER_BLOCKED, 5, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'failed', message: REVIEWER_BLOCKED_MESSAGE }),
+  ],
+  [RUN_LEGACY_REVIEWER]: [
+    ...TWO_LANES.map((lane, index) => event(RUN_LEGACY_REVIEWER, index + 1, { type: 'status_changed', node_id: `launch_${lane}`, attempt: 1, status: 'succeeded', message: `Native ${lane} session launched and its turn ended; not implementation completion` })),
+    event(RUN_LEGACY_REVIEWER, 3, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'succeeded', message: `Reviewer session ${LEGACY_REVIEWER_SESSION} approved the candidate` }),
+    event(RUN_LEGACY_REVIEWER, 4, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
+  ],
 }
 
 export const artifactFiles: Record<string, ArtifactFile[]> = {
@@ -460,6 +523,9 @@ export const artifactFiles: Record<string, ArtifactFile[]> = {
   [RUN_LEGACY]: [...UI_ARTIFACTS, ...ADAPTER_ARTIFACTS],
   [RUN_THREE_LANES]: THREE_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
   [RUN_ONE_LANE]: ONE_LANE.flatMap(lane => LANE_ARTIFACTS[lane]),
+  [RUN_TWO_REVIEWERS]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
+  [RUN_REVIEWER_BLOCKED]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
+  [RUN_LEGACY_REVIEWER]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
 }
 
 // ---- Worker tasks, prompts and the reviewer's quotes ----------------------------------------------------
@@ -530,7 +596,7 @@ export const ADAPTER_HANDOFF_ASSUMPTION = 'The artifact byte limit stays at the 
 export const DOCS_COMPLETION_SUMMARY = 'Documented the lane configuration in the feature README and the runbook.'
 export const sourceBranch = (runId: string, workflowId: string = WORKFLOW_ID) => `feature/${workflowId}/${runId}`
 
-// ---- Raw export sections (the shapes workflow/export_state.py 1.2.0 and 1.3.0 write) --------------------
+// ---- Raw export sections (the shapes workflow/export_state.py 1.2.0, 1.3.0 and 1.4.0 write) --------------
 
 export type RawFinding = {
   severity: 'P0' | 'P1' | 'P2'
@@ -539,18 +605,45 @@ export type RawFinding = {
   /** A lane id, `multiple` or `none`; `both` is what two-lane exports recorded and is still accepted; null predates the field. */
   worker: string | null
   requirement: string | null
+  /** Export 1.4.0: the id of the reviewer that raised the finding; absent before, when the one reviewer was `review`. */
+  reviewer?: string
+}
+/**
+ * How one reviewer of a 1.4.0 export ended, as its status file records it: `succeeded` once the combined verdict was approved,
+ * `accepted` when its file was accepted but the run blocked elsewhere, `blocked` for its own block (a blocked verdict, the
+ * deadline or a rejected file, the last two with no verdict), `superseded` when it was stopped after another reviewer's block.
+ */
+export type RawReviewerStatus = 'succeeded' | 'accepted' | 'blocked' | 'superseded' | 'needs_reconciliation'
+/**
+ * One reviewer of a 1.4.0 export (PRD_PARALLEL_REVIEWERS section 4: id, transport, session id, verdict, findings, launch
+ * and acceptance times, status). A reviewer that delivered no verdict (superseded, timed out, rejected) has `verdict` null.
+ */
+export type RawReviewer = {
+  reviewer_id: string
+  transport: 'native' | 'print' | 'manual'
+  session_id: string
+  verdict: 'approved' | 'blocked' | null
+  findings: RawFinding[]
+  launched_at: string | null
+  accepted_at: string | null
+  status: RawReviewerStatus
 }
 export type RawReviewSection = {
   attempt: number
   transport: 'native' | 'print' | 'manual'
+  /** `review.json`'s `reviewer`: the one session before 1.4.0, the declared reviewers' sessions joined with ", " from 1.4.0. */
   reviewer_session_id: string
   independent: true
   bundle_sha256: string
   candidate_commit: string
+  /** The combined verdict: approved only when every reviewer approved and no reviewer left an unresolved P0/P1. */
   verdict: 'approved' | 'blocked'
+  /** The union of every reviewer's findings, each tagged with `reviewer` from 1.4.0; one reviewer's untagged findings before. */
   findings: RawFinding[]
   reviewed_at: string
   diff: { path: 'review.diff'; sha256: string; bytes: number } | null
+  /** Export 1.4.0 only, one entry per declared reviewer in declared order; absent before, when the adapter fills one entry named `review`. */
+  reviewers?: RawReviewer[]
 }
 export type RawCheck = { id: string; kind: 'build' | 'typecheck' | 'unit' | 'integration' | 'contract' | 'browser'; argv: string[]; command: string; timeout_seconds: number; scenarios: { id: string; description: string }[] }
 export type RawWorkerInput = {
@@ -588,8 +681,42 @@ export type RawInputsSection = {
 const offset = (iso: string) => iso.replace(/Z$/, '+00:00')
 const zulu = (value: string) => (value.endsWith('+00:00') ? `${value.slice(0, -6)}Z` : value)
 
-/** The reviewer's findings for a run; one message and one quote name a directory (redacted by the adapter). */
+/** A finding both reviewers of the two-reviewer run raised independently: unioned, never merged, so it is listed twice. */
+export const DUPLICATE_FINDING = 'The findings table drops the disposition column below 480px.'
+export const COVERAGE_FINDING_UI = 'No browser scenario drives the reviewer filter while findings are grouped by worker.'
+export const COVERAGE_FINDING_ADAPTER = 'The adapter unit tests never serve a superseded reviewer entry.'
+export const BLOCKING_COVERAGE_FINDING = 'The two-reviewer browser scenario asserts nothing about the blocked run.'
+
+/** The findings one reviewer of a two-reviewer run recorded (tagged with its id); the run's union keeps declared order. */
+export function reviewerFindings(runId: string, reviewer: string): RawFinding[] {
+  return reviewFindings(runId).filter(finding => finding.reviewer === reviewer)
+}
+
+/** The reviewer's findings for a run (the union of every reviewer's from 1.4.0); one message and one quote name a directory (redacted by the adapter). */
 export function reviewFindings(runId: string, leak = PATH_TOKEN): RawFinding[] {
+  if (runId === RUN_TWO_REVIEWERS) {
+    // `general` then `coverage` in declared order; the first ui finding was raised by both and stays two findings.
+    return [
+      { severity: 'P2', message: DUPLICATE_FINDING, disposition: 'open', worker: 'ui', requirement: UI_QUOTE, reviewer: 'general' },
+      { severity: 'P2', message: 'The review route re-reads the export on every request.', disposition: 'accepted', worker: 'adapter', requirement: ADAPTER_QUOTE, reviewer: 'general' },
+      { severity: 'P2', message: DUPLICATE_FINDING, disposition: 'open', worker: 'ui', requirement: UI_QUOTE, reviewer: 'coverage' },
+      { severity: 'P2', message: COVERAGE_FINDING_UI, disposition: 'open', worker: 'ui', requirement: null, reviewer: 'coverage' },
+      { severity: 'P2', message: COVERAGE_FINDING_ADAPTER, disposition: 'accepted', worker: 'adapter', requirement: ADAPTER_QUOTE, reviewer: 'coverage' },
+    ]
+  }
+  if (runId === RUN_REVIEWER_BLOCKED) {
+    // Only `coverage` delivered findings: `general` was stopped once the block was recorded and left none.
+    return [
+      { severity: 'P1', message: BLOCKING_COVERAGE_FINDING, disposition: 'open', worker: 'ui', requirement: UI_QUOTE, reviewer: 'coverage' },
+      { severity: 'P2', message: `Screenshots were written beside ${leak} instead of below it.`, disposition: 'resolved', worker: 'ui', requirement: uiPathQuote(leak), reviewer: 'coverage' },
+    ]
+  }
+  if (runId === RUN_LEGACY_REVIEWER) {
+    return [
+      { severity: 'P2', message: 'The summary line paraphrases the disposition counts.', disposition: 'open', worker: 'ui', requirement: PARAPHRASED_QUOTE },
+      { severity: 'P2', message: 'The review route re-reads the export on every request.', disposition: 'accepted', worker: 'adapter', requirement: ADAPTER_QUOTE },
+    ]
+  }
   if (runId === RUN_THREE_LANES) {
     // One finding per lane, one that concerns several lanes in the current vocabulary, one recorded with the
     // legacy `both` value (never written by a 1.3.0 controller, but accepted from exports), and one cross-cutting.
@@ -643,6 +770,37 @@ export function rawReviewSection(runId: string, leak = PATH_TOKEN): RawReviewSec
     return {
       attempt: 1, transport: 'native', reviewer_session_id: REVIEWER_SESSION, independent: true, bundle_sha256: BUNDLE_SHA256, candidate_commit: CANDIDATE_COMMIT,
       verdict: 'approved', findings: reviewFindings(runId, leak), reviewed_at: offset(T3), diff: null,
+    }
+  }
+  if (runId === RUN_TWO_REVIEWERS) {
+    // Both completion files were accepted; the combined verdict is approved and the union carries both reviewer tags.
+    const findings = reviewFindings(runId, leak)
+    return {
+      attempt: 1, transport: 'native', reviewer_session_id: JOINED_REVIEWER_SESSIONS, independent: true, bundle_sha256: BUNDLE_SHA256, candidate_commit: CANDIDATE_COMMIT,
+      verdict: 'approved', findings, reviewed_at: offset(T3), diff: null,
+      reviewers: TWO_REVIEWERS.map(reviewer => ({
+        reviewer_id: reviewer, transport: 'native', session_id: REVIEWER_SESSIONS[reviewer], verdict: 'approved',
+        findings: findings.filter(finding => finding.reviewer === reviewer), launched_at: offset(T2), accepted_at: offset(T3), status: 'succeeded',
+      })),
+    }
+  }
+  if (runId === RUN_REVIEWER_BLOCKED) {
+    // `coverage` blocked while `general` was still working: the run blocked at once, `general` was stopped and superseded, no relaunch.
+    const findings = reviewFindings(runId, leak)
+    return {
+      attempt: 1, transport: 'native', reviewer_session_id: JOINED_REVIEWER_SESSIONS, independent: true, bundle_sha256: BUNDLE_SHA256, candidate_commit: CANDIDATE_COMMIT,
+      verdict: 'blocked', findings, reviewed_at: offset(T3), diff: null,
+      reviewers: [
+        { reviewer_id: 'general', transport: 'native', session_id: GENERAL_REVIEWER_SESSION, verdict: null, findings: [], launched_at: offset(T2), accepted_at: null, status: 'superseded' },
+        { reviewer_id: 'coverage', transport: 'native', session_id: COVERAGE_REVIEWER_SESSION, verdict: 'blocked', findings, launched_at: offset(T2), accepted_at: offset(T3), status: 'blocked' },
+      ],
+    }
+  }
+  if (runId === RUN_LEGACY_REVIEWER) {
+    // A 1.3.0 export: one reviewer, no `reviewers` list and no `reviewer` tags; the adapter fills one entry named `review`.
+    return {
+      attempt: 1, transport: 'native', reviewer_session_id: LEGACY_REVIEWER_SESSION, independent: true, bundle_sha256: BUNDLE_SHA256, candidate_commit: CANDIDATE_COMMIT,
+      verdict: 'approved', findings: reviewFindings(runId, leak), reviewed_at: offset(T2), diff: null,
     }
   }
   return null
@@ -729,6 +887,20 @@ function rawLaneWorker(lane: string, runId: string, leak: string, requestedAt: s
 /** The export's `inputs` section for a run, or null for the legacy export that predates it. */
 export function rawInputsSection(runId: string, leak = PATH_TOKEN): RawInputsSection | null {
   if (runId === RUN_LEGACY) return null
+  if (runId === RUN_TWO_REVIEWERS || runId === RUN_REVIEWER_BLOCKED || runId === RUN_LEGACY_REVIEWER) {
+    // The reviewers workflow's lanes are pinned like any configured policy's; the reviewer set lives in the review section, not here.
+    return {
+      feature: REVIEWERS_FEATURE_NAME, policy_version: '1.2.0', base_commit: BASE_COMMIT, source_branch: sourceBranch(runId, REVIEWERS_WORKFLOW_ID),
+      mode: 'automatic',
+      automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 7200, review_timeout_seconds: 1800, reviewer_transport: 'native' },
+      setup: [{ argv: ['npm', 'ci'], command: 'npm ci', timeout_seconds: 600 }],
+      max_verification_attempts: 3,
+      failure_drill: null,
+      selected_workers: [...TWO_LANES],
+      excluded_workers: [],
+      workers: Object.fromEntries(TWO_LANES.map(lane => [lane, rawLaneWorker(lane, runId, leak, T1)])),
+    }
+  }
   if (runId === RUN_THREE_LANES || runId === RUN_ONE_LANE) {
     const selected: readonly string[] = runId === RUN_THREE_LANES ? THREE_LANES : ONE_LANE
     return {
@@ -770,24 +942,41 @@ function lanesQuoting(requirement: string | null, tasks: Record<string, string>)
   return Object.keys(tasks).filter(lane => tasks[lane].includes(requirement))
 }
 
+/**
+ * The review projection at contract 1.4.0. A section without `reviewers` (exports before 1.4.0) is one reviewer named
+ * `review`: the adapter fills a one-entry list from the section itself and tags every finding with that id, so the viewer
+ * has a single code path. The combined `reviewer` identity stays what the review node names (the first reviewer's session).
+ */
 function projectReview(runId: string, section: RawReviewSection, tasks: Record<string, string>): ReviewResult {
+  const link = (finding: RawFinding, reviewer: string) => ({ ...finding, reviewer: finding.reviewer ?? reviewer, requirement_found_in: lanesQuoting(finding.requirement, tasks) })
+  const reviewers: RawReviewer[] = section.reviewers ?? [{
+    reviewer_id: DEFAULT_REVIEWER_ID, transport: section.transport, session_id: section.reviewer_session_id, verdict: section.verdict,
+    findings: section.findings, launched_at: null, accepted_at: section.reviewed_at, status: section.verdict === 'approved' ? 'succeeded' : 'blocked',
+  }]
   return validateReviewResult({
-    contract_version: '1.3.0', run_id: runId, node_id: 'review', attempt: section.attempt,
+    contract_version: CONTRACT_VERSION, run_id: runId, node_id: 'review', attempt: section.attempt,
     reviewer: { session_id: section.reviewer_session_id, transport: section.transport, independent: true },
     bundle_sha256: section.bundle_sha256, candidate_commit: section.candidate_commit, verdict: section.verdict,
-    findings: section.findings.map(finding => ({ ...finding, requirement_found_in: lanesQuoting(finding.requirement, tasks) })),
+    findings: section.findings.map(finding => link(finding, DEFAULT_REVIEWER_ID)),
+    reviewers: reviewers.map(reviewer => ({
+      reviewer_id: reviewer.reviewer_id, transport: reviewer.transport, session_id: reviewer.session_id, verdict: reviewer.verdict,
+      findings: reviewer.findings.map(finding => link(finding, reviewer.reviewer_id)),
+      launched_at: reviewer.launched_at === null ? null : zulu(reviewer.launched_at),
+      accepted_at: reviewer.accepted_at === null ? null : zulu(reviewer.accepted_at),
+      status: reviewer.status,
+    })),
     reviewed_at: zulu(section.reviewed_at),
     diff: section.diff === null ? null : { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', uri: `${apiRunPath(runId, runDetails[runId].summary.workflow_id)}/artifacts/${REVIEW_DIFF_ARTIFACT_ID}`, sha256: section.diff.sha256 },
   })
 }
 
 /**
- * The run-inputs projection at contract 1.3.0. A 1.2.0 export has neither a selection nor pinned check kinds: every
+ * The run-inputs projection at the current contract. A 1.2.0 export has neither a selection nor pinned check kinds: every
  * listed lane was selected, nothing was excluded, and the kinds are the ones its role required, exactly as the adapter serves it.
  */
 function projectInputs(runId: string, section: RawInputsSection): RunInputs {
   return validateRunInputs({
-    contract_version: '1.3.0', run_id: runId, feature: section.feature, base_commit: section.base_commit, source_branch: section.source_branch,
+    contract_version: CONTRACT_VERSION, run_id: runId, feature: section.feature, base_commit: section.base_commit, source_branch: section.source_branch,
     mode: section.mode, automatic: section.automatic,
     setup: section.setup.map(step => ({ command: step.command, timeout_seconds: step.timeout_seconds })),
     max_verification_attempts: section.max_verification_attempts,
@@ -816,7 +1005,7 @@ function projectInputs(runId: string, section: RawInputsSection): RunInputs {
 const taskTexts = (section: RawInputsSection | null): Record<string, string> =>
   Object.fromEntries(Object.entries(section?.workers ?? {}).map(([lane, worker]) => [lane, worker.task]))
 
-const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE]
+const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE, RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER]
 
 /** Projected review results per run (runs without one are absent: the mock answers 404 REVIEW_NOT_FOUND). */
 export const reviewResults: Record<string, ReviewResult> = Object.fromEntries(ALL_RUNS.flatMap(runId => {

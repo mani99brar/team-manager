@@ -54,7 +54,7 @@ test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bun
   await expect(group(page, 'accepted').getByTestId('finding')).toHaveCount(2)
   await expect(group(page, 'resolved')).toHaveCount(0)
   await expect(findings(page).locator('section')).toHaveCount(2)
-  await expect(group(page, 'open').getByRole('columnheader')).toHaveText(['Severity', 'Message', 'Worker', 'Requirement'])
+  await expect(group(page, 'open').getByRole('columnheader')).toHaveText(['Severity', 'Message', 'Worker', 'Reviewer', 'Requirement'])
   for (const row of await findingRows(page).all()) {
     await expect(row).toHaveAttribute('data-severity', 'P2')
     await expect(row).not.toHaveClass(/finding-blocking/)

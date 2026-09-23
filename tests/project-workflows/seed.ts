@@ -8,6 +8,9 @@
  * a 1.0.0 export without either section. The `lanes-flow` runs are 1.3.0 exports: their plan pins `workers`
  * and `excluded_workers`, their state keeps per-lane data under `lanes[<id>]` and `packets[<id>]`, and their
  * inputs section carries the selection and each lane's `required_check_kinds` (PRD_WORKER_LANES section 4).
+ * The `reviewers-flow` runs are 1.4.0 exports (PRD_PARALLEL_REVIEWERS section 4): their plan pins `reviewers`
+ * and their review section carries one entry per reviewer plus the union of findings tagged by reviewer, except
+ * the legacy single-reviewer run, which is a 1.3.0 export of the same graph without either.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -37,9 +40,18 @@ import {
   RUN_BLOCKED,
   RUN_FAILED,
   RUN_LEGACY,
+  RUN_LEGACY_REVIEWER,
   RUN_ONE_LANE,
+  RUN_REVIEWER_BLOCKED,
   RUN_SUCCEEDED,
   RUN_THREE_LANES,
+  RUN_TWO_REVIEWERS,
+  REVIEWERS_NODES,
+  REVIEWERS_WORKFLOW_ID,
+  REVIEWERS_WORKFLOW_NAME,
+  REVIEWER_BLOCKED_MESSAGE,
+  TWO_LANES,
+  TWO_REVIEWERS,
   T0,
   T1,
   T2,
@@ -118,8 +130,10 @@ function writePacket(runDir: string, phase: 'worker' | 'candidate', node: string
 type RunOptions = {
   createdAt: string; updatedAt: string; definitionNodes: typeof GRAPH_NODES; values: Record<string, unknown>; next: string[]; tasks: Task[]; events: InternalEvent[]
   packets: (runDir: string) => object[]
-  /** Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane selection. */
-  version?: '1.0.0' | '1.2.0' | '1.3.0'
+  /** Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane selection, 1.4.0 the reviewer set. */
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0'
+  /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
+  reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
   lanes?: readonly string[]
   /** The pinned definition's name (the registered workflow's name, so an unchanged graph hashes to the current revision). */
@@ -140,7 +154,8 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   const plan = {
     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
-    ...(version === '1.3.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(version === '1.3.0' || version === '1.4.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
   }
@@ -172,10 +187,12 @@ export function seedCandidate(root: string): string {
   const runsRoot = join(root, 'runs', WORKFLOW_ID)
   const emptyRunsRoot = join(root, 'runs', EMPTY_WORKFLOW_ID)
   const lanesRunsRoot = join(root, 'runs', LANES_WORKFLOW_ID)
+  const reviewersRunsRoot = join(root, 'runs', REVIEWERS_WORKFLOW_ID)
   mkdirSync(repository, { recursive: true })
   mkdirSync(runsRoot, { recursive: true })
   mkdirSync(emptyRunsRoot, { recursive: true })
   mkdirSync(lanesRunsRoot, { recursive: true })
+  mkdirSync(reviewersRunsRoot, { recursive: true })
 
   const packetSet = (runDir: string, phases: { phase: 'worker' | 'candidate'; node: string; attempt: number; result: WorkerResult; blocked?: string }[]) =>
     phases.map(entry => writePacket(runDir, entry.phase, entry.node, entry.attempt, entry.result, LANE_ARTIFACTS[entry.node],
@@ -308,12 +325,16 @@ export function seedCandidate(root: string): string {
 
   // ---- lanes-flow: 1.3.0 exports of runs whose lanes come from configuration (`ui`, `adapter`, `docs`) ----
 
-  /** Per-lane state as the plan-driven pipeline keeps it: receipts under `lanes`, packet paths under `packets`. */
-  const laneValues = (runId: string, lanes: readonly string[], requestedAt: string) => ({
-    lanes: Object.fromEntries(lanes.map(lane => [lane, receipt(lane, join(lanesRunsRoot, runId), LANE_SESSIONS[lane], requestedAt)])),
+  /** Per-lane state as the plan-driven pipeline keeps it, up to the verified candidate: receipts under `lanes`, packet paths under `packets`. */
+  const laneCandidateValues = (runsRoot: string, runId: string, lanes: readonly string[], requestedAt: string) => ({
+    lanes: Object.fromEntries(lanes.map(lane => [lane, receipt(lane, join(runsRoot, runId), LANE_SESSIONS[lane], requestedAt)])),
     snapshots: Object.fromEntries(lanes.map(lane => [lane, LANE_OUTPUT_COMMITS[lane]])),
     packets: Object.fromEntries(lanes.map(lane => [lane, `verification/worker/${lane}/1/packet.json`])),
     bundle: { run_id: runId, base_commit: BASE_COMMIT, candidate_commit: CANDIDATE_COMMIT, policy_sha256: 'e'.repeat(64) },
+  })
+  /** A configured run that was reviewed, approved and integrated. */
+  const laneValues = (runId: string, lanes: readonly string[], requestedAt: string, runsRoot = lanesRunsRoot) => ({
+    ...laneCandidateValues(runsRoot, runId, lanes, requestedAt),
     review: { run_id: runId, verdict: 'approved', independent: true, reviewer: 'synthetic-reviewer', findings: [] },
     approved_bundle: 'f'.repeat(64), integrated_commit: CANDIDATE_COMMIT,
   })
@@ -355,6 +376,64 @@ export function seedCandidate(root: string): string {
     inputs: rawInputsSection(RUN_ONE_LANE, leakFor(lanesRunsRoot, RUN_ONE_LANE)),
   })
 
+  // ---- reviewers-flow: a feature declaring the reviewers `general` and `coverage` over the plain two-lane graph ----
+
+  const reviewersLeak = (runId: string) => leakFor(reviewersRunsRoot, runId)
+  const reviewerLaunchEvents = (): InternalEvent[] => [
+    internalEvent(0, T2, 'review', 'running', 'Launching reviewer general over the shared review worktree'),
+    internalEvent(0, T2, 'review', 'running', 'Launching reviewer coverage over the shared review worktree'),
+  ]
+
+  // Both reviewers' completion files were accepted: review.json holds the combined verdict and both entries.
+  writeRun(reviewersRunsRoot, repository, RUN_TWO_REVIEWERS, {
+    createdAt: T1, updatedAt: T3, definitionNodes: REVIEWERS_NODES, definitionName: REVIEWERS_WORKFLOW_NAME, version: '1.4.0', lanes: TWO_LANES, reviewers: TWO_REVIEWERS,
+    values: {
+      ...laneValues(RUN_TWO_REVIEWERS, TWO_LANES, T1, reviewersRunsRoot),
+      review: {
+        run_id: RUN_TWO_REVIEWERS, verdict: 'approved', independent: true, reviewer: 'synthetic-reviewer', findings: [],
+        reviewers: TWO_REVIEWERS.map(reviewer => ({ reviewer_id: reviewer, session_id: `synthetic-${reviewer}`, verdict: 'approved', accepted_at: T3 })),
+      },
+    },
+    next: [], tasks: [],
+    events: laneEvents(TWO_LANES, T1, reviewerLaunchEvents()),
+    packets: runDir => lanePackets(RUN_TWO_REVIEWERS, runDir, TWO_LANES),
+    review: rawReviewSection(RUN_TWO_REVIEWERS, reviewersLeak(RUN_TWO_REVIEWERS)),
+    inputs: rawInputsSection(RUN_TWO_REVIEWERS, reviewersLeak(RUN_TWO_REVIEWERS)),
+  })
+
+  // `coverage` blocked while `general` was still working: the run failed at the review node and `general` was stopped and superseded.
+  writeRun(reviewersRunsRoot, repository, RUN_REVIEWER_BLOCKED, {
+    createdAt: T2, updatedAt: T3, definitionNodes: REVIEWERS_NODES, definitionName: REVIEWERS_WORKFLOW_NAME, version: '1.4.0', lanes: TWO_LANES, reviewers: TWO_REVIEWERS,
+    values: laneCandidateValues(reviewersRunsRoot, RUN_REVIEWER_BLOCKED, TWO_LANES, T2),
+    next: [],
+    tasks: [{ node_id: 'review', error: `${REVIEWER_BLOCKED_MESSAGE}; see ${join(reviewersRunsRoot, RUN_REVIEWER_BLOCKED, 'review.json')}`, interrupts: [], result: null }],
+    events: (() => {
+      const events: InternalEvent[] = []
+      const push = (time: string, node: string, status: string, message: string) => events.push(internalEvent(events.length + 1, time, node, status, message))
+      for (const lane of TWO_LANES) push(T2, lane, 'running', 'Launching or reconciling the exact native session')
+      push(T2, 'freeze', 'succeeded', 'Captured every worker snapshot')
+      for (const lane of TWO_LANES) push(T2, `verify_${lane}`, 'succeeded', `${lane} verification passed`)
+      push(T2, 'candidate', 'succeeded', 'Combined candidate checks passed')
+      for (const event of reviewerLaunchEvents()) push(event.time, event.node, event.status, event.message)
+      push(T3, 'review', 'blocked', REVIEWER_BLOCKED_MESSAGE)
+      return events
+    })(),
+    packets: runDir => lanePackets(RUN_REVIEWER_BLOCKED, runDir, TWO_LANES),
+    review: rawReviewSection(RUN_REVIEWER_BLOCKED, reviewersLeak(RUN_REVIEWER_BLOCKED)),
+    inputs: rawInputsSection(RUN_REVIEWER_BLOCKED, reviewersLeak(RUN_REVIEWER_BLOCKED)),
+  })
+
+  // Reviewed before the feature declared reviewers: a 1.3.0 export whose review section has no `reviewers` list.
+  writeRun(reviewersRunsRoot, repository, RUN_LEGACY_REVIEWER, {
+    createdAt: T0, updatedAt: T2, definitionNodes: REVIEWERS_NODES, definitionName: REVIEWERS_WORKFLOW_NAME, version: '1.3.0', lanes: TWO_LANES,
+    values: laneValues(RUN_LEGACY_REVIEWER, TWO_LANES, T0, reviewersRunsRoot),
+    next: [], tasks: [],
+    events: laneEvents(TWO_LANES, T0),
+    packets: runDir => lanePackets(RUN_LEGACY_REVIEWER, runDir, TWO_LANES),
+    review: rawReviewSection(RUN_LEGACY_REVIEWER, reviewersLeak(RUN_LEGACY_REVIEWER)),
+    inputs: rawInputsSection(RUN_LEGACY_REVIEWER, reviewersLeak(RUN_LEGACY_REVIEWER)),
+  })
+
   const registry = {
     version: 1,
     projects: [
@@ -364,6 +443,7 @@ export function seedCandidate(root: string): string {
           { workflow_id: WORKFLOW_ID, runs_root: runsRoot, definition: { name: WORKFLOW_NAME, nodes: GRAPH_NODES } },
           { workflow_id: EMPTY_WORKFLOW_ID, runs_root: emptyRunsRoot, definition: { name: EMPTY_WORKFLOW_NAME, nodes: EMPTY_WORKFLOW_DEFINITION.nodes } },
           { workflow_id: LANES_WORKFLOW_ID, runs_root: lanesRunsRoot, definition: { name: LANES_WORKFLOW_NAME, nodes: THREE_LANE_NODES } },
+          { workflow_id: REVIEWERS_WORKFLOW_ID, runs_root: reviewersRunsRoot, definition: { name: REVIEWERS_WORKFLOW_NAME, nodes: REVIEWERS_NODES } },
         ],
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },

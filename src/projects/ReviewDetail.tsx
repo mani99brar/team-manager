@@ -14,6 +14,7 @@ import {
 } from './api.ts'
 import { runLanes, workerGroupOf, workerGroups, workerWording } from './findings.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
+import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
 import { formatTime, reviewSummary, shortRevision } from './status.ts'
 import { useResource, type Resource } from './useResource.ts'
@@ -23,6 +24,8 @@ type DefinitionNode = RunDetail['definition']['nodes'][number]
 type Lane = ReviewFinding['requirement_found_in'][number]
 type Disposition = ReviewFinding['disposition']
 type GroupBy = 'disposition' | 'worker'
+/** A reviewer id, or null for every reviewer. */
+type ReviewerFilter = string | null
 
 type Props = {
   scope: RunScope
@@ -36,7 +39,7 @@ type Props = {
   onOpenRequirement: (nodeId: string, quote: string) => void
 }
 
-const TRANSPORT_WORDING: Record<ReviewResult['reviewer']['transport'], string> = {
+const TRANSPORT_WORDING: Record<Reviewer['transport'], string> = {
   native: 'native session',
   print: 'print-mode session',
   manual: 'operator-supplied review',
@@ -60,11 +63,13 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
       data-severity={finding.severity}
       data-disposition={finding.disposition}
       data-worker={finding.worker ?? 'unrecorded'}
+      data-reviewer={finding.reviewer}
       className={blocking ? 'finding-blocking' : undefined}
     >
       <td><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
       <td>{finding.message}</td>
       <td>{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
+      <td data-testid="finding-reviewer">{finding.reviewer}</td>
       <td>
         {finding.requirement === null ? '—' : (
           <>
@@ -94,32 +99,86 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
   )
 }
 
+/** A reviewer's own verdict; a reviewer stopped, timed out or rejected before deciding has none. */
+function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
+  if (verdict === null) return <span className="projects-muted" data-testid="reviewer-verdict" data-status="none">No verdict</span>
+  const approved = verdict === 'approved'
+  return (
+    <span className={`status-badge ${approved ? 'status-succeeded' : 'status-failed'}`} data-testid="reviewer-verdict" data-status={verdict}>
+      <span>{approved ? 'Approved' : 'Blocked'}</span>
+    </span>
+  )
+}
+
+/** One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason), finding counts by severity and its times. */
+function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
+  return (
+    <section className="evidence-section reviewer-strip" aria-labelledby="review-reviewers-title" data-testid="reviewer-strip" data-count={reviewers.length}>
+      <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
+      <ul className="evidence-list reviewer-list">
+        {reviewers.map(reviewer => (
+          <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+            <p>
+              <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+              <ReviewerVerdict verdict={reviewer.verdict} />{' '}
+              <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
+            </p>
+            <p className="projects-muted">
+              <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
+              {reviewer.launched_at !== null && <> · launched {formatTime(reviewer.launched_at)}</>}
+              {reviewer.accepted_at !== null && <> · file accepted {formatTime(reviewer.accepted_at)}</>}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, onOpenRequirement }: { review: ReviewResult } & Omit<Props, 'node' | 'refreshToken'>) {
   const approved = review.verdict === 'approved'
+  const reviewers = review.reviewers
+  const several = reviewers.length > 1
+  const blockedBy = blockedByWording(review)
   const candidateNode = definitionNodes.some(candidate => candidate.node_id === 'candidate') ? 'candidate' : null
   const bundle = <code title={review.bundle_sha256}>{shortRevision(review.bundle_sha256)}</code>
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
   const diffHref = review.diff === null ? null : paths.artifact(scope, review.diff.artifact_id)
   const diffScoped = review.diff !== null && review.diff.uri === diffHref
   const [groupBy, setGroupBy] = useState<GroupBy>('disposition')
+  const [reviewerFilter, setReviewerFilter] = useState<ReviewerFilter>(null)
   const lanes = runLanes(definitionNodes, inputs)
+  // The filter narrows the union to one reviewer's findings; grouping then applies to what is left.
+  const visible = reviewerFilter === null ? review.findings : review.findings.filter(finding => finding.reviewer === reviewerFilter)
+  const countFor = (reviewerId: string) => review.findings.filter(finding => finding.reviewer === reviewerId).length
   const groups = groupBy === 'disposition'
-    ? DISPOSITIONS.map(disposition => ({ key: disposition, label: DISPOSITION_LABEL[disposition], attributes: { 'data-disposition': disposition }, findings: review.findings.filter(finding => finding.disposition === disposition) }))
-    : workerGroups(lanes, review.findings).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: review.findings.filter(finding => workerGroupOf(finding) === group.key) }))
+    ? DISPOSITIONS.map(disposition => ({ key: disposition, label: DISPOSITION_LABEL[disposition], attributes: { 'data-disposition': disposition }, findings: visible.filter(finding => finding.disposition === disposition) }))
+    : workerGroups(lanes, visible).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: visible.filter(finding => workerGroupOf(finding) === group.key) }))
   const populated = groups.filter(group => group.findings.length > 0)
   return (
-    <div className="review-result" data-testid="review-result" data-verdict={review.verdict}>
+    <div className="review-result" data-testid="review-result" data-verdict={review.verdict} data-reviewer-count={reviewers.length}>
       <p className="review-verdict-line">
         <span className={`status-badge ${approved ? 'status-succeeded' : 'status-failed'}`} data-testid="review-verdict" data-status={review.verdict}>
           <span>{approved ? 'Approved' : 'Blocked'}</span>
         </span>
-        <span className="projects-muted">Recorded verdict of review attempt {review.attempt}; approval and integration are separate nodes.</span>
+        <span className="projects-muted">
+          Combined verdict of {several ? `${reviewers.length} reviewers` : 'the one reviewer'} for review attempt {review.attempt}: every reviewer must approve; approval and integration are separate nodes.
+        </span>
       </p>
+      {blockedBy !== null && <p className="projects-error-inline" role="status" data-testid="review-blocked-by">{blockedBy}</p>}
       <p className="review-summary" data-testid="review-summary">{reviewSummary(review)}</p>
       <dl className="projects-facts">
         <div>
-          <dt>Reviewer</dt>
-          <dd data-testid="review-reviewer"><code>{review.reviewer.session_id}</code> · {TRANSPORT_WORDING[review.reviewer.transport]}, independent of every worker lane</dd>
+          <dt>{several ? 'Reviewers' : 'Reviewer'}</dt>
+          <dd data-testid="review-reviewer">
+            {reviewers.map((reviewer, index) => (
+              <span key={reviewer.reviewer_id} data-reviewer={reviewer.reviewer_id}>
+                {index > 0 && ', '}
+                {several && `${reviewer.reviewer_id}: `}{reviewer.session_id ? <code>{reviewer.session_id}</code> : <span className="projects-muted">no session recorded</span>} · {TRANSPORT_WORDING[reviewer.transport]}
+              </span>
+            ))}
+            {several ? '; independent of every worker lane and of one another' : ', independent of every worker lane'}
+          </dd>
         </div>
         <div><dt>Reviewed at</dt><dd>{formatTime(review.reviewed_at)}</dd></div>
         <div>
@@ -132,7 +191,7 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
           </dd>
         </div>
         <div>
-          <dt>Diff the reviewer saw</dt>
+          <dt>Diff the {several ? 'reviewers' : 'reviewer'} saw</dt>
           <dd data-testid="review-diff">
             {review.diff === null ? 'No diff artifact was recorded.' : diffScoped && diffHref !== null ? (
               <>
@@ -146,26 +205,49 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
         </div>
       </dl>
 
-      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-group-by={groupBy}>
+      <ReviewerStrip reviewers={reviewers} />
+
+      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-group-by={groupBy} data-reviewer-filter={reviewerFilter ?? 'all'}>
         <div className="review-findings-head">
           <h4 id="review-findings-title">Findings</h4>
           {review.findings.length > 0 && (
-            <div className="review-group-toggle" role="group" aria-label="Group findings by">
-              <span className="projects-muted">Group by</span>
-              <button type="button" className="button button-small" aria-pressed={groupBy === 'disposition'} data-testid="group-by-disposition" onClick={() => setGroupBy('disposition')}>Disposition</button>
-              <button type="button" className="button button-small" aria-pressed={groupBy === 'worker'} data-testid="group-by-worker" onClick={() => setGroupBy('worker')}>Worker</button>
-            </div>
+            <>
+              <div className="review-group-toggle" role="group" aria-label="Show findings from">
+                <span className="projects-muted">Reviewer</span>
+                <button type="button" className="button button-small" aria-pressed={reviewerFilter === null} data-testid="filter-reviewer" data-reviewer="all" onClick={() => setReviewerFilter(null)}>All ({review.findings.length})</button>
+                {reviewers.map(reviewer => (
+                  <button
+                    key={reviewer.reviewer_id}
+                    type="button"
+                    className="button button-small"
+                    aria-pressed={reviewerFilter === reviewer.reviewer_id}
+                    data-testid="filter-reviewer"
+                    data-reviewer={reviewer.reviewer_id}
+                    onClick={() => setReviewerFilter(reviewer.reviewer_id)}
+                  >
+                    {reviewer.reviewer_id} ({countFor(reviewer.reviewer_id)})
+                  </button>
+                ))}
+              </div>
+              <div className="review-group-toggle" role="group" aria-label="Group findings by">
+                <span className="projects-muted">Group by</span>
+                <button type="button" className="button button-small" aria-pressed={groupBy === 'disposition'} data-testid="group-by-disposition" onClick={() => setGroupBy('disposition')}>Disposition</button>
+                <button type="button" className="button button-small" aria-pressed={groupBy === 'worker'} data-testid="group-by-worker" onClick={() => setGroupBy('worker')}>Worker</button>
+              </div>
+            </>
           )}
         </div>
         {populated.length === 0 ? (
-          <p className="projects-muted" data-testid="findings-empty">The reviewer recorded no findings.</p>
+          <p className="projects-muted" data-testid="findings-empty">
+            {reviewerFilter !== null ? `Reviewer ${reviewerFilter} recorded no findings.` : several ? 'No reviewer recorded a finding.' : 'The reviewer recorded no findings.'}
+          </p>
         ) : populated.map(group => (
           <section key={group.key} className="finding-group" {...group.attributes} aria-labelledby={`findings-${group.key}`}>
             <h5 id={`findings-${group.key}`}>{group.label} ({group.findings.length})</h5>
             <div className="table-wrap">
               <table className="findings-table">
                 <thead>
-                  <tr><th scope="col">Severity</th><th scope="col">Message</th><th scope="col">Worker</th><th scope="col">Requirement</th></tr>
+                  <tr><th scope="col">Severity</th><th scope="col">Message</th><th scope="col">Worker</th><th scope="col">Reviewer</th><th scope="col">Requirement</th></tr>
                 </thead>
                 <tbody>
                   {group.findings.map((finding, index) => (
@@ -176,15 +258,18 @@ function ReviewResultView({ review, scope, definitionNodes, inputs, onNavigate, 
             </div>
           </section>
         ))}
-        <p className="projects-muted">Blocking means an unresolved P0 or P1 finding; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane.</p>
+        <p className="projects-muted">
+          Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
+        </p>
       </section>
     </div>
   )
 }
 
 /**
- * The Result section of a review node: the persisted verdict, reviewer identity, bundle, findings and diff.
- * A run whose export predates review results (404 REVIEW_NOT_FOUND) is a "not recorded" state, not an error.
+ * The Result section of a review node: the persisted combined verdict, every reviewer's identity and outcome, the bundle,
+ * the unioned findings and the diff. A run whose export predates review results (404 REVIEW_NOT_FOUND) is a "not recorded"
+ * state, not an error.
  */
 export function ReviewPanel({ scope, node, definitionNodes, inputs, refreshToken, onNavigate, onOpenRequirement }: Props) {
   // The snapshot links the recorded review; an older export has no link, so the first attempt is asked for once the node ran.
