@@ -9,7 +9,8 @@
   A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
   that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
-  in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane.
+  in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane. A delivery that
+  fails leaves the answer recorded but undelivered; rerunning `answer` delivers it, once.
 
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
@@ -23,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -690,8 +692,12 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
     return entry
 
 
-def record_answer(directory: Path, node: str, text: str, clock=None) -> dict:
-    """The latest question's answer; the deadline restarts now. Refused when no question waits."""
+def record_answer(directory: Path, node: str, text: str, clock=None, delivered: bool | None = None) -> dict:
+    """The latest question's answer; the deadline restarts now. Refused when no question waits.
+
+    `answer` records `delivered: false` and sets it once the text reached the worker, so a failed delivery can be
+    retried; an answer typed in the pane (recorded by the controller) carries no flag.
+    """
     if not text.strip():
         raise ValueError("The answer is empty")
     with question_lock(directory):
@@ -700,9 +706,33 @@ def record_answer(directory: Path, node: str, text: str, clock=None) -> dict:
             raise ValueError(f"Worker {node} has no unanswered question")
         at = (clock or time.time)()
         questions[-1].update(answer=text, answered_at=iso(at))
+        if delivered is not None:
+            questions[-1]["delivered"] = delivered
         save_questions(directory, node, questions)
         resume_deadline(directory, node, at)
     return questions[-1]
+
+
+def undelivered_answer(directory: Path, node: str, text: str) -> dict | None:
+    """The latest question when `answer` recorded this text but never delivered it: a rerun delivers it, recording nothing.
+
+    A different text is refused: a question is answered once, and its deadline already runs again.
+    """
+    questions = load_questions(directory, node)
+    if not questions or questions[-1]["answer"] is None or questions[-1].get("delivered") is not False:
+        return None
+    entry = questions[-1]
+    if entry["answer"] != text:
+        raise ValueError(f"Question {entry['n']} of {node} is already answered and that answer was never delivered; "
+                         f"rerun answer with the recorded text to deliver it: {entry['answer']!r}")
+    return entry
+
+
+def mark_delivered(directory: Path, node: str, number: int) -> None:
+    with question_lock(directory):
+        questions = load_questions(directory, node)
+        questions[number - 1]["delivered"] = True
+        save_questions(directory, node, questions)
 
 
 PANE_ANSWER = "(answered by typing in the worker's pane)"
@@ -714,9 +744,10 @@ def deliver_answer(directory: Path, node: str, text: str, use_herdr: bool = True
     if not use_herdr:
         return f"Type the answer in the worker's session: claude attach {receipt.get('background_id')}"
     from .herdr import herdr
-    mapping = read_json(directory / "terminals.json")
+    terminals = directory / "terminals.json"
+    mapping = read_json(terminals) if terminals.exists() else {}  # A run started without --herdr has none.
     if node not in mapping:
-        raise RuntimeError(f"No Herdr pane is recorded for {node}; rerun with --no-herdr")
+        raise RuntimeError(f"No Herdr pane is recorded for {node} in {terminals}")
     pane = mapping[node]["pane_id"]
     herdr("pane", "send-text", pane, text)
     herdr("pane", "send-keys", pane, "Enter")
@@ -756,21 +787,42 @@ def resume_main(argv=None):
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
 
 
+def answer_command(directory: Path, node: str, text: str, herdr: bool = True) -> str:
+    return f"{sys.executable} -m workflow answer {directory} {node} {shlex.quote(text)}" + ("" if herdr else " --no-herdr")
+
+
 def answer_main(argv=None):
+    """The deadline restarts when the answer is recorded (PRD 4.6), before the delivery, and stays running when the delivery
+    fails: paused until a delivery, it would never run again if the operator then typed the answer in the pane (the
+    controller records a pane answer only while the question waits). A rerun delivers the recorded answer within it."""
     parser = argparse.ArgumentParser(prog="python -m workflow answer", description="Answer a worker's question: record it, restart the "
-                                     "worker's deadline and type it into the worker's pane.")
+                                     "worker's deadline and type it into the worker's pane. Rerun it to deliver an answer whose delivery failed.")
     parser.add_argument("directory", type=Path)
     parser.add_argument("node", help="The lane whose latest question this answers")
     parser.add_argument("text")
     parser.add_argument("--no-herdr", action="store_true", help="Print the claude attach command instead of typing into the pane")
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
+    entry = delivered = None
     try:
         plan = read_json(directory / "plan.json")
         if args.node not in plan_workers(plan):
             raise ValueError(f"{args.node} is not a lane of this run ({', '.join(plan_workers(plan))})")
-        entry = record_answer(directory, args.node, args.text)
-        print(f"Recorded the answer to question {entry['n']} of {args.node}; its deadline runs again.")
+        entry = undelivered_answer(directory, args.node, args.text)
+        if entry is None:
+            entry = record_answer(directory, args.node, args.text, delivered=False)
+            print(f"Recorded the answer to question {entry['n']} of {args.node}; its deadline runs again.")
+        else:
+            print(f"Question {entry['n']} of {args.node} was answered at {entry['answered_at']} and never delivered; delivering it now "
+                  "(nothing is recorded again, and its deadline has run since).")
         print(deliver_answer(directory, args.node, args.text, not args.no_herdr))
+        delivered = True
+        mark_delivered(directory, args.node, entry["n"])
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        if delivered:
+            parser.exit(1, f"Blocked: {error}\nThe answer reached the worker but is not marked delivered; do not rerun answer for this question.\n")
+        if entry is not None:
+            parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} stays recorded and its deadline runs, but it did not reach "
+                           f"the worker. Deliver it by rerunning, from a Herdr pane:\n  {answer_command(directory, args.node, args.text)}\n"
+                           f"or print the claude attach command and type it yourself:\n  {answer_command(directory, args.node, args.text, herdr=False)}\n")
         parser.exit(1, f"Blocked: {error}\n")

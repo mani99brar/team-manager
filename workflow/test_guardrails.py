@@ -810,6 +810,116 @@ class WorkerQuestion(unittest.TestCase):
         self.assertIn("Stop (from your task, the bound on this work): After three failed fixes, report blocked.", prompt)
 
 
+class AnswerDelivery(unittest.TestCase):
+    """`answer` records first (the deadline restarts, PRD 4.6), then delivers; a failed delivery is retried by rerunning it."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        save_json(self.root / "plan.json", {"run_id": "run", "workers": ["ui", "adapter"], "nodes": {"ui": {}, "adapter": {}}})
+        for lane in ("ui", "adapter"):
+            save_json(self.root / f"{lane}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00", "background_id": f"bg-{lane}"})
+        from .guardrails import record_question
+        runtime = SimpleNamespace(directory=self.root, event=lambda *_: None)
+        for lane in ("ui", "adapter"):
+            save_json(self.root / f"{lane}.completion.json", {"status": "question"})
+            record_question(runtime, lane, {"question": "Option A or B?"}, clock=lambda: 10.0)
+        self.now = 100.0
+
+    def answer(self, *argv, herdr_env=True, fail=False):
+        """(herdr commands, output, exit code); `fail` makes every Herdr command exit 1, as for a closed pane."""
+        calls = []
+
+        def run(command, **_):
+            calls.append(command)
+            if fail:
+                raise subprocess.CalledProcessError(1, command, "", "no such pane")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        output = io.StringIO()
+        environment = {key: value for key, value in os.environ.items() if key != "HERDR_ENV"} | ({"HERDR_ENV": "1"} if herdr_env else {})
+        with patch.dict(os.environ, environment, clear=True), patch("workflow.guardrails.time.time", lambda: self.now), \
+                patch("workflow.herdr.subprocess.run", side_effect=run), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                answer_main([str(self.root), *argv])
+                code = 0
+            except SystemExit as exit_:
+                code = exit_.code
+        return calls, output.getvalue(), code
+
+    def entry(self, lane: str = "ui") -> dict:
+        return read_json(self.root / f"{lane}.questions.json")["questions"][-1]
+
+    def test_a_failed_delivery_keeps_the_answer_and_a_rerun_delivers_it_exactly_once(self):
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        # Outside a Herdr pane: recorded and the deadline runs again from now (PRD 4.6), but nothing reached the worker.
+        calls, output, code = self.answer("ui", "Use option B", herdr_env=False)
+        self.assertEqual((calls, code), ([], 1), output)
+        self.assertIn("Recorded the answer to question 1 of ui; its deadline runs again.", output)
+        self.assertIn("Blocked: Herdr controls require a Herdr-managed caller pane", output)
+        self.assertIn("did not reach the worker", output)
+        self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B'\n", output)
+        self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B' --no-herdr\n", output)
+        recorded = self.entry()
+        self.assertEqual((recorded["answer"], recorded["answered_at"], recorded["delivered"]), ("Use option B", "1970-01-01T00:01:40Z", False))
+        deadline = read_json(self.root / "ui.deadline.json")
+        self.assertEqual(deadline, {"node_id": "ui", "paused_seconds": 90.0, "paused_at": None})
+        # A different answer to the answered question is refused, and nothing is typed.
+        self.now = 150.0
+        calls, output, code = self.answer("ui", "Use option C")
+        self.assertEqual((calls, code), ([], 1), output)
+        self.assertIn("already answered", output)
+        self.assertIn("'Use option B'", output)
+        # The pane is gone: the same command fails again and records nothing.
+        calls, output, code = self.answer("ui", "Use option B", fail=True)
+        self.assertEqual((len(calls), code), (1, 1), output)
+        self.assertIn("Blocked: Command '['herdr', 'pane', 'send-text'", output)
+        self.assertNotIn("Recorded the answer", output)
+        # The pane is back: the rerun types the recorded answer once, and neither the answer nor the deadline changes.
+        self.now = 200.0
+        calls, output, code = self.answer("ui", "Use option B")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [["herdr", "pane", "send-text", "pane-ui", "Use option B"], ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+        self.assertIn("never delivered; delivering it now", output)
+        self.assertNotIn("Recorded the answer", output)
+        self.assertEqual(self.entry(), {**recorded, "delivered": True})
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), deadline)
+        self.assertEqual(len(read_json(self.root / "ui.questions.json")["questions"]), 1)
+        # Delivered: every further answer is refused, with or without Herdr.
+        for argv in (("ui", "Use option B"), ("ui", "Use option B", "--no-herdr")):
+            calls, output, code = self.answer(*argv)
+            self.assertEqual((calls, code), ([], 1), output)
+            self.assertIn("no unanswered question", output)
+        # The export serves the entry without the delivery flag.
+        from .export_state import worker_questions
+        self.assertEqual(worker_questions(self.root / "ui.questions.json"), [{key: recorded[key] for key in ("n", "question", "asked_at", "answer", "answered_at")}])
+
+    def test_a_run_without_a_pane_for_the_lane_delivers_the_recorded_answer_with_no_herdr(self):
+        # Launched without Herdr: no terminals.json, a clear refusal instead of a missing-file error.
+        calls, output, code = self.answer("ui", "Use option B")
+        self.assertEqual((calls, code), ([], 1), output)
+        self.assertIn("Blocked: No Herdr pane is recorded for ui", output)
+        self.assertNotIn("Errno", output)
+        self.assertIs(self.entry()["delivered"], False)
+        # A terminals.json without the lane.
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        calls, output, code = self.answer("adapter", "Keep the adapter")
+        self.assertEqual((calls, code), ([], 1), output)
+        self.assertIn("Blocked: No Herdr pane is recorded for adapter", output)
+        # --no-herdr delivers the recorded answer: the attach command to type it, nothing recorded again.
+        answered_at = self.entry()["answered_at"]
+        self.now = 300.0
+        calls, output, code = self.answer("ui", "Use option B", "--no-herdr")
+        self.assertEqual((calls, code), ([], 0), output)
+        self.assertIn("Type the answer in the worker's session: claude attach bg-ui", output)
+        self.assertNotIn("Recorded the answer", output)
+        self.assertEqual((self.entry()["answered_at"], self.entry()["delivered"]), (answered_at, True))
+        # Exactly once: the plain command does not type it a second time.
+        calls, output, code = self.answer("ui", "Use option B")
+        self.assertEqual((calls, code), ([], 1), output)
+        self.assertIn("no unanswered question", output)
+
+
 class ExportSeam(unittest.TestCase):
     def test_export_seam_1_5_0_carries_decisions_challenge_evidence_and_questions_and_older_runs_export_nulls(self):
         """Scenario export-seam (the Python half; contracts/projects/contract.test.ts and server/projects.test.ts serve it)."""
