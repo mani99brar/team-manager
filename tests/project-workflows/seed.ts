@@ -13,6 +13,9 @@
  * the legacy single-reviewer run, which is a 1.3.0 export of the same graph without either. The `clarity-flow` run is a
  * 1.4.0 export whose ui worker-phase packet carries the files captured at freeze (`file` artifacts written beside the
  * packet like any artifact, and `files_not_captured` in the packet result); its candidate-phase packet captures nothing.
+ * The `guarded-flow` run is a 1.5.0 export (PRD_PORTABLE_WORKFLOW 4.7) whose graph starts with the `challenge` node: its
+ * inputs section carries `decisions`, the accepted `challenge`, 1.1.0 completion evidence and each lane's `questions`; the
+ * ui lane's worker packet captured a Markdown file, and the adapter lane's first verification was blocked.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -29,6 +32,10 @@ import {
   EMPTY_WORKFLOW_ID,
   EMPTY_WORKFLOW_NAME,
   FILE_ARTIFACTS,
+  GUARDED_FILE_ARTIFACTS,
+  GUARDED_NODES,
+  GUARDED_WORKFLOW_ID,
+  GUARDED_WORKFLOW_NAME,
   GRAPH_NODES,
   LANE_ARTIFACTS,
   LANE_OUTPUT_COMMITS,
@@ -46,6 +53,7 @@ import {
   RUN_BLOCKED,
   RUN_FAILED,
   RUN_FILES,
+  RUN_GUARDED,
   RUN_LEGACY,
   RUN_LEGACY_REVIEWER,
   RUN_ONE_LANE,
@@ -73,6 +81,7 @@ import {
   backgroundId,
   candidateUiResult,
   capturedUiResult,
+  guardedUiResult,
   docsTask,
   laneResult,
   launchToken,
@@ -140,7 +149,7 @@ type RunOptions = {
   createdAt: string; updatedAt: string; definitionNodes: typeof GRAPH_NODES; values: Record<string, unknown>; next: string[]; tasks: Task[]; events: InternalEvent[]
   packets: (runDir: string) => object[]
   /** Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane selection, 1.4.0 the reviewer set. */
-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0'
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0'
   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
   reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
@@ -163,7 +172,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   const plan = {
     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
-    ...(version === '1.3.0' || version === '1.4.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
@@ -198,12 +207,14 @@ export function seedCandidate(root: string): string {
   const lanesRunsRoot = join(root, 'runs', LANES_WORKFLOW_ID)
   const reviewersRunsRoot = join(root, 'runs', REVIEWERS_WORKFLOW_ID)
   const clarityRunsRoot = join(root, 'runs', CLARITY_WORKFLOW_ID)
+  const guardedRunsRoot = join(root, 'runs', GUARDED_WORKFLOW_ID)
   mkdirSync(repository, { recursive: true })
   mkdirSync(runsRoot, { recursive: true })
   mkdirSync(emptyRunsRoot, { recursive: true })
   mkdirSync(lanesRunsRoot, { recursive: true })
   mkdirSync(reviewersRunsRoot, { recursive: true })
   mkdirSync(clarityRunsRoot, { recursive: true })
+  mkdirSync(guardedRunsRoot, { recursive: true })
 
   const packetSet = (runDir: string, phases: { phase: 'worker' | 'candidate'; node: string; attempt: number; result: WorkerResult; blocked?: string }[]) =>
     phases.map(entry => writePacket(runDir, entry.phase, entry.node, entry.attempt, entry.result, LANE_ARTIFACTS[entry.node],
@@ -462,6 +473,36 @@ export function seedCandidate(root: string): string {
     inputs: rawInputsSection(RUN_FILES, leakFor(clarityRunsRoot, RUN_FILES)),
   })
 
+  // ---- guarded-flow: a 1.5.0 export whose graph starts with the design challenge (PRD_PORTABLE_WORKFLOW 4.5 to 4.7) ----
+
+  // The challenge was accepted, ui verified, the adapter's first verification was blocked and its worker is fixing it while
+  // its second question waits on the operator: the adapter has no accepted packet, so its verify node is still running.
+  const guardedDir = join(guardedRunsRoot, RUN_GUARDED)
+  writeRun(guardedRunsRoot, repository, RUN_GUARDED, {
+    createdAt: T1, updatedAt: T3, definitionNodes: GUARDED_NODES, definitionName: GUARDED_WORKFLOW_NAME, version: '1.5.0', lanes: TWO_LANES,
+    values: {
+      lanes: Object.fromEntries(TWO_LANES.map(lane => [lane, receipt(lane, guardedDir, LANE_SESSIONS[lane], T1)])),
+      snapshots: Object.fromEntries(TWO_LANES.map(lane => [lane, LANE_OUTPUT_COMMITS[lane]])),
+      packets: { ui: 'verification/worker/ui/1/packet.json' },
+    },
+    next: ['verify_adapter'], tasks: [],
+    events: [
+      internalEvent(1, T1, 'challenge', 'succeeded', 'Design challenge accepted by the operator'),
+      internalEvent(2, T1, 'ui', 'running', 'Launching or reconciling the exact native session'),
+      internalEvent(3, T1, 'adapter', 'running', 'Launching or reconciling the exact native session'),
+      internalEvent(4, T2, 'freeze', 'succeeded', 'Captured every worker snapshot'),
+      internalEvent(5, T2, 'verify_ui', 'succeeded', 'ui verification passed; changed text files captured at freeze'),
+      internalEvent(6, T2, 'verify_adapter', 'blocked', 'Injected gate failure (failure drill); checks preserved'),
+      internalEvent(7, T3, 'verify_adapter', 'running', 'The adapter worker is fixing the failed verification; its question is waiting on the operator'),
+    ],
+    packets: runDir => [
+      writePacket(runDir, 'worker', 'ui', 1, guardedUiResult(RUN_GUARDED), [...LANE_ARTIFACTS.ui, ...GUARDED_FILE_ARTIFACTS], { status: 'passed', reasons: [] }),
+      writePacket(runDir, 'worker', 'adapter', 1, adapterResult(RUN_GUARDED, true), LANE_ARTIFACTS.adapter, { status: 'blocked', reasons: ['Injected gate failure (failure drill)'] }),
+    ],
+    review: null,
+    inputs: rawInputsSection(RUN_GUARDED, leakFor(guardedRunsRoot, RUN_GUARDED)),
+  })
+
   const registry = {
     version: 1,
     projects: [
@@ -473,6 +514,7 @@ export function seedCandidate(root: string): string {
           { workflow_id: LANES_WORKFLOW_ID, runs_root: lanesRunsRoot, definition: { name: LANES_WORKFLOW_NAME, nodes: THREE_LANE_NODES } },
           { workflow_id: REVIEWERS_WORKFLOW_ID, runs_root: reviewersRunsRoot, definition: { name: REVIEWERS_WORKFLOW_NAME, nodes: REVIEWERS_NODES } },
           { workflow_id: CLARITY_WORKFLOW_ID, runs_root: clarityRunsRoot, definition: { name: CLARITY_WORKFLOW_NAME, nodes: CLARITY_NODES } },
+          { workflow_id: GUARDED_WORKFLOW_ID, runs_root: guardedRunsRoot, definition: { name: GUARDED_WORKFLOW_NAME, nodes: GUARDED_NODES } },
         ],
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },

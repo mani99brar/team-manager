@@ -11,13 +11,14 @@ import {
   type WorkerResult,
   type WorkflowEvent,
 } from './api.ts'
+import { ChallengePanel } from './Challenge.tsx'
 import { CreatedFiles } from './CreatedFiles.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { ReviewPanel } from './ReviewDetail.tsx'
 import { runPathname } from './routes.ts'
-import { executorCategory, executorOf, formatTime, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
+import { executorCategory, executorOf, formatTime, isChallengeNode, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
 import { useResource, type Resource } from './useResource.ts'
-import { LaunchReceipt, StopLine, TaskPanel, WorkerSignals } from './WorkerInputs.tsx'
+import { LaunchReceipt, StopLine, TaskPanel, WorkerQuestions, WorkerSignals } from './WorkerInputs.tsx'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
@@ -306,11 +307,13 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
   const approvals = nodeEvents.filter(event => event.type === 'approval_requested')
 
   const isWorker = definition.kind === 'worker'
-  const isReview = definition.kind === 'review'
+  const isChallenge = isChallengeNode(definition)
+  const isReview = definition.kind === 'review' && !isChallenge
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const worker = isWorker && recordedInputs !== null ? recordedInputs.workers.find(candidate => candidate.launch_node_id === node.node_id) ?? null : null
   const receiptSession = worker?.launch?.session_id ?? null
-  const reviewNode = snapshotNodes.find(candidate => candidate.kind === 'review') ?? null
+  // The design challenge is also of kind review; the independent review is the other one.
+  const reviewNode = snapshotNodes.find(candidate => candidate.kind === 'review' && !isChallengeNode(candidate)) ?? null
   const hasNode = (nodeId: string) => definitionNodes.some(candidate => candidate.node_id === nodeId)
   const launchNodeOf = (lane: string) => {
     const launched = recordedInputs?.workers.find(candidate => candidate.node_id === lane)?.launch_node_id
@@ -318,6 +321,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
     return hasNode(`launch_${lane}`) ? `launch_${lane}` : null
   }
   const verifyNodeId = worker !== null && hasNode(`verify_${worker.node_id}`) ? `verify_${worker.node_id}` : null
+  const checksNode = verifyNodeId === null ? null : { href: runPathname(scope.projectId, scope.workflowId, scope.runId, verifyNodeId), label: definitionNodes.find(candidate => candidate.node_id === verifyNodeId)!.label }
 
   const resultBody = (evidence: (data: WorkerResult) => ReactNode) => (
     <>
@@ -357,7 +361,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
       <h3 id="node-detail-title">{definition.label} <span className="projects-muted node-detail-id">({node.node_id})</span></h3>
       <dl className="projects-facts">
         <div><dt>Kind</dt><dd>{KIND_LABEL[definition.kind]}</dd></div>
-        <div><dt>Executed by</dt><dd data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport)}</dd></div>
+        <div><dt>Executed by</dt><dd data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport, definition.node_id)}</dd></div>
         <div><dt>Status</dt><dd><StatusBadge status={node.status} /> <span data-testid="node-status-meaning">{nodeStatusMeaning(definition.kind, node.status)}</span></dd></div>
         <div><dt>Graph attempt</dt><dd data-testid="node-attempt">{node.attempt === 0 ? '0 (not started)' : node.attempt}</dd></div>
         <div>
@@ -405,7 +409,8 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
           )}
           {worker !== null && (
             <>
-              <WorkerSignals completion={worker.completion} handoff={worker.handoff} />
+              <WorkerSignals completion={worker.completion} handoff={worker.handoff} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />
+              <WorkerQuestions questions={worker.questions} />
               <LaunchReceipt launch={worker.launch} />
               <TaskDisclosure highlight={highlight}>
                 <TaskPanel
@@ -413,7 +418,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
                   result={result}
                   highlight={highlight}
                   onHighlightApplied={onHighlightApplied}
-                  checksNode={verifyNodeId === null ? null : { href: runPathname(scope.projectId, scope.workflowId, scope.runId, verifyNodeId), label: definitionNodes.find(candidate => candidate.node_id === verifyNodeId)!.label }}
+                  checksNode={checksNode}
                   onNavigate={onNavigate}
                 />
               </TaskDisclosure>
@@ -425,8 +430,10 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
         <>
           {reuseSection}
           <section className="evidence-section" aria-labelledby="node-result">
-            <h4 id="node-result">{isReview ? 'Review result' : 'Result'}</h4>
-            {isReview ? (
+            <h4 id="node-result">{isChallenge ? 'Design challenge' : isReview ? 'Review result' : 'Result'}</h4>
+            {isChallenge ? (
+              <ChallengePanel inputs={inputs} onRetry={onRetryInputs} />
+            ) : isReview ? (
               <ReviewPanel
                 scope={scope}
                 node={node}

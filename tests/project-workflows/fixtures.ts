@@ -21,7 +21,11 @@
  * run whose ui worker-phase result carries the files the verifier captured at freeze (PRD_VIEWER_CLARITY section 4.1): a
  * Markdown and a TypeScript `file` artifact, a too-large and a binary entry in `files_not_captured`, and review findings
  * naming those files with and without line ranges plus one naming a similar but different path. Every other run is
- * unchanged and records no capture, like results verified before it existed.
+ * unchanged and records no capture, like results verified before it existed. `guarded-flow` holds one 1.5.0 export of a
+ * guarded run (PRD_PORTABLE_WORKFLOW sections 4.5 to 4.7): a `challenge` node accepted over a P1 and a P2 concern, a ui lane
+ * whose 1.1.0 completion names a declared check as its falsifying check, an adapter lane waiting on its second question, the
+ * pinned `decisions.md`, and a captured Markdown file; both texts carry a remote image and an external link. Every other run
+ * serves no decisions, no challenge, no questions and null completion evidence, as the adapter serves older exports.
  */
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
@@ -45,8 +49,8 @@ export const REVIEWERS_WORKFLOW_ID = 'reviewers-flow'
 export const REVIEWERS_WORKFLOW_NAME = 'Reviewers flow'
 /** The projects contract version every projected review result carries (parallel reviewers, `contracts/projects/README.md`). */
 export const REVIEW_CONTRACT_VERSION = '1.4.0'
-/** The version every projected run-inputs payload carries: its shape is unchanged since 1.3.0, so the contract pins that. */
-export const INPUTS_CONTRACT_VERSION = '1.3.0'
+/** The version every projected run-inputs payload carries (decisions, challenge, completion evidence and questions). */
+export const INPUTS_CONTRACT_VERSION = '1.4.0'
 export const RUN_SUCCEEDED = 'run-succeeded'
 export const RUN_FAILED = 'run-failed'
 export const RUN_AWAITING = 'run-awaiting'
@@ -76,6 +80,11 @@ export const CLARITY_WORKFLOW_ID = 'clarity-flow'
 export const CLARITY_WORKFLOW_NAME = 'Clarity flow'
 /** A 1.4.0 export whose ui worker-phase packet captured the changed files; reviewed by `general` and `coverage`. */
 export const RUN_FILES = 'run-files-captured'
+/** The workflow of the guarded run (feature 2.2.0): its graph starts with the design challenge. */
+export const GUARDED_WORKFLOW_ID = 'guarded-flow'
+export const GUARDED_WORKFLOW_NAME = 'Guarded flow'
+/** A 1.5.0 export, still running: challenge accepted, ui verified, the adapter resumed after a failed verification and waiting on an answer. */
+export const RUN_GUARDED = 'run-guarded'
 /** The id the adapter gives the single reviewer of an export that predates `reviewers`. */
 export const DEFAULT_REVIEWER_ID = 'review'
 export const PINNED_LABEL = 'Verify UI (pinned r1)'
@@ -97,6 +106,7 @@ export const FEATURE_NAME = 'Review visibility and run inputs in the viewer'
 export const LANES_FEATURE_NAME = 'Worker lanes from configuration'
 export const REVIEWERS_FEATURE_NAME = 'Parallel reviewers'
 export const CLARITY_FEATURE_NAME = 'Viewer clarity'
+export const GUARDED_FEATURE_NAME = 'Workflow guardrails'
 export const REVIEWER_SESSION = '33333333-3333-4333-8333-333333333333'
 export const PRINT_REVIEWER_SESSION = '44444444-4444-4444-8444-444444444444'
 export const GENERAL_REVIEWER_SESSION = '66666666-6666-4666-8666-666666666666'
@@ -156,6 +166,13 @@ export const ONE_LANE_NODES = laneGraphNodes(ONE_LANE)
 /** The reviewers workflow pins the plain two-lane graph; reviewers share the one `review` node, so the graph does not change with them. */
 export const REVIEWERS_NODES = laneGraphNodes(TWO_LANES)
 export const CLARITY_NODES = laneGraphNodes(TWO_LANES)
+/** The design challenge node a 2.2.0 run's graph starts with (PRD_PORTABLE_WORKFLOW 4.7). */
+export const CHALLENGE_NODE: DefinitionNode = { node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] }
+/** A guarded run's graph: the challenge first, and every launch node depends on it. */
+export const GUARDED_NODES: DefinitionNode[] = [
+  CHALLENGE_NODE,
+  ...laneGraphNodes(TWO_LANES).map(node => (node.kind === 'worker' ? { ...node, depends_on: [CHALLENGE_NODE.node_id] } : node)),
+]
 
 /** Definition revision exactly as the contract specifies: SHA-256 of canonical JSON without `definition_revision`. */
 export function definitionRevision(definition: { contract_version: string; project_id: string; workflow_id: string; name: string; nodes: DefinitionNode[] }): string {
@@ -183,10 +200,11 @@ export const LANES_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID
 export const ONE_LANE_DEFINITION = definition(PROJECT.project_id, LANES_WORKFLOW_ID, LANES_WORKFLOW_NAME, ONE_LANE_NODES)
 export const REVIEWERS_DEFINITION = definition(PROJECT.project_id, REVIEWERS_WORKFLOW_ID, REVIEWERS_WORKFLOW_NAME, REVIEWERS_NODES)
 export const CLARITY_DEFINITION = definition(PROJECT.project_id, CLARITY_WORKFLOW_ID, CLARITY_WORKFLOW_NAME, CLARITY_NODES)
+export const GUARDED_DEFINITION = definition(PROJECT.project_id, GUARDED_WORKFLOW_ID, GUARDED_WORKFLOW_NAME, GUARDED_NODES)
 
 export const projectList = { projects: [PROJECT, EMPTY_PROJECT] }
 export const workflowLists: Record<string, { workflows: WorkflowDefinition[] }> = {
-  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION, CLARITY_DEFINITION] },
+  [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION, CLARITY_DEFINITION, GUARDED_DEFINITION] },
   [EMPTY_PROJECT.project_id]: { workflows: [] },
 }
 
@@ -326,6 +344,78 @@ export const FILE_ARTIFACTS: ArtifactFile[] = [
   { artifact_id: 'file-6-capture-ts', kind: 'file', path: CAPTURE_TS_PATH, content: Buffer.from(CAPTURE_TS, 'utf8'), contentType: 'text/plain; charset=utf-8' },
 ]
 
+// ---- The guarded run (PRD_PORTABLE_WORKFLOW 4.5 to 4.8) ---------------------------------------------------
+
+/** Every host a remote reference in the guarded run's Markdown names; the viewer must contact none of them. */
+export const REMOTE_IMAGE_URL = 'https://images.example.com/guardrails/challenge-flow.png'
+export const REMOTE_LINK_URL = 'https://example.com/workflow/runbook'
+export const REMOTE_AUTOLINK_URL = 'https://docs.example.org/guardrails'
+export const REMOTE_HTML_IMAGE_URL = 'https://tracker.example.net/pixel.png'
+export const REMOTE_LINK_TEXT = 'the operator runbook'
+export const REMOTE_IMAGE_ALT = 'Challenge flow diagram'
+/** The pinned `decisions.md` of the guarded run, with a remote image and an external link. */
+export const GUARDED_DECISIONS = [
+  '# Decisions: workflow guardrails',
+  '',
+  '## Decisions',
+  '',
+  '- The design challenge runs before any worker; a P0 or P1 pauses the run.',
+  `- Operators follow [${REMOTE_LINK_TEXT}](${REMOTE_LINK_URL}) to answer questions.`,
+  '',
+  `![${REMOTE_IMAGE_ALT}](${REMOTE_IMAGE_URL})`,
+  '',
+  '## Assumptions',
+  '',
+  '- Answers reach a worker by typing into its Herdr pane.',
+  '',
+  '## Deferred',
+  '',
+  '- Reusing worker-phase check results at the candidate phase.',
+  '',
+].join('\n')
+/** A Markdown file the ui lane created, captured at freeze; it names remote content four ways. */
+export const GUARDED_NOTES_PATH = 'src/projects/GUARDRAILS.md'
+export const GUARDED_NOTES = [
+  '# Guardrail notes',
+  '',
+  `See [${REMOTE_LINK_TEXT}](${REMOTE_LINK_URL}) and ${REMOTE_AUTOLINK_URL} for the answer flow.`,
+  '',
+  `![${REMOTE_IMAGE_ALT}](${REMOTE_IMAGE_URL})`,
+  '',
+  `<img src="${REMOTE_HTML_IMAGE_URL}" alt="pixel">`,
+  '',
+].join('\n')
+export const GUARDED_FILE_ARTIFACTS: ArtifactFile[] = [
+  { artifact_id: 'file-5-guardrail-notes-md', kind: 'file', path: GUARDED_NOTES_PATH, content: Buffer.from(GUARDED_NOTES, 'utf8'), contentType: 'text/plain; charset=utf-8' },
+]
+export const GUARDED_CHANGED_FILES = [GUARDED_NOTES_PATH]
+
+export const CHALLENGE_SESSION = '99999999-9999-4999-8999-999999999999'
+export const CHALLENGE_P1 = 'The viewer assumes every completion is 1.1.0, but runs prepared before slice 2 still serve 1.0.0 completions.'
+export const CHALLENGE_P1_CONSEQUENCE = 'Old runs would show empty evidence as if the worker had claimed nothing was untested.'
+export const CHALLENGE_P2 = 'A separate challenge page duplicates the review panel.'
+export const CHALLENGE_P2_CONSEQUENCE = 'Two review-like pages drift apart in wording over time.'
+export const CHALLENGE_ALTERNATIVE = 'Show the challenge concerns as findings inside the existing review panel.'
+export const CHALLENGE_EXPERIMENT = 'Render one 1.0.0 run and one 1.1.0 run side by side before building the evidence section.'
+export const CHALLENGE_ACCEPTED_REASON = 'Legacy completions are served as nulls by the export; the viewer states that evidence was not recorded.'
+export const CHALLENGE_DECIDED_AT = '2026-03-01T10:03:00Z'
+/** The ui lane's completion evidence: the falsifying check is a check id the lane declares. */
+export const GUARDED_UNTESTED = ['Keyboard focus order inside the challenge page', 'Rendering of a paused challenge with a P0']
+export const GUARDED_FALSIFYING_CHECK = 'project-workflows-browser'
+export const GUARDED_VERIFY_YOURSELF = 'That the export serves 1.0.0 completions with null evidence fields.'
+export const GUARDED_UI_SUMMARY = 'Showed the challenge, completion evidence, questions and decisions in the viewer.'
+export const GUARDED_ADAPTER_SUMMARY = 'Asked the operator whether a paused deadline counts toward the review budget.'
+/** The questions, with their times: the ui lane's one was answered; the adapter's second is waiting on the operator. */
+export const GUARDED_QUESTIONS: Record<string, { n: number; question: string; asked_at: string; answer: string | null; answered_at: string | null }[]> = {
+  ui: [
+    { n: 1, question: 'Should the challenge page show earlier attempts?', asked_at: '2026-03-01T10:08:00Z', answer: 'No, the attempt count is enough.', answered_at: '2026-03-01T10:09:30Z' },
+  ],
+  adapter: [
+    { n: 1, question: 'May the adapter serve questions as an empty list for 1.4.0 exports?', asked_at: '2026-03-01T10:07:00Z', answer: 'Yes, as the PRD says.', answered_at: '2026-03-01T10:07:45Z' },
+    { n: 2, question: 'Does a paused deadline count toward the review budget?', asked_at: '2026-03-01T10:30:00Z', answer: null, answered_at: null },
+  ],
+}
+
 function checks(cwd: string, entries: { command: string; log: string; exit: number; start: string; finish: string }[]): WorkerResult['checks'] {
   return entries.map(entry => ({ command: entry.command, cwd, started_at: entry.start, finished_at: entry.finish, exit_code: entry.exit, log_artifact_id: entry.log }))
 }
@@ -410,6 +500,16 @@ export function capturedUiResult(runId: string): WorkerResult {
     changed_files: CAPTURED_CHANGED_FILES,
     artifacts: [...base.artifacts, ...artifactRefs(FILE_ARTIFACTS)],
     files_not_captured: [{ path: TOO_LARGE_PATH, reason: 'too_large' }, { path: BINARY_PATH, reason: 'binary' }],
+  })
+}
+
+/** The guarded run's ui lane at freeze: the usual checks, plus its created Markdown file captured. */
+export function guardedUiResult(runId: string): WorkerResult {
+  const base = uiResult(runId)
+  return validateWorkerResult({
+    ...base,
+    changed_files: GUARDED_CHANGED_FILES,
+    artifacts: [...base.artifacts, ...artifactRefs(GUARDED_FILE_ARTIFACTS)],
   })
 }
 
@@ -504,10 +604,16 @@ export const runDetails: Record<string, RunDetail> = {
   [RUN_FILES]: runDetail(RUN_FILES, 'succeeded', CLARITY_DEFINITION, T1, T3, {
     ...lanesVerified(TWO_LANES), review: { status: 'succeeded', attempt: 1, session: GENERAL_REVIEWER_SESSION, review: 1 }, approval: done(), integrate: done(),
   }, 6),
+  // The challenge was accepted; ui verified; the adapter's verification failed and its worker is fixing it, waiting on an answer.
+  [RUN_GUARDED]: runDetail(RUN_GUARDED, 'running', GUARDED_DEFINITION, T1, T3, {
+    challenge: done(),
+    launch_ui: done(UI_SESSION, 'ui'), launch_adapter: done(ADAPTER_SESSION, 'adapter'), handoff: done(),
+    verify_ui: done(undefined, 'ui'), verify_adapter: { status: 'running', attempt: 1, result: 'adapter' },
+  }, 9),
 }
 
 /** Each workflow's runs sorted by `updated_at` descending then `run_id` ascending, as the contract requires. */
-export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, CLARITY_WORKFLOW_ID].map(workflowId => [workflowId, {
+export const runLists: Record<string, { runs: RunDetail['summary'][]; next_cursor: null }> = Object.fromEntries([WORKFLOW_ID, LANES_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, CLARITY_WORKFLOW_ID, GUARDED_WORKFLOW_ID].map(workflowId => [workflowId, {
   runs: Object.values(runDetails).map(detail => detail.summary).filter(summary => summary.workflow_id === workflowId)
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.run_id.localeCompare(b.run_id)),
   next_cursor: null,
@@ -531,6 +637,7 @@ export const workerResults: Record<string, Record<string, WorkerResult>> = {
     'ui/1': capturedUiResult(RUN_FILES), 'adapter/1': adapterResult(RUN_FILES, false),
     'candidate_ui/1': candidateUiResult(RUN_FILES), 'candidate_adapter/1': adapterResult(RUN_FILES, false),
   },
+  [RUN_GUARDED]: { 'ui/1': guardedUiResult(RUN_GUARDED), 'adapter/1': adapterResult(RUN_GUARDED, true) },
 }
 
 function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {
@@ -610,6 +717,13 @@ export const runEvents: Record<string, WorkflowEvent[]> = {
     event(RUN_FILES, 5, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'succeeded', message: 'Reviewers general and coverage approved the candidate' }),
     event(RUN_FILES, 6, { type: 'status_changed', node_id: 'integrate', attempt: 1, status: 'succeeded', message: 'Fast-forwarded the feature branch' }),
   ],
+  [RUN_GUARDED]: [
+    event(RUN_GUARDED, 1, { type: 'status_changed', node_id: 'challenge', attempt: 1, status: 'succeeded', message: 'Design challenge accepted by the operator' }),
+    ...TWO_LANES.map((lane, index) => event(RUN_GUARDED, index + 2, { type: 'status_changed', node_id: `launch_${lane}`, attempt: 1, status: 'succeeded', message: `Native ${lane} session launched and its turn ended; not implementation completion` })),
+    event(RUN_GUARDED, 4, { type: 'status_changed', node_id: 'verify_ui', attempt: 1, status: 'succeeded', message: 'ui verification passed; changed text files captured at freeze' }),
+    event(RUN_GUARDED, 5, { type: 'status_changed', node_id: 'verify_adapter', attempt: 1, status: 'failed', message: 'Injected gate failure (failure drill); checks preserved' }),
+    event(RUN_GUARDED, 6, { type: 'status_changed', node_id: 'verify_adapter', attempt: 1, status: 'running', message: 'The adapter worker is fixing the failed verification; its question is waiting on the operator' }),
+  ],
 }
 
 export const artifactFiles: Record<string, ArtifactFile[]> = {
@@ -624,6 +738,7 @@ export const artifactFiles: Record<string, ArtifactFile[]> = {
   [RUN_REVIEWER_BLOCKED]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
   [RUN_LEGACY_REVIEWER]: TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]),
   [RUN_FILES]: [...TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]), ...FILE_ARTIFACTS],
+  [RUN_GUARDED]: [...TWO_LANES.flatMap(lane => LANE_ARTIFACTS[lane]), ...GUARDED_FILE_ARTIFACTS],
 }
 
 // ---- Worker tasks, prompts and the reviewer's quotes ----------------------------------------------------
@@ -755,9 +870,30 @@ export type RawWorkerInput = {
   owned_paths: string[]
   checks: RawCheck[]
   launch: { session_id: string | null; launch_token: string; launch_requested_at: string; native_started_at: number | null; observed_state: string | null; status: string; launcher_invocations: number; background_id: string | null } | null
-  completion: { status: 'completed' | 'blocked'; summary: string; open_assumptions: string[] } | null
+  /** Completion 1.1.0 (export 1.5.0) adds the evidence fields and the `question` status; a 1.0.0 completion has neither. */
+  completion: {
+    status: 'completed' | 'blocked' | 'question'; summary: string; open_assumptions: string[]
+    untested?: string[] | null; falsifying_check?: string | null; verify_yourself?: string | null
+  } | null
   handoff: { summary: string; open_assumptions: string[] } | null
   stop: { stopped: boolean; confirmed_at: string | null } | null
+  /** Export 1.5.0: the worker's questions with the operator's answers; absent before. */
+  questions?: RawQuestion[]
+}
+export type RawQuestion = { n: number; question: string; asked_at: string; answer: string | null; answered_at: string | null }
+export type RawConcern = { severity: 'P0' | 'P1' | 'P2'; kind: 'assumption' | 'failure_mode' | 'complexity' | 'other'; message: string; consequence: string }
+/** Export 1.5.0: the latest `challenge.json` without `run_id` and `version`, plus the number of attempts. */
+export type RawChallenge = {
+  status: 'passed' | 'paused' | 'accepted' | 'disabled'
+  attempt: number
+  session_id: string
+  pinned: { tasks_sha256: string; decisions_sha256: string; prd_sha256: string | null }
+  concerns: RawConcern[]
+  simpler_alternative: string
+  cheap_experiment: string
+  accepted_reason: string | null
+  decided_at: string
+  attempts: number
 }
 export type RawInputsSection = {
   feature: string
@@ -774,6 +910,9 @@ export type RawInputsSection = {
   excluded_workers?: string[]
   /** Keyed by lane id in policy order; a 1.3.0 export lists the selected lanes only. */
   workers: Record<string, RawWorkerInput>
+  /** Export 1.5.0: the pinned `decisions.md` text and the design challenge; absent before. */
+  decisions?: string | null
+  challenge?: RawChallenge | null
 }
 
 /** Receipts store `+00:00` offsets; the adapter normalises them to a trailing Z. */
@@ -1018,6 +1157,7 @@ function rawLaneWorker(lane: string, runId: string, leak: string, requestedAt: s
 /** The export's `inputs` section for a run, or null for the legacy export that predates it. */
 export function rawInputsSection(runId: string, leak = PATH_TOKEN): RawInputsSection | null {
   if (runId === RUN_LEGACY) return null
+  if (runId === RUN_GUARDED) return guardedInputsSection(leak)
   if (runId === RUN_TWO_REVIEWERS || runId === RUN_REVIEWER_BLOCKED || runId === RUN_LEGACY_REVIEWER || runId === RUN_FILES) {
     // The reviewers workflow's lanes are pinned like any configured policy's; the reviewer set lives in the review section, not here.
     const files = runId === RUN_FILES
@@ -1064,6 +1204,53 @@ export function rawInputsSection(runId: string, leak = PATH_TOKEN): RawInputsSec
     max_verification_attempts: 3,
     failure_drill: runId === RUN_FAILED ? { node_id: 'adapter', phase: 'worker', attempt: 1 } : null,
     workers: { ui: rawWorker('ui', runId, leak, requestedAt), adapter: rawWorker('adapter', runId, leak, requestedAt) },
+  }
+}
+
+/** The guarded run's 1.5.0 inputs section: decisions, the accepted challenge, completion evidence and questions. */
+function guardedInputsSection(leak: string): RawInputsSection {
+  const ui = rawLaneWorker('ui', RUN_GUARDED, leak, T1)
+  const adapter = rawLaneWorker('adapter', RUN_GUARDED, leak, T1)
+  return {
+    feature: GUARDED_FEATURE_NAME, policy_version: '1.2.0', base_commit: BASE_COMMIT,
+    source_branch: sourceBranch(RUN_GUARDED, GUARDED_WORKFLOW_ID),
+    mode: 'automatic',
+    automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 7200, review_timeout_seconds: 1800, reviewer_transport: 'print' },
+    setup: [{ argv: ['npm', 'ci'], command: 'npm ci', timeout_seconds: 600 }],
+    max_verification_attempts: 3,
+    failure_drill: { node_id: 'adapter', phase: 'worker', attempt: 1 },
+    selected_workers: [...TWO_LANES],
+    excluded_workers: [],
+    workers: {
+      ui: {
+        ...ui,
+        completion: {
+          status: 'completed', summary: GUARDED_UI_SUMMARY, open_assumptions: [UI_ASSUMPTION],
+          untested: GUARDED_UNTESTED, falsifying_check: GUARDED_FALSIFYING_CHECK, verify_yourself: GUARDED_VERIFY_YOURSELF,
+        },
+        handoff: { summary: GUARDED_UI_SUMMARY, open_assumptions: [UI_ASSUMPTION] },
+        questions: GUARDED_QUESTIONS.ui,
+      },
+      adapter: {
+        ...adapter,
+        // The worker is in its fix turn and ended it with a question: no evidence yet, and its stop is not confirmed.
+        completion: { status: 'question', summary: GUARDED_ADAPTER_SUMMARY, open_assumptions: [], untested: null, falsifying_check: null, verify_yourself: null },
+        handoff: { summary: ADAPTER_COMPLETION_SUMMARY, open_assumptions: [] },
+        stop: { stopped: false, confirmed_at: null },
+        questions: GUARDED_QUESTIONS.adapter,
+      },
+    },
+    decisions: GUARDED_DECISIONS,
+    challenge: {
+      status: 'accepted', attempt: 2, session_id: CHALLENGE_SESSION,
+      pinned: { tasks_sha256: sha256('tasks'), decisions_sha256: sha256(GUARDED_DECISIONS), prd_sha256: sha256('prd') },
+      concerns: [
+        { severity: 'P2', kind: 'complexity', message: CHALLENGE_P2, consequence: CHALLENGE_P2_CONSEQUENCE },
+        { severity: 'P1', kind: 'assumption', message: CHALLENGE_P1, consequence: CHALLENGE_P1_CONSEQUENCE },
+      ],
+      simpler_alternative: CHALLENGE_ALTERNATIVE, cheap_experiment: CHALLENGE_EXPERIMENT,
+      accepted_reason: CHALLENGE_ACCEPTED_REASON, decided_at: CHALLENGE_DECIDED_AT, attempts: 2,
+    },
   }
 }
 
@@ -1128,17 +1315,25 @@ function projectInputs(runId: string, section: RawInputsSection): RunInputs {
           native_started_at: worker.launch.native_started_at === null ? null : new Date(worker.launch.native_started_at).toISOString(),
           observed_state: worker.launch.observed_state, status: worker.launch.status, launcher_invocations: worker.launch.launcher_invocations,
         },
-        completion: worker.completion, handoff: worker.handoff,
+        // A 1.0.0 completion serves the evidence fields as null (contract 1.4.0).
+        completion: worker.completion === null ? null : {
+          status: worker.completion.status, summary: worker.completion.summary, open_assumptions: worker.completion.open_assumptions,
+          untested: worker.completion.untested ?? null, falsifying_check: worker.completion.falsifying_check ?? null, verify_yourself: worker.completion.verify_yourself ?? null,
+        },
+        handoff: worker.handoff,
         stop: worker.stop === null ? null : { stopped: worker.stop.stopped, confirmed_at: worker.stop.confirmed_at === null ? null : zulu(worker.stop.confirmed_at) },
+        questions: worker.questions ?? [],
       }
     }),
+    decisions: section.decisions ?? null,
+    challenge: section.challenge ?? null,
   })
 }
 
 const taskTexts = (section: RawInputsSection | null): Record<string, string> =>
   Object.fromEntries(Object.entries(section?.workers ?? {}).map(([lane, worker]) => [lane, worker.task]))
 
-const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE, RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER, RUN_FILES]
+const ALL_RUNS = [RUN_SUCCEEDED, RUN_FAILED, RUN_AWAITING, RUN_BLOCKED, RUN_LEGACY, RUN_THREE_LANES, RUN_ONE_LANE, RUN_TWO_REVIEWERS, RUN_REVIEWER_BLOCKED, RUN_LEGACY_REVIEWER, RUN_FILES, RUN_GUARDED]
 
 /** Projected review results per run (runs without one are absent: the mock answers 404 REVIEW_NOT_FOUND). */
 export const reviewResults: Record<string, ReviewResult> = Object.fromEntries(ALL_RUNS.flatMap(runId => {

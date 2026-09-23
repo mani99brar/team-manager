@@ -1,6 +1,6 @@
 import { useMemo, type KeyboardEvent } from 'react'
 import { DAG_NODE_HEIGHT, DAG_NODE_WIDTH, layoutDag } from './dag.ts'
-import { EXECUTOR_LABEL, executorCategory, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from './status.ts'
+import { executorCategory, executorOf, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from './status.ts'
 import { wrapLabel } from '../graph/labels.ts'
 
 export type GraphNodeView = {
@@ -104,7 +104,7 @@ export function WorkflowGraph({ title, nodes, selectedId, onSelect }: Props) {
               KIND_LABEL[node.kind].toLowerCase(),
               status ? STATUS_LABEL[status].toLowerCase() : null,
               node.attempt !== undefined ? `attempt ${node.attempt}` : null,
-              `executed by ${EXECUTOR_LABEL[node.kind]}`,
+              `executed by ${executorOf(node.kind, undefined, node.node_id)}`,
             ].filter(Boolean).join(', ')
             const meta = status
               ? `${STATUS_LABEL[status]}${node.attempt !== undefined ? ` · attempt ${node.attempt}` : ''} · ${EXECUTOR_SHORT[executor]}`

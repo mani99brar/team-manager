@@ -15,7 +15,7 @@ type TaskProps = {
   /** Called once the highlight has been applied, so the run view forgets it (leaving the node drops it anyway). */
   onHighlightApplied: () => void
   /** The verify node that shows the executed checks with their logs; null when the pinned graph has none. */
-  checksNode: { href: string; label: string } | null
+  checksNode: CheckTarget | null
   onNavigate: (pathname: string) => void
 }
 
@@ -57,7 +57,7 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied, check
         <p className="projects-muted" data-testid="task-highlight-missing">The quoted requirement was not found in this task text, so nothing is highlighted.</p>
       )}
       {view === 'rendered' ? (
-        <div className="task-rendered"><Markdown content={text} /></div>
+        <div className="task-rendered"><Markdown content={text} inert /></div>
       ) : (
         <pre className="task-source" data-testid="task-source" tabIndex={0}>
           {index === -1 ? text : (
@@ -152,8 +152,150 @@ function Assumptions({ items }: { items: string[] }) {
   return <ul className="evidence-list">{items.map((item, index) => <li key={index}>{item}</li>)}</ul>
 }
 
-/** The worker's own completion signal, and the accepted handoff only when it differs from it. */
-export function WorkerSignals({ completion, handoff }: { completion: RunInputWorker['completion']; handoff: RunInputWorker['handoff'] }) {
+type Completion = NonNullable<RunInputWorker['completion']>
+/** Where a check id named by the worker is shown: the verify node, and the executed check it matched by command when known. */
+export type CheckTarget = { href: string; label: string }
+
+const COMPLETION_BADGE: Record<Completion['status'], string> = { completed: 'status-succeeded', blocked: 'status-failed', question: 'status-awaiting_approval' }
+
+/**
+ * The falsifying check the worker named: a declared check id links to the verify node that shows that check executed; a
+ * command equal to a declared check's command is treated the same; anything else is shown as the worker wrote it.
+ */
+function FalsifyingCheck({ value, worker, result, checksNode, onNavigate }: {
+  value: string
+  worker: RunInputWorker
+  result: Resource<WorkerResult>
+  checksNode: CheckTarget | null
+  onNavigate: (pathname: string) => void
+}) {
+  const check = worker.checks.find(candidate => candidate.id === value) ?? worker.checks.find(candidate => candidate.command === value) ?? null
+  if (check === null) {
+    return <span data-testid="falsifying-check-text"><code>{value}</code> <span className="projects-muted">(not a check id declared for this lane)</span></span>
+  }
+  const executed = result.status === 'ready' ? result.data.checks.findIndex(candidate => candidate.command === check.command) : -1
+  const where = executed === -1 ? '' : `, executed as check ${executed + 1}`
+  const label = <><code>{check.id}</code> · <code>{check.command}</code></>
+  if (checksNode === null) return <span data-testid="falsifying-check-text" data-check-id={check.id}>{label}</span>
+  return (
+    <AppLink
+      href={checksNode.href}
+      onNavigate={onNavigate}
+      data-testid="falsifying-check-link"
+      data-check-id={check.id}
+      data-check-index={executed === -1 ? undefined : executed}
+      title={`The executed check and its log are shown on ${checksNode.label}`}
+    >
+      {label} (on {checksNode.label}{where})
+    </AppLink>
+  )
+}
+
+/**
+ * The evidence a 1.1.0 completion carries (PRD_PORTABLE_WORKFLOW 4.6): what no executed check covers, the check that would
+ * fail if the implementation were wrong, and one assumption to verify independently. A 1.0.0 completion serves all three
+ * as null, which is stated rather than shown as empty.
+ */
+function CompletionEvidence({ completion, worker, result, checksNode, onNavigate }: {
+  completion: Completion
+  worker: RunInputWorker
+  result: Resource<WorkerResult>
+  checksNode: CheckTarget | null
+  onNavigate: (pathname: string) => void
+}) {
+  const { untested, falsifying_check: falsifying, verify_yourself: verify } = completion
+  if (completion.status === 'question') {
+    return (
+      <p className="projects-muted" data-testid="completion-evidence-question">
+        No completion evidence yet: the worker ended its turn with a question, listed below with its answer when there is one.
+      </p>
+    )
+  }
+  if (untested === null && falsifying === null && verify === null) {
+    return (
+      <p className="projects-muted" data-testid="completion-evidence-none">
+        Completion evidence was not recorded for this run: its completion predates the untested, falsifying-check and verify-yourself fields.
+      </p>
+    )
+  }
+  return (
+    <dl className="projects-facts completion-evidence" data-testid="completion-evidence">
+      <div data-testid="evidence-untested">
+        <dt>Untested</dt>
+        <dd>
+          {untested === null ? <span className="projects-muted">Not recorded</span>
+            : untested.length === 0 ? <span className="projects-muted">Nothing: the worker names no behaviour outside its executed checks.</span>
+              : <ul className="evidence-list">{untested.map((item, index) => <li key={index}>{item}</li>)}</ul>}
+        </dd>
+      </div>
+      <div data-testid="evidence-falsifying-check">
+        <dt>Falsifying check</dt>
+        <dd>
+          {falsifying === null || falsifying === ''
+            ? <span className="projects-muted">Not recorded</span>
+            : <FalsifyingCheck value={falsifying} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />}
+        </dd>
+      </div>
+      <div data-testid="evidence-verify-yourself">
+        <dt>Verify yourself</dt>
+        <dd>{verify === null || verify === '' ? <span className="projects-muted">Not recorded</span> : verify}</dd>
+      </div>
+    </dl>
+  )
+}
+
+/** The questions the worker asked mid-run, with the operator's answers and times; an unanswered one is waiting on the operator. */
+export function WorkerQuestions({ questions }: { questions: RunInputWorker['questions'] }) {
+  const waiting = questions.filter(question => question.answer === null).length
+  return (
+    <section className="evidence-section" aria-labelledby="worker-questions-title" data-testid="worker-questions">
+      <h4 id="worker-questions-title">Questions to the operator</h4>
+      {questions.length === 0 ? (
+        <p className="projects-muted" data-testid="worker-questions-none">No questions were recorded for this worker.</p>
+      ) : (
+        <>
+          {waiting > 0 && (
+            <p className="projects-notice" role="status" data-testid="worker-questions-waiting">
+              {waiting === 1 ? 'One question is' : `${waiting} questions are`} waiting on the operator. Answers are given through the workflow CLI (<code>workflow answer</code>), not this viewer; the worker's deadline is paused meanwhile.
+            </p>
+          )}
+          <ol className="evidence-list worker-questions" data-testid="worker-question-list">
+            {questions.map(question => {
+              const answered = question.answer !== null
+              return (
+                <li key={question.n} data-testid="worker-question" data-question={question.n} data-answered={answered ? 'true' : 'false'}>
+                  <p>
+                    <strong>Question {question.n}</strong> <span className="projects-muted">asked at {formatTime(question.asked_at)}</span>
+                    {!answered && <> · <span className="status-badge status-awaiting_approval" data-testid="question-waiting"><span>Waiting on the operator</span></span></>}
+                  </p>
+                  <p className="worker-question-text">{question.question}</p>
+                  {answered && (
+                    <p className="worker-question-answer" data-testid="question-answer">
+                      <strong>Answer</strong> <span className="projects-muted">at {question.answered_at === null ? 'an unrecorded time' : formatTime(question.answered_at)}</span>: {question.answer}
+                    </p>
+                  )}
+                </li>
+              )
+            })}
+          </ol>
+        </>
+      )}
+    </section>
+  )
+}
+
+/**
+ * The worker's own completion signal with its evidence, and the accepted handoff only when it differs from it. `worker`,
+ * `result` and `checksNode` let the falsifying check link to the executed check.
+ */
+export function WorkerSignals({ completion, handoff, worker, result, checksNode, onNavigate }: {
+  completion: RunInputWorker['completion']
+  handoff: RunInputWorker['handoff']
+  worker: RunInputWorker
+  result: Resource<WorkerResult>
+  checksNode: CheckTarget | null
+  onNavigate: (pathname: string) => void
+}) {
   const handoffDiffers = handoff !== null && (
     completion === null || handoff.summary !== completion.summary || JSON.stringify(handoff.open_assumptions) !== JSON.stringify(completion.open_assumptions)
   )
@@ -166,11 +308,12 @@ export function WorkerSignals({ completion, handoff }: { completion: RunInputWor
         ) : (
           <>
             <p>
-              <span className={`status-badge ${completion.status === 'completed' ? 'status-succeeded' : 'status-failed'}`} data-status={completion.status}><span>{completion.status}</span></span>
+              <span className={`status-badge ${COMPLETION_BADGE[completion.status]}`} data-status={completion.status}><span>{completion.status}</span></span>
               {' '}<span className="projects-muted">as signalled by the session itself, not a verified result.</span>
             </p>
             <p className="worker-summary">{completion.summary}</p>
             <Assumptions items={completion.open_assumptions} />
+            <CompletionEvidence completion={completion} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />
           </>
         )}
       </section>

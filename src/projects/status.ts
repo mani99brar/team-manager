@@ -76,8 +76,19 @@ export function executorCategory(kind: NodeKind): Executor {
   return kind === 'verification' ? 'verifier' : 'controller'
 }
 
-/** The executor wording for a node; a review names print jobs when the served review result's transport is `print`. */
-export function executorOf(kind: NodeKind, transport?: ReviewResult['reviewer']['transport']): string {
+/** The design challenge node of a guarded run (PRD_PORTABLE_WORKFLOW 4.5): kind `review`, but not the independent review. */
+export const CHALLENGE_NODE_ID = 'challenge'
+
+export function isChallengeNode(node: { node_id: string; kind: NodeKind }): boolean {
+  return node.node_id === CHALLENGE_NODE_ID && node.kind === 'review'
+}
+
+/**
+ * The executor wording for a node; a review names print jobs when the served review result's transport is `print`, and
+ * the design challenge is always one print job.
+ */
+export function executorOf(kind: NodeKind, transport?: ReviewResult['reviewer']['transport'], nodeId?: string): string {
+  if (nodeId !== undefined && isChallengeNode({ node_id: nodeId, kind })) return 'one print job'
   if (kind === 'review' && transport === 'print') return 'one print job per reviewer'
   return EXECUTOR_LABEL[kind]
 }

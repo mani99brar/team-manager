@@ -2,7 +2,14 @@ import { memo } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-type Props = { content: string }
+type Props = {
+  content: string
+  /**
+   * Opt-in for Markdown that comes from run data (captured files, tasks, decisions): no image is fetched and no link is
+   * live, so rendering it never contacts another host. The default (false) keeps the document viewer's policy below.
+   */
+  inert?: boolean
+}
 
 const EXTERNAL_LINK = /^https?:\/\//i
 const REMOTE_IMAGE = /^https:\/\//i
@@ -22,6 +29,16 @@ function domProps<T extends { node?: unknown }>(props: T): Omit<T, 'node'> {
   return rest
 }
 
+function unavailableImage(label: string, reason: string) {
+  return (
+    <span role="img" className="image-unavailable" aria-label={`${label} (image unavailable: ${reason})`}>
+      {label} (image unavailable)
+    </span>
+  )
+}
+
+const table: Components['table'] = all => <div className="table-wrap"><table {...domProps(all)} /></div>
+
 const components: Components = {
   a(all) {
     const { href, children, ...props } = domProps(all)
@@ -34,22 +51,43 @@ const components: Components = {
     const { src, alt, ...props } = domProps(all)
     const label = alt || 'Image'
     if (src && REMOTE_IMAGE.test(src)) return <img {...props} src={src} alt={alt ?? ''} loading="lazy" />
+    return unavailableImage(label, 'only HTTPS images are shown')
+  },
+  table,
+}
+
+/**
+ * The inert policy: every link is text followed by its target as text, and every image is a labelled placeholder
+ * naming its source, so nothing is fetched and nothing navigates.
+ */
+const inertComponents: Components = {
+  a(all) {
+    const { href, children, title } = domProps(all)
     return (
-      <span role="img" className="image-unavailable" aria-label={`${label} (image unavailable: only HTTPS images are shown)`}>
-        {label} (image unavailable)
+      <span className="link-inert" data-inert-link={href ?? ''} title={title ?? 'Links in run data are not followed in the viewer'}>
+        {children}
+        {href ? <span className="link-inert-target"> ({href})</span> : null}
       </span>
     )
   },
-  table(all) {
-    return <div className="table-wrap"><table {...domProps(all)} /></div>
+  img(all) {
+    const { src, alt } = domProps(all)
+    const label = alt || 'Image'
+    return (
+      <span data-inert-image={src ?? ''}>
+        {unavailableImage(label, 'images in run data are not loaded')}
+        {src ? <span className="link-inert-target"> ({src})</span> : null}
+      </span>
+    )
   },
+  table,
 }
 
 /** GitHub-flavored rendering with react-markdown defaults: raw HTML stays literal text, unsafe URLs are dropped. */
-export const Markdown = memo(function Markdown({ content }: Props) {
+export const Markdown = memo(function Markdown({ content, inert = false }: Props) {
   return (
-    <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown>
+    <div className="markdown" data-inert={inert ? 'true' : undefined}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={inert ? inertComponents : components}>{content}</ReactMarkdown>
     </div>
   )
 })

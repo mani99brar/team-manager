@@ -153,7 +153,7 @@ function CapturedFilePanel({ scope, file, findings, focused }: { scope: RunScope
         state.data.length === 0
           ? <p className="projects-muted">This file is empty.</p>
           : view === 'rendered'
-            ? <div className="task-rendered" data-testid="file-rendered"><Markdown content={state.data} /></div>
+            ? <div className="task-rendered" data-testid="file-rendered"><Markdown content={state.data} inert /></div>
             : <FileSource text={state.data} marked={marked} preRef={preRef} />
       )}
     </section>

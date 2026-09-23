@@ -16,7 +16,9 @@ type Props = {
 
 export const INPUTS_NONE_SENTENCE = 'Inputs not recorded for this run (the export predates run inputs; re-export it with the workflow CLI).'
 
-/** The Assignment tab: what the run was asked to do, pinned from its own files, with each worker's task rendered as Markdown. */
+export const DECISIONS_NONE_SENTENCE = 'No decisions.md was recorded for this run (its feature predates the guardrails, or the export predates decisions).'
+
+/** The Assignment tab: what the run was asked to do, pinned from its own files, with the feature's decisions and each worker's task rendered as inert Markdown. */
 export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, tabId }: Props) {
   let content: React.ReactNode
   if (inputs.status === 'loading' || inputs.status === 'idle') content = <LoadingPanel>Loading the run inputs…</LoadingPanel>
@@ -52,6 +54,18 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
           </div>
         </dl>
 
+        <section className="assignment-decisions" data-testid="assignment-decisions" aria-labelledby="assignment-decisions-title">
+          <h4 id="assignment-decisions-title">Decisions</h4>
+          {data.decisions === null ? (
+            <p className="projects-muted" data-testid="assignment-decisions-none">{DECISIONS_NONE_SENTENCE}</p>
+          ) : (
+            <>
+              <p className="projects-muted">The feature's <code>decisions.md</code> as pinned at prepare; every worker and reviewer prompt included it. Links and images in it are shown as text.</p>
+              <div className="task-rendered" data-testid="assignment-decisions-rendered"><Markdown content={data.decisions} inert /></div>
+            </>
+          )}
+        </section>
+
         <h4 id="assignment-setup-title">Setup commands</h4>
         {data.setup.length === 0 ? (
           <p className="projects-muted" data-testid="assignment-setup">No setup commands were pinned.</p>
@@ -69,7 +83,7 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
               Worker {worker.node_id} ({worker.role}) · launched by{' '}
               <AppLink href={runPathname(scope.projectId, scope.workflowId, scope.runId, worker.launch_node_id)} onNavigate={onNavigate}>{worker.launch_node_id}</AppLink>
             </h4>
-            <div className="task-rendered" data-testid="assignment-task"><Markdown content={worker.task.text} /></div>
+            <div className="task-rendered" data-testid="assignment-task"><Markdown content={worker.task.text} inert /></div>
             {worker.task.truncated && <p className="projects-notice" role="note">The task text was truncated by the viewer API; the marker at its end says how many characters were left out.</p>}
             <h5 id={`assignment-owned-${worker.node_id}`}>Owned paths</h5>
             {worker.owned_paths.length === 0 ? <p className="projects-muted">No owned paths were pinned.</p> : (
