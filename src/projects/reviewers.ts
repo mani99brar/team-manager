@@ -11,25 +11,21 @@ export type Reviewer = ReviewResult['reviewers'][number]
 const SEVERITIES: readonly ReviewFinding['severity'][] = ['P0', 'P1', 'P2']
 
 /**
- * How a reviewer's status file ended, as the controller records it. `accepted` and `succeeded` both mean its completion
- * file was accepted; `blocked` covers its own blocked verdict as well as the deadline and a rejected file (then with no
- * verdict); `superseded` is a reviewer stopped because another one blocked. Any other value is shown as recorded.
+ * How a reviewer ended, in the contract's vocabulary (`REVIEWER_STATUSES` in `contracts/projects/v1.ts`): `accepted` (its
+ * completion file was accepted), `blocked` (its verdict, an unresolved P0/P1, a rejected file or the review deadline
+ * blocked the run), `superseded` (stopped after the run was decided while it was still working) or `pending` (no verdict
+ * recorded yet). The contract records no separate status for the deadline or a rejected file: both are `blocked` with a
+ * null verdict, so the wording for them is derived from `verdict` in `blockingReason`, never from an invented status.
  */
-const STATUS_WORDING: Readonly<Record<string, string>> = {
+const STATUS_WORDING: Readonly<Record<Reviewer['status'], string>> = {
   accepted: 'completion file accepted',
-  succeeded: 'completion file accepted',
   blocked: 'blocked',
-  rejected: 'completion file rejected',
-  timed_out: 'reached the review deadline',
   superseded: 'stopped after the combined decision',
-  needs_reconciliation: 'needs reconciliation; no verdict',
-  pending: 'not launched',
-  launching: 'launching when the run stopped',
-  running: 'still running when the run stopped',
+  pending: 'no verdict recorded yet',
 }
 
-export function statusWording(status: string): string {
-  return STATUS_WORDING[status] ?? status.replace(/_/g, ' ')
+export function statusWording(status: Reviewer['status']): string {
+  return STATUS_WORDING[status]
 }
 
 /** Whether the reviewer was stopped because of another reviewer's outcome rather than its own. */
@@ -39,23 +35,25 @@ function superseded(reviewer: Pick<Reviewer, 'status'>): boolean {
 
 /**
  * Why this reviewer's own outcome blocks the run, or null when it does not: a blocked verdict; an approval that left an
- * unresolved P0/P1; or a blocking status without any verdict (the deadline expired or its file was rejected).
+ * unresolved P0/P1; or a blocked status without any verdict, which the contract records for both the expired review
+ * deadline and a rejected completion file (it does not say which).
  */
 export function blockingReason(reviewer: Pick<Reviewer, 'status' | 'verdict' | 'findings'>): string | null {
   if (reviewer.verdict === 'blocked') return 'blocked the candidate'
   if (reviewer.verdict === 'approved') return reviewer.findings.some(isBlockingFinding) ? 'approved with an unresolved P0/P1 finding' : null
-  if (superseded(reviewer)) return null
-  if (reviewer.status === 'timed_out') return 'reached the review deadline without a verdict'
-  if (reviewer.status === 'rejected') return 'completion file rejected'
   if (reviewer.status === 'blocked') return 'delivered no verdict: the review deadline expired or its completion file was rejected'
   return null
 }
 
-/** One line for the reviewer strip: how the reviewer ended, with the blocking reason when it has one. */
-export function outcomeWording(reviewer: Pick<Reviewer, 'status' | 'verdict' | 'findings'>): string {
+/**
+ * One line for the reviewer strip: how the reviewer ended, with the blocking reason when it has one. A reviewer without a
+ * verdict says so: superseded before deciding, pending and not yet launched, or pending after its launch.
+ */
+export function outcomeWording(reviewer: Pick<Reviewer, 'status' | 'verdict' | 'findings' | 'launched_at'>): string {
   const reason = blockingReason(reviewer)
   if (reason !== null) return reason
-  if (superseded(reviewer)) return `${statusWording(reviewer.status)}, no verdict`
+  if (superseded(reviewer)) return reviewer.verdict === null ? `${statusWording(reviewer.status)}, no verdict` : statusWording(reviewer.status)
+  if (reviewer.status === 'pending') return reviewer.launched_at === null ? 'not launched, no verdict recorded yet' : statusWording(reviewer.status)
   return statusWording(reviewer.status)
 }
 
@@ -76,7 +74,7 @@ function list(items: readonly string[]): string {
 
 /**
  * Why a blocked review is blocked, naming the reviewers whose own outcome caused it (a blocked verdict, an unresolved
- * P0/P1, the deadline, a rejected file), then the reviewers stopped because of it. Null for an approved review.
+ * P0/P1, the deadline or a rejected file), then the reviewers stopped because of it. Null for an approved review.
  */
 export function blockedByWording(review: Pick<ReviewResult, 'verdict' | 'reviewers'>): string | null {
   if (review.verdict !== 'blocked') return null

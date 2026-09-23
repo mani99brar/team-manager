@@ -39,8 +39,10 @@ export const EMPTY_WORKFLOW_NAME = 'Empty flow'
 /** The workflow whose feature declares two reviewers; its runs are exported at 1.4.0 (plus one legacy 1.3.0 export). */
 export const REVIEWERS_WORKFLOW_ID = 'reviewers-flow'
 export const REVIEWERS_WORKFLOW_NAME = 'Reviewers flow'
-/** The projects contract version every projected review result and run inputs payload carries. */
-export const CONTRACT_VERSION = '1.4.0'
+/** The projects contract version every projected review result carries (parallel reviewers, `contracts/projects/README.md`). */
+export const REVIEW_CONTRACT_VERSION = '1.4.0'
+/** The version every projected run-inputs payload carries: its shape is unchanged since 1.3.0, so the contract pins that. */
+export const INPUTS_CONTRACT_VERSION = '1.3.0'
 export const RUN_SUCCEEDED = 'run-succeeded'
 export const RUN_FAILED = 'run-failed'
 export const RUN_AWAITING = 'run-awaiting'
@@ -609,14 +611,15 @@ export type RawFinding = {
   reviewer?: string
 }
 /**
- * How one reviewer of a 1.4.0 export ended, as its status file records it: `succeeded` once the combined verdict was approved,
- * `accepted` when its file was accepted but the run blocked elsewhere, `blocked` for its own block (a blocked verdict, the
- * deadline or a rejected file, the last two with no verdict), `superseded` when it was stopped after another reviewer's block.
+ * How one reviewer of a 1.4.0 export ended, as `workflow/export_state.py` writes it (the contract's `REVIEWER_STATUSES`, mapped
+ * from the controller's status file: `succeeded` and `accepted` both become `accepted`): `accepted` when its completion file
+ * was accepted, `blocked` for its own block (a blocked verdict, an unresolved P0/P1, the deadline or a rejected file, the last
+ * two with no verdict), `superseded` when it was stopped after another reviewer's block, `pending` when no verdict was recorded.
  */
-export type RawReviewerStatus = 'succeeded' | 'accepted' | 'blocked' | 'superseded' | 'needs_reconciliation'
+export type RawReviewerStatus = 'accepted' | 'blocked' | 'superseded' | 'pending'
 /**
  * One reviewer of a 1.4.0 export (PRD_PARALLEL_REVIEWERS section 4: id, transport, session id, verdict, findings, launch
- * and acceptance times, status). A reviewer that delivered no verdict (superseded, timed out, rejected) has `verdict` null.
+ * and acceptance times, status). A reviewer that delivered no verdict (superseded, the deadline, a rejected file) has `verdict` null.
  */
 export type RawReviewer = {
   reviewer_id: string
@@ -780,7 +783,7 @@ export function rawReviewSection(runId: string, leak = PATH_TOKEN): RawReviewSec
       verdict: 'approved', findings, reviewed_at: offset(T3), diff: null,
       reviewers: TWO_REVIEWERS.map(reviewer => ({
         reviewer_id: reviewer, transport: 'native', session_id: REVIEWER_SESSIONS[reviewer], verdict: 'approved',
-        findings: findings.filter(finding => finding.reviewer === reviewer), launched_at: offset(T2), accepted_at: offset(T3), status: 'succeeded',
+        findings: findings.filter(finding => finding.reviewer === reviewer), launched_at: offset(T2), accepted_at: offset(T3), status: 'accepted',
       })),
     }
   }
@@ -951,10 +954,10 @@ function projectReview(runId: string, section: RawReviewSection, tasks: Record<s
   const link = (finding: RawFinding, reviewer: string) => ({ ...finding, reviewer: finding.reviewer ?? reviewer, requirement_found_in: lanesQuoting(finding.requirement, tasks) })
   const reviewers: RawReviewer[] = section.reviewers ?? [{
     reviewer_id: DEFAULT_REVIEWER_ID, transport: section.transport, session_id: section.reviewer_session_id, verdict: section.verdict,
-    findings: section.findings, launched_at: null, accepted_at: section.reviewed_at, status: section.verdict === 'approved' ? 'succeeded' : 'blocked',
+    findings: section.findings, launched_at: null, accepted_at: section.reviewed_at, status: section.verdict === 'approved' ? 'accepted' : 'blocked',
   }]
   return validateReviewResult({
-    contract_version: CONTRACT_VERSION, run_id: runId, node_id: 'review', attempt: section.attempt,
+    contract_version: REVIEW_CONTRACT_VERSION, run_id: runId, node_id: 'review', attempt: section.attempt,
     reviewer: { session_id: section.reviewer_session_id, transport: section.transport, independent: true },
     bundle_sha256: section.bundle_sha256, candidate_commit: section.candidate_commit, verdict: section.verdict,
     findings: section.findings.map(finding => link(finding, DEFAULT_REVIEWER_ID)),
@@ -976,7 +979,7 @@ function projectReview(runId: string, section: RawReviewSection, tasks: Record<s
  */
 function projectInputs(runId: string, section: RawInputsSection): RunInputs {
   return validateRunInputs({
-    contract_version: CONTRACT_VERSION, run_id: runId, feature: section.feature, base_commit: section.base_commit, source_branch: section.source_branch,
+    contract_version: INPUTS_CONTRACT_VERSION, run_id: runId, feature: section.feature, base_commit: section.base_commit, source_branch: section.source_branch,
     mode: section.mode, automatic: section.automatic,
     setup: section.setup.map(step => ({ command: step.command, timeout_seconds: step.timeout_seconds })),
     max_verification_attempts: section.max_verification_attempts,

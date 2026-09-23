@@ -99,7 +99,7 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
   )
 }
 
-/** A reviewer's own verdict; a reviewer stopped, timed out or rejected before deciding has none. */
+/** A reviewer's own verdict; a reviewer superseded before deciding, still pending, or blocked by the deadline or a rejected file has none. */
 function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
   if (verdict === null) return <span className="projects-muted" data-testid="reviewer-verdict" data-status="none">No verdict</span>
   const approved = verdict === 'approved'
