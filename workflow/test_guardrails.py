@@ -337,11 +337,13 @@ class ChallengeJobStops(FailingChallenge):
         self.mode.write_text("pass")
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 1)
-        self.assertIn("Challenge worktree is not the clean base commit; reconcile before rerunning the challenge", output)
+        # resume checks every run worktree before it commits or re-pins anything (fix/challenge-resume).
+        self.assertIn("challenge-worktree is not a clean checkout of the base", output)
+        self.assertIn("reconcile before resume", output)
         self.assertEqual(self.launches(directory), ["challenge"])
-        # The refused rerun is the challenge node's last status, not the re-pin's `running`.
+        # Nothing was re-pinned, so the challenge node's last status is still attempt 1's refusal, never `running`.
         self.assertEqual([event for event in self.events(directory) if event[0] == "challenge"][-1],
-                         ("challenge", "blocked", "Challenge worktree is not the clean base commit; reconcile before rerunning the challenge"))
+                         ("challenge", "blocked", "Challenge worktree changed during the job; refusing its result"))
         git(directory / "challenge-worktree", "clean", "-fdq")
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 0, output)
