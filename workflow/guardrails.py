@@ -473,8 +473,9 @@ def commit_revision(runtime, answered: int) -> None:
     from .pipeline import commit_env
     directory, plan = runtime.directory, runtime.plan
     repo, base, branch = Path(plan["repository"]), plan["base_commit"], plan["source_branch"]
-    if git(repo, "symbolic-ref", "--short", "HEAD") != branch:
-        raise ValueError(f"The source checkout is not on the run's branch {branch}; switch back before resume")
+    head = subprocess.run(["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if head != branch:
+        raise ValueError(f"The source checkout is not on the run's branch {branch}{'' if head else ' (its HEAD is detached)'}; switch back before resume")
     dirty = dirty_paths(repo)
     others = [path for path in dirty if path not in pinned_paths(plan)]
     if others:
@@ -594,7 +595,8 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
 
     Only before any worker launch. Edited feature files are committed on the run's branch first and the run moves to
     that commit, so the source checkout stays clean for integration. A challenge that already passed or was accepted
-    is returned as it is.
+    is returned as it is. The override accepts only an attempt that read what the plan pins now: a rerun that failed
+    after its re-pin leaves the paused record of the previous attempt, which read other files.
     """
     directory, plan = runtime.directory, runtime.plan
     if not has_challenge(plan):
@@ -611,6 +613,11 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
         if current is None or current["status"] != "paused":
             raise ValueError("Only a paused design challenge can be accepted")
         refuse_unused_edits(directory, plan, runtime.policy)
+        changed = [key.removesuffix("_sha256") for key, value in pinned_digests(directory, plan).items() if current["pinned"].get(key) != value]
+        if changed:
+            raise ValueError(f"Design challenge attempt {current['attempt']} read other feature files than the plan now pins ({', '.join(changed)}): "
+                             "a later resume re-pinned them and its challenge decided nothing. The override would launch the workers on "
+                             "files no challenge read; rerun resume without --accept-challenge")
         record = {**current, "status": "accepted", "accepted_reason": accept_reason.strip(), "decided_at": now()}
         save_challenge(directory, record)
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by the operator: {record['accepted_reason']}")
@@ -774,16 +781,26 @@ def resume_main(argv=None):
     directory = args.directory.resolve()
     from langgraph.checkpoint.sqlite import SqliteSaver
     from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
+
+    def export(runtime) -> Path:
+        """As `start` does on a pause: run-state.json shows the latest attempt and the plan's base and pinned files."""
+        with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
+            return report(runtime, build_pipeline(saver, runtime).get_state(graph_config(runtime)))
+
     try:
         with run_lock(directory):
             runtime = Pipeline(directory)
-            record = resume_challenge(runtime, args.accept_challenge)
+            try:
+                record = resume_challenge(runtime, args.accept_challenge)
+            except BaseException:
+                # A rerun that failed after its re-pin has moved the base and the files: the viewer refuses an export
+                # whose base is not plan.json's, and shows the failed attempt's event.
+                print(f"Report: {export(Pipeline(directory))}")
+                raise
             runtime = Pipeline(directory)  # The re-pinned plan on its current base: session receipts bind to its digest.
             if record["status"] == "paused":
                 print(paused_message(directory, args.herdr))
-                with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
-                    state = build_pipeline(saver, runtime).get_state(graph_config(runtime))
-                print(f"Report: {report(runtime, state)}")  # As `start` does: run-state.json shows the new attempt and base.
+                print(f"Report: {export(runtime)}")
                 return
             start_workers(runtime, attach=args.herdr)
         print(f"Design challenge {record['status']} (attempt {record['attempt']}); workers launched: {', '.join(runtime.workers)}")

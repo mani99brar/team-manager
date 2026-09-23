@@ -27,7 +27,7 @@ from .guardrails import answer_main, brief_problems, repin, resume_main
 from .interactive import worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
-from .sessions import read_json, save_json
+from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
 from .test_pipeline import FakeSessions, OfflinePipeline
 from .test_portable import Isolated, commit_all, git
@@ -49,6 +49,18 @@ def two_lane_policy() -> dict:
 
 def concern(severity: str, message: str = "A concern") -> dict:
     return {"severity": severity, "kind": "assumption", "message": message, "consequence": f"{message} breaks the run"}
+
+
+class RecordingSessions(FakeSessions):
+    """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends."""
+
+    def __init__(self, directory, plan, given: dict):
+        super().__init__(directory, plan)
+        self.given = given
+
+    def run(self, node):
+        self.given[node] = {"plan_digest": plan_digest(self.plan), "prompt": worker_prompt(self.directory, self.plan, node)}
+        return super().run(node)
 
 
 class GuardedFeature(Isolated):
@@ -96,6 +108,7 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
                   "structured_output": json.loads(Path({str(self.output)!r}).read_text())}}))
 ''')
         self.executable.chmod(0o700)
+        self.given = {}  # Per lane, what its launch was given (RecordingSessions).
 
     def challenge_says(self, concerns: list) -> None:
         save_json(self.output, {"concerns": concerns, "simpler_alternative": "One lane instead of two",
@@ -104,15 +117,17 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
     def challenge_calls(self) -> list:
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
-    def prepare(self, run_id: str) -> Path:
+    def prepare(self, run_id: str, automatic: bool = False) -> Path:
         """The exact prepare command a launch runs, executed against the target."""
-        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False)
+        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic)
+        if automatic:  # Automatic preparation needs the feature branch the launch switches to first.
+            subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         return run
 
     def sessions(self, directory: Path) -> FakeSessions:
-        sessions = FakeSessions(directory, read_json(directory / "plan.json"))
+        sessions = RecordingSessions(directory, read_json(directory / "plan.json"), self.given)
         sessions.executable = str(self.executable)
         return sessions
 
@@ -470,13 +485,21 @@ class ChallengePauses(GuardedFeature):
         self.assertEqual(code, 1)
         self.assertIn("paused this run", output)
         self.assertEqual(self.launches(directory), ["challenge"])
-        # A resume whose rerun still finds a P1 stays paused, as attempt 2, and launches nothing.
+        # A resume whose rerun still finds a P0 stays paused, as attempt 2, and launches nothing.
+        self.challenge_says([concern("P0", "The lanes cannot merge")])
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), (0, "paused", 2))
+        self.assertIn("P0 [assumption] The lanes cannot merge", output)
         self.assertEqual(self.launches(directory), ["challenge", "challenge"])
-        # The operator edits a task; resume re-pins it and reruns the challenge as attempt 3, which passes, then launches the workers.
+        # The viewer shows attempt 2's concerns, not the ones attempt 1 raised.
+        exported = read_json(directory / "run-state.json")["inputs"]["challenge"]
+        self.assertEqual((exported["attempts"], [item["message"] for item in exported["concerns"]]), (2, ["The lanes cannot merge"]))
+        # The operator edits a task, decisions.md and the PRD; resume re-pins all three and reruns the challenge as attempt 3,
+        # which passes, then launches the workers.
         task = self.folder / "ui-task.md"
         task.write_text(task.read_text() + "\nOnly ui.txt; the adapter lane owns backend.py.\n")
+        (self.folder / "decisions.md").write_text(DECISIONS + "\n- ui.txt is the only file the ui lane writes: DECISION-MARKER-43.\n")
+        (self.repo / "docs/PRD.md").write_text("# PRD\n\nThe guarded feature, on one screen: PRD-MARKER-7.\n")
         self.challenge_says([concern("P2", "Minor")])
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 0, output)
@@ -487,11 +510,18 @@ class ChallengePauses(GuardedFeature):
         plan = read_json(directory / "plan.json")
         self.assertIn("the adapter lane owns backend.py", plan["nodes"]["ui"]["task"])
         self.assertIn("Approved ownership and checks:", plan["nodes"]["ui"]["task"])
-        self.assertNotEqual(record["pinned"]["tasks_sha256"], paused["pinned"]["tasks_sha256"])
-        self.assertEqual(record["pinned"]["decisions_sha256"], paused["pinned"]["decisions_sha256"])
+        self.assertIn("DECISION-MARKER-43", plan["decisions"]["text"])
+        self.assertIn("PRD-MARKER-7", (directory / "challenge-inputs/prd.md").read_text())
+        for key in ("tasks_sha256", "decisions_sha256", "prd_sha256"):
+            self.assertNotEqual(record["pinned"][key], paused["pinned"][key], key)
         self.assertIn("the adapter lane owns backend.py", self.challenge_calls()[-1]["prompt"])
+        self.assertIn("DECISION-MARKER-43", self.challenge_calls()[-1]["prompt"])
         self.assertEqual(self.launches(directory), ["challenge"] * 3 + ["adapter", "ui"])
-        # The launch ran on the re-pinned plan (a fresh runtime after the re-pin), which the export records.
+        # The workers launched from the re-pinned plan (the sessions of a runtime built after the re-pin): their receipts
+        # bind its digest and their prompts carry the edited task and decisions.
+        self.assertEqual({lane: self.given[lane]["plan_digest"] for lane in LANES}, dict.fromkeys(LANES, plan_digest(plan)))
+        self.assertIn("the adapter lane owns backend.py", self.given["ui"]["prompt"])
+        self.assertTrue(all("DECISION-MARKER-43" in self.given[lane]["prompt"] for lane in LANES))
         self.assertIn("the adapter lane owns backend.py", read_json(directory / "run-state.json")["inputs"]["workers"]["ui"]["task"])
         # Once workers run, resume refuses.
         output, code = self.cli(resume_main, [str(directory)])
@@ -533,6 +563,27 @@ class ChallengePauses(GuardedFeature):
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--run-root", str(self.runs)])
         self.assertEqual([command[3] if command[0] != "git" else "git" for command in calls], ["preflight", "git", "prepare", "start"])
         self.assertIn("Launch paused at the design challenge; no worker was launched", output.getvalue())
+
+
+class ChallengeResumeSupervises(GuardedFeature):
+    def test_resume_hands_an_automatic_run_to_the_supervisor_only_after_the_workers_launched(self):
+        """Scenario challenge-pauses: after a paused automatic launch, `resume` is what starts the supervisor."""
+        directory = self.prepare("auto-001", automatic=True)
+        self.assertIsInstance(read_json(directory / "plan.json")["automatic"], dict)
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
+        supervised = []
+        with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):
+            # Paused again: nothing launched, nothing supervised.
+            output, code = self.cli(resume_main, [str(directory)])
+            self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
+            self.assertEqual(supervised, [])
+            output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 0, output)
+        # Supervised once, with the run directory, after both workers launched.
+        self.assertEqual(supervised, [(directory, ["challenge", "challenge", "adapter", "ui"])])
+        self.assertIn("Automatic run reached a verified feature branch", output)
 
 
 class ChallengeRevision(GuardedFeature):
@@ -608,6 +659,14 @@ class ChallengeRevision(GuardedFeature):
     def test_resume_refuses_changes_it_does_not_re_pin_a_broken_brief_and_commits_it_did_not_make(self):
         directory, base = self.paused("unrelated-001")
         task = self.edit_task()
+        # A detached HEAD is refused like another branch, before anything is committed.
+        branch = git(self.repo, "symbolic-ref", "--short", "HEAD")
+        git(self.repo, "checkout", "-q", "--detach")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"The source checkout is not on the run's branch {branch} (its HEAD is detached)", output)
+        git(self.repo, "checkout", "-q", branch)
+        self.assertEqual((git(self.repo, "rev-parse", "HEAD"), git(self.repo, "diff", "--name-only")), (base, f"features/{FEATURE}/ui-task.md"))
         (self.repo / "backend.py").write_text("VALUE = 3\n")
         (self.repo / "notes.txt").write_text("scratch\n")
         output, code = self.cli(resume_main, [str(directory)])
@@ -671,6 +730,39 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
         self.assert_moved(directory, base)
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+    def test_an_override_after_a_failed_rerun_waits_for_a_challenge_that_read_the_re_pinned_files(self):
+        directory, _ = self.paused("failed-rerun-001")
+        self.edit_task()
+        save_json(self.output, {"concerns": "none"})  # The rerun's output violates the schema: the job fails and decides nothing.
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Design challenge attempt 2 output violates challenge.schema.json", output)
+        revision = git(self.repo, "rev-parse", "HEAD")
+        self.assert_moved(directory, revision)
+        self.assertIn("the adapter lane owns backend.py", read_json(directory / "plan.json")["nodes"]["ui"]["task"])
+        self.assertEqual((read_json(directory / "challenge.json")["attempt"], read_json(directory / "challenge.running.json")["attempt"]), (1, 2))
+        # The export follows plan.json (the viewer refuses a run whose export names another base) and shows the failed attempt.
+        exported = read_json(directory / "run-state.json")
+        self.assertEqual(exported["base_commit"], revision)
+        self.assertIn("the adapter lane owns backend.py", exported["inputs"]["workers"]["ui"]["task"])
+        self.assertEqual((exported["events"][-1]["node"], exported["events"][-1]["status"]), ("challenge", "blocked"))
+        # Attempt 1 read the task before the edit and the workers would get the edited one: the override is refused.
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Design challenge attempt 1 read other feature files than the plan now pins (tasks)", output)
+        self.assertIn("rerun resume without --accept-challenge", output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], self.launches(directory)), ("paused", ["challenge", "challenge"]))
+        # A rerun that reads them and pauses again can be accepted: attempt 3 read what the workers get.
+        self.challenge_says([concern("P1", "The lanes still overlap")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["attempt"], git(self.repo, "rev-parse", "HEAD")), (0, 3, revision), output)
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 0, output)
+        accepted = read_json(directory / "challenge.json")
+        self.assertEqual((accepted["status"], accepted["attempt"], accepted["accepted_reason"]), ("accepted", 3, "Known risk"))
+        self.assertEqual(self.launches(directory), ["challenge"] * 3 + ["adapter", "ui"])
+        self.assertIn("the adapter lane owns backend.py", self.given["ui"]["prompt"])
 
     def test_an_interrupted_resume_continues_from_its_commit_and_no_worker_launches_on_a_half_moved_run(self):
         directory, base = self.paused("interrupted-001")
