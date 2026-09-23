@@ -159,10 +159,11 @@ def lanes(runtime) -> list[str]:
 def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     """Idle alone never means completion. Deadlines survive controller restart.
 
-    A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`) until the
-    operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
+    A lane's deadline runs from its launch to its completion signal: a lane that finished is not held to it while
+    others work. A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`)
+    until the operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
     """
-    from .guardrails import PANE_ANSWER, deadline_extension, load_questions, record_answer, record_question, waiting_question
+    from .guardrails import PANE_ANSWER, deadline_extension, load_questions, record_pane_answer, record_question, waiting_question
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
     if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
@@ -178,37 +179,47 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
         rows = runtime.sessions.inventory()
         handoffs = {}
         for node in workers:
+            row = runtime.sessions.locate(node, rows)
+            if row is None:
+                raise RuntimeError("Native worker missing; reconciliation required")
+            path = runtime.directory / f"{node}.completion.json"
+            # The turn is over, so the file is final. A turn that ends on a question reports idle, done or, waiting on
+            # the operator, blocked; a `completed` or `blocked` file is still accepted only once idle or done, as before.
+            item = read_signal(runtime, node) if row["state"] in {"idle", "done", "blocked"} and path.exists() else None
+            if item and item["status"] != "question" and row["state"] != "blocked":
+                handoffs[node] = read_completion(runtime, node)
+                continue  # Its completion signal met the deadline.
             receipt = read_json(runtime.directory / f"{node}.interactive.json")
             started = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
             extension = deadline_extension(runtime.directory, node)  # None while a question waits: that lane has no running deadline.
             if extension is not None and clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"] + extension:
                 raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
-            row = runtime.sessions.locate(node, rows)
-            if row is None:
-                raise RuntimeError("Native worker missing; reconciliation required")
-            if row["state"] == "working" and waiting_question(runtime.directory, node):
-                # The operator typed the answer in the pane: the worker is working again, so its deadline runs again.
-                record_answer(runtime.directory, node, PANE_ANSWER, clock)
+            if item and item["status"] == "question":
+                record_question(runtime, node, item, clock)
+                continue
+            waiting = waiting_question(runtime.directory, node)
+            if row["state"] == "working" and waiting:
+                # Working again while the question waits: its deadline runs again. `answer` may have landed meanwhile
+                # (then nothing is recorded), and it still records and delivers an answer after this.
+                record_pane_answer(runtime.directory, node, clock)
             for entry in load_questions(runtime.directory, node):
                 if entry["answer"] is not None and (node, entry["n"]) not in answered:
                     answered.add((node, entry["n"]))
-                    runtime.event(node, "interactive", f"Worker {node} question {entry['n']} answered; its deadline runs again")
-            if row["state"] == "blocked" and node not in attention:
+                    runtime.event(node, "interactive", (f"Worker {node} is working again while question {entry['n']} waits (an answer typed "
+                                                        "in its pane, or a command of its own); its deadline runs again, and `answer` "
+                                                        "still records and delivers an answer") if entry["answer"] == PANE_ANSWER
+                                  else f"Worker {node} question {entry['n']} answered; its deadline runs again")
+            if row["state"] == "blocked" and not waiting and node not in attention:
                 # A native session reports `blocked` when its turn ended needing a human: a question,
                 # a permission prompt or a refusal the harness could not continue past. That is not a
                 # failure of the lane, and the other lanes keep working. The operator may answer in the
-                # pane; the worker deadline bounds the wait. No billing/provider fallback.
+                # pane; the worker deadline bounds the wait. No billing/provider fallback. A recorded
+                # question already said what it waits for, and its deadline is paused.
                 attention.add(node)
                 runtime.event(node, "interactive", f"Worker {node} needs attention in its pane (native state blocked); "
                                                    "waiting until its deadline")
             elif row["state"] != "blocked":
                 attention.discard(node)
-            path = runtime.directory / f"{node}.completion.json"
-            if row["state"] in {"idle", "done"} and path.exists():
-                if read_signal(runtime, node)["status"] == "question":
-                    record_question(runtime, node, read_signal(runtime, node), clock)
-                    continue
-                handoffs[node] = read_completion(runtime, node)
         if set(handoffs) == set(workers):
             for node, value in handoffs.items():
                 save_json(runtime.directory / f"{node}.handoff.json", value)

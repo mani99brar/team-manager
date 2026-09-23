@@ -24,7 +24,7 @@ from . import pipeline
 from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wait_handoffs
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
-from .guardrails import answer_main, brief_problems, repin, resume_main
+from .guardrails import PANE_ANSWER, answer_main, brief_problems, repin, resume_main
 from .interactive import worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
@@ -1070,9 +1070,9 @@ class WorkerQuestion(unittest.TestCase):
         self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 0.0, "paused_at": "1970-01-01T00:00:10Z"})
         self.assertEqual([event[:2] for event in self.events], [("ui", "interactive")])
         self.assertIn("question 1 of 3", self.events[0][2])
-        # A restarted controller long after ui's own deadline: the persisted pause keeps ui waiting. (adapter was relaunched meanwhile.)
+        # A restarted controller long after ui's own deadline: the persisted pause keeps ui waiting. adapter keeps its real launch
+        # time: finished (a completion signal while idle), it met its deadline and is not held to it while ui waits.
         self.now = answered_at = self.TIMEOUT * 3
-        save_json(self.root / "adapter.interactive.json", {"launch_requested_at": "1970-01-01T12:00:00+00:00", "background_id": "bg-adapter"})
         self.completion("adapter")
         self.states["adapter"] = "idle"
         extended = self.TIMEOUT + (answered_at - 10.0)
@@ -1106,7 +1106,7 @@ class WorkerQuestion(unittest.TestCase):
         self.ask("Second?")
         steps = iter([lambda: self.states.update(ui="working"), lambda: (self.states.update(ui="idle"), self.completion("ui"))])
         self.wait(on_sleep=lambda: next(steps)())
-        self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][1]["answer"], "(answered by typing in the worker's pane)")
+        self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][1]["answer"], PANE_ANSWER)
         self.assertIsNone(read_json(self.root / "ui.deadline.json")["paused_at"])
         # Without Herdr, answer prints the attach command for the operator to type the answer.
         self.ask("Third?")
@@ -1137,6 +1137,101 @@ class WorkerQuestion(unittest.TestCase):
         prompt = completion_prompt(self.root, self.plan, "ui")
         self.assertIn("a fourth question is treated as blocked", prompt)
         self.assertIn("Stop (from your task, the bound on this work): After three failed fixes, report blocked.", prompt)
+
+    def test_a_finished_lane_is_not_held_to_its_deadline_while_another_lane_waits_on_a_question(self):
+        # Both lanes launched at t=0. adapter finished at t=100; ui asks at T-600 and is answered after adapter's deadline.
+        self.runtime.stop_workers = lambda: self.fail("No worker is stopped")
+        self.states.update(ui="working", adapter="idle")
+        self.now = 100.0
+        self.completion("adapter")
+        steps = iter([lambda: (self.states.update(ui="idle"), self.ask("Option A or B?")),
+                      lambda: None,  # T+1: adapter's own deadline has passed and the question still waits.
+                      lambda: (self.assertEqual(self.answer("ui", "Use option B")[2], 0), self.states.update(ui="working")),
+                      lambda: None,
+                      lambda: (self.states.update(ui="idle"), self.completion("ui"))])
+        times = iter([self.TIMEOUT - 600, self.TIMEOUT + 1, self.TIMEOUT + 60, self.TIMEOUT + 600, self.TIMEOUT + 650])
+
+        def poll():
+            self.now = next(times)
+            next(steps)()
+        # The answer at T+60 moves ui's deadline to T+660: ui finishes inside it and nothing expires.
+        self.wait(on_sleep=poll)
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 660.0, "paused_at": None})
+        for lane in ("ui", "adapter"):
+            self.assertEqual(read_json(self.root / f"{lane}.handoff.json"), {"summary": "Work", "open_assumptions": []})
+        self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
+
+    def test_a_question_is_recorded_in_every_state_a_turn_ends_in(self):
+        # A session whose turn ended on a question reports idle or done, or blocked: real sessions whose last message
+        # waits on the operator report blocked. In each the file is final; the pause and `answer` work the same.
+        for state in ("idle", "done", "blocked"):
+            with self.subTest(state=state):
+                self.setUp()  # A fresh run for each state.
+                self.states.update(ui=state, adapter="idle")
+                self.completion("adapter")
+                self.ask("Option A or B?")
+
+                def answer():
+                    self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][0]["question"], "Option A or B?")
+                    self.assertEqual(read_json(self.root / "ui.deadline.json")["paused_at"], "1970-01-01T00:00:10Z")
+                    self.now = 70.0
+                    calls, output, code = self.answer("ui", "Use option B")
+                    self.assertEqual((len(calls), code), (2, 0), output)
+                    self.states["ui"] = "working"
+                steps = iter([answer, lambda: (self.states.update(ui="done"), self.completion("ui"))])
+                self.wait(on_sleep=lambda: next(steps)())
+                entry = read_json(self.root / "ui.questions.json")["questions"][0]
+                self.assertEqual((entry["answer"], entry["delivered"]), ("Use option B", True))
+                self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 60.0, "paused_at": None})
+                self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
+                # The question event and its answer; a blocked session waiting on its question needs no other attention event.
+                self.assertEqual([message.split(";")[0] for _, _, message in self.events],
+                                 ["Worker ui asked question 1 of 3", "Worker ui question 1 answered"])
+
+    def test_a_session_working_again_without_an_answer_keeps_the_question_answerable_and_a_concurrent_answer_is_no_error(self):
+        # ui asks at t=10; at t=40 its session works again though nobody answered (a background command it started ended).
+        self.states["adapter"] = "idle"
+        self.completion("adapter")
+        self.ask("Option A or B?")
+        answers = []
+
+        def operator_answers():
+            self.states["ui"] = "idle"  # Its turn ends again, still waiting on the question.
+            self.now = 50.0
+            answers.append(self.answer("ui", "Use option B"))
+        steps = iter([lambda: (self.states.update(ui="working"), setattr(self, "now", 40.0)),
+                      operator_answers,
+                      lambda: self.states.update(ui="working"),  # The answer arrives in the pane.
+                      lambda: self.states.update(ui="idle"),     # working -> idle -> working with no question waiting.
+                      lambda: self.states.update(ui="working"),
+                      lambda: (self.states.update(ui="done"), self.completion("ui"))])
+        self.wait(on_sleep=lambda: next(steps)())
+        calls, output, code = answers[0]
+        self.assertEqual((len(calls), code), (2, 0), output)
+        entry = read_json(self.root / "ui.questions.json")["questions"][0]
+        self.assertEqual((entry["answer"], entry["answered_at"], entry["delivered"]), ("Use option B", "1970-01-01T00:00:50Z", True))
+        # The deadline ran again from t=40, when the session worked; `answer` moved nothing.
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 30.0, "paused_at": None})
+        self.assertFalse((self.root / "adapter.questions.json").exists())
+        self.assertEqual(len(self.events), 2)
+        self.assertIn("Worker ui is working again while question 1 waits", self.events[1][2])
+        # `answer` lands between the controller seeing the waiting question and recording the session at work: not an error.
+        from . import guardrails
+        self.ask("Second?")
+        self.states["ui"] = "idle"
+        real, raced = guardrails.waiting_question, []
+
+        def answered_meanwhile(directory, node):
+            entry = real(directory, node)
+            if entry and self.states[node] == "working" and not raced:
+                raced.append(self.answer(node, "Use option C"))
+            return entry
+        steps = iter([lambda: self.states.update(ui="working"), lambda: (self.states.update(ui="done"), self.completion("ui"))])
+        with patch("workflow.guardrails.waiting_question", answered_meanwhile):
+            self.wait(on_sleep=lambda: next(steps)())
+        self.assertEqual(raced[0][2], 0, raced[0][1])
+        self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][1]["answer"], "Use option C")
+        self.assertIn(("ui", "interactive", "Worker ui question 2 answered; its deadline runs again"), self.events)
 
 
 class AnswerDelivery(unittest.TestCase):

@@ -726,22 +726,44 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
     return entry
 
 
+# What the controller records when the session works again while its question waits: the operator typed in the pane,
+# or something else woke the session (a background command it started ending). It never claims an answer.
+PANE_ANSWER = "(no answer recorded: the worker's session worked again in its pane)"
+
+
 def record_answer(directory: Path, node: str, text: str, clock=None, delivered: bool | None = None) -> dict:
     """The latest question's answer; the deadline restarts now. Refused when no question waits.
 
     `answer` records `delivered: false` and sets it once the text reached the worker, so a failed delivery can be
-    retried; an answer typed in the pane (recorded by the controller) carries no flag.
+    retried. It also replaces PANE_ANSWER, which the controller records (without the flag) once the session works
+    again: that deadline already runs, and the text still reaches the worker.
     """
     if not text.strip():
         raise ValueError("The answer is empty")
     with question_lock(directory):
         questions = load_questions(directory, node)
-        if not questions or questions[-1]["answer"] is not None:
+        if not questions or questions[-1]["answer"] not in {None, PANE_ANSWER}:
             raise ValueError(f"Worker {node} has no unanswered question")
         at = (clock or time.time)()
         questions[-1].update(answer=text, answered_at=iso(at))
         if delivered is not None:
             questions[-1]["delivered"] = delivered
+        save_questions(directory, node, questions)
+        resume_deadline(directory, node, at)
+    return questions[-1]
+
+
+def record_pane_answer(directory: Path, node: str, clock=None) -> dict | None:
+    """The session works again while its latest question waits: PANE_ANSWER, and the deadline runs again.
+
+    Checked and written under the lock: when `answer` recorded the answer meanwhile, nothing is recorded (None).
+    """
+    with question_lock(directory):
+        questions = load_questions(directory, node)
+        if not questions or questions[-1]["answer"] is not None:
+            return None
+        at = (clock or time.time)()
+        questions[-1].update(answer=PANE_ANSWER, answered_at=iso(at))
         save_questions(directory, node, questions)
         resume_deadline(directory, node, at)
     return questions[-1]
@@ -767,9 +789,6 @@ def mark_delivered(directory: Path, node: str, number: int) -> None:
         questions = load_questions(directory, node)
         questions[number - 1]["delivered"] = True
         save_questions(directory, node, questions)
-
-
-PANE_ANSWER = "(answered by typing in the worker's pane)"
 
 
 def deliver_answer(directory: Path, node: str, text: str, use_herdr: bool = True) -> str:
