@@ -61,17 +61,68 @@ def text_test_counts(log: str) -> dict | None:
         if not re.search(r"^(?:OK(?:\s|$)|FAILED\s*\()", text, re.MULTILINE):
             return None
         return {"passed": max(0, total - skipped - failures), "failed": failures, "skipped": skipped}
-    # Node's TAP and spec reporters. Require a complete self-consistent summary.
+    # Vitest's summary and Node's TAP and spec reporters. A log can hold several (a script that runs both, or a
+    # reporter that restates vitest's counts), so each field takes the largest count: a failure anywhere stays
+    # a failure and a restated summary is not counted twice. Any summary that does not add up is no evidence.
+    found = [counts for counts in (vitest_counts(text), node_counts(text)) if counts is not None]
+    if not found or any(counts is INVALID for counts in found):
+        return None
+    return {key: max(counts[key] for counts in found) for key in ("passed", "failed", "skipped")}
+
+
+# A summary that is present but not self-consistent: the whole log is then no test evidence.
+INVALID = {"passed": 0, "failed": 0, "skipped": 0, "invalid": True}
+
+
+def node_counts(text: str) -> dict | None:
+    """Node's TAP and spec reporters (`# tests 4`, `ℹ pass 3`): a complete self-consistent summary, else INVALID."""
     counts = {}
     for key in ("tests", "pass", "fail", "skipped", "cancelled", "todo"):
         found = re.findall(rf"^[#ℹ]\s+{key}\s+(\d+)\s*$", text, re.MULTILINE)
         if found:
             counts[key] = int(found[-1])
+    if not counts:
+        return None
     if {"tests", "pass", "fail", "skipped"} <= counts.keys():
         if sum(counts.get(key, 0) for key in ("pass", "fail", "skipped", "cancelled", "todo")) == counts["tests"]:
             return {"passed": counts["pass"], "failed": counts["fail"] + counts.get("cancelled", 0),
                     "skipped": counts["skipped"] + counts.get("todo", 0)}
-    return None
+    return INVALID
+
+
+VITEST_TOTAL = re.compile(r"^\s*(Test Files|Tests)\s+(\d+ [a-z ]+?(?: \| \d+ [a-z ]+?)*)\s+\((\d+)\)\s*$", re.MULTILINE)
+VITEST_ERRORS = re.compile(r"^\s*Errors\s+(\d+) errors?\b", re.MULTILINE)
+# `expected fail` is a `test.fails` test that failed as it should: a pass.
+VITEST_STATES = {"passed": "passed", "expected fail": "passed", "failed": "failed", "skipped": "skipped", "todo": "skipped"}
+
+
+def vitest_counts(text: str) -> dict | None:
+    """Vitest's run summaries (`Tests  1 failed | 69 passed (70)`), summed over every run in the log; INVALID when a
+    summary does not add up or names an unknown state.
+
+    A test file that failed to load and an unhandled error are failures too, though no test in the count failed.
+    """
+    totals = {"passed": 0, "failed": 0, "skipped": 0}
+    seen = False
+    for label, parts, total in VITEST_TOTAL.findall(text):
+        counts = {}
+        for part in parts.split(" | "):
+            number, state = part.split(" ", 1)
+            if state not in VITEST_STATES:
+                return INVALID
+            counts[state] = counts.get(state, 0) + int(number)
+        if sum(counts.values()) != int(total):
+            return INVALID
+        if label == "Tests":
+            seen = True
+            for state, number in counts.items():
+                totals[VITEST_STATES[state]] += number
+        else:
+            totals["failed"] += counts.get("failed", 0)
+    if not seen:
+        return INVALID if totals["failed"] else None
+    totals["failed"] += sum(int(value) for value in VITEST_ERRORS.findall(text))
+    return totals
 
 
 class Capture:

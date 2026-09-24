@@ -11,7 +11,7 @@ from unittest.mock import patch
 from jsonschema.exceptions import ValidationError
 
 from . import checks
-from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, verify_revision
+from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, text_test_counts, verify_revision
 from .sessions import git
 from .verification import validate_schema
 
@@ -170,6 +170,37 @@ class FileCaptureTests(unittest.TestCase):
             forged = json.loads(json.dumps(packet))
             forged["result"]["files_not_captured"] = entries
             self.assertEqual(recheck_packet(forged, policy, self.run_dir)["gate"]["status"], "blocked", entries)
+
+
+class VitestCountsTests(unittest.TestCase):
+    SUMMARY = ("\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m6 passed\x1b[39m\x1b[22m\x1b[90m (6)\x1b[39m\n"
+               "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m70 passed\x1b[39m\x1b[22m\x1b[90m (70)\x1b[39m\n\x1b[2m   Start at \x1b[22m 09:20:57\n")
+
+    def test_a_passing_vitest_run_is_test_evidence(self):
+        self.assertEqual(text_test_counts(" \u2713 |unit| tests/unit/purity.test.ts (10 tests) 20ms\n" + self.SUMMARY), {"passed": 70, "failed": 0, "skipped": 0})
+        self.assertEqual(text_test_counts("      Tests  67 passed | 2 skipped | 1 todo (70)\n"), {"passed": 67, "failed": 0, "skipped": 3})
+
+    def test_failed_tests_files_and_unhandled_errors_are_failures(self):
+        self.assertEqual(text_test_counts(" Test Files  1 failed | 5 passed (6)\n      Tests  2 failed | 68 passed (70)\n"), {"passed": 68, "failed": 3, "skipped": 0})
+        # A file that failed to load counts no failed test, yet the suite did not pass.
+        self.assertEqual(text_test_counts(" Test Files  1 failed | 5 passed (6)\n      Tests  60 passed (60)\n"), {"passed": 60, "failed": 1, "skipped": 0})
+        self.assertEqual(text_test_counts("      Tests  70 passed (70)\n     Errors  2 errors\n"), {"passed": 70, "failed": 2, "skipped": 0})
+
+    def test_expected_failures_pass_and_every_run_in_the_log_counts(self):
+        self.assertEqual(text_test_counts("      Tests  68 passed | 2 expected fail (70)\n"), {"passed": 70, "failed": 0, "skipped": 0})
+        # Two vitest runs in one check: the first run's failure is not overwritten by the second's pass.
+        self.assertEqual(text_test_counts("      Tests  1 failed | 2 passed (3)\n...\n      Tests  3 passed (3)\n"), {"passed": 5, "failed": 1, "skipped": 0})
+        # `node --test; vitest run`: the failing Node summary still fails the check.
+        self.assertEqual(text_test_counts("# tests 4\n# pass 3\n# fail 1\n# skipped 0\n      Tests  3 passed (3)\n"), {"passed": 3, "failed": 1, "skipped": 0})
+        # A reporter restating vitest's counts in TAP form is not counted twice.
+        self.assertEqual(text_test_counts(self.SUMMARY + "\n# tests 70\n# pass 70\n# fail 0\n# skipped 0\n# cancelled 0\n"), {"passed": 70, "failed": 0, "skipped": 0})
+
+    def test_an_inconsistent_or_partial_summary_is_no_evidence(self):
+        self.assertIsNone(text_test_counts("      Tests  70 passed (71)\n"))
+        self.assertIsNone(text_test_counts(" Test Files  6 passed (6)\n"))
+        self.assertIsNone(text_test_counts("      Tests  70 passed | 1 exploded (71)\n"))
+        self.assertIsNone(text_test_counts(" Test Files  1 failed (1)\n"))
+        self.assertIsNone(text_test_counts("      Tests  3 passed (3)\n# tests 4\n# pass 3\n"))
 
 
 if __name__ == "__main__":
