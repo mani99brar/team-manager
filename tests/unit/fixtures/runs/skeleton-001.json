@@ -1,0 +1,1151 @@
+{
+ "detail": {
+  "summary": {
+   "contract_version": "1.0.0",
+   "project_id": "project-b",
+   "workflow_id": "skeleton",
+   "definition_revision": "ccdd5a54711d5ad983010d2aaf895193ce1df0d0870496cacb9b25989cca44ca",
+   "run_id": "skeleton-001",
+   "status": "failed",
+   "created_at": "2026-09-24T08:39:40.880216Z",
+   "updated_at": "2026-09-24T09:36:07.226453Z"
+  },
+  "definition": {
+   "contract_version": "1.0.0",
+   "project_id": "project-b",
+   "workflow_id": "skeleton",
+   "name": "Feature implementation",
+   "definition_revision": "ccdd5a54711d5ad983010d2aaf895193ce1df0d0870496cacb9b25989cca44ca",
+   "nodes": [
+    {
+     "node_id": "challenge",
+     "label": "Design challenge",
+     "kind": "review",
+     "depends_on": []
+    },
+    {
+     "node_id": "launch_game",
+     "label": "Launch game worker",
+     "kind": "worker",
+     "depends_on": [
+      "challenge"
+     ]
+    },
+    {
+     "node_id": "handoff",
+     "label": "Freeze worker handoffs",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_game"
+     ]
+    },
+    {
+     "node_id": "verify_game",
+     "label": "Verify game",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ]
+    },
+    {
+     "node_id": "candidate",
+     "label": "Verify combined candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_game"
+     ]
+    },
+    {
+     "node_id": "review",
+     "label": "Independent review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ]
+    },
+    {
+     "node_id": "approval",
+     "label": "Integration approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ]
+    },
+    {
+     "node_id": "integrate",
+     "label": "Integrate candidate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ]
+    }
+   ]
+  },
+  "snapshot": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "status": "failed",
+   "last_sequence": 26,
+   "nodes": [
+    {
+     "node_id": "challenge",
+     "kind": "review",
+     "depends_on": [],
+     "status": "succeeded",
+     "attempt": 3,
+     "session_id": "0b798f88-a1fe-44b8-9d63-80d60efbd361",
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "launch_game",
+     "kind": "worker",
+     "depends_on": [
+      "challenge"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "756cafa6-d6ba-4e6a-8cd0-390c36b368f6",
+     "result_uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/results/game/3",
+     "lane_results": []
+    },
+    {
+     "node_id": "handoff",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_game"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "verify_game",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ],
+     "status": "succeeded",
+     "attempt": 3,
+     "session_id": "756cafa6-d6ba-4e6a-8cd0-390c36b368f6",
+     "result_uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/results/game/3",
+     "lane_results": []
+    },
+    {
+     "node_id": "candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_game"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": [
+      {
+       "worker": "game",
+       "attempt": 1,
+       "result_uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/results/candidate_game/1"
+      }
+     ]
+    },
+    {
+     "node_id": "review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ],
+     "status": "failed",
+     "attempt": 1,
+     "session_id": "d161afbd-d0df-4fdd-a23b-c01d8461fcf0, 4cf1b055-2285-4ce6-a127-ba83ad013cda",
+     "result_uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/reviews/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ],
+     "status": "pending",
+     "attempt": 0,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "integrate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ],
+     "status": "pending",
+     "attempt": 0,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:1",
+   "sequence": 1,
+   "occurred_at": "2026-09-24T08:39:42.328723Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Design challenge attempt 1: one print job, session f18dee3c-424c-4e3e-9379-a7ad784c9e37",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:2",
+   "sequence": 2,
+   "occurred_at": "2026-09-24T08:45:55.023382Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Feature files re-pinned for design challenge attempt 2 on base 313eb87418e253d4c66f7fb7419c208d5dd01d07",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:3",
+   "sequence": 3,
+   "occurred_at": "2026-09-24T08:45:55.036739Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Design challenge attempt 2: one print job, session c1184fab-ea34-430e-8634-b01ee06518a3",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:4",
+   "sequence": 4,
+   "occurred_at": "2026-09-24T08:46:41.858387Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "KeyboardInterrupt",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:5",
+   "sequence": 5,
+   "occurred_at": "2026-09-24T08:48:20.225191Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Feature files re-pinned for design challenge attempt 3 on base 313eb87418e253d4c66f7fb7419c208d5dd01d07",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:6",
+   "sequence": 6,
+   "occurred_at": "2026-09-24T08:48:20.236350Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Design challenge attempt 3: one print job, session 0b798f88-a1fe-44b8-9d63-80d60efbd361",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:7",
+   "sequence": 7,
+   "occurred_at": "2026-09-24T08:50:49.658602Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Design challenge attempt 3 passed (8 P2 concern(s)); launching workers",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:8",
+   "sequence": 8,
+   "occurred_at": "2026-09-24T08:50:49.674439Z",
+   "node_id": "launch_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching or reconciling the exact native session",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:9",
+   "sequence": 9,
+   "occurred_at": "2026-09-24T08:50:53.258682Z",
+   "node_id": "launch_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Awaiting explicit completion signal; idle is not acceptance",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:10",
+   "sequence": 10,
+   "occurred_at": "2026-09-24T08:50:55.356067Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3242976",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:11",
+   "sequence": 11,
+   "occurred_at": "2026-09-24T09:19:13.880018Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "log",
+   "status": null,
+   "message": "Native workers stopped before snapshot capture: game",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:12",
+   "sequence": 12,
+   "occurred_at": "2026-09-24T09:19:13.951401Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Immutable snapshots captured; worker-reported checks are not trusted",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:13",
+   "sequence": 13,
+   "occurred_at": "2026-09-24T09:19:13.954320Z",
+   "node_id": "verify_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 1; revision 5c1a734e71c3312a8d9174f50951e27fcd26d0b7",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:14",
+   "sequence": 14,
+   "occurred_at": "2026-09-24T09:20:20.664061Z",
+   "node_id": "verify_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "unit: no passing test evidence or failed tests; integration: no passing test evidence or failed tests",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:15",
+   "sequence": 15,
+   "occurred_at": "2026-09-24T09:20:23.135227Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3259841",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:16",
+   "sequence": 16,
+   "occurred_at": "2026-09-24T09:20:23.161778Z",
+   "node_id": "verify_game",
+   "attempt": 2,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 2; revision 5c1a734e71c3312a8d9174f50951e27fcd26d0b7",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:17",
+   "sequence": 17,
+   "occurred_at": "2026-09-24T09:21:30.184237Z",
+   "node_id": "verify_game",
+   "attempt": 2,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "unit: no passing test evidence or failed tests; integration: no passing test evidence or failed tests",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:18",
+   "sequence": 18,
+   "occurred_at": "2026-09-24T09:21:32.101936Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3260737",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:19",
+   "sequence": 19,
+   "occurred_at": "2026-09-24T09:21:32.120750Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "worker/game failed identically on attempts 1 and 2; not transient, inspect <path> Before review a code fix is a lane repair (RUNBOOK)",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:20",
+   "sequence": 20,
+   "occurred_at": "2026-09-24T09:27:09.438802Z",
+   "node_id": "verify_game",
+   "attempt": 2,
+   "type": "status_changed",
+   "status": "paused",
+   "message": "Repair 1 by the operator: snapshot 50b14b3c = 5c1a734e + b27d726a on snapshot 5c1a734e (tests/reporters/testSummary.ts, tests/unit/testSummary.test.ts, vitest.config.ts). Reason: The verifier parses only unittest or Node TAP/spec summaries; Vitest's summary gave no test evidence, so a reporter now prints Vitest's counts in the Node summary form. Answers worker/game attempt 2: unit: no passing test evidence or failed tests; integration: no passing test evidence or failed tests. Continue with python -m workflow automatic <path> --live",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:21",
+   "sequence": 21,
+   "occurred_at": "2026-09-24T09:27:09.439902Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Repair 1 applied: checkpoint forked from 1f1b7f90 (after handoff); attempts worker:game 3",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:22",
+   "sequence": 22,
+   "occurred_at": "2026-09-24T09:28:00.496234Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3263135",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:23",
+   "sequence": 23,
+   "occurred_at": "2026-09-24T09:28:00.528631Z",
+   "node_id": "verify_game",
+   "attempt": 3,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 3; revision 50b14b3c766005cf076331e8e8a59261cf90d16b",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:24",
+   "sequence": 24,
+   "occurred_at": "2026-09-24T09:29:15.773779Z",
+   "node_id": "verify_game",
+   "attempt": 3,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Required tests and artifacts passed; recorded for the candidate gate: browser, build",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:25",
+   "sequence": 25,
+   "occurred_at": "2026-09-24T09:30:21.618568Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Combined revision 0bc381f3ad92dd74630f151863bc58303681f1a1",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "event_id": "skeleton-001:26",
+   "sequence": 26,
+   "occurred_at": "2026-09-24T09:32:32.977940Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3265776",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  }
+ ],
+ "inputs": {
+  "contract_version": "1.4.0",
+  "run_id": "skeleton-001",
+  "feature": "Pirate Sea Race walking skeleton",
+  "base_commit": "313eb87418e253d4c66f7fb7419c208d5dd01d07",
+  "source_branch": "feature/skeleton/skeleton-001",
+  "mode": "automatic",
+  "automatic": {
+   "finish": "verified-feature-branch",
+   "permission_mode": "bypassPermissions",
+   "worker_timeout_seconds": 10800,
+   "review_timeout_seconds": 3600,
+   "reviewer_transport": "print"
+  },
+  "setup": [
+   {
+    "command": "npm ci",
+    "timeout_seconds": 900
+   }
+  ],
+  "max_verification_attempts": 3,
+  "selected_workers": [
+   "game"
+  ],
+  "excluded_workers": [],
+  "workers": [
+   {
+    "node_id": "game",
+    "launch_node_id": "launch_game",
+    "role": "fullstack",
+    "required_check_kinds": [
+     "typecheck",
+     "unit",
+     "integration",
+     "build",
+     "browser"
+    ],
+    "task": {
+     "text": "(trimmed for the triage fixture)",
+     "truncated": true
+    },
+    "prompt": null,
+    "owned_paths": [
+     "package.json",
+     "package-lock.json",
+     "tsconfig.json",
+     "tsconfig.base.json",
+     "vitest.config.ts",
+     ".gitignore",
+     ".npmrc",
+     "README.md",
+     "CLAUDE.md",
+     "docs/architecture.md",
+     "apps",
+     "packages",
+     "tests",
+     "assets",
+     "infra",
+     "scripts"
+    ],
+    "checks": [
+     {
+      "id": "typecheck",
+      "kind": "typecheck",
+      "command": "npm run typecheck",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "unit",
+      "kind": "unit",
+      "command": "npm run test:unit",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "integration",
+      "kind": "integration",
+      "command": "npm run test:integration",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "build",
+      "kind": "build",
+      "command": "npm run build",
+      "timeout_seconds": 600,
+      "scenarios": []
+     },
+     {
+      "id": "browser",
+      "kind": "browser",
+      "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+      "timeout_seconds": 600,
+      "scenarios": [
+       {
+        "id": "join-private-match",
+        "description": "One browser opens the landing page, enters a private match code and joins; the HUD shows the code, the protocol version, one player and a connected status."
+       },
+       {
+        "id": "two-ships-sync",
+        "description": "Two browsers join the same private match; one moves its ship with the keyboard and the other browser's view shows that ship at the new server-authoritative position."
+       }
+      ]
+     }
+    ],
+    "launch": {
+     "session_id": "756cafa6-d6ba-4e6a-8cd0-390c36b368f6",
+     "launch_requested_at": "2026-09-24T08:50:50.045639Z",
+     "native_started_at": "2026-09-24T08:50:52.345Z",
+     "observed_state": "working",
+     "status": "attached_session_available",
+     "launcher_invocations": 1
+    },
+    "completion": {
+     "version": "1.1.0",
+     "status": "completed",
+     "summary": "Built the §17 walking skeleton as npm workspaces: apps/web (Phaser client with landing page, HUD, keyboard adapter, input sender, snapshot interpolation), apps…",
+     "open_assumptions": [
+      "The 60 Hz clock uses Colyseus Room.setFixedTimestep, which replaces the depreca…",
+      "Colyseus 0.18 answers matchmaking over HTTP, so join refusals use HTTP status c…"
+     ],
+     "untested": [
+      "No browser test shows the protocol-mismatch or match-full refusal. The server's…",
+      "Releasing held keys on window blur. The server's 250 ms hold lapse is covered o…"
+     ],
+     "falsifying_check": "browser",
+     "verify_yourself": "Check that the verifier's clean npm ci can fetch uWebSockets.js from github.com…",
+     "question": null
+    },
+    "handoff": {
+     "summary": "Built the §17 walking skeleton as npm workspaces: apps/web (Phaser client with landing page, HUD, keyboard adapter, input sender, snapshot interpolation), apps…",
+     "open_assumptions": []
+    },
+    "stop": {
+     "stopped": true,
+     "confirmed_at": "2026-09-24T09:19:13.530514Z"
+    },
+    "questions": []
+   }
+  ],
+  "decisions": "# Decisions: skeleton\n\n(trimmed for the triage fixture)\n",
+  "challenge": {
+   "status": "passed",
+   "attempt": 3,
+   "attempts": 3,
+   "session_id": "0b798f88-a1fe-44b8-9d63-80d60efbd361",
+   "pinned": {
+    "tasks_sha256": "c4fa2ea77384b7cede8a49f1b9b4576c4278ec1d2b83578197ff7f01a61928ef",
+    "decisions_sha256": "566650f3976c3030cf2a9cfc1b7026a29ef2570fa359eea3a3d357d1bafcf628",
+    "prd_sha256": "99329c4b04e5b65287196d384f9629a81e12e03943fb81f579d91b68fd0396ba"
+   },
+   "concerns": [
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "filterBy(['code']) with a code generated on the server is fragile. Colyseus fills the filterBy fiel…",
+     "consequence": "Joining by code always fails with 'no rooms found' until the worker finds the listing detail. Even…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "Package resolution when nothing is built yet. The verifier runs typecheck, unit and integration bef…",
+     "consequence": "A green local run turns into a verifier failure and uses one of the three verification attempts. Th…"
+    },
+    {
+     "severity": "P2",
+     "kind": "assumption",
+     "message": "The rule allowing the previous major for 'that one package' does not fit Colyseus. The server (`col…",
+     "consequence": "If 0.17 misbehaves on Node 24, the worker might pair a 0.16 server with the 0.17 SDK (handshake or…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "Schema decorators and class fields. With `@type()` decorators and `useDefineForClassFields` on (the…",
+     "consequence": "Ship positions change on the server but never reach clients. The integration and two-ships-sync tes…"
+    },
+    {
+     "severity": "P2",
+     "kind": "assumption",
+     "message": "Purity is not enforced by what the plan names. Leaving out the DOM lib does not remove `setTimeout`…",
+     "consequence": "The purity unit test passes while a pure package calls `Math.random` or `setTimeout`, so the determ…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "Movement tests can be flaky because of spawn slots and map bounds. §2 describes 'outer-world' spawn…",
+     "consequence": "two-ships-sync, or the hash-difference unit test, fails intermittently depending on the match seed.…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "'Both ships are drawn on the canvas' has no specified way to be observed. With WebGL, `toDataURL` a…",
+     "consequence": "The worker either weakens the check to the DOM readout, which a reviewer will flag as not proving r…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "Playwright webServer on the fixed ports 2593 and 5393 with `reuseExistingServer: true`. If the work…",
+     "consequence": "Browser checks pass or fail against old code. The worker's own report.json can then disagree with t…"
+    }
+   ],
+   "simpler_alternative": "Make every workspace package source-only: `exports` points at `src/index.ts`. Typecheck with `tsc -…",
+   "cheap_experiment": "A 20–30 minute spike in a scratch directory on Node 24, using the exact versions the worker plans t…",
+   "accepted_reason": null,
+   "decided_at": "2026-09-24T08:50:49.654137Z"
+  }
+ },
+ "review": {
+  "contract_version": "1.4.0",
+  "run_id": "skeleton-001",
+  "node_id": "review",
+  "attempt": 1,
+  "reviewer": {
+   "session_id": "d161afbd-d0df-4fdd-a23b-c01d8461fcf0, 4cf1b055-2285-4ce6-a127-ba83ad013cda",
+   "transport": "print",
+   "independent": true
+  },
+  "bundle_sha256": "c54a9d1e73ffd1f8b1908c848438380ac65761ec5bd421fc3e9e533b3c407096",
+  "candidate_commit": "0bc381f3ad92dd74630f151863bc58303681f1a1",
+  "verdict": "blocked",
+  "findings": [
+   {
+    "severity": "P1",
+    "message": "Private matches can be joined without their code. authorizeEntry (apps/server/src/MatchRoom.ts:44-50) treats any request whose options lack `code` as a create request and accepts it once createMatchOptionsSchema passes. Colyseus 0.18 expos…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": "One Colyseus room per match. Players join a private match by code. A private match holds 1 to 8 players and is marked c…",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "general"
+   },
+   {
+    "severity": "P2",
+    "message": "The full-match refusal in onAuth reads the listing before Colyseus reserves the seat. If two joins arrive while the match has seven players, the one that loses the race is refused by Colyseus's own 'no rooms found' error (MATCHMAKE_INVALID…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": "One Colyseus room per match. Players join a private match by code. A private match holds 1 to 8 players and is marked c…",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "general"
+   },
+   {
+    "severity": "P2",
+    "message": "InputGate uses an input's frame tag only for the 30-frame future-window check. An accepted input is held and applied from the next step no matter which frame it names (apps/server/src/inputGate.ts:39-51). This is acceptable without predict…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": "Clients send intent only: a frame-tagged input with a sequence number, buttons and bounded movement axes.",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "general"
+   },
+   {
+    "severity": "P2",
+    "message": "If allocateCode fails 16 times, onCreate throws ServerError(400, 'Could not allocate a match code'), which Colyseus returns to the client as a create failure. This is only reachable with extreme numbers of live rooms, so it is a note rathe…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": null,
+    "requirement_found_in": [],
+    "reviewer": "general"
+   }
+  ],
+  "reviewers": [
+   {
+    "reviewer_id": "general",
+    "transport": "print",
+    "session_id": "d161afbd-d0df-4fdd-a23b-c01d8461fcf0",
+    "verdict": "blocked",
+    "findings": [
+     {
+      "severity": "P1",
+      "message": "Private matches can be joined without their code. authorizeEntry (apps/server/src/MatchRoom.ts:44-50) treats any request whose options lack `code` as a create request and accepts it once createMatchOptionsSchema passes. Colyseus 0.18 expos…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": "One Colyseus room per match. Players join a private match by code. A private match holds 1 to 8 players and is marked c…",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "general"
+     },
+     {
+      "severity": "P2",
+      "message": "The full-match refusal in onAuth reads the listing before Colyseus reserves the seat. If two joins arrive while the match has seven players, the one that loses the race is refused by Colyseus's own 'no rooms found' error (MATCHMAKE_INVALID…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": "One Colyseus room per match. Players join a private match by code. A private match holds 1 to 8 players and is marked c…",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "general"
+     },
+     {
+      "severity": "P2",
+      "message": "InputGate uses an input's frame tag only for the 30-frame future-window check. An accepted input is held and applied from the next step no matter which frame it names (apps/server/src/inputGate.ts:39-51). This is acceptable without predict…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": "Clients send intent only: a frame-tagged input with a sequence number, buttons and bounded movement axes.",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "general"
+     },
+     {
+      "severity": "P2",
+      "message": "If allocateCode fails 16 times, onCreate throws ServerError(400, 'Could not allocate a match code'), which Colyseus returns to the client as a create failure. This is only reachable with extreme numbers of live rooms, so it is a note rathe…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": null,
+      "requirement_found_in": [],
+      "reviewer": "general"
+     }
+    ],
+    "launched_at": null,
+    "accepted_at": "2026-09-24T09:32:31.349458Z",
+    "status": "blocked"
+   },
+   {
+    "reviewer_id": "coverage",
+    "transport": "print",
+    "session_id": "4cf1b055-2285-4ce6-a127-ba83ad013cda",
+    "verdict": null,
+    "findings": [],
+    "launched_at": null,
+    "accepted_at": null,
+    "status": "superseded"
+   }
+  ],
+  "reviewed_at": "2026-09-24T09:32:31.411386Z",
+  "diff": {
+   "artifact_id": "patch-review-c5075a2598a2",
+   "kind": "patch",
+   "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/patch-review-c5075a2598a2",
+   "sha256": "c5075a2598a2a8de4875e4279678d4d640c3e628c99865fbe074af1c93440df7"
+  }
+ },
+ "results": {
+  "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/results/candidate_game/1": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "node_id": "candidate_game",
+   "attempt": 1,
+   "session_id": "756cafa6-d6ba-4e6a-8cd0-390c36b368f6",
+   "status": "succeeded",
+   "base_commit": "313eb87418e253d4c66f7fb7419c208d5dd01d07",
+   "output_commit": "0bc381f3ad92dd74630f151863bc58303681f1a1",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run typecheck",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T09:29:41.298602Z",
+     "finished_at": "2026-09-24T09:29:44.295119Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-1-f6a2e7f9b0b2"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T09:29:44.298588Z",
+     "finished_at": "2026-09-24T09:29:46.484180Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-2-be0528e2f1d3"
+    },
+    {
+     "command": "npm run test:integration",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T09:29:46.486187Z",
+     "finished_at": "2026-09-24T09:29:50.932526Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-3-fca8512c13ab"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T09:29:50.934189Z",
+     "finished_at": "2026-09-24T09:29:54.793567Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-4-297422c27859"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T09:29:54.794985Z",
+     "finished_at": "2026-09-24T09:30:21.504899Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-5-080a52762a42"
+    }
+   ],
+   "open_assumptions": [],
+   "artifacts": [
+    {
+     "artifact_id": "log-1-f6a2e7f9b0b2",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-1-f6a2e7f9b0b2",
+     "sha256": "f6a2e7f9b0b226e310ece20624a44963bfbc50ad58519e84b4593c5064c226b0"
+    },
+    {
+     "artifact_id": "log-2-be0528e2f1d3",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-2-be0528e2f1d3",
+     "sha256": "be0528e2f1d3fcd51b6e1b80066fb954c1445cf2140efe4db4490f036f5a1351"
+    },
+    {
+     "artifact_id": "log-3-fca8512c13ab",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-3-fca8512c13ab",
+     "sha256": "fca8512c13abffab91ebeb3e477224df36c975a5bf441d06b384d5faf5f0a730"
+    },
+    {
+     "artifact_id": "log-4-297422c27859",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-4-297422c27859",
+     "sha256": "297422c278590221276e828cd9f640e6b4471e16d94d80c49881c23c15e4541a"
+    },
+    {
+     "artifact_id": "log-5-080a52762a42",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-5-080a52762a42",
+     "sha256": "080a52762a42dcabc34513f2ead50bf46c3fc44b9667f963a7f64b899ede391f"
+    },
+    {
+     "artifact_id": "screenshot-6-7e3e127efcfa",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/screenshot-6-7e3e127efcfa",
+     "sha256": "7e3e127efcfad1ba3697ed2e562c7ec9b12ca1c5253eeb06143aea3fd4701a89"
+    },
+    {
+     "artifact_id": "screenshot-7-8e68d8ac5c18",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/screenshot-7-8e68d8ac5c18",
+     "sha256": "8e68d8ac5c18e9b7473dd6ec7f0815f3ed7487e04ea76d70f1ac70890c916c6c"
+    },
+    {
+     "artifact_id": "test_report-8-ac14890e271b",
+     "kind": "test_report",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/test_report-8-ac14890e271b",
+     "sha256": "ac14890e271bff33021ea9f88d068ee1c1f1f93e2125517c6eb4eaa4c5cf04ba"
+    }
+   ],
+   "summary": "Trusted candidate check capture; not integration approval",
+   "error": null
+  },
+  "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/results/game/3": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-001",
+   "node_id": "game",
+   "attempt": 3,
+   "session_id": "756cafa6-d6ba-4e6a-8cd0-390c36b368f6",
+   "status": "succeeded",
+   "base_commit": "313eb87418e253d4c66f7fb7419c208d5dd01d07",
+   "output_commit": "50b14b3c766005cf076331e8e8a59261cf90d16b",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run typecheck",
+     "cwd": "verification/worker/game/3/worktree",
+     "started_at": "2026-09-24T09:28:42.709921Z",
+     "finished_at": "2026-09-24T09:28:45.252411Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-78-f6a2e7f9b0b2"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/worker/game/3/worktree",
+     "started_at": "2026-09-24T09:28:45.255388Z",
+     "finished_at": "2026-09-24T09:28:47.637583Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-79-7cd59d87a6d7"
+    },
+    {
+     "command": "npm run test:integration",
+     "cwd": "verification/worker/game/3/worktree",
+     "started_at": "2026-09-24T09:28:47.639336Z",
+     "finished_at": "2026-09-24T09:28:52.429848Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-80-d6dbc5d77465"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/worker/game/3/worktree",
+     "started_at": "2026-09-24T09:28:52.431271Z",
+     "finished_at": "2026-09-24T09:28:56.225778Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-81-e3dfe747726f"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+     "cwd": "verification/worker/game/3/worktree",
+     "started_at": "2026-09-24T09:28:56.227412Z",
+     "finished_at": "2026-09-24T09:29:15.662928Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-82-ece7fbc78f76"
+    }
+   ],
+   "open_assumptions": [
+    "The 60 Hz clock uses Colyseus Room.setFixedTimestep, which replaces the depreca…",
+    "Colyseus 0.18 answers matchmaking over HTTP, so join refusals use HTTP status c…"
+   ],
+   "artifacts": [
+    {
+     "artifact_id": "log-78-f6a2e7f9b0b2",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-78-f6a2e7f9b0b2",
+     "sha256": "f6a2e7f9b0b226e310ece20624a44963bfbc50ad58519e84b4593c5064c226b0"
+    },
+    {
+     "artifact_id": "log-79-7cd59d87a6d7",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-79-7cd59d87a6d7",
+     "sha256": "7cd59d87a6d749d897cd381588380360759a61acb5d42e3c6f203baf1028b512"
+    },
+    {
+     "artifact_id": "log-80-d6dbc5d77465",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-80-d6dbc5d77465",
+     "sha256": "d6dbc5d774655a3c561186328caa9c26b4ad96eea4fa71b5ec8293dcb84e8c65"
+    },
+    {
+     "artifact_id": "log-81-e3dfe747726f",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-81-e3dfe747726f",
+     "sha256": "e3dfe747726f28ddfb4964f4ef978eeea5b972f013d5526855582596ac7490c8"
+    },
+    {
+     "artifact_id": "log-82-ece7fbc78f76",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/log-82-ece7fbc78f76",
+     "sha256": "ece7fbc78f769c774e9587ce50f4906b42134cbc5edb21b53714ef9a3d97e4b4"
+    },
+    {
+     "artifact_id": "screenshot-83-a256f6c9bf89",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/screenshot-83-a256f6c9bf89",
+     "sha256": "a256f6c9bf89f968907b63d4d0ecfe0c3ff53974a0a86bfef90081bbaa75a384"
+    },
+    {
+     "artifact_id": "screenshot-84-3830570b6596",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/screenshot-84-3830570b6596",
+     "sha256": "3830570b6596e4fa82485cfdb957cbe596354694786bc735c35b0ea5d8c13578"
+    },
+    {
+     "artifact_id": "test_report-85-5845f1e20942",
+     "kind": "test_report",
+     "uri": "/api/projects/project-b/workflows/skeleton/runs/skeleton-001/artifacts/test_report-85-5845f1e20942",
+     "sha256": "5845f1e20942b89ed82e16e04b8d9b4cbcb11b9261e975b8aa45ce83ec5b7b18"
+    }
+   ],
+   "summary": "Built the §17 walking skeleton as npm workspaces: apps/web (Phaser client with landing page, HUD, keyboard adapter, input sender, snapshot interpolation), apps/server (Colyseus MatchRoom: one room per private match, filterBy code, static o…",
+   "error": null,
+   "deferred_checks": [
+    {
+     "id": "build",
+     "check_index": 3
+    },
+    {
+     "id": "browser",
+     "check_index": 4
+    }
+   ],
+   "files_not_captured": []
+  }
+ }
+}
