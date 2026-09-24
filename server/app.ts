@@ -19,6 +19,8 @@ export type AppOptions = {
    * nothing and every scoped route is a 404. Validated again here so a caller cannot bypass the registry rules.
    */
   projects?: ProjectsConfig
+  /** Re-reads the registry file when it changed (see projectsConfigReloader); omitted means the registry is fixed. */
+  refreshProjects?: () => Promise<ProjectsConfig | null>
   /** Read limits for persisted run files; tests lower them to prove reads are bounded. */
   runStore?: Pick<RunStoreOptions, 'exportByteLimit' | 'packetByteLimit' | 'artifactByteLimit'>
 }
@@ -87,6 +89,10 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
   // The Projects root is a separate, read-only surface with its own error shape; it never touches skill locations.
   const store = new RunStore(assertProjectsConfig(options.projects ?? EMPTY_PROJECTS), {
     ...options.runStore,
+    refresh: options.refreshProjects && (async () => {
+      const config = await options.refreshProjects!()
+      return config === null ? null : assertProjectsConfig(config)
+    }),
     warn: (message, details) => app.log.warn(details, message),
   })
   app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })

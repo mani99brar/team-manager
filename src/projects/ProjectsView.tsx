@@ -28,9 +28,11 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   const runId = route && route.level === 'run' ? route.runId : null
   const nodeId = route && route.level === 'run' ? route.nodeId : null
 
-  const { state: projects, reload: reloadProjects } = useResource('projects', fetchProjects, refreshToken)
+  // The registry itself changes while the viewer runs (a launch registers its workflow); both lists are cheap to re-read.
+  const registryPoll = usePoll(route?.level === 'projects' || route?.level === 'project')
+  const { state: projects, reload: reloadProjects } = useResource('projects', fetchProjects, refreshToken, registryPoll)
   const loadWorkflows = useCallback((signal: AbortSignal) => fetchWorkflows(projectId!, signal), [projectId])
-  const { state: workflows, reload: reloadWorkflows } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken)
+  const { state: workflows, reload: reloadWorkflows } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken, registryPoll)
   const loadRuns = useCallback((signal: AbortSignal) => fetchRuns(projectId!, workflowId!, {}, signal), [projectId, workflowId])
   const runsKey = workflowId === null ? null : `runs:${projectId}/${workflowId}`
   // Run lists and run details re-read themselves while shown (a finished run no longer changes). A list stops polling

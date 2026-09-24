@@ -8,7 +8,7 @@ import { schemas as projectSchemas, validateDefinition, validateReviewResult, va
 import { eventSchema, validateWorkerResult } from '../contracts/workflow/v1.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { PROJECTS_CONFIG_ENV, ProjectsConfigError, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig } from './projectsConfig.ts'
+import { PROJECTS_CONFIG_ENV, ProjectsConfigError, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
  * Every test builds disposable run roots in the documented producer format (plan.json, atomic run-state.json,
@@ -296,6 +296,35 @@ async function harness(run: (h: Harness) => Promise<void>, projects: Parameters<
     } finally { await app.close() }
   } finally { await rm(root, { recursive: true, force: true }) }
 }
+
+test('a workflow registered while the server runs is served without a restart; an invalid registry keeps the last one', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-'))
+  try {
+    for (const workflow of ['main', 'fixes']) await mkdir(join(root, 'runs', 'alpha', workflow), { recursive: true })
+    const path = join(root, 'projects.json')
+    const one = registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }])
+    const two = registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }, { id: 'fixes' }] }])
+    await writeFile(path, JSON.stringify(one))
+    const config = await parseProjectsConfig(JSON.stringify(one), path)
+    const app = createApp([], { projects: config, refreshProjects: projectsConfigReloader(path) })
+    try {
+      const served = async () => projectSchemas.workflowList.parse((await get(app, url('alpha'))).json()).workflows.map(workflow => workflow.workflow_id)
+      assert.deepEqual(await served(), ['main'])
+      // A launch registers a new workflow (the `workflow` CLI rewrites the file).
+      await writeFile(path, JSON.stringify(two))
+      assert.deepEqual(await served(), ['main', 'fixes'])
+      assert.equal((await get(app, url('alpha', 'fixes'))).status, 200)
+      // A half-written or invalid file is not served; the last loaded registry stays in use.
+      await writeFile(path, '{"version": 1, "projects": [')
+      assert.deepEqual(await served(), ['main', 'fixes'])
+      await rm(path)
+      assert.deepEqual(await served(), ['main', 'fixes'])
+      await writeFile(path, JSON.stringify(one))
+      assert.deepEqual(await served(), ['main'])
+      assert.equal((await get(app, url('alpha', 'fixes'))).status, 404)
+    } finally { await app.close() }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
 
 /** Contract paths: a project lists workflows, a workflow lists runs, a run has detail plus sub-resources in `rest`. */
 const url = (project: string, workflow?: string, run?: string, rest = '') =>

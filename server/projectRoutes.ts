@@ -95,6 +95,8 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     log.error({ code: (error as NodeJS.ErrnoException)?.code, message: (error as Error)?.message }, 'Unhandled project API failure')
     return sendError(reply, 500, 'INTERNAL', 'The request failed unexpectedly. Retry, then check the server log.')
   })
+  // Workflows registered by a launch while the viewer runs appear without a restart.
+  scope.addHook('onRequest', async () => { await store.sync() })
   scope.addHook('onSend', async (_request, reply) => {
     if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store')
   })

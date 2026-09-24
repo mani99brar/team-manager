@@ -697,22 +697,52 @@ export type RunStoreOptions = {
   artifactByteLimit?: number
   /** Receives skipped legacy directories and unexpected failures for logging; details may name run directories. */
   warn?: (message: string, details: Record<string, unknown>) => void
+  /**
+   * Re-reads the registry: a new config when its file changed, else null. Launches register workflows while the
+   * viewer runs, so every Projects request syncs first; a failed read keeps the last loaded registry.
+   */
+  refresh?: () => Promise<ProjectsConfig | null>
 }
 
 export class RunStore {
-  readonly config: ProjectsConfig
-  private readonly projectsById = new Map<string, ProjectConfig>()
-  private readonly options: Required<Omit<RunStoreOptions, 'warn'>> & Pick<RunStoreOptions, 'warn'>
+  private current: ProjectsConfig
+  private projectsById = new Map<string, ProjectConfig>()
+  private syncing: Promise<void> | null = null
+  private readonly options: Required<Omit<RunStoreOptions, 'warn' | 'refresh'>> & Pick<RunStoreOptions, 'warn' | 'refresh'>
 
   constructor(config: ProjectsConfig, options: RunStoreOptions = {}) {
-    this.config = config
-    for (const project of config.projects) this.projectsById.set(project.project_id, project)
+    this.current = config
+    this.index(config)
     this.options = {
       exportByteLimit: options.exportByteLimit ?? DEFAULT_EXPORT_BYTE_LIMIT,
       packetByteLimit: options.packetByteLimit ?? DEFAULT_PACKET_BYTE_LIMIT,
       artifactByteLimit: options.artifactByteLimit ?? DEFAULT_ARTIFACT_BYTE_LIMIT,
       warn: options.warn,
+      refresh: options.refresh,
     }
+  }
+
+  get config(): ProjectsConfig {
+    return this.current
+  }
+
+  private index(config: ProjectsConfig) {
+    this.projectsById = new Map(config.projects.map(project => [project.project_id, project]))
+  }
+
+  /** Picks up a changed registry file before a request is served; concurrent requests share one read. */
+  async sync(): Promise<void> {
+    const refresh = this.options.refresh
+    if (!refresh) return
+    this.syncing ??= refresh().then(
+      config => {
+        if (config === null) return
+        this.current = config
+        this.index(config)
+      },
+      error => this.options.warn?.('Project registry reload failed; the last loaded registry stays in use', { message: (error as Error).message }),
+    ).finally(() => { this.syncing = null })
+    await this.syncing
   }
 
   projects(): Project[] {

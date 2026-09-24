@@ -1,6 +1,6 @@
 import { createApp, type LocationStatus } from './app.ts'
 import { ConfigError, loadConfig, type AppConfig } from './config.ts'
-import { ProjectsConfigError, loadProjectsConfig, type LoadedProjectsConfig } from './projectsConfig.ts'
+import { ProjectsConfigError, loadProjectsConfig, projectsConfigReloader, type LoadedProjectsConfig } from './projectsConfig.ts'
 
 // Configuration is read once, before anything listens. A missing or invalid config is a startup failure
 // with a local diagnostic (which may name configured paths); there is no fallback to the fixtures.
@@ -17,6 +17,7 @@ try {
 
 // The project registry is optional and independent of the skills configuration: unset means an empty Projects
 // root, while an explicitly named file that is missing or invalid is a startup failure (no demo data is substituted).
+// Afterwards it is re-read whenever the file changes, since launches register workflows while the viewer runs.
 let projects: LoadedProjectsConfig
 try {
   projects = await loadProjectsConfig(process.env)
@@ -28,7 +29,7 @@ try {
   throw error
 }
 
-const app = createApp(config.locations, { projects })
+const app = createApp(config.locations, { projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath) })
 try {
   await app.listen({ port: Number(process.env.MD_MANAGER_API_PORT ?? 3001), host: '127.0.0.1' })
   app.log.info({ mode: config.mode, configPath: config.configPath ?? null, locations: config.locations.length }, 'Configuration loaded')

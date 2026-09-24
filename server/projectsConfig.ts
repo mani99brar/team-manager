@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { readFile, realpath } from 'node:fs/promises'
+import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { validateDefinition, type WorkflowDefinition } from '../contracts/projects/v1.ts'
@@ -210,6 +210,28 @@ export async function parseProjectsConfig(text: string, describe: string): Promi
 }
 
 export type LoadedProjectsConfig = ProjectsConfig & { configPath: string | null }
+
+/**
+ * Re-reads the registry at `configPath` when its file changed (inode, size or modification time): the new config,
+ * or null when unchanged. The first call always reads, so a change between startup and then is not missed. A file
+ * that cannot be read or is invalid throws once per change, and the caller keeps its last config.
+ */
+export function projectsConfigReloader(configPath: string): () => Promise<ProjectsConfig | null> {
+  let seen: string | null = null
+  return async () => {
+    let stamp: string
+    try {
+      const info = await stat(configPath)
+      stamp = `${info.ino}:${info.size}:${info.mtimeMs}`
+    } catch (error) {
+      stamp = `unreadable:${(error as NodeJS.ErrnoException).code ?? 'unknown'}`
+    }
+    if (stamp === seen) return null
+    seen = stamp
+    if (stamp.startsWith('unreadable:')) throw new ProjectsConfigError(`Project registry ${configPath} could not be read (${stamp.slice('unreadable:'.length)}).`)
+    return parseProjectsConfig(await readFile(configPath, 'utf8'), configPath)
+  }
+}
 
 /** Unset or blank means an empty registry; an explicitly named file must exist and be valid. */
 export async function loadProjectsConfig(env: NodeJS.ProcessEnv): Promise<LoadedProjectsConfig> {

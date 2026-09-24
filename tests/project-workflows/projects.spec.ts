@@ -473,3 +473,23 @@ test(`[scenario:live-refresh] A shown run re-reads its state in the background w
   await expect(view).toHaveAttribute('data-run-status', 'running')
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
 })
+
+test(`[scenario:registry-refresh] A workflow registered while the project page is open appears without a Refresh (${phase})`, async ({ page }) => {
+  const listRequest = (url: URL) => url.pathname === `/api/projects/${PROJECT.project_id}/workflows`
+  let registered = false
+  await page.route(listRequest, async route => {
+    // The worker phase answers from the mocks, the candidate phase from the real API.
+    const body = (phase === 'worker'
+      ? JSON.parse(mockResponse(new URL(route.request().url())).body as string)
+      : await (await route.fetch()).json()) as { workflows: { workflow_id: string; name: string }[] }
+    if (registered) body.workflows.push({ ...body.workflows[0], workflow_id: 'fixes', name: 'Fixes' })
+    await route.fulfill({ json: body })
+  })
+  await page.goto(projectUrl(PROJECT.project_id))
+  const list = page.getByTestId('workflows-list')
+  await expect(list).toBeVisible()
+  const fixes = list.locator('.projects-card-title', { hasText: 'Fixes' })
+  await expect(fixes).toHaveCount(0)
+  registered = true
+  await expect(fixes).toBeVisible({ timeout: 15_000 })
+})
