@@ -698,7 +698,8 @@ def deadline_extension(directory: Path, node: str) -> float | None:
 
 
 def deadline_met(directory: Path, node: str) -> bool:
-    """Whether the controller accepted the lane's completion signal once its turn ended (`met_at`): its deadline is met for good."""
+    """Whether the controller accepted the lane's completion signal once its turn ended (`met_at`): its deadline is met
+    while other lanes still work; once every lane's was accepted, wait_handoffs holds it to the latest lane deadline."""
     return bool(load_deadline(directory, node).get("met_at"))
 
 

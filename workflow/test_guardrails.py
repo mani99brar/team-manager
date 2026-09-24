@@ -1200,6 +1200,101 @@ class WorkerQuestion(unittest.TestCase):
             self.assertEqual(read_json(self.root / f"{lane}.handoff.json"), {"summary": "Work", "open_assumptions": []})
         self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
 
+    def test_a_finished_lane_that_works_again_once_every_lane_finished_is_held_to_the_latest_lane_deadline(self):
+        # adapter finished at t=100 while ui worked; ui asks at T-600 and is answered at T+60, which moves ui's deadline to
+        # T+660. Meanwhile the operator prompts adapter's pane. Its met deadline kept the run alive while ui worked and waited;
+        # once ui finished too it protects no other lane, so adapter is held to the latest lane deadline, T+660: the run never
+        # waits longer than its lanes' own deadlines allowed. Past it, the wait ends as a deadline (drive stops the workers).
+        for state in ("blocked", "working"):
+            with self.subTest(state=state):
+                self.setUp()  # A fresh run for each state.
+                self.states.update(ui="working", adapter="idle")
+                self.now = 100.0
+                self.completion("adapter")
+                steps = iter([lambda: (self.states.update(ui="idle"), self.ask("Option A or B?")),
+                              lambda: (self.assertEqual(self.answer("ui", "Use option B")[2], 0), self.states.update(ui="working", adapter=state)),
+                              lambda: (self.states.update(ui="idle"), self.completion("ui")),
+                              lambda: None,   # T+659: inside the latest lane deadline.
+                              lambda: None])  # T+660: at it.
+                times = iter([self.TIMEOUT - 600, self.TIMEOUT + 60, self.TIMEOUT + 600, self.TIMEOUT + 659, self.TIMEOUT + 660])
+
+                def poll():
+                    self.now = next(times, None) or self.fail("adapter's wait has no bound")
+                    next(steps)()
+                with self.assertRaisesRegex(RuntimeError, "Worker adapter deadline exhausted; no automatic relaunch"):
+                    self.wait(on_sleep=poll)
+                self.assertEqual(read_json(self.root / "ui.deadline.json")["met_at"], "1970-01-01T04:10:00Z")
+                self.assertFalse((self.root / "ui.handoff.json").exists())
+                messages = [message for node, _, message in self.events if node == "adapter"]
+                bound = (f"Worker adapter is {state} again after its completion signal was accepted, and so was every other lane's: "
+                         "the run waits for its turn to end until 1970-01-01T04:11:00Z, the latest lane deadline")
+                attention = ("Worker adapter needs attention in its pane (native state blocked); its completion signal met its deadline, so "
+                             "the run waits for it while another lane works or waits on a question, then until the latest lane deadline")
+                self.assertEqual(messages, [attention, bound] if state == "blocked" else [bound])
+
+    def test_a_finished_lane_that_works_again_and_ends_its_turn_inside_the_latest_lane_deadline_is_handed_off(self):
+        self.runtime.stop_workers = lambda: self.fail("No worker is stopped")
+        self.states.update(ui="working", adapter="idle")
+        self.now = 100.0
+        self.completion("adapter")
+        steps = iter([lambda: self.states.update(adapter="working"),  # The operator prompts adapter's pane.
+                      lambda: (self.states.update(ui="idle"), self.completion("ui")),
+                      lambda: None,
+                      lambda: (self.states.update(adapter="idle"), self.completion("adapter", summary="Follow-up"))])
+        times = iter([200.0, self.TIMEOUT - 100, self.TIMEOUT - 50, self.TIMEOUT - 10])
+
+        def poll():
+            self.now = next(times)
+            next(steps)()
+        self.wait(on_sleep=poll)
+        self.assertEqual(read_json(self.root / "adapter.handoff.json"), {"summary": "Follow-up", "open_assumptions": []})
+        self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
+        self.assertEqual(self.events, [("adapter", "interactive", "Worker adapter is working again after its completion signal was accepted, and "
+                                        "so was every other lane's: the run waits for its turn to end until 1970-01-01T04:00:00Z, the latest lane deadline")])
+
+    def test_a_question_written_before_the_deadline_pauses_it_though_the_controller_first_reads_it_after(self):
+        # The controller was away across ui's deadline (Claude Code unavailable, exit 75, or a Ctrl-C): ui wrote its question
+        # at T-300 and the controller reads it at T+600. The completion file carries no time of its own; its modification time
+        # says when ui asked, so the pause starts there and the answer leaves ui the 300 seconds it had left.
+        self.runtime.stop_workers = lambda: self.fail("No worker is stopped")
+        self.states.update(ui="blocked", adapter="idle")
+        self.completion("adapter")
+        self.ask("Option A or B?")
+        os.utime(self.root / "ui.completion.json", (self.TIMEOUT - 300,) * 2)
+
+        def pane_reply():
+            # The operator types the reply in ui's pane and no poll sees ui working. ui writes its next question at T+650, read at
+            # T+700: question 1's pause is counted until then, so question 2's starts there, not at T+650 (never counted twice).
+            self.ask("Second?")
+            os.utime(self.root / "ui.completion.json", (self.TIMEOUT + 650,) * 2)
+            self.now = self.TIMEOUT + 700
+
+        def answer():
+            self.now = self.TIMEOUT + 800
+            self.assertEqual(self.answer("ui", "Use option C")[2], 0)
+            self.states["ui"] = "working"
+        steps = iter([pane_reply, answer, lambda: (setattr(self, "now", self.TIMEOUT + 1050), self.states.update(ui="done"), self.completion("ui"))])
+        self.now = self.TIMEOUT + 600
+        self.wait(on_sleep=lambda: next(steps)())
+        self.assertEqual([(entry["n"], entry["asked_at"], entry["answer"]) for entry in read_json(self.root / "ui.questions.json")["questions"]],
+                         [(1, "1970-01-01T03:55:00Z", PANE_ANSWER), (2, "1970-01-01T04:11:40Z", "Use option C")])
+        # Paused from T-300 to T+700, then from T+700 to the answer at T+800: ui's deadline is T+1100 and it finished at T+1050.
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 1100.0, "paused_at": None})
+        self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
+        self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
+        # A question written after ui's deadline is refused as before: nothing is recorded, and the deadline ends the wait.
+        self.setUp()
+        self.states.update(ui="blocked", adapter="idle")
+        self.completion("adapter")
+        self.ask("Too late?")
+        os.utime(self.root / "ui.completion.json", (self.TIMEOUT + 10,) * 2)
+        self.now = self.TIMEOUT + 600
+        with self.assertRaisesRegex(RuntimeError, "Worker ui deadline exhausted; no automatic relaunch"):
+            self.wait(on_sleep=lambda: self.fail("Unexpected wait"))
+        self.assertFalse((self.root / "ui.questions.json").exists())
+        self.assertTrue((self.root / "ui.completion.json").exists())
+        self.assertEqual(self.events, [])
+
     def test_a_question_is_recorded_in_every_state_a_turn_ends_in(self):
         # A session whose turn ended on a question reports idle or done, or blocked: real sessions whose last message
         # waits on the operator report blocked. In each the file is final; the pause and `answer` work the same.

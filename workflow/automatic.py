@@ -157,15 +157,46 @@ def lanes(runtime) -> list[str]:
     return list(getattr(runtime, "workers", None) or plan_workers(runtime.plan))
 
 
+def lane_deadline(runtime, node: str) -> float | None:
+    """The lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
+    from .guardrails import deadline_extension
+    extension = deadline_extension(runtime.directory, node)
+    if extension is None:
+        return None
+    receipt = read_json(runtime.directory / f"{node}.interactive.json")
+    return datetime.fromisoformat(receipt["launch_requested_at"]).timestamp() + runtime.plan["automatic"]["worker_timeout_seconds"] + extension
+
+
+def latest_deadline(runtime, workers: list[str]) -> float | None:
+    """The latest of the lanes' own deadlines; None while any lane's question waits (the run waits on its answer anyway)."""
+    deadlines = [lane_deadline(runtime, node) for node in workers]
+    return None if None in deadlines else max(deadlines)
+
+
+def question_asked_at(runtime, node: str, now: float) -> float:
+    """When the worker wrote its question: the completion file carries no time of its own, so its modification time.
+
+    Never later than now, nor before the lane's deadline last ran again (its launch, or its previous question's answer),
+    so a question first read late (the controller away across the deadline, a slow poll) pauses the deadline from when
+    it was asked, and no paused time counts twice.
+    """
+    from .guardrails import epoch, load_questions
+    receipt = read_json(runtime.directory / f"{node}.interactive.json")
+    ran = [epoch(entry["answered_at"]) for entry in load_questions(runtime.directory, node) if entry["answered_at"]]
+    ran.append(datetime.fromisoformat(receipt["launch_requested_at"]).timestamp())
+    return max(min(now, (runtime.directory / f"{node}.completion.json").stat().st_mtime), *ran)
+
+
 def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     """Idle alone never means completion. Deadlines survive controller restart.
 
     A lane's deadline runs from its launch to its completion signal: a lane that finished is not held to it while
-    others work. A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`)
-    until the operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
+    others work; once every lane's signal was accepted, one whose session works again is held to the latest lane deadline.
+    A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`) from when it was
+    written until the operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
     """
-    from .guardrails import (PANE_ANSWER, deadline_extension, deadline_met, load_questions, mark_deadline_met, record_pane_answer,
-                             record_question, waiting_question)
+    from .guardrails import (PANE_ANSWER, deadline_met, iso, load_questions, mark_deadline_met, record_pane_answer, record_question,
+                             waiting_question)
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
     if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
@@ -175,9 +206,11 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
                 raise RuntimeError("Handoff changed after stop intent")
         return
     attention: set[str] = set()
-    # Lanes whose completion signal was accepted once their turn ended: their deadline is met, whatever their session
-    # does afterwards (an operator prompt in its pane, a command of its own). Kept across controller restarts.
+    # Lanes whose completion signal was accepted once their turn ended: their deadline is met while another lane still
+    # needs the run, whatever their session does afterwards (an operator prompt in its pane, a command of its own). Kept
+    # across controller restarts.
     met = {node for node in workers if deadline_met(runtime.directory, node)}
+    bounds: dict[str, float] = {}  # The latest lane deadline last announced for a met lane that is out again.
     # Answers recorded before this controller started need no second event.
     answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
@@ -220,23 +253,34 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             if item and item["status"] != "question" and row["state"] != "blocked":
                 handoffs[node] = read_completion(runtime, node)
                 continue  # Its completion signal met the deadline.
-            receipt = read_json(runtime.directory / f"{node}.interactive.json")
-            started = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
-            extension = deadline_extension(runtime.directory, node)  # None while a question waits: that lane has no running deadline.
-            if node not in met and extension is not None and clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"] + extension:
-                raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
+            deadline = lane_deadline(runtime, node)  # None while a question waits: that lane has no running deadline.
+            if node in met:
+                # Its signal met its deadline: it never ends the run while another lane works or waits on a question. Once
+                # every lane's signal was accepted that protects no lane, so the latest lane deadline bounds its session
+                # working or blocked again: it never makes the run wait longer than the lanes' own deadlines would have.
+                deadline = latest_deadline(runtime, workers) if deadline is not None and met == set(workers) else None
             if item and item["status"] == "question":
-                record_question(runtime, node, item, clock)
-                continue
+                # Written before the deadline, it pauses it from then, though first read after it (the controller away).
+                asked = question_asked_at(runtime, node, clock())
+                if deadline is None or asked < deadline:
+                    record_question(runtime, node, item, lambda: asked)
+                    continue
+            if node in met and deadline is not None and bounds.get(node) != deadline:
+                bounds[node] = deadline
+                runtime.event(node, "interactive", f"Worker {node} is {row['state']} again after its completion signal was accepted, and so was "
+                                                   f"every other lane's: the run waits for its turn to end until {iso(deadline)}, the latest lane deadline")
+            if deadline is not None and clock() >= deadline:
+                raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
             if row["state"] == "blocked" and not waiting and node not in attention:
                 # A native session reports `blocked` when its turn ended needing a human: a question,
                 # a permission prompt or a refusal the harness could not continue past. That is not a
                 # failure of the lane, and the other lanes keep working. The operator may answer in the
-                # pane; the worker deadline bounds the wait. No billing/provider fallback. A recorded
-                # question already said what it waits for, and its deadline is paused.
+                # pane; the worker deadline bounds the wait (a met lane's, as above). No billing/provider
+                # fallback. A recorded question already said what it waits for, and its deadline is paused.
                 attention.add(node)
-                runtime.event(node, "interactive", f"Worker {node} needs attention in its pane (native state blocked); "
-                                                   "waiting until its deadline")
+                runtime.event(node, "interactive", f"Worker {node} needs attention in its pane (native state blocked); " + (
+                    "its completion signal met its deadline, so the run waits for it while another lane works or waits on a question, "
+                    "then until the latest lane deadline" if node in met else "waiting until its deadline"))
             elif row["state"] != "blocked":
                 attention.discard(node)
         if set(handoffs) == set(workers):
