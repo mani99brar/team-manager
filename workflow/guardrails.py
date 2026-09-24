@@ -11,7 +11,7 @@
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
   in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane, only while that pane
   shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
-  delivers it, typing the text at most once.
+  delivers it, typing the text at most once (after a Herdr timeout on the text the operator looks at the pane first).
 
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
@@ -300,7 +300,8 @@ def challenge_worktree(runtime) -> Path:
     """
     cwd = runtime.directory / "challenge-worktree"
     base = runtime.plan["base_commit"]
-    then = f"no job ran; fix it, then run the challenge and launch the workers with: {resume_command(runtime.directory)}"
+    then = (f"no job ran; fix it, then run the challenge and launch the workers with: {resume_command(runtime.directory)} "
+            "(add --herdr for the worker panes, as launch opens them unless --no-herdr)")
     try:
         if not cwd.exists():
             git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), base)

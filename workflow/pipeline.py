@@ -1071,6 +1071,17 @@ def main():
                         step = f"verify_{args.node}" if args.phase == "worker" else "candidate"
                         if step not in state.next:
                             parser.error("Selected check is not a failed/pending step")
+                        if runtime.plan.get("automatic"):
+                            from .automatic import RETRY_REQUESTS
+                            from .repair import continuation
+                            requests = read_json(directory / RETRY_REQUESTS) if (directory / RETRY_REQUESTS).exists() else {}
+                            current = runtime.attempt(args.phase, args.node)
+                            if (requests.get(f"{args.phase}:{args.node}") == current
+                                    and not (directory / "verification" / args.phase / args.node / str(current)).exists()):
+                                # Raised by an earlier retry and not run yet: raising it again would skip an attempt that never ran.
+                                print(f"{args.phase}/{args.node} attempt {current} is already requested and has not run; nothing changed. "
+                                      f"An automatic run continues under its supervisor: {continuation(runtime)}")
+                                return
                         attempt = runtime.retry_check(args.phase, args.node)
                         if runtime.plan.get("automatic"):
                             # Invoked here, the graph would run the review node, reviewer launches included, in this

@@ -194,7 +194,12 @@ def blocked_step(runtime, state) -> dict:
     if not packets:
         # Plain retry reruns the step on a manual plan. The supervisor reruns only a raised attempt: every failed verify_<lane>
         # needs one, the candidate step one lane's (it reuses every passing packet), best a lane without one.
-        rerun = continuation(runtime) if not runtime.plan.get("automatic") else check_retry(
+        from .automatic import RETRY_REQUESTS
+        requests = read_json(directory / RETRY_REQUESTS) if (directory / RETRY_REQUESTS).exists() else {}
+        requested = any(requests.get(f"{phase}:{node}") == raw_attempt(directory, phase, node)
+                        and not (directory / "verification" / phase / node / str(raw_attempt(directory, phase, node))).exists() for node in nodes)
+        # An attempt a retry already raised, not run yet, is the supervisor's to run: another retry would skip it.
+        rerun = continuation(runtime) if not runtime.plan.get("automatic") or requested else check_retry(
             runtime, phase, nodes if phase == "worker" else (unverified or nodes)[:1])
         raise ValueError("The failed step has no blocked packet at its current attempt, so it is not a check verdict "
                          f"(an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then rerun it with: {rerun}")

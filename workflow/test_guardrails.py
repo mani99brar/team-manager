@@ -396,7 +396,8 @@ class ChallengeCheckoutFails(FailingChallenge):
         self.assertFalse((directory / "challenge.json").exists() or (directory / "challenge.running.json").exists())
         self.assertEqual(self.launches(directory), [])
         # The refusal says what runs once the checkout is fixed: `launch` refuses the run directory it already prepared.
-        self.assertIn(f"no job ran; fix it, then run the challenge and launch the workers with: {PY} -m workflow resume {directory}\n", output)
+        self.assertIn(f"no job ran; fix it, then run the challenge and launch the workers with: {PY} -m workflow resume {directory} "
+                      "(add --herdr for the worker panes, as launch opens them unless --no-herdr)\n", output)
         # No job ran, so nothing is left undecided: once the path is free, start runs attempt 1.
         (directory / "challenge-worktree").unlink()
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
@@ -409,7 +410,7 @@ class ChallengeCheckoutFails(FailingChallenge):
         (directory / "challenge-worktree").symlink_to(self.root / "nowhere")
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])  # The start a `launch --automatic` runs.
         self.assertEqual(code, 1, output)
-        self.assertIn(f"then run the challenge and launch the workers with: {PY} -m workflow resume {directory}\n", output)
+        self.assertIn(f"then run the challenge and launch the workers with: {PY} -m workflow resume {directory} (add --herdr", output)
         (directory / "challenge-worktree").unlink()
         supervised = []
         with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):

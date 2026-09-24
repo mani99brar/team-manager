@@ -630,6 +630,15 @@ class InterruptedCheckOnAnAutomaticRun(RepairFixture):
         self.assertEqual(read_json(directory / "attempts.json"), {"worker:ui": 2})
         self.assertFalse((directory / "verification/worker/ui/2").exists())
         self.assertEqual((directory / "fake-launches.log").read_text(), launches)
+        # While that attempt waits for the supervisor, a second retry raises nothing, and repair names only the continuation.
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"worker/ui attempt 2 is already requested and has not run; nothing changed. An automatic run continues under its "
+                      f"supervisor: {automatic}", out)
+        self.assertEqual(read_json(directory / "attempts.json"), {"worker:ui": 2})
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertIn(f"inspect, then rerun it with: {automatic}\n", err)
         # A rerun that fails before its check starts is not rerun again: the request is consumed first.
         with patch.object(self.runtime, "verify", side_effect=RuntimeError("before the check")), patch("workflow.automatic.wait_handoffs"), \
                 self.assertRaisesRegex(RuntimeError, "Non-retryable"):
@@ -657,39 +666,65 @@ class InterruptedCheckOnAnAutomaticRun(RepairFixture):
 
 class ReviewFailedBeforeALaunch(RepairFixture):
     """A review node that failed before it launched any reviewer (Git could not create the review worktree) is re-entered
-    by the supervisor once; plain retry on the automatic run points there and runs nothing."""
+    once per `automatic --live`, across the supervisor's step processes; plain retry on the automatic run points there."""
 
-    def test_the_supervisor_reenters_a_review_that_launched_nothing(self):
+    def test_the_supervisor_reenters_a_review_that_launched_nothing_once(self):
         directory = self.directory
         self.sessions.edits["ui"] = ("ui.txt", "after")
         self.start()
-        real, failures = automatic.git_worktree, []
+        real, failures, broken = automatic.git_worktree, [], [True]
         def locked(repository, *arguments):
-            if arguments[-2].endswith("/review-worktree") and len(failures) < 2:
+            if arguments[-2].endswith("/review-worktree") and broken[0]:
                 failures.append(arguments[-2])
                 raise WorktreeError(128, ["git", "worktree", *arguments], "", "fatal: cannot lock ref 'HEAD': File exists")
             return real(repository, *arguments)
-        # Twice in a row: re-entered once by this controller, then the same failure stops it.
+        # As under the supervisor, every step is a new controller (single_step): the review is re-entered once, then the
+        # same failure stops the run instead of being re-entered by each of the supervisor's next steps.
         with patch("workflow.automatic.git_worktree", side_effect=locked), patch("workflow.automatic.wait_handoffs"), \
                 self.assertRaisesRegex(RuntimeError, "Non-retryable"):
-            drive(self.runtime)
+            for _ in range(6):
+                self.assertIsNone(drive(self.runtime, single_step=True))
         self.assertEqual(len(failures), 2)
         self.assertFalse((directory / "review-worktree").exists())
         reentries = [e["message"] for e in self.events() if e["node"] == "review" and e["message"].startswith("Re-entering the review")]
         self.assertEqual(len(reentries), 1)
         self.assertIn("cannot lock ref 'HEAD': File exists", reentries[0])
         self.assertNotIn("review", self.sessions.starts)
-        # Plain retry runs nothing on an automatic run: it names automatic --live, which now continues it.
+        # Plain retry runs nothing on an automatic run: it names automatic --live.
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
             code, _, err = self.pipeline_cli("retry", str(directory))
         self.assertNotEqual(code, 0)
         self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live", err)
         self.assertNotIn("review", self.sessions.starts)
-        # A new controller (automatic --live) re-enters it once more, launches each reviewer once and reaches the branch.
+        # The operator fixes the cause and runs automatic --live again: its supervisor clears the marker when it starts, and
+        # its controller re-enters the review once more, launches each reviewer once and reaches the feature branch.
+        broken[0] = False
+        with patch("workflow.automatic.subprocess.run", side_effect=lambda *a, **k: subprocess.CompletedProcess(a, 1)), \
+                self.assertRaisesRegex(RuntimeError, "exit 1"), contextlib.redirect_stdout(io.StringIO()):
+            automatic.supervise(directory)  # Its steps are stubbed: only its start matters here.
+        self.assertFalse((directory / automatic.REVIEW_RESTART).exists())
         with patch("workflow.automatic.wait_handoffs"):
             commit = drive(self.runtime)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
         self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
+
+    def test_a_review_worktree_left_behind_names_its_removal(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        real = subprocess.run
+        def diff_fails(command, *args, **kwargs):
+            if command[:1] == ["git"] and "diff" in command and "--binary" in command:
+                raise subprocess.CalledProcessError(128, command)
+            return real(command, *args, **kwargs)
+        worktree = directory / "review-worktree"
+        # The controller's next look at the failed review refuses it with the removal, not a generic failure.
+        with patch("workflow.automatic.subprocess.run", side_effect=diff_fails), patch("workflow.automatic.wait_handoffs"), \
+                self.assertRaisesRegex(RuntimeError, f"Partial review worktree {worktree} left by the failed review; remove it with "
+                                                     f"git worktree remove --force {worktree}, then rerun"):
+            drive(self.runtime)
+        self.assertTrue(worktree.exists())
+        self.assertNotIn("review", self.sessions.starts)
 
 
 class InterruptedCheckOnAManualRun(RepairFixture):

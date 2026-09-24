@@ -518,8 +518,10 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
     # says so: saved, the combined status overwrites the default reviewer's `status`.
     for reviewer_id in state.ids:
         accepted = state.statuses[reviewer_id].get("accepted_at")
-        if accepted and reviewer_id not in decisions and decision_blocks(accept(reviewer_id, accepted)):
-            return decisions  # The first block decides; nobody waits for the other reviewers.
+        if accepted and reviewer_id not in decisions:
+            accept(reviewer_id, accepted)
+    if any(decision_blocks(decision) for decision in decisions.values()):
+        return decisions  # A block decides; every verdict accepted before it is kept too.
     while True:
         rows = runtime.sessions.inventory()
         for reviewer_id in state.ids:
@@ -1074,6 +1076,7 @@ def supervise(directory: Path) -> None:
     """Each recovery uses a new controller process, not just an in-memory replay."""
     validate_automatic(read_json(directory / "plan.json"))
     with run_lock(directory, "automatic-supervisor.lock"), Timeline(directory):
+        (directory / REVIEW_RESTART).unlink(missing_ok=True)  # Each `automatic --live` may re-enter a review that launched nothing once.
         for _ in range(45):
             try:
                 result = subprocess.run([sys.executable, "-m", "workflow", "automatic-step", str(directory), "--live"],
@@ -1139,17 +1142,29 @@ def resume_interrupted_review(runtime, state) -> bool:
     return True
 
 
+REVIEW_RESTART = "review-restart.json"
+
+
 def restart_review(runtime, state) -> bool:
     """The review node failed before it launched any reviewer: no reviewer status and no review worktree exist.
 
-    Re-entering it launches each reviewer at most once (each status is saved before its launch), so the supervisor
-    does it once per controller; a partial review worktree still needs the operator (review_candidate refuses it).
+    Re-entering it launches each reviewer at most once (each status is saved before its launch), so the controller does
+    it once per `automatic --live`: REVIEW_RESTART persists across the supervisor's step processes and supervise clears
+    it when it starts. A review worktree left behind is refused with how to remove it.
     """
     if [task.name for task in state.tasks if task.error and task.name in state.next] != ["review"]:
         return False
-    if combined_status_path(runtime).exists() or (runtime.directory / "review-worktree").exists():
+    if combined_status_path(runtime).exists():
         return False
+    worktree = runtime.directory / "review-worktree"
+    if worktree.exists():
+        raise RuntimeError(f"Partial review worktree {worktree} left by the failed review; remove it with "
+                           f"git worktree remove --force {worktree}, then rerun: python -m workflow automatic {runtime.directory} --live")
+    marker = runtime.directory / REVIEW_RESTART
+    if marker.exists():
+        return False  # Re-entered once already under this supervisor: the same failure again stops it.
     error = next(str(task.error) for task in state.tasks if task.error and task.name == "review")
+    save_json(marker, {"error": error})
     runtime.event("review", "running", f"Re-entering the review, which failed before any reviewer was launched: {error}")
     return True
 
@@ -1207,7 +1222,6 @@ def drive(runtime, *, single_step=False) -> str | None:
         raise RuntimeError("Source feature branch changed; no automatic continuation")
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
-    review_restarted = False
     while True:
         with SqliteSaver.from_conn_string(str(runtime.directory / "pipeline.sqlite")) as saver:
             graph = build_pipeline(saver, runtime)
@@ -1260,9 +1274,8 @@ def drive(runtime, *, single_step=False) -> str | None:
                 raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
-                if review_restarted or not restart_review(runtime, state):
+                if not restart_review(runtime, state):
                     raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
-                review_restarted = True  # Once per controller: the same failure again stops it.
             try:
                 graph.invoke(value, config)
             except Exception as error:

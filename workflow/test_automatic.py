@@ -748,6 +748,21 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
     reviewers = ["general", "coverage"]
 
+    def test_a_block_accepted_before_a_restart_keeps_every_verdict_accepted_with_it(self):
+        # coverage (declared second) approves first; general (declared first) then blocks, and the wait returns both. After
+        # a restart the pre-pass restores both before the block decides, as the controller that never stopped had them.
+        from .automatic import ReviewStatus, wait_reviews
+        first, second = self.ids
+        self.write(second)
+        self.rows[first]["state"] = "working"
+        def blocks(_seconds):
+            self.write(first, verdict="blocked")
+            self.rows[first]["state"] = "idle"
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=blocks)
+        self.assertEqual(set(decisions), {first, second})
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, {first: "blocked", second: "approved"})
+
     def test_a_verdict_accepted_before_a_restart_is_kept_when_a_reviewer_declared_before_it_expires(self):
         # coverage (declared second) is accepted at t=100 while general works; the controller goes away and resumes past
         # every deadline with general still without its file. The expired deadline blocks the review, and coverage's
