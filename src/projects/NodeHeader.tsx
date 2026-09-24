@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { humanizeEvent, type Now, type SpanStatus, type Timeline } from '../../contracts/projects/triage.ts'
-import type { ReviewResult, RunDetail, WorkerResult, WorkflowEvent } from './api.ts'
+import type { Now, SpanStatus, Timeline } from '../../contracts/projects/triage.ts'
+import type { ReviewResult, RunDetail } from './api.ts'
 import { CommandBlock } from './CommandBlock.tsx'
 import { attemptWord, type StripItem, type Timing } from './node/model.ts'
 import { AppLink, StatusBadge } from './panels.tsx'
@@ -12,10 +12,23 @@ import { formatSpan } from './time.ts'
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type NodeStatus = RunDetail['snapshot']['nodes'][number]['status']
 type Link = { href: string; label: string }
+/** The verification that proves a worker's result, with its own status: only a passed one "verified" it. */
+type VerifyLink = Link & { status: NodeStatus }
 
 /** The words of a span status, for attempt chips; "ended without a record" has no badge of its own. */
 const SPAN_WORD: Record<SpanStatus, string> = { ...Object.fromEntries(Object.entries(STATUS_LABEL).map(([key, label]) => [key, label.toLowerCase()])) as Record<NodeStatus, string>, no_record: 'ended without a record' }
 const SPAN_GLYPH: Record<SpanStatus, string> = { ...STATUS_GLYPH, no_record: '?' }
+
+/** How a worker's success names its verification: "verified by" only once the verification passed. */
+const VERIFY_WORD: Record<NodeStatus, string> = {
+  succeeded: 'verified by',
+  failed: 'verification failed at',
+  cancelled: 'verification cancelled at',
+  pending: 'not verified yet by',
+  running: 'verification running at',
+  awaiting_approval: 'verification waiting at',
+  paused: 'verification paused at',
+}
 
 const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`)
 
@@ -32,7 +45,7 @@ function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavi
   cause: string | null
   /** The operator's repairs recorded before the shown attempt. */
   repairs: number[]
-  verifyNode: Link | null
+  verifyNode: VerifyLink | null
   onNavigate: (pathname: string) => void
 }): ReactNode {
   switch (status) {
@@ -45,9 +58,8 @@ function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavi
     case 'failed': return `This step failed.${cause ? ` ${sentence(cause)}` : ' The run cannot succeed without intervention.'}`
     case 'succeeded':
       if (kind === 'worker') {
-        return verifyNode
-          ? <>Session ended its turn. This is not workflow completion — verified by <AppLink href={verifyNode.href} onNavigate={onNavigate}>{verifyNode.label} ›</AppLink></>
-          : 'Session ended its turn. This is not workflow completion; verification, review and integration are separate steps.'
+        if (!verifyNode) return 'Session ended its turn. This is not workflow completion; verification, review and integration are separate steps.'
+        return <>Session ended its turn. This is not workflow completion — {VERIFY_WORD[verifyNode.status]} <AppLink href={verifyNode.href} onNavigate={onNavigate}>{verifyNode.label} ›</AppLink></>
       }
       if (kind === 'integration') return 'This integration step completed.'
       if (attempt > 1) return `Passed on attempt ${attempt}${repairs.length ? ` after operator ${repairs.map(n => `repair ${n}`).join(', ')}` : ''}.`
@@ -108,9 +120,10 @@ function AttemptStrip({ items, loaded, shown, attemptHref, onNavigate }: {
               <span className={`status-text-${chip.status === 'no_record' ? 'pending' : chip.status}`} aria-hidden="true">#{chip.attempt} {SPAN_GLYPH[chip.status]}</span>
               {chip.start && <> <Time iso={chip.start.at} /></>}
               {chip.ms !== null && <> · {formatSpan(chip.ms)}</>}
+              {chip.reason && <> · <span className="node-attempt-reason" data-testid="node-attempt-reason">{chip.reason}</span></>}
             </>
           )
-          const name = `Attempt ${chip.attempt}, ${SPAN_WORD[chip.status]}${chip.ms !== null ? `, ${formatSpan(chip.ms)}` : ''}`
+          const name = `Attempt ${chip.attempt}, ${SPAN_WORD[chip.status]}${chip.ms !== null ? `, ${formatSpan(chip.ms)}` : ''}${chip.reason ? `: ${chip.reason === 'same' ? 'the same reasons as the attempt before' : chip.reason}` : ''}`
           return (
             <li key={`attempt-${chip.attempt}`}>
               {linked ? (
@@ -135,14 +148,13 @@ type Props = {
   attempt: number
   timing: Timing | null
   clock: number
-  /** The node's events, for the cause of its status. */
-  events: WorkflowEvent[]
+  /** What the status is worded by (`causeOf`): the failure's error, the viewed attempt's outcome or its last status message. */
+  cause: string | null
+  /** A live or failed verification's attempt on its revision and the cap ("1 of 3 on this revision", 5.3); null otherwise. */
+  revision: { attempt: number; of: number } | null
   timeline: Timeline | null
-  result: WorkerResult | null
-  /** The failure's cause when the node's own result does not carry it: the failing lanes' gate reasons on the candidate. */
-  failure: string | null
   reviewTransport: ReviewResult['reviewer']['transport'] | undefined
-  verifyNode: Link | null
+  verifyNode: VerifyLink | null
   strip: StripItem[]
   loaded: (uri: string) => boolean
   attemptHref: (attempt: number) => string
@@ -156,10 +168,7 @@ type Props = {
  * its times (the source named when it is not an event); what the status means, worded by its cause; the attempt strip
  * when there were several; and the run's next step when this node is where the run stopped.
  */
-export function NodeHeader({ definition, status, attempt, timing, clock, events, timeline, result, failure, reviewTransport, verifyNode, strip, loaded, attemptHref, next, onNavigate }: Props) {
-  const own = events.filter(event => event.status !== null && (event.attempt === attempt || attempt === 0))
-  const last = own.at(-1) ?? events.findLast(event => event.status !== null)
-  const cause = status === 'failed' && (result?.error || failure) ? result?.error?.message ?? failure : last ? humanizeEvent(last) : null
+export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, next, onNavigate }: Props) {
   const starts = timing?.start ? Date.parse(timing.start.at) : Infinity
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && marker.node_id === definition.node_id && Date.parse(marker.at) <= starts).map(marker => marker.repair?.n ?? 0).filter(n => n > 0)
   return (
@@ -173,6 +182,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, events,
       </div>
       <p className="node-timing" data-testid="node-timing">
         {attempt === 0 ? <span data-testid="node-attempt">{attemptWord(0)}</span> : <>attempt <span data-testid="node-attempt">{attemptWord(attempt)}</span></>}
+        {revision && <span data-testid="node-attempt-revision"> ({revision.attempt} of {revision.of} on this revision)</span>}
         {timing && <TimingText timing={timing} clock={clock} />}
       </p>
       <p className="node-status-meaning" data-testid="node-status-meaning">

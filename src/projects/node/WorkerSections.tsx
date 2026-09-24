@@ -23,6 +23,36 @@ function TaskDisclosure({ highlight, children }: { highlight: string | null; chi
   )
 }
 
+/**
+ * Where the worker's result stands with its verification (docs/PRD_VIEWER_UX.md 8): the revision frozen at handoff, then
+ * "verified" only when the verification passed on this result; a failed or unfinished one says so, since the facts and the
+ * gate's error it links are shown once, on the verify node.
+ */
+function VerifiedLine({ result, checksNode, frozenCommit, repairNote, onNavigate }: {
+  result: WorkerResult
+  checksNode: NonNullable<Props['checksNode']>
+  frozenCommit: string | null
+  repairNote: string
+  onNavigate: (pathname: string) => void
+}) {
+  const passed = checksNode.status === 'succeeded' && result.status === 'succeeded' && result.error === null
+  const failed = !passed && (checksNode.status === 'failed' || result.error !== null || result.status === 'failed')
+  const state = passed ? 'verified' : failed ? 'failed' : 'unverified'
+  const after = repairNote ? ` ${repairNote}` : ''
+  const words = passed ? `verified on attempt ${result.attempt}${after}`
+    : failed ? `verification failed on attempt ${result.attempt}${after}`
+      : checksNode.status === 'pending' || checksNode.attempt === 0 ? 'not verified yet'
+        : `verification attempt ${checksNode.attempt} is ${checksNode.status === 'running' ? 'running' : 'not finished'}`
+  const repaired = passed && result.output_commit !== null && frozenCommit !== null && result.output_commit !== frozenCommit
+  return (
+    <p className="worker-verified" data-testid="worker-verified" data-state={state}>
+      {frozenCommit ? <>Frozen at handoff as <code>{frozenCommit.slice(0, 7)}</code>; {words}</> : `${words[0].toUpperCase()}${words.slice(1)}`}
+      {repaired && <> as <code>{result.output_commit!.slice(0, 7)}</code></>} ·{' '}
+      <AppLink href={checksNode.href} onNavigate={onNavigate}>{failed ? 'the gate\'s reasons' : 'facts and checks'} on {checksNode.label} ›</AppLink>
+    </p>
+  )
+}
+
 type Props = {
   scope: RunScope
   /** The node's result as loaded, with its loading, error and absence lines already worded. */
@@ -30,8 +60,10 @@ type Props = {
   result: Resource<WorkerResult>
   /** Whether this node shows the result's facts (no verify node links the same result) and the worker's narrative. */
   role: { facts: boolean; narrative: boolean }
-  /** The verify node that shows the result's facts and executed checks; null when the pinned graph has none. */
-  checksNode: CheckTarget | null
+  /** The verify node that shows the result's facts and executed checks, with its status; null when the pinned graph has none. */
+  checksNode: (CheckTarget & { status: SnapshotNode['status']; attempt: number }) | null
+  /** The revision the worker handed over (the verification's first attempt's output commit); null until known. */
+  frozenCommit: string | null
   /** "after operator repair 1" when the verify node's latest attempt followed a repair; empty otherwise. */
   repairNote: string
   inputs: Resource<RunInputs | null>
@@ -51,7 +83,7 @@ type Props = {
  * produced (its narrative, and the result's facts unless the verify node shows them) and the files it created or changed
  * as captured at freeze, then its completion signal, the launch receipt and the task behind a disclosure.
  */
-export function WorkerSections({ scope, renderResult, result, role, checksNode, repairNote, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied }: Props) {
+export function WorkerSections({ scope, renderResult, result, role, checksNode, frozenCommit, repairNote, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied }: Props) {
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const files = result.status === 'ready' ? filesCount(result.data) : 0
   return (
@@ -65,13 +97,7 @@ export function WorkerSections({ scope, renderResult, result, role, checksNode, 
       <NodeSection sectionKey="result" title="Result">
         {renderResult(data => (
           <div className="worker-evidence" data-testid="worker-result" data-view="produced">
-            {!role.facts && checksNode !== null && (
-              <p className="worker-verified" data-testid="worker-verified">
-                Verified on attempt {data.attempt}{repairNote ? ` ${repairNote}` : ''}
-                {data.output_commit ? <> · revision <code>{data.output_commit.slice(0, 7)}</code></> : null} ·{' '}
-                <AppLink href={checksNode.href} onNavigate={onNavigate}>facts and checks on {checksNode.label} ›</AppLink>
-              </p>
-            )}
+            {!role.facts && checksNode !== null && <VerifiedLine result={data} checksNode={checksNode} frozenCommit={frozenCommit} repairNote={repairNote} onNavigate={onNavigate} />}
             {role.narrative && <WorkerNarrative result={data} />}
             {role.facts && <><ResultFacts result={data} /><ResultError result={data} /></>}
           </div>

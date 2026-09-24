@@ -3,7 +3,7 @@ import { attemptResultUris, type Now, type Timeline } from '../../contracts/proj
 import { scopedResultPath, type RunDetail, type RunInputs, type ReviewResult, type RunScope, type WorkerResult, type WorkflowEvent } from './api.ts'
 import { ChallengeSections } from './node/ChallengeSections.tsx'
 import { AwaitingNotice, ControllerSections } from './node/ControllerSections.tsx'
-import { attemptStrip, nodeTiming, resultRole, verifiedSections, workerSectionEntries, type SectionEntry } from './node/model.ts'
+import { attemptStrip, causeOf, nodeTiming, resultRole, revisionAttempt, verifiedSections, workerSectionEntries, type SectionEntry } from './node/model.ts'
 import { ReviewSections } from './node/ReviewSections.tsx'
 import { CandidateLanes, VerifiedEvidence, WorkerReportLink, type LaneEntry } from './node/VerifySections.tsx'
 import { WorkerSections } from './node/WorkerSections.tsx'
@@ -115,7 +115,13 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     return id === null ? null : nodeLink(id)
   }
   const lane = isWorker ? worker?.node_id ?? node.node_id.replace(/^launch_/, '') : null
-  const verifyNode = lane !== null && hasNode(`verify_${lane}`) ? nodeLink(`verify_${lane}`) : null
+  const verifyId = lane !== null && hasNode(`verify_${lane}`) ? `verify_${lane}` : null
+  const verifyState = verifyId === null ? null : snapshotNodes.find(candidate => candidate.node_id === verifyId) ?? null
+  const verifyNode = verifyId === null ? null : { ...nodeLink(verifyId), status: verifyState?.status ?? 'pending' as const, attempt: verifyState?.attempt ?? 0 }
+  // What the worker handed over: the verification's first attempt ran on the snapshot frozen at handoff (a repair makes a new one).
+  const frozenUri = verifyId === null ? null : attemptResultUris(detail, verifyId).find(item => item.attempt === 1)?.uri ?? null
+  const { results: frozenResults } = useRunResults(scope, useMemo(() => (frozenUri === null ? [] : [frozenUri]), [frozenUri]), stamp)
+  const frozenCommit = frozenUri === null ? null : frozenResults.get(frozenUri)?.output_commit ?? null
   const role = resultRole(detail, node.node_id)
   const reportNode = isVerify && !role.narrative && role.partner !== null ? nodeLink(role.partner) : null
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && verifyNode !== null && marker.node_id === verifyNode.node_id)
@@ -123,6 +129,15 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
   const timing = timeline && recorded ? nodeTiming(timeline, node.node_id, isLatest ? null : attempt, isVerify ? resultData : null) : null
   const headerStatus = isLatest ? node.status : viewedChip?.status ?? resultData?.status ?? 'pending'
+  const cause = causeOf({
+    timeline, nodeId: node.node_id, attempt: isLatest ? null : shownAttempt, events: nodeEvents, latest,
+    error: headerStatus === 'failed' ? resultData?.error?.message ?? failure : null,
+  })
+  // A live or failed verification counts its attempts against the cap, which a repair restarts (5.3).
+  const cap = recordedInputs?.max_verification_attempts ?? null
+  const revision = (isVerify || isCandidate) && recorded && timeline !== null && cap !== null && (headerStatus === 'running' || headerStatus === 'failed')
+    ? { attempt: revisionAttempt(timeline, node.node_id, shownAttempt), of: cap }
+    : null
   const next = isLatest && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required') ? now.next : null
   const attemptHref = (value: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id, value)
   const nodeHref = runPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id)
@@ -146,8 +161,9 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     ...(isWorker ? workerSectionEntries(worker, resultData) : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
     ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData) : []),
-    ...(isReview ? [{ key: 'review', label: 'Review' }] : []),
-    ...(isChallenge ? [{ key: 'challenge', label: 'Challenge' }] : []),
+    // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
+    ...(isReview && reviewTransport !== undefined ? [{ key: 'review', label: 'Review' }] : []),
+    ...(isChallenge && recordedInputs?.challenge ? [{ key: 'challenge', label: 'Challenge' }] : []),
     ...(reuse.length > 0 ? [{ key: 'reuse', label: 'Reuse', count: reuse.length }] : []),
     { key: 'history', label: 'History', ...(events.status === 'ready' ? { count: nodeEvents.length } : {}) },
   ]
@@ -162,10 +178,9 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
         attempt={shownAttempt}
         timing={timing}
         clock={clock}
-        events={nodeEvents}
+        cause={cause}
+        revision={revision}
         timeline={timeline}
-        result={resultData}
-        failure={failure}
         reviewTransport={reviewTransport}
         verifyNode={verifyNode}
         strip={strip}
@@ -200,6 +215,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             result={result}
             role={role}
             checksNode={verifyNode}
+            frozenCommit={frozenCommit}
             repairNote={repairNote}
             inputs={inputs}
             onRetryInputs={onRetryInputs}

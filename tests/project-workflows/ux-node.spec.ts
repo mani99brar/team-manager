@@ -7,8 +7,9 @@
  * earlier attempt has its own page, reached from the strip and from Activity.
  */
 import { test, expect, type Page, type Route } from '@playwright/test'
+import { OUTPUT_COMMIT_UI, RUN_FAILED } from './fixtures.ts'
 import { RUN_IDENTICAL, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
-import { NODE_ASSUMPTION, NODE_VERIFY_FAILURE, NODE_WORKER_SUMMARY, RUN_THIRD_ATTEMPT, UX_NODE_WORKFLOW_ID } from './fixtures/ux-node.ts'
+import { NODE_ASSUMPTION, NODE_VERIFY_FAILURE, NODE_WORKER_SUMMARY, REPAIRED_COMMIT, RUN_THIRD_ATTEMPT, UX_NODE_WORKFLOW_ID } from './fixtures/ux-node.ts'
 import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl } from './support.ts'
 
 installHooks()
@@ -38,6 +39,8 @@ test(`[scenario:node-header] A node opens on its status by cause, its timing and
   await expect(timing).toContainText('setup 42s')
   await expect(timing).toContainText('checks 31s')
   await expect(page.getByTestId('node-status-meaning')).toContainText('after operator repair 1')
+  // A passed verification does not count its attempts against the cap.
+  await expect(page.getByTestId('node-attempt-revision')).toHaveCount(0)
 
   // The section index: in-page links with counts that equal what each section lists; History comes last.
   await expect(page.getByRole('navigation', { name: 'Sections of Verify ui' })).toBeVisible()
@@ -75,10 +78,26 @@ test(`[scenario:node-header] A node opens on its status by cause, its timing and
   await reportLink.getByRole('link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
   await expect(page.getByTestId('worker-summary')).toHaveText(NODE_WORKER_SUMMARY)
+  await page.getByTestId('assumptions-details').getByText('Open assumptions (1)').click()
+  await expect(page.getByTestId('assumptions')).toBeVisible()
   await expect(page.getByTestId('assumptions')).toContainText(NODE_ASSUMPTION)
+  // The launch line: the revision frozen at handoff, verified on attempt 3 after the repair as the repaired revision.
+  const verified = page.getByTestId('worker-verified')
+  await expect(verified).toHaveAttribute('data-state', 'verified')
+  await expect(verified).toContainText(`Frozen at handoff as ${OUTPUT_COMMIT_UI.slice(0, 7)}; verified on attempt 3 after operator repair 1 as ${REPAIRED_COMMIT.slice(0, 7)}`)
+  await expect(page.getByTestId('node-status-meaning')).toContainText('verified by Verify ui')
   await expect(page.getByTestId('node-timing')).toContainText('from the launch receipt and the stop receipt')
   await expect(indexLink(page, 'questions')).toHaveCount(0)
   await expect(page.getByTestId('node-attempts')).toHaveCount(0)
+
+  // A result whose verification failed is never called verified, on the line or in the status; the failure is linked.
+  await page.goto(runUrl(RUN_FAILED, 'launch_adapter'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_adapter')
+  await expect(page.getByTestId('worker-verified')).toHaveAttribute('data-state', 'failed')
+  await expect(page.getByTestId('worker-verified')).toContainText(/verification failed on attempt 1/i)
+  await expect(page.getByTestId('worker-verified').getByRole('link')).toHaveText("the gate's reasons on Verify adapter ›")
+  await expect(page.getByTestId('node-status-meaning')).toContainText('verification failed at Verify adapter')
+  await expect(nodeDetail(page)).not.toContainText(/verified on attempt|verified by/)
 
   // A step that never started says so, and has no timing.
   await page.goto(nodeUrl('integrate'))
@@ -117,6 +136,8 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await expect(attempts(page).locator('[data-item="repair"]')).toContainText('repair 1')
   release()
   await expect(chip(page, 1)).toBeVisible()
+  // The chip names the checks the gate failed.
+  await expect(chip(page, 1).getByTestId('node-attempt-reason')).toHaveText('frontend-unit, project-workflows-browser')
   await expect(chip(page, 2)).toHaveCount(0)
   await expect(attempts(page).locator('[data-item]')).toHaveCount(4)
   await expect(chip(page, 1)).toHaveAttribute('href', attemptUrl('verify_ui', 1))
@@ -125,13 +146,18 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await page.unroute(resultPattern(2))
 
   // Attempt 1's page reads its own result (already fetched for its chip): failed, with the gate's reasons, and says which
-  // attempt is the latest.
-  await chip(page, 1).click()
+  // attempt is the latest. Opened from the keyboard, the focus moves to the new page's heading.
+  await chip(page, 1).focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/nodes/verify_ui/attempts/1$`))
+  await expect(page.locator('#node-detail-title')).toBeFocused()
   await expect(header(page).locator('.status-badge').first()).toHaveText('Failed')
   await expect(header(page)).toContainText(/Failed[\s\S]*attempt 1/)
   await expect(page.getByTestId('node-attempt')).toHaveText('1')
   await expect(page.getByTestId('node-timing')).toContainText('1m07s')
+  await expect(page.getByTestId('node-attempt-revision')).toHaveText(' (1 of 3 on this revision)')
+  const shownAttempt = page.getByTestId('result-facts').locator('div').filter({ has: page.locator('dt', { hasText: /^Attempt$/ }) }).locator('dd')
+  await expect(shownAttempt).toHaveText('1')
   const banner = page.getByTestId('attempt-banner')
   await expect(banner).toContainText('You are viewing attempt 1 of 3. The latest is attempt 3 ›')
   await expect(banner.getByRole('link')).toHaveAttribute('href', nodeUrl('verify_ui'))
@@ -140,11 +166,17 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await expect(page.getByTestId('node-next')).toHaveCount(0)
   await attach(page, testInfo, 'node-attempts')
 
-  // The attempt survives a reload, and the banner leads back to the latest.
+  // The attempt survives a reload, which reads results/ui/1 again (the run's cache lives with the page), and the banner
+  // leads back to the latest, with the focus on its heading.
+  const reread = page.waitForRequest(resultPattern(1))
   await page.reload()
+  await reread
   await expect(page.getByTestId('node-attempt')).toHaveText('1')
-  await banner.getByRole('link').click()
+  await expect(shownAttempt).toHaveText('1')
+  await banner.getByRole('link').focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`/nodes/verify_ui$`))
+  await expect(page.locator('#node-detail-title')).toBeFocused()
   await expect(page.getByTestId('attempt-banner')).toHaveCount(0)
   await expect(page.getByTestId('gate-outcome')).toHaveAttribute('data-passed', 'true')
 
@@ -157,5 +189,6 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await failed.last().getByRole('link').click()
   await expect(page.getByTestId('node-attempt')).toHaveText('2')
   await expect(page.getByTestId('attempt-banner')).toContainText('You are viewing attempt 2 of 3.')
+  await expect(page.getByTestId('node-attempt-revision')).toHaveText(' (2 of 3 on this revision)')
   await expectNoExecutionControls(page)
 })

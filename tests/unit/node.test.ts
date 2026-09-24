@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { validateReviewResult, validateRunDetail, validateRunInputs } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.ts'
 import { buildTimeline, type RunData } from '../../contracts/projects/triage.ts'
-import { attemptStrip, attemptWord, nodeTiming, resultRole, type StripItem } from '../../src/projects/node/model.ts'
+import { attemptStrip, attemptWord, causeOf, nodeTiming, resultRole, revisionAttempt, type StripItem } from '../../src/projects/node/model.ts'
 import { formatSpan } from '../../src/projects/time.ts'
 
 function loadRun(name: string): RunData {
@@ -74,7 +74,7 @@ describe('nodeTiming on skeleton-001', () => {
   test('the print review names its inferred start', () => {
     const timing = nodeTiming(timeline, 'review', null)!
     assert.equal(timing.inferred, true)
-    assert.match(timing.source!, /start inferred from Verify combined candidate|start inferred from/)
+    assert.match(timing.source!, /start inferred from Verify combined candidate/)
   })
 
   test('a step that never started has no timing', () => {
@@ -91,6 +91,8 @@ describe('attemptStrip', () => {
     assert.deepEqual(chips.map(chip => formatSpan(chip.ms!)), ['1m07s', '1m07s', '1m15s'])
     const repair = strip.find(item => item.kind === 'repair')!
     assert.equal(repair.kind === 'repair' && repair.label, 'repair 1')
+    // Each failure says its reasons in a few words (the checks the gate named), and a repeat says "same"; a pass says none.
+    assert.deepEqual(chips.map(chip => chip.reason), ['unit, integration', 'same', ''])
   })
 
   test('a step with one attempt has no strip', () => {
@@ -113,6 +115,30 @@ describe('attemptStrip', () => {
     const base = '/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results'
     assert.deepEqual(chips[0].uris.sort(), [`${base}/candidate_controller/1`, `${base}/candidate_ui/1`])
     assert.deepEqual(chips[1].uris, [`${base}/candidate_ui/2`])
+  })
+})
+
+describe('revisionAttempt: the attempt cap restarts at a repair', () => {
+  const timeline = timelineOf(skeleton)
+  test('before the repair the attempt is its own number; the attempt after repair 1 is the first on the new revision', () => {
+    assert.equal(revisionAttempt(timeline, 'verify_game', 1), 1)
+    assert.equal(revisionAttempt(timeline, 'verify_game', 2), 2)
+    assert.equal(revisionAttempt(timeline, 'verify_game', 3), 1)
+  })
+})
+
+describe('causeOf: the status cause of the attempt shown', () => {
+  const timeline = timelineOf(skeleton)
+  const events = skeleton.events.filter(event => event.node_id === 'challenge')
+
+  test("an earlier attempt's page quotes that attempt's outcome, though every challenge event is served as attempt 1", () => {
+    assert.ok(events.every(event => event.attempt <= 1))
+    assert.equal(causeOf({ timeline, nodeId: 'challenge', attempt: 2, events, latest: 3, error: null }), 'interrupted (KeyboardInterrupt)')
+    assert.doesNotMatch(causeOf({ timeline, nodeId: 'challenge', attempt: 1, events, latest: 3, error: null }) ?? '', /attempt 3 passed/)
+  })
+
+  test("a failure's own error comes first", () => {
+    assert.equal(causeOf({ timeline, nodeId: 'verify_game', attempt: 1, events: [], latest: 3, error: 'unit: failed' }), 'unit: failed')
   })
 })
 

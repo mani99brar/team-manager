@@ -3,10 +3,11 @@
  * attempt strip with the controller's diagnosis and the operator's repairs, and which of two nodes that share one result
  * shows its facts and which its worker narrative. Pure, so the header and the unit tests read the same values.
  */
-import { attemptResultUris, type Instant, type Span, type SpanStatus, type Timeline } from '../../../contracts/projects/triage.ts'
-import type { RunDetail, RunInputWorker, WorkerResult } from '../api.ts'
+import { attemptResultUris, humanizeEvent, type Instant, type Span, type SpanStatus, type Timeline } from '../../../contracts/projects/triage.ts'
+import type { RunDetail, RunInputWorker, WorkerResult, WorkflowEvent } from '../api.ts'
 
-export type AttemptChip = { attempt: number; status: SpanStatus; start: Instant | null; ms: number | null; outcome: string; uris: string[] }
+/** `reason`: a failed attempt's reasons in a few words ("unit, integration"), "same" when they repeat the attempt before; empty otherwise. */
+export type AttemptChip = { attempt: number; status: SpanStatus; start: Instant | null; ms: number | null; outcome: string; reason: string; uris: string[] }
 export type StripItem =
   | { kind: 'attempt'; at: string; chip: AttemptChip }
   | { kind: 'diagnosis' | 'repair'; at: string; label: string; message: string }
@@ -111,15 +112,79 @@ export function attemptStrip(detail: RunDetail, timeline: Timeline, nodeId: stri
     const chip: AttemptChip = {
       attempt, status: attemptStatus(spans), start, ms: start && end ? Math.max(0, ms(end) - ms(start)) : null,
       outcome: spans.map(span => span.outcome).filter(Boolean).join('; '),
+      reason: '',
       uris: uris.filter(item => item.attempt === attempt).map(item => item.uri),
     }
     return { kind: 'attempt', at: (start ?? end)?.at ?? '', chip }
   })
+  let previous: AttemptChip | null = null
+  for (const item of items) {
+    if (item.kind !== 'attempt') continue
+    const { chip } = item
+    if (chip.status === 'failed' && chip.outcome) {
+      chip.reason = previous?.status === 'failed' && previous.outcome === chip.outcome ? 'same' : reasonWords(chip.outcome)
+    }
+    previous = chip
+  }
   for (const marker of timeline.markers) {
     if (marker.node_id !== nodeId || (marker.kind !== 'diagnosis' && marker.kind !== 'repair')) continue
     items.push({ kind: marker.kind, at: marker.at, label: marker.kind === 'repair' ? `repair ${marker.repair?.n ?? ''}`.trim() : 'diagnosis', message: marker.message })
   }
   return items.sort((a, b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0))
+}
+
+/**
+ * The cause a header names after its status (8): a failure's own error first; on an earlier attempt's page, that attempt's
+ * outcome as the timeline re-read it (served events may all carry one attempt number, 5.2 rule 1); otherwise the latest
+ * status message of the attempt, humanized. Null when nothing recorded one.
+ */
+export function causeOf({ timeline, nodeId, attempt, events, latest, error }: {
+  timeline: Timeline | null
+  nodeId: string
+  /** The viewed earlier attempt; null for the latest. */
+  attempt: number | null
+  /** The node's events; the latest attempt's are those of `latest`. */
+  events: WorkflowEvent[]
+  latest: number
+  error: string | null
+}): string | null {
+  if (error) return error
+  if (attempt !== null && timeline !== null) {
+    const outcome = (attemptsOf(timeline, nodeId).get(attempt) ?? []).map(span => span.outcome).filter(Boolean).join('; ')
+    if (outcome) return outcome
+  }
+  const shown = attempt ?? latest
+  const own = events.filter(event => event.status !== null && (event.attempt === shown || shown === 0))
+  // Only the latest attempt falls back to the node's last status message; an earlier one never quotes a later attempt.
+  const last = own.at(-1) ?? (attempt === null ? events.findLast(event => event.status !== null) : undefined)
+  return last ? humanizeEvent(last) : null
+}
+
+/** A failure's reasons in a few words: the checks its keyed gate reasons name ("unit, integration"), else the outcome itself. */
+function reasonWords(outcome: string): string {
+  const segments = outcome.split(';').map(segment => segment.trim()).filter(Boolean)
+  const keys = segments.map(segment => /^([\w.-]+):\s/.exec(segment)?.[1] ?? null)
+  return keys.length > 0 && keys.every(key => key !== null) ? [...new Set(keys)].join(', ') : outcome
+}
+
+/**
+ * Which attempt of a verification this is on its revision (5.3): counted from the operator's latest repair before it, since
+ * a repair restarts the attempt cap. Without a repair it is the attempt itself.
+ */
+export function revisionAttempt(timeline: Timeline, nodeId: string, attempt: number): number {
+  const groups = attemptsOf(timeline, nodeId)
+  const at = (value: number) => {
+    const spans = groups.get(value) ?? []
+    const instant = earliest(spans.map(span => span.start)) ?? earliest(spans.map(span => span.end))
+    return instant ? ms(instant) : null
+  }
+  const shown = at(attempt)
+  if (shown === null) return attempt
+  const repaired = timeline.markers
+    .filter(marker => marker.kind === 'repair' && marker.node_id === nodeId && Date.parse(marker.at) <= shown)
+    .reduce((last, marker) => Math.max(last, Date.parse(marker.at)), -Infinity)
+  if (repaired === -Infinity) return attempt
+  return [...groups.keys()].filter(value => value <= attempt && (at(value) ?? shown) >= repaired).length
 }
 
 /**

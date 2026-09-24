@@ -139,19 +139,23 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-testid="${TABS[next].testId}"]`)?.focus()
   }
 
-  // Selecting a step opens its page at the top with the focus on its heading; coming back focuses the step's row again.
+  // Selecting a step, or another attempt of it, opens its page at the top with the focus on its heading (the link that was
+  // activated unmounts with the page it was on); coming back focuses the step's row again.
   const shownNode = useRef(selectedNodeId)
+  const shownAttempt = useRef(selectedAttempt)
   useEffect(() => {
     const previous = shownNode.current
+    const previousAttempt = shownAttempt.current
     shownNode.current = selectedNodeId
-    if (previous === selectedNodeId) return
+    shownAttempt.current = selectedAttempt
+    if (previous === selectedNodeId && previousAttempt === selectedAttempt) return
     if (selectedNodeId !== null) {
       window.scrollTo(0, 0)
       document.getElementById('node-detail-title')?.focus({ preventScroll: true })
     } else if (previous !== null) {
       document.querySelector<HTMLElement>(`[data-testid="run-node-list"] [data-node-id="${CSS.escape(previous)}"] a`)?.focus()
     }
-  }, [selectedNodeId])
+  }, [selectedNodeId, selectedAttempt])
 
   // While a question, a pane or an approval waits on the operator, the tab title says so (docs/PRD_VIEWER_UX.md 6.4).
   const waiting = attention?.top != null

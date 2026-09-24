@@ -33,7 +33,7 @@ export function ResultError({ result }: { result: WorkerResult }) {
 }
 
 /**
- * The worker's narrative in its result: the summary and the open assumptions, which are absent when there are none. Shown
+ * The worker's narrative in its result: the summary and the open assumptions behind a count, absent when there are none. Shown
  * once, on the launch node, when it shares the result with its verify node.
  */
 export function WorkerNarrative({ result }: { result: WorkerResult }) {
@@ -41,12 +41,12 @@ export function WorkerNarrative({ result }: { result: WorkerResult }) {
     <>
       <p className="worker-summary" data-testid="worker-summary">{result.summary}</p>
       {result.open_assumptions.length > 0 && (
-        <section className="evidence-section" aria-labelledby="evidence-assumptions">
-          <h5 id="evidence-assumptions">Open assumptions ({result.open_assumptions.length})</h5>
+        <details className="evidence-section assumptions-details" data-testid="assumptions-details">
+          <summary id="evidence-assumptions">Open assumptions ({result.open_assumptions.length})</summary>
           <ul className="evidence-list" data-testid="assumptions">
             {result.open_assumptions.map((assumption, index) => <li key={index}>{assumption}</li>)}
           </ul>
-        </section>
+        </details>
       )}
     </>
   )

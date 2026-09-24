@@ -26,7 +26,7 @@ Implements row S4-core of `docs/PRD_VIEWER_UX.md` section 11 on branch `ux/s4cor
 
 **`SectionIndex.tsx`**: `<nav aria-label="Sections of <label>" data-testid="section-index">` of in-page links with counts (`data-section`, `data-count`). It sticks under the step strip (its `top` is measured from the strip with a `ResizeObserver`). A link scrolls its section below the sticky rows and focuses its heading, without touching the path. Sections are `<section aria-labelledby data-section>` (`NodeSection`); a section that holds a panel with its own heading is labelled by that heading. Empty sections get no chip and no body: no reuse section without `result_reused` events, no empty checks, screenshots, artifacts, assumptions or files lines. The honesty lines stay: `result-none`, `worker-inputs-none`, `events-none`, and `screenshots-deferred`. History (`node-events` / `events-none`) is always rendered and always last; the stop line moved from History into Session.
 
-**Dedup by `result_uri`** (7): when the launch and verify nodes link the same result, the verify node shows the facts (status, attempt, session, commits) and the gate's error; the launch node shows the worker narrative (`worker-summary`, `assumptions`) and one line, `Verified on attempt 3 after operator repair 1 · revision 50b14b3 · facts and checks on Verify ui ›`, which replaces "Result attempt 3 (graph node attempt is 1)". The verify node carries `worker-report-link` ("Worker's report → Launch ui worker ›") on the index row; each candidate lane carries its own. A result no other node links keeps both.
+**Dedup by `result_uri`** (7): when the launch and verify nodes link the same result, the verify node shows the facts (status, attempt, session, commits) and the gate's error; the launch node shows the worker narrative (`worker-summary`, `assumptions`) and one line, `Frozen at handoff as abcdef1; verified on attempt 3 after operator repair 1 as 50b14b3 · facts and checks on Verify ui ›` (only when the verification passed; see section 7), which replaces "Result attempt 3 (graph node attempt is 1)". The verify node carries `worker-report-link` ("Worker's report → Launch ui worker ›") on the index row; each candidate lane carries its own. A result no other node links keeps both.
 
 **`useRunData.ts`**: a run-scoped cache of immutable results and reviews by URI (`useRunResults`, `useRunResult`, `useRunReview`), replacing `RunView.tsx`'s module cache. The Now banner, the review, the node's own result, the attempt chips and the candidate lanes all read through it, so a result is fetched once per page lifetime. Only detail, events and inputs poll. A 404 or a failure is asked again when the caller's stamp changes (a Refresh; for the chips also a new `last_sequence`), and stays shown meanwhile.
 
@@ -100,7 +100,7 @@ Unchanged and green: `clarity.spec.ts` output-first order (Result, Files, Report
 
 1. **Files outside the S4-core list**: `tests/project-workflows/ux-run.spec.ts` and `ux-time.spec.ts` (the two migrations above), and `tests/unit/node.test.ts` plus `src/projects/node/model.ts` (a pure module, so the header rules have unit tests; within `src/projects/**` and `tests/unit/**`).
 2. **Launch section order** is Questions, Result, Files, Report, Session, Task, History, not 4.5's Report, Files, Task, Session: `clarity.spec.ts` output-first (unchanged per 12.3) pins the launch receipt before the task. S4b folds the receipt into a closed Session disclosure.
-3. **The launch line** reads "Verified on attempt 3 after operator repair 1 · revision 50b14b3 · facts and checks on Verify ui ›", not section 8's "Frozen at handoff as 5c1a734 …": the result's `output_commit` is the verified revision, which after a repair is the repaired snapshot, not the one frozen at handoff.
+3. **The launch line** (reworked after review, section 7) reads "Frozen at handoff as abcdef1; verified on attempt 3 after operator repair 1 as 50b14b3 · facts and checks on Verify ui ›". Section 8's wording, plus "as <sha>" when a repair changed the verified revision. The frozen revision is the output commit of the verification's attempt-1 result (read through the cache). Until that result loads, the line starts at "Verified…".
 4. **No `worker-completion` clamp, no retryable-note removal, no check table, no `Requirements` section**: those are S4a/S4b. `Requirements.tsx` is extracted only.
 5. **Stylesheets**: App.css keeps the node rules it had (section 11: only S1 and S3 edit it); the new `node.css` and `node/*.css` hold only the new rules, so `review.css` and `controller.css` are near-empty until S4c.
 6. **No Identifiers disclosure** yet on review, challenge and controller nodes; their session ids are in the review and challenge panels. The header's facts grid (Kind, Depends on, Session) is gone.
@@ -112,6 +112,46 @@ Unchanged and green: `clarity.spec.ts` output-first order (Result, Files, Report
 
 - **S4a**: `worker-error` still carries the retryable sentence (`projects.spec.ts:305`); `RequiredChecks` is ready for the Requirements section; the Gate section already lists the error first.
 - **S4b**: the launch sections are split into `WorkerSections`; the Session section holds the receipt, the questions-none line and the stop line, ready to become the closed disclosure (and to migrate `lanes.spec.ts:102`, per S1's deviation 1).
+- **S4c**: move `ReviewPanel` (`ReviewDetail.tsx`) onto `useRunReview`, and add the Identifiers disclosure on review, challenge and controller nodes (section 7). **S4a**: the same disclosure for the verify facts. **S4b**: `CreatedFiles.tsx` should read the review through `useRunReview`.
 - **S4c**: `ReviewSections`/`ChallengeSections`/`ControllerSections` are thin wrappers today; the review's section chip has no count (the review is fetched by `ReviewPanel`, which could read `useRunReview`).
 - The strip's `aria-label` on unlinked chips (the challenge) sits on a `span`; S4c's challenge chips could make them list items with visible text only.
 - The candidate phase and the full suites are the orchestrator's.
+
+## 7. Review fixes (second commit)
+
+An independent review raised 5 findings and 8 gaps. Each one was checked against the code before it was fixed.
+
+| Item | Outcome |
+|---|---|
+| P1 `WorkerSections.tsx:69`: the launch line said "Verified on attempt k" even when the shared result had failed the gate or was still being verified | **Fixed.** `VerifiedLine` takes the verify node's status. It says "verified" only when that node succeeded and the result has `status: succeeded` and no error. Otherwise it says "verification failed on attempt k · the gate's reasons on Verify … ›" (`data-state="failed"`), "verification attempt k is running", or "not verified yet". The header's worker-success sentence had the same flaw ("— verified by Verify adapter ›" on `run-failed`). It now words the link by the verify node's status (`verified by`, `verification failed at`, `verification running at`, …). |
+| P2 `NodeHeader.tsx:163`: an earlier attempt's status cause was chosen by the served `event.attempt` | **Fixed.** The new pure function `causeOf` (model.ts) is ordered: the failure's error first, then the viewed attempt's span outcome as the timeline re-read it, then that attempt's own status message. Only the latest attempt falls back to the node's last message. On skeleton-001, `/challenge/attempts/2` now quotes "interrupted (KeyboardInterrupt)". |
+| P3 `RunView.tsx:154`: focus was lost when moving between attempts of the same node | **Fixed.** The focus effect also tracks `selectedAttempt`, so a chip or the banner link moves focus to the new page's `h3`. The browser test drives this from the keyboard. |
+| P3 `ux-node.spec.ts:139`: the attempt page never proved which result it loaded | **Fixed.** The spec now asserts `result-facts` Attempt = 1 on `/attempts/1` both before and after the reload, and asserts that the reload requests `results/ui/1`. |
+| P3 `node.test.ts:73`: the regex alternative matched any inferred start | **Fixed.** The test now asserts `/start inferred from Verify combined candidate/`. |
+| gap: review fetched through `useResource` in `ReviewDetail.tsx`/`CreatedFiles.tsx` | **Deferred to S4c (`ReviewDetail.tsx`) and S4b (`CreatedFiles.tsx`).** Section 11 lists those files for those slices, and `useRunReview` is ready for them. |
+| gap: Review/Challenge chips always listed | **Fixed.** The Review chip appears only once a recorded review loaded. The Challenge chip appears only when the inputs record a challenge. The honesty lines `review-none` / `challenge-none` stay, since review.spec and lanes.spec pin `review-none`. |
+| gap: "k of N on this revision" (5.3) | **Fixed.** On a verification or the candidate that is running or failed, `node-timing` adds `node-attempt-revision`, e.g. " (1 of 3 on this revision)". N is `inputs.max_verification_attempts`, and k is counted from the node's latest repair marker before the attempt (`revisionAttempt`). |
+| gap: attempt chips carry no reason | **Fixed.** Chips now show `node-attempt-reason` on a failed attempt. It holds the check ids its keyed gate reasons name ("frontend-unit, project-workflows-browser"), or the outcome itself when there are no keyed reasons. A repeat of the previous failure shows "same". The reason is also in the chip's accessible name. |
+| gap: "Open assumptions" disclosure (12.3 `projects.spec.ts:228`) | **Fixed.** `WorkerNarrative` puts the assumptions in a closed `<details data-testid="assumptions-details">` whose summary reads "Open assumptions (n)". `projects.spec.ts` and `ux-node.spec.ts` open it before asserting. |
+| gap: no "Identifiers" disclosure for other kinds | **Deferred to S4a (verify/candidate `ResultFacts`) and S4c (review, challenge, controller panels).** Collecting session ids and commits in a closed disclosure means moving them out of those panels, and section 11 assigns the panels to those slices. Nothing is lost meanwhile: a verification's `node.session_id` is its result's `session_id`, shown in `result-facts`, and the review and challenge panels name their sessions. |
+| gap: 12.2 `loads results/<lane>/1` not asserted | **Fixed** with the P3 test finding. |
+| gap: "Frozen at handoff as <sha>" launch line | **Fixed** with P1 (deviation 3, updated). |
+
+**Red** (the new assertions against the previous `src/`, with the tests updated): `git stash push -- src/` and then `npx playwright test -c tests/project-workflows/playwright.config.ts tests/project-workflows/ux-node.spec.ts --reporter=line` gave **2 failed**:
+```
+node-header:   locator.click: Test timeout of 30000ms exceeded   (no assumptions-details disclosure to open)
+node-attempts: getByTestId('node-attempt-reason')  Expected: "frontend-unit, project-workflows-browser"  element(s) not found
+```
+The reviewer's probes are the red evidence for P1 and P2: `/runs/run-failed/nodes/launch_adapter` showed "Verified on attempt 1 · facts and checks on Verify adapter ›", and the challenge's attempt 2 quoted "attempt 3 passed · 8 P2 concerns". The new unit tests `causeOf` and `revisionAttempt` import functions that did not exist before, so they have no behavioural red.
+
+**Green**, final tree:
+
+| Check | Result |
+|---|---|
+| `npx tsx --test tests/unit/*.test.ts` | 152 passed (node 15) |
+| `npx tsc -b`, `npx eslint` on every changed file | clean |
+| `npx playwright test -c tests/project-workflows/playwright.config.ts --reporter=line` (worker phase, all 10 spec files) | **45 passed** (3.9m) |
+| `WORKFLOW_VERIFICATION_PHASE=candidate` (same config): `ux-node.spec.ts` and `projects.spec.ts` | **12 passed** (1.1m) |
+| `WORKFLOW_VERIFICATION_PHASE=candidate`: the other 8 spec files | **33 passed** (2.9m) |
+
+The fixtures did not change, so `server/projects.test.ts` was not re-run. No file outside the S4-core list was touched beyond those deviation 1 already names.

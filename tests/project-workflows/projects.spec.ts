@@ -240,7 +240,9 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', launchNode)
   await expect(page.getByTestId('changed-files').locator('li')).toContainText(['src/App.tsx'])
   await expect(page.getByTestId('worker-summary')).not.toBeEmpty()
+  await page.getByTestId('assumptions-details').getByText('Open assumptions').click()
   await expect(page.getByTestId('assumptions').locator('li')).toContainText([UI_ASSUMPTION])
+  await expect(page.getByTestId('assumptions')).toBeVisible()
 
   // Nodes without a result say so explicitly instead of showing another node's evidence.
   const unpublished = detail.snapshot.nodes.find(node => node.result_uri === null)
