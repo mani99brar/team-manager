@@ -746,5 +746,39 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.runtime.freeze()
 
 
+class AdvanceTests(unittest.TestCase):
+    def test_every_step_is_exported_as_it_ends_and_a_failed_export_never_fails_the_step(self):
+        from typing import TypedDict
+        from langgraph.graph import END, START, StateGraph
+        from . import pipeline
+
+        class State(TypedDict, total=False):
+            first: str
+            second: str
+        seen = []
+        def second(state):
+            # The first step's export happened before this one ran: the viewer does not wait for the whole invoke.
+            self.assertEqual(seen, [({"first": "done"}, ("second",))])
+            return {"second": "done"}
+        builder = StateGraph(State)
+        builder.add_node("first", lambda _state: {"first": "done"})
+        builder.add_node("second", second)
+        builder.add_edge(START, "first")
+        builder.add_edge("first", "second")
+        builder.add_edge("second", END)
+        def exported(_runtime, state):
+            seen.append((dict(state.values), tuple(state.next)))
+            if len(seen) == 2:
+                raise OSError("disk full")
+        with tempfile.TemporaryDirectory() as root, SqliteSaver.from_conn_string(str(Path(root) / "graph.sqlite")) as saver:
+            graph = builder.compile(checkpointer=saver)
+            config = {"configurable": {"thread_id": "run"}}
+            with patch.object(pipeline, "report", exported), patch("sys.stderr") as stderr:
+                pipeline.advance(SimpleNamespace(), graph, {}, config)
+            self.assertEqual(graph.get_state(config).values, {"first": "done", "second": "done"})
+        self.assertEqual(seen[1], ({"first": "done", "second": "done"}, ()))
+        self.assertIn("disk full", "".join(str(call) for call in stderr.write.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

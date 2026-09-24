@@ -1215,7 +1215,7 @@ class ClaudeUnavailableTests(GraphFixture):
                     graph.error = repr(outcome)
                 raise outcome
             graph.error = None
-        graph.get_state, graph.invoke = state, invoke
+        graph.get_state, graph.stream = state, lambda value, config, **_: iter(invoke(value, config) or ())
         with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.pipeline.report"):
             # The review wait lost `claude`: the node kept its reviewers running and marked the interruption.
             save_json(combined, {"transport": "native", "status": "running", "reviewers": ["review"], "interrupted": "timed out"})
@@ -1252,7 +1252,7 @@ class ClaudeUnavailableTests(GraphFixture):
             graph.error = repr(self.unavailable()) if graph.unavailable else None
             if graph.unavailable:
                 raise self.unavailable()
-        graph.get_state, graph.invoke = state, invoke
+        graph.get_state, graph.stream = state, lambda value, config, **_: iter(invoke(value, config) or ())
         with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.pipeline.report"):
             for recorded in ({"transport": "print", "status": "blocked", "reviewers": ["review"], "error": str(self.unavailable())},
                              {"transport": "native", "status": "needs_reconciliation", "reviewers": ["review"]}):

@@ -1235,7 +1235,7 @@ def settle_interruption(runtime, failed=None) -> None:
 
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
-    from .pipeline import build_pipeline, graph_config, report
+    from .pipeline import advance, build_pipeline, graph_config, report
     from .repair import refuse_recorded
     validate_automatic(runtime.plan)
     refuse_recorded(runtime.directory)
@@ -1298,7 +1298,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                 if not restart_review(runtime, state):
                     raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
             try:
-                graph.invoke(value, config)
+                advance(runtime, graph, value, config)
             except Exception as error:
                 failed = graph.get_state(config)
                 if not any(task.error for task in failed.tasks):

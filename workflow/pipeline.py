@@ -785,11 +785,22 @@ def start_workers(runtime, attach: bool = False) -> None:
         if graph.get_state(config).values:
             raise RuntimeError("Run already started; use status/explicit controls, never start again")
         try:
-            graph.invoke({"run_id": runtime.plan["run_id"]}, config)
+            advance(runtime, graph, {"run_id": runtime.plan["run_id"]}, config)
         finally:
             print(f"Report: {report(runtime, graph.get_state(config))}")
     if attach:
         print(json.dumps(attach_panels(runtime.sessions), indent=2))
+
+
+def advance(runtime, graph, value, config) -> None:
+    """`graph.invoke`, re-exporting after every step: one invoke can run freeze, checks, candidate and review, and the
+    viewer reads run-state.json, which otherwise stays at the last boundary for all of them. Each step's checkpoint is
+    persisted before it is exported; a failed export never fails the step (the caller exports again when it ends)."""
+    for _ in graph.stream(value, config, stream_mode="updates", durability="sync"):
+        try:
+            report(runtime, graph.get_state(config))
+        except Exception as error:
+            print(f"Report after a step failed; the run continues: {error}", file=sys.stderr)
 
 
 def graph_config(runtime) -> dict:
@@ -1116,7 +1127,7 @@ def main():
                                      "(a check or candidate step that left no verdict first needs retry --phase <phase> --node <lane>)")
                 if args.action != "status":
                     try:
-                        graph.invoke(value, config)
+                        advance(runtime, graph, value, config)
                     finally:
                         print(f"Report: {report(runtime, graph.get_state(config))}")
                     if args.action == "start" and args.herdr:
