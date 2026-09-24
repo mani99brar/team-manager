@@ -24,7 +24,7 @@ from . import pipeline
 from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wait_handoffs
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
-from .guardrails import PANE_ANSWER, answer_main, brief_problems, repin, resume_main
+from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, repin, resume_main
 from .interactive import worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
@@ -967,6 +967,46 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+
+class OverrideFromAnotherController(GuardedFeature):
+    """The override compares the feature files as written, not the rules and check-report command the controller appends
+    to a browser lane's pinned task, which name the interpreter and checkout of the process that pinned it."""
+
+    def test_accept_challenge_from_another_interpreter_and_checkout_accepts_unchanged_files_and_refuses_an_edit(self):
+        policy = two_lane_policy()
+        policy["workers"][0]["checks"].append({"id": "ui-browser", "kind": "browser", "argv": ["npx", "--no-install", "playwright", "test"],
+                                               "timeout_seconds": 10, "scenarios": [{"id": "alpha", "description": "alpha works"}]})
+        save_json(self.folder / "policy.json", policy)
+        commit_all(self.repo, "A browser check on the ui lane")
+        directory = self.prepare("elsewhere-001")
+        base = read_json(directory / "plan.json")["base_commit"]
+        self.assertIn(CHECK_REPORT, read_json(directory / "plan.json")["nodes"]["ui"]["task"])
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
+        # The override runs from another worktree of the tool, with another spelling of the interpreter.
+        elsewhere = CHECK_REPORT.replace(str(TOOL), str(self.root / "md-manager-ctl")).replace(PY, PY + "3")
+        self.assertNotEqual(elsewhere, CHECK_REPORT)
+        with patch("workflow.guardrails.CHECK_REPORT", elsewhere):
+            # An edit of the browser lane's task, committed by hand, is still refused.
+            task = self.folder / "ui-task.md"
+            task.write_text(task.read_text() + "\nA late edit.\n")
+            commit_all(self.repo, "My own edit")
+            output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+            self.assertEqual(code, 1, output)
+            self.assertIn(f"Feature files changed since they were pinned (features/{FEATURE}/ui-task.md)", output)
+            self.assertEqual((read_json(directory / "challenge.json")["status"], self.launches(directory)), ("paused", ["challenge"]))
+            # The unchanged files are accepted: nothing to revert, nothing re-pinned.
+            git(self.repo, "reset", "-q", "--hard", base)
+            pinned = read_json(directory / "plan.json")["nodes"]
+            output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("accepted", 1))
+        self.assertEqual(read_json(directory / "plan.json")["nodes"], pinned)
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+
 class CompletionEvidence(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

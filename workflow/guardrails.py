@@ -148,15 +148,22 @@ BROWSER_RULES = ("\nBrowser scenarios: each scenario id of your browser checks a
                  "PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json npx --no-install playwright test --config=<config> --reporter=json "
                  "<spec files>` and check the report with the verifier's own rules against the run's pinned policy (it only "
                  "reads it), from anywhere in your worktree: `{check_report} {lane} <tmp>/report.json`.")
+APPROVED = "\nApproved ownership and checks:\n"
 
 
 def pinned_task(text: str, worker: dict) -> str:
     """A lane's task as the plan pins it: the authored text plus the approved ownership and checks, and for a lane
     with browser checks the scenario rules the verifier applies and the command that applies them to a report."""
-    task = text + "\nApproved ownership and checks:\n" + json.dumps(worker)
+    task = text + APPROVED + json.dumps(worker)
     if any(check["kind"] == "browser" for check in worker["checks"]):
         task += BROWSER_RULES.format(check_report=CHECK_REPORT, lane=worker["node_id"])
     return task
+
+
+def authored_task(task: str) -> str:
+    """The task file's text a pinned task holds: everything before the approved ownership and checks. What follows is
+    the controller's own, and for a browser lane it names the interpreter and checkout of the process that pinned it."""
+    return task.rpartition(APPROVED)[0]
 
 
 def pin_guardrails(plan: dict, directory: Path, task_files: dict[str, Path], decisions: Path, prd: Path | None, challenge: bool) -> None:
@@ -571,13 +578,16 @@ def move_base(runtime, target: str, heads: set[str]) -> None:
                                         "re-pinned files next; no worker exists yet")
 
 
-def changed_pins(plan: dict, policy: dict) -> list[Path]:
-    """The pinned feature files that no longer hold the plan's copies: edited, committed without `resume`, or removed."""
-    workers = {worker["node_id"]: worker for worker in policy["workers"]}
+def changed_pins(plan: dict) -> list[Path]:
+    """The pinned feature files that no longer hold the plan's copies: edited, committed without `resume`, or removed.
+
+    A task file is compared with the authored part of its pinned task, never with a task pinned again here: another
+    interpreter, tool checkout or tool version appends other text to a browser lane's task than prepare did.
+    """
     changed = []
     for node in plan_workers(plan):
         path = Path(plan["task_files"][node])
-        if not path.is_file() or pinned_task(path.read_text(), workers[node]) != plan["nodes"][node]["task"]:
+        if not path.is_file() or path.read_text() != authored_task(plan["nodes"][node]["task"]):
             changed.append(path)
     decisions = Path(plan["decisions"]["path"])
     if not decisions.is_file() or decisions.read_text() != plan["decisions"]["text"]:
@@ -588,7 +598,7 @@ def changed_pins(plan: dict, policy: dict) -> list[Path]:
     return changed
 
 
-def refuse_unused_edits(directory: Path, plan: dict, policy: dict) -> None:
+def refuse_unused_edits(directory: Path, plan: dict) -> None:
     """An override launches the workers on the plan's pinned copies at its base; an unfinished resume, an unused revision or a changed pin refuses it."""
     repo = Path(plan["repository"])
     if (directory / REVISION_INTENT).exists():
@@ -598,7 +608,7 @@ def refuse_unused_edits(directory: Path, plan: dict, policy: dict) -> None:
         raise ValueError(f"An interrupted resume committed revised feature files ({', '.join(pending)}) that this run does not use yet; "
                          "rerun resume without --accept-challenge to finish moving the run to them")
     edited = {path for path in dirty_paths(repo) if path in pinned_paths(plan)}
-    edited |= {path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path) for path in changed_pins(plan, policy)}
+    edited |= {path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path) for path in changed_pins(plan)}
     if edited:
         raise ValueError(f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers "
                          "without them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
@@ -632,7 +642,7 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
             raise ValueError("--accept-challenge needs a non-empty reason")
         if current is None or current["status"] != "paused":
             raise ValueError("Only a paused design challenge can be accepted")
-        refuse_unused_edits(directory, plan, runtime.policy)
+        refuse_unused_edits(directory, plan)
         changed = [key.removesuffix("_sha256") for key, value in pinned_digests(directory, plan).items() if current["pinned"].get(key) != value]
         if changed:
             raise ValueError(f"Design challenge attempt {current['attempt']} read other feature files than the plan now pins ({', '.join(changed)}): "
