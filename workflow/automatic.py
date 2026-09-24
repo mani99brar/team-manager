@@ -602,6 +602,13 @@ def rebind_reviewers(runtime, state: ReviewStatus) -> None:
             try:
                 bound = runtime.reconcile_reviewer(reviewer_id)
             except Exception as error:
+                if isinstance(error, TransientInfraError) and not partial:
+                    # Claude Code itself was unavailable, not a verdict: the reviewer keeps running, its receipt unbound. The
+                    # marker lets the next controller re-enter the review and rebind it again (review_interrupted).
+                    combined["interrupted"] = str(error)
+                    state.save()
+                    runtime.event("review", "interrupted", f"{error}. {REVIEW_RESUME_NOTE.format(directory=runtime.directory)}")
+                    raise
                 status.update(status="needs_reconciliation", error=str(error))
                 combined.update(status="needs_reconciliation", error=str(error))
                 state.save()
@@ -1282,9 +1289,12 @@ def drive(runtime, *, single_step=False) -> str | None:
                 failed = graph.get_state(config)
                 if not any(task.error for task in failed.tasks):
                     raise
-                if isinstance(error, TransientInfraError):
-                    # Claude Code itself was unavailable, whichever node called it: no verdict on any session. Raised, so
-                    # the step exits 69 (75 would claim a persisted checkpoint to continue from) and `automatic` exits 75.
+                if isinstance(error, TransientInfraError) and (freeze_failure(failed) or review_interrupted(runtime, failed)
+                                                                or reviewer_stop_pending(runtime, failed)):
+                    # Claude Code itself was unavailable, whichever node called it, and the next controller continues what it
+                    # left (the freeze's recorded stops, native reviewers still running, an accepted review's stops): no verdict
+                    # on any session. Raised, so the step exits 69 (75 would claim a persisted checkpoint to continue from)
+                    # and `automatic` exits 75.
                     if freeze_failure(failed):
                         save_json(runtime.directory / FREEZE_INTERRUPTED, {"error": str(error)})
                         runtime.event("freeze", "interrupted", f"{error}. {FREEZE_RESUME_NOTE.format(directory=runtime.directory)}")
@@ -1292,6 +1302,12 @@ def drive(runtime, *, single_step=False) -> str | None:
                         runtime.event("controller", "interrupted", f"{error}. {UNAVAILABLE_NOTE.format(directory=runtime.directory)}")
                     settle_interruption(runtime, failed)
                     raise
+                if isinstance(error, TransientInfraError):
+                    # Exit 75 is only for a state `automatic --live` continues. This node ended on the outage for good (a print
+                    # review terminated its jobs, a reviewer launch needs reconciliation): the run is blocked, classified below.
+                    names = ", ".join(task.name for task in failed.tasks if task.error and task.name in failed.next)
+                    runtime.event("controller", "blocked", f"{error}. The {names} step ended on it in a state no resume continues; "
+                                                           "inspect retained evidence")
                 settle_interruption(runtime)
                 if reviewer_stop_pending(runtime, failed):
                     # Not retried in this loop: the operator inspects the session first; a resumed

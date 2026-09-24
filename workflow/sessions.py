@@ -218,7 +218,9 @@ UPDATE_ERRNOS = {errno.ENOENT, errno.ENOEXEC, errno.ETXTBSY}
 class TransientInfraError(RuntimeError):
     """Claude Code itself is unavailable: an update is replacing the binary, or the background service is restarting.
 
-    It is not a verdict on any session, so the automatic controller stops nothing on it and exits resumable.
+    It is not a verdict on any session, so the automatic controller stops nothing on it and exits resumable, wherever the
+    next controller continues the step: a print review it interrupts has terminated its jobs, and a reviewer launch it
+    interrupts needs reconciliation, so those block the run.
     Raised by type at the source (run_claude and friends, the session inventory); never classified from message text.
     """
 

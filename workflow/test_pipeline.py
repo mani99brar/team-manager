@@ -580,6 +580,87 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             run([[respawned], [respawned]], run_claude=Mock(side_effect=TransientInfraError("Claude Code unavailable for 60s")))
         self.assertEqual(read_json(marker), {**intent, "pid": os.getpid()})
 
+    def test_a_stop_that_exited_non_zero_is_issued_again_to_the_session_an_update_respawned(self):
+        # `claude stop` ran and exited non-zero while an update restarted the background service, which then respawned the idle
+        # session under a new PID. The retry in that gap found the session left out of the listing and the old PID ended, and
+        # recorded `stopped: true` with no stop issued: the respawned session kept running. A stop that failed is still owed:
+        # the retry looks through the gap, records nothing while it lasts, and stops the respawned process once.
+        from .sessions import TransientInfraError
+        old = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(old.wait)
+        self.addCleanup(old.kill)
+        save_json(self.directory / "ui.interactive.json", {"background_id": "id-ui", "session_id": "session-ui"})
+        row = {**self.native_rows()["ui"], "pid": old.pid}
+        respawned = {**row, "pid": os.getpid()}
+        marker = self.directory / "ui.stop.json"
+        fake = SimpleNamespace(now=0.0, listings=iter(()), codes=iter(()))
+        self.runtime.sessions = SimpleNamespace(executable="claude", inventory=lambda: next(fake.listings),
+                                               locate=lambda node, rows: next((item for item in rows if item["id"] == f"id-{node}"), None))
+        def run(listings, codes):
+            fake.listings, fake.codes = iter(listings), iter(codes)
+            with patch("workflow.pipeline.time") as fake_time, patch("workflow.pipeline.pid_alive", return_value=False), \
+                    patch("workflow.pipeline.subprocess.run", side_effect=lambda argv, **_: subprocess.CompletedProcess(argv, next(fake.codes))) as command:
+                fake_time.monotonic.side_effect = lambda: fake.now
+                fake_time.sleep.side_effect = lambda seconds: setattr(fake, "now", fake.now + seconds)
+                try:
+                    self.runtime.stop_session("ui")
+                finally:
+                    self.commands = [item.args[0] for item in command.call_args_list]
+        with self.assertRaisesRegex(RuntimeError, "Stop failed for ui"):
+            run([[row], [row]], [1])
+        self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
+        self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": old.pid, "stopped": False, "issued": False})
+        old.kill()
+        old.wait()  # The restart ended the process the failed stop was for.
+        with self.assertRaises(TransientInfraError):
+            run([[]] * 20, [])
+        self.assertEqual((self.commands, read_json(marker)["stopped"]), ([], False))
+        run([[], [respawned], []], [0])
+        self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
+        self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True, "issued": True})
+
+    def test_stop_workers_stops_every_lane_and_names_each_stop_it_could_not_confirm(self):
+        # A blocked wait stops the workers, and the lane that blocked it (a `stopped` or `failed` row, a changed identity) is
+        # usually one whose stop is refused. The lanes after it used to keep running, and using quota, after the run was blocked.
+        from .sessions import TransientInfraError
+        live, refusals = {}, {}
+        def locate(node, rows):
+            if node in refusals:
+                raise refusals[node]
+            return next((row for row in rows if row["id"] == f"id-{node}"), None)
+        self.runtime.sessions = SimpleNamespace(executable="claude", inventory=lambda: list(live.values()), locate=locate)
+        def stop(argv, **_kwargs):
+            live.pop(argv[-1].removeprefix("id-"))
+            return subprocess.CompletedProcess(argv, 0)
+        def run(refused):
+            live.clear()
+            live.update(self.native_rows())
+            refusals.clear()
+            refusals.update(refused)
+            for node in ("ui", "adapter"):
+                (self.directory / f"{node}.stop.json").unlink(missing_ok=True)
+            with patch("workflow.pipeline.subprocess.run", side_effect=stop) as command, patch("workflow.pipeline.pid_alive", return_value=False):
+                try:
+                    Pipeline.stop_workers(self.runtime)
+                finally:
+                    self.commands = [item.args[0] for item in command.call_args_list]
+        with self.assertRaisesRegex(RuntimeError, r"^ui: Native Claude UUID changed; refusing attachment$") as raised:
+            run({"ui": RuntimeError("Native Claude UUID changed; refusing attachment")})
+        self.assertNotIsInstance(raised.exception, TransientInfraError)
+        self.assertEqual(self.commands, [["claude", "stop", "id-adapter"]])
+        self.assertFalse((self.directory / "ui.stop.json").exists())
+        self.assertTrue(read_json(self.directory / "adapter.stop.json")["stopped"])
+        self.assertFalse((self.directory / "events.jsonl").exists())  # No "Native workers stopped": one was not.
+        # Claude Code unavailable for every failing lane keeps a freeze resumable; any other refusal decides the run.
+        unavailable = TransientInfraError("Claude session inventory unavailable for 60s: `claude agents --json` exited 1")
+        with self.assertRaisesRegex(TransientInfraError, r"^ui: Claude session inventory unavailable"):
+            run({"ui": unavailable})
+        self.assertEqual(self.commands, [["claude", "stop", "id-adapter"]])
+        with self.assertRaisesRegex(RuntimeError, r"^ui: Session is not attachable: 'stopped'; reconcile manually; adapter: Claude session") as raised:
+            run({"ui": RuntimeError("Session is not attachable: 'stopped'; reconcile manually"), "adapter": unavailable})
+        self.assertNotIsInstance(raised.exception, TransientInfraError)
+        self.assertEqual(self.commands, [])
+
     def test_launch_reviewer_pane_is_best_effort_and_launch_failure_is_recorded(self):
         receipt = {"session_id": "33333333-3333-4333-8333-333333333333", "background_id": "33333333", "status": "attached_session_available"}
         launches = []

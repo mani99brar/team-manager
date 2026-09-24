@@ -371,6 +371,10 @@ class Pipeline:
                     save_json(marker, intent)
                     raise
                 if result.returncode != 0:
+                    # It ran and failed (a restarting background service refuses it, then respawns the session): nothing
+                    # confirms it, so it is still owed and a retry looks through the respawn gap instead of trusting absence.
+                    intent["issued"] = False
+                    save_json(marker, intent)
                     raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
             # Recover stop-before-receipt without issuing another stop command.
             rows = self.sessions.inventory()
@@ -380,8 +384,18 @@ class Pipeline:
             save_json(marker, intent)
 
     def stop_workers(self):
+        """Stop every lane, continuing past failures, so no session keeps using quota for a run that cannot continue (the lane
+        that blocked a wait is often one whose stop is refused); the unconfirmed ones are then raised together, by lane."""
+        failures = {}
         for node in self.workers:
-            self.stop_session(node)
+            try:
+                self.stop_session(node)
+            except Exception as error:
+                failures[node] = error
+        if failures:
+            # Claude Code unavailable for each of them keeps a freeze resumable; any other refusal decides the run.
+            transient = all(isinstance(error, TransientInfraError) for error in failures.values())
+            raise (TransientInfraError if transient else RuntimeError)("; ".join(f"{node}: {error}" for node, error in failures.items()))
         stopped_ids = {read_json(self.directory / f"{node}.stop.json")["session_id"] for node in self.workers}
         if any(row.get("sessionId") in stopped_ids and row.get("pid") for row in self.sessions.inventory()):
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")

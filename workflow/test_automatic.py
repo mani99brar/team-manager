@@ -666,6 +666,37 @@ class ReviewCompletionTests(unittest.TestCase):
             self.assertFalse(review_interrupted(self.runtime, failed), status)
 
 
+    def test_claude_code_unavailable_while_a_resume_rebinds_a_reviewer_keeps_the_review_resumable(self):
+        # A resume rebinds a reviewer whose settle poll a Ctrl-C cut short, and the listing it binds from can be unavailable too.
+        # That used to mark the reviewer and the review `needs_reconciliation`, a state no `automatic --live` continues, while
+        # the step still exited as Claude Code unavailable. The reviewers keep running, and the next controller rebinds them.
+        from unittest.mock import Mock
+        from .automatic import ReviewStatus, rebind_reviewers, review_interrupted
+        from .sessions import TransientInfraError
+        last = self.ids[-1]
+        path = self.root / f"automatic-{self.node(last)}.json"
+        save_json(path, {key: value for key, value in read_json(path).items() if key != "session_id"})
+        self.runtime.reconcile_reviewer = Mock(side_effect=TransientInfraError("Claude session inventory unavailable: timed out"))
+        with self.assertRaises(TransientInfraError):
+            rebind_reviewers(self.runtime, ReviewStatus.load(self.runtime))
+        self.runtime.reconcile_reviewer.assert_called_once_with(last)
+        combined = read_json(self.root / "automatic-review.json")
+        self.assertEqual((combined["status"], combined["interrupted"]), ("running", "Claude session inventory unavailable: timed out"))
+        self.assertNotIn("error", combined)
+        state = ReviewStatus.load(self.runtime)
+        self.assertEqual([state.statuses[reviewer_id]["status"] for reviewer_id in self.ids], ["running"] * len(self.ids))
+        self.assertEqual([event[:2] for event in self.events], [("review", "interrupted")])
+        self.assertIn("NOT stopped", self.events[0][2])
+        self.assertIn(f"python -m workflow automatic {self.root} --live", self.events[0][2])
+        failed = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="TransientInfraError('Claude session inventory unavailable')")])
+        self.assertTrue(review_interrupted(self.runtime, failed))
+        # Any other failure to rebind still needs the operator.
+        self.runtime.reconcile_reviewer = Mock(side_effect=RuntimeError("Existing launch cannot be reconciled; no automatic relaunch"))
+        with self.assertRaisesRegex(RuntimeError, "cannot be reconciled"):
+            rebind_reviewers(self.runtime, ReviewStatus.load(self.runtime))
+        state = ReviewStatus.load(self.runtime)
+        self.assertEqual((state.combined["status"], state.statuses[last]["status"]), ("needs_reconciliation", "needs_reconciliation"))
+
     def test_a_verdict_accepted_in_time_decides_when_the_controller_resumes_after_the_deadline(self):
         # Every verdict is written and accepted at t=600; then Claude Code is unavailable while the controller checks the
         # reviewers' identity (exit 75). The operator resumes after every reviewer's deadline: the files are read again and
@@ -1159,19 +1190,51 @@ class ClaudeUnavailableTests(GraphFixture):
             self.assertEqual(graph.invokes, [None, None, None])
             self.assertNotIn("interrupted", read_json(combined))
             self.assertIn("Resuming the review interrupted by: timed out", self.events()[-1]["message"])
-            # Without the marker (a reviewer launch the outage interrupted leaves the review at needs_reconciliation) the step
-            # still ends as Claude Code unavailable, exit 69, never as a persisted checkpoint (75) that the supervisor would
-            # continue from; the next controller finds the review non-retryable. Nothing loops or relaunches.
-            graph.outcome = self.unavailable()
-            save_json(combined, {"transport": "native", "status": "needs_reconciliation", "reviewers": ["review"]})
+
+    def test_an_outage_that_ended_the_review_for_good_blocks_the_run_instead_of_exiting_resumable(self):
+        # A print review terminates its jobs when `claude` stays unavailable, and a reviewer launch the outage interrupted leaves
+        # the review at needs_reconciliation: no `automatic --live` continues either. The step used to exit 69 (`automatic` 75,
+        # "Nothing was stopped ... resume with"), and that resume then stopped at a non-retryable failure. The step now records
+        # why the run is blocked and persists the checkpoint, so the next controller names the failure and `automatic` exits 1.
+        # An accepted review whose reviewer stop the outage interrupted stays resumable: the next controller retries the stop.
+        from .sessions import TransientInfraError
+        f = self.fixture
+        combined = f.directory / "automatic-review.json"
+        graph = SimpleNamespace(error=None, invokes=[], unavailable=True)
+        def state(config):
+            return SimpleNamespace(values={"run_id": "run"}, next=("review",),
+                                   tasks=[SimpleNamespace(name="review", error=graph.error, interrupts=())])
+        def invoke(value, config):
+            graph.invokes.append(value)
+            graph.error = repr(self.unavailable()) if graph.unavailable else None
+            if graph.unavailable:
+                raise self.unavailable()
+        graph.get_state, graph.invoke = state, invoke
+        with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.pipeline.report"):
+            for recorded in ({"transport": "print", "status": "blocked", "reviewers": ["review"], "error": str(self.unavailable())},
+                             {"transport": "native", "status": "needs_reconciliation", "reviewers": ["review"]}):
+                graph.error = None
+                save_json(combined, recorded)
+                self.assertIsNone(drive(f.runtime, single_step=True))  # Exit 75 from the step: its checkpoint persisted.
+                event = self.events()[-1]
+                self.assertEqual((event["node"], event["status"]), ("controller", "blocked"), recorded)
+                self.assertIn("Claude session inventory unavailable", event["message"])
+                self.assertIn("review step", event["message"])
+                for claim in ("Nothing was stopped", "resume with"):
+                    self.assertNotIn(claim, event["message"])
+                with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
+                    drive(f.runtime)
+            self.assertEqual(graph.invokes, [None, None])
+            graph.error = None
+            save_json(combined, {"transport": "native", "status": "succeeded", "reviewers": ["review"]})
             with self.assertRaises(TransientInfraError):
                 drive(f.runtime, single_step=True)
             event = self.events()[-1]
             self.assertEqual((event["node"], event["status"]), ("controller", "interrupted"))
             self.assertIn(f"python -m workflow automatic {f.directory} --live", event["message"])
-            with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
-                drive(f.runtime)
-            self.assertEqual(graph.invokes, [None, None, None, None])
+            graph.unavailable = False
+            self.assertIsNone(drive(f.runtime, single_step=True))  # The stop is retried, and this time the node ends.
+        self.assertEqual(graph.invokes, [None, None, None, None])
 
     def lanes_live(self):
         """Each lane's session as a live `sleep` process listed by a registry the test controls; `claude stop` ends it."""
@@ -1207,8 +1270,9 @@ class ClaudeUnavailableTests(GraphFixture):
     def test_an_outage_while_the_freeze_stops_the_workers_is_resumed_and_relaunches_nothing(self):
         # Every lane finished and the freeze stops them before the snapshots. Claude Code goes away right after ui's `claude stop`,
         # before that stop is confirmed: the step exits 69 (automatic then exits 75), not 75 "checkpoint persisted", after which
-        # the next step used to find no next graph step and block ("No verified feature-branch completion"). The next
-        # `automatic --live` completes the recorded stop, stops adapter once and captures the snapshots; nothing is relaunched.
+        # the next step used to find no next graph step and block ("No verified feature-branch completion"). adapter's stop is
+        # attempted too and records nothing; each lane is named. The next `automatic --live` completes the recorded stop, stops
+        # adapter once and captures the snapshots; nothing is relaunched.
         from .automatic import UNAVAILABLE_EXIT
         f = self.fixture
         stop = self.lanes_live()
@@ -1216,7 +1280,8 @@ class ClaudeUnavailableTests(GraphFixture):
         with patch("workflow.pipeline.run_claude", side_effect=stop):
             code, errors = self.cli(["automatic-step", str(f.directory), "--live"])
             self.assertEqual(code, UNAVAILABLE_EXIT, errors)
-            self.assertIn("Interrupted: Claude session inventory unavailable", errors)
+            self.assertIn("Interrupted: ui: Claude session inventory unavailable", errors)
+            self.assertIn("; adapter: Claude session inventory unavailable", errors)
             self.assertEqual(self.stops, ["ui"])
             self.assertEqual(read_json(f.directory / "ui.stop.json")["stopped"], False)
             self.assertFalse((f.directory / "adapter.stop.json").exists())
@@ -1238,8 +1303,9 @@ class ClaudeUnavailableTests(GraphFixture):
         self.assertEqual(f.sessions.starts, starts)
         self.assertFalse((f.directory / "freeze-interrupted.json").exists())
         messages = [(event["node"], event["status"], event["message"]) for event in self.events()]
-        self.assertIn(("freeze", "running", "Resuming the freeze interrupted by: Claude session inventory unavailable for 60s: "
-                                            "`claude agents --json` exited 1; its recorded stops are completed, nothing is relaunched"), messages)
+        unavailable = "Claude session inventory unavailable for 60s: `claude agents --json` exited 1"
+        self.assertIn(("freeze", "running", f"Resuming the freeze interrupted by: ui: {unavailable}; adapter: {unavailable}; "
+                                            "its recorded stops are completed, nothing is relaunched"), messages)
         self.assertEqual([status for node, status, _ in messages if node == "freeze"], ["interrupted", "running", "stopped", "succeeded"])
 
     def test_a_freeze_re_entry_cut_short_is_re_entered_by_the_next_controller(self):
