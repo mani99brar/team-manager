@@ -348,21 +348,28 @@ class Pipeline:
             row = self.stop_row(node, self.sessions.inventory())
             if row is None:
                 raise RuntimeError(f"{node} session missing before stop; reconcile before continuing")
-            intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
+            intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False, "issued": False}
             save_json(marker, intent)
         if not intent["stopped"]:
             rows = self.sessions.inventory()
             matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
-            if matching:
+            # A session the listing leaves out (or lists without a PID) counts as stopped only once its stop was issued (an
+            # intent recorded before `issued` existed counts as issued); a stop never issued looks through an update's respawn gap.
+            if matching or intent.get("issued") is False:
                 # Its session UUID listed under another background id is a changed identity, never a gap.
-                row = self.stop_row(node, rows) if any(item.get("id") == intent["background_id"] for item in matching) else None
+                row = self.stop_row(node, rows) if not matching or any(item.get("id") == intent["background_id"] for item in matching) else None
                 if row is None or row["id"] != intent["background_id"] or row["sessionId"] != intent["session_id"]:
                     raise RuntimeError(f"Native {node} session identity changed after stop intent; reconcile manually")
-                if row["pid"] != intent["pid"]:
-                    # An update respawned the session (same background id and UUID) under a new live PID: stop that process.
-                    intent["pid"] = row["pid"]
+                # The process this stop is for (an update respawns a session under a new PID, same background id and UUID),
+                # and that the stop is issued, are recorded before it runs.
+                intent.update(pid=row["pid"], issued=True)
+                save_json(marker, intent)
+                try:
+                    result = run_claude([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
+                except TransientInfraError:
+                    intent["issued"] = False  # Its exec failed for the whole grace: nothing ran, the stop is still owed.
                     save_json(marker, intent)
-                result = run_claude([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
+                    raise
                 if result.returncode != 0:
                     raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
             # Recover stop-before-receipt without issuing another stop command.

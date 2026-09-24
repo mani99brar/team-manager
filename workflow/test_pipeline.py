@@ -491,7 +491,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         self.assertEqual([item.args[0] for item in command.call_args_list], [["claude", "stop", "id-ui"]])
         alive.assert_called_once_with(respawned)  # Termination is established for the process that was stopped.
         self.assertEqual(read_json(self.directory / "ui.stop.json"),
-                         {"background_id": "id-ui", "session_id": "session-ui", "pid": respawned, "stopped": True})
+                         {"background_id": "id-ui", "session_id": "session-ui", "pid": respawned, "stopped": True, "issued": True})
 
     def test_a_stop_waits_out_an_update_respawn_gap_of_a_bound_session(self):
         # Every lane is idle at the freeze, which is what an update respawns: the listing omits the session, then lists its
@@ -522,7 +522,8 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
                     self.commands, self.sleeps = [item.args[0] for item in command.call_args_list], fake_time.sleep.call_count
         stop([[], [{**row, "pid": ended.pid}], [row], [row], []])
         self.assertEqual((self.commands, self.sleeps), ([["claude", "stop", "id-ui"]], 2))
-        self.assertEqual(read_json(self.directory / "ui.stop.json"), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True})
+        self.assertEqual(read_json(self.directory / "ui.stop.json"), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True,
+                                                                     "issued": True})
         stop([[{**row, "pid": ended.pid}], [row], []], intent={"background_id": "id-ui", "session_id": "session-ui", "pid": ended.pid, "stopped": False})
         self.assertEqual((self.commands, self.sleeps), ([["claude", "stop", "id-ui"]], 1))
         self.assertEqual(read_json(self.directory / "ui.stop.json")["pid"], os.getpid())
@@ -531,6 +532,53 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             stop([[]] * 20)
         self.assertEqual((self.commands, self.sleeps), ([], DEAD_PID_GRACE_SECONDS // 2))
         self.assertFalse((self.directory / "ui.stop.json").exists())
+
+    def test_a_stop_never_issued_is_issued_to_the_session_an_update_respawned(self):
+        # An outage right after the freeze recorded ui's stop intent, before `claude stop` ran. The restarted service respawns the
+        # idle lane under a new PID, and the resumed stop lists it in that gap: left out, then listed anew. Left out of the
+        # listing means stopped only for a stop that was issued; this one is looked up through the gap and issued once, and
+        # `stopped` is recorded only after it. Used to: no stop, `stopped: true`, then "A stopped worker was restarted".
+        import contextlib
+        from unittest.mock import Mock
+        from .sessions import TransientInfraError
+        ended = subprocess.Popen(["sleep", "60"])
+        ended.kill()
+        ended.wait()
+        save_json(self.directory / "ui.interactive.json", {"background_id": "id-ui", "session_id": "session-ui"})
+        respawned = {**self.native_rows()["ui"], "pid": os.getpid()}
+        marker = self.directory / "ui.stop.json"
+        intent = {"background_id": "id-ui", "session_id": "session-ui", "pid": ended.pid, "stopped": False, "issued": False}
+        fake = SimpleNamespace(listings=iter(()), during=[])
+        self.runtime.sessions = SimpleNamespace(executable="claude", inventory=lambda: next(fake.listings),
+                                               locate=lambda node, rows: next((item for item in rows if item["id"] == f"id-{node}"), None))
+        def stop(argv, **_kwargs):
+            fake.during.append(read_json(marker))  # What the marker says while `claude stop` runs.
+            return subprocess.CompletedProcess(argv, 0)
+        def run(listings, saved=None, run_claude=None):
+            fake.listings = iter(listings)
+            if saved:
+                save_json(marker, saved)
+            with patch("workflow.pipeline.time") as fake_time, patch("workflow.pipeline.subprocess.run", side_effect=stop) as command, \
+                    patch("workflow.pipeline.pid_alive", return_value=False), \
+                    patch("workflow.pipeline.run_claude", run_claude) if run_claude else contextlib.nullcontext():
+                fake_time.monotonic.return_value = 0.0
+                try:
+                    self.runtime.stop_session("ui")
+                finally:
+                    self.commands = [item.args[0] for item in command.call_args_list]
+        run([[], [respawned], []], intent)
+        self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
+        self.assertEqual(fake.during, [{**intent, "pid": os.getpid(), "issued": True}])
+        self.assertEqual(read_json(marker), {**intent, "pid": os.getpid(), "issued": True, "stopped": True})
+        # An issued stop (or one recorded before `issued` existed) whose session the listing leaves out is confirmed, not issued again.
+        for saved in ({**intent, "issued": True}, {key: value for key, value in intent.items() if key != "issued"}):
+            run([[], []], saved)
+            self.assertEqual((self.commands, read_json(marker)["stopped"]), ([], True))
+        # A new stop records its intent unissued; a `claude stop` whose exec failed for the whole grace ran nothing and stays unissued.
+        marker.unlink()
+        with self.assertRaises(TransientInfraError):
+            run([[respawned], [respawned]], run_claude=Mock(side_effect=TransientInfraError("Claude Code unavailable for 60s")))
+        self.assertEqual(read_json(marker), {**intent, "pid": os.getpid()})
 
     def test_launch_reviewer_pane_is_best_effort_and_launch_failure_is_recorded(self):
         receipt = {"session_id": "33333333-3333-4333-8333-333333333333", "background_id": "33333333", "status": "attached_session_available"}

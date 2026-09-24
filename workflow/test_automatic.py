@@ -558,9 +558,70 @@ class ReviewCompletionTests(unittest.TestCase):
         self.assertEqual(now[0], 1 + DEAD_PID_GRACE_SECONDS)
         self.assertNotIn("error", read_json(self.root / f"automatic-{self.node(last)}.json"))
 
+    def bind_live(self):
+        """Every reviewer's receipt bound to its background id, each listed with a live PID (this process's), each file written."""
+        for reviewer_id in self.ids:
+            path = self.root / f"{self.node(reviewer_id)}.interactive.json"
+            save_json(path, {**read_json(path), "background_id": self.uuid(reviewer_id)[:8]})
+            self.rows[reviewer_id]["pid"] = os.getpid()
+            self.write(reviewer_id)
+
+    def test_the_identity_check_after_the_files_waits_out_an_update_respawn_gap(self):
+        # The identity check lists the reviewers once more right after the wait accepted their files, when they are idle: what an
+        # update respawns under a new PID. A listing in that gap is taken again 2 seconds later, as the wait does: the session back
+        # under a new PID passes, a gap that outlasts the grace is Claude Code unavailable. A changed UUID is still refused at once.
+        from .automatic import ReviewStatus, check_independence
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        from .sessions import TransientInfraError
+        self.bind_live()
+        state = ReviewStatus.load(self.runtime)
+        first, last = self.ids[0], self.ids[-1]
+        listed = [dict(row) for reviewer_id, row in self.rows.items() if reviewer_id != last]
+        listings = iter([listed, [*listed, {**self.rows[last], "pid": os.getppid()}]])
+        self.runtime.sessions.inventory = lambda: next(listings)
+        sleeps = []
+        check_independence(self.runtime, self.bundle, state, clock=lambda: 1, sleep=sleeps.append)
+        self.assertEqual(sleeps, [2])
+        self.runtime.sessions.inventory = lambda: [{**self.rows[first], "sessionId": "44444444-4444-4444-8444-444444444444"}]
+        with self.assertRaisesRegex(RuntimeError, rf"^Reviewer identity changed or is not independent \({first}\); refusing the verdict"):
+            check_independence(self.runtime, self.bundle, state, clock=lambda: 1, sleep=sleeps.append)
+        self.assertEqual(sleeps, [2])
+        now = [1.0]
+        self.runtime.sessions.inventory = lambda: [dict(row) for row in listed]
+        with self.assertRaisesRegex(TransientInfraError, rf"^Claude Code has not listed a live {self.node(last)} session "
+                                                         rf"\({self.uuid(last)[:8]}\) for {DEAD_PID_GRACE_SECONDS}s"):
+            check_independence(self.runtime, self.bundle, state, clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
+        self.assertEqual(now[0], 1 + DEAD_PID_GRACE_SECONDS)
+
+    def test_a_respawn_gap_that_outlasts_the_grace_after_the_files_interrupts_the_review_and_stops_no_reviewer(self):
+        # Used to: one listing without the idle reviewer refused the verdict ("identity changed"), blocked the review and stopped
+        # every reviewer. Now the review node records the interruption the next `automatic --live` re-enters; nothing is stopped.
+        from unittest.mock import Mock
+        from .automatic import ReviewStatus, _accept_native, review_interrupted
+        from .sessions import TransientInfraError
+        self.bind_live()
+        last = self.ids[-1]
+        listings = iter([[dict(row) for row in self.rows.values()]])  # The wait accepts every file; then the respawn gap starts.
+        self.runtime.sessions.inventory = lambda: next(listings, [dict(row) for reviewer_id, row in self.rows.items() if reviewer_id != last])
+        self.runtime.stop_reviewer = Mock()
+        clock = SimpleNamespace(now=1.0)
+        with patch("workflow.automatic.time") as fake_time, self.assertRaises(TransientInfraError):
+            fake_time.time.side_effect = lambda: clock.now
+            fake_time.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+            _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
+        self.runtime.stop_reviewer.assert_not_called()
+        combined = read_json(self.root / "automatic-review.json")
+        self.assertEqual(combined["status"], "running")
+        self.assertTrue(combined["interrupted"].startswith(f"Claude Code has not listed a live {self.node(last)} session"), combined["interrupted"])
+        self.assertNotIn("error", combined)
+        self.assertFalse(any((self.root / f"{self.node(reviewer_id)}.stop.json").exists() for reviewer_id in self.ids))
+        self.assertEqual([event[:2] for event in self.events], [("review", "interrupted")])
+        failed = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="TransientInfraError('Claude Code has not listed')")])
+        self.assertTrue(review_interrupted(self.runtime, failed))
+
     def test_claude_code_unavailable_during_the_wait_stops_no_reviewer_and_is_resumed_once(self):
         from unittest.mock import Mock
-        from .automatic import ReviewStatus, _accept_native, resume_interrupted_review, review_interrupted
+        from .automatic import ReviewStatus, _accept_native, resume_interrupted_review, review_interrupted, settle_interruption
         from .sessions import TransientInfraError
         self.runtime.stop_reviewer = Mock()
         self.runtime.sessions.inventory = Mock(side_effect=TransientInfraError("Claude session inventory unavailable: timed out"))
@@ -581,9 +642,15 @@ class ReviewCompletionTests(unittest.TestCase):
         failed = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="TransientInfraError('Claude session inventory unavailable')")])
         self.assertTrue(review_interrupted(self.runtime, failed))
         self.assertTrue(resume_interrupted_review(self.runtime, failed))
-        self.assertNotIn("interrupted", read_json(self.root / "automatic-review.json"))
         self.assertEqual(self.events[-1][:2], ("review", "running"))
         self.assertIn("rebound, not relaunched", self.events[-1][2])
+        # The marker stays until the re-entry's outcome is known: one cut short (Ctrl-C) is re-entered by the next controller,
+        # and one interrupted again keeps it.
+        self.assertTrue(resume_interrupted_review(self.runtime, failed))
+        settle_interruption(self.runtime, failed)
+        self.assertTrue(review_interrupted(self.runtime, failed))
+        settle_interruption(self.runtime)  # The re-entry ended, or failed for another reason.
+        self.assertNotIn("interrupted", read_json(self.root / "automatic-review.json"))
         self.assertFalse(resume_interrupted_review(self.runtime, failed))  # Consumed: a second failure is classified as itself.
         for status in ("blocked", "needs_reconciliation", "succeeded"):
             save_json(self.root / "automatic-review.json", {**combined, "status": status})
@@ -944,7 +1011,8 @@ class ClaudeUnavailableTests(GraphFixture):
             graph.invokes.append(value)
             outcome, graph.outcome = graph.outcome, None
             if outcome:
-                graph.error = repr(outcome)
+                if isinstance(outcome, Exception):  # LangGraph records a node's error; an interrupted step records nothing.
+                    graph.error = repr(outcome)
                 raise outcome
             graph.error = None
         graph.get_state, graph.invoke = state, invoke
@@ -955,9 +1023,14 @@ class ClaudeUnavailableTests(GraphFixture):
             with self.assertRaises(TransientInfraError):
                 drive(f.runtime)
             self.assertEqual(graph.invokes, [None])
-            # A new controller re-enters the node once and consumes the marker.
+            # A new controller re-enters the node; a Ctrl-C (a closed terminal, a kill) during that re-entry keeps the marker.
+            graph.outcome = KeyboardInterrupt()
+            with self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime, single_step=True)
+            self.assertEqual(read_json(combined)["interrupted"], "timed out")
+            # The next controller re-enters it again and consumes the marker once the node ends.
             self.assertIsNone(drive(f.runtime, single_step=True))
-            self.assertEqual(graph.invokes, [None, None])
+            self.assertEqual(graph.invokes, [None, None, None])
             self.assertNotIn("interrupted", read_json(combined))
             self.assertIn("Resuming the review interrupted by: timed out", self.events()[-1]["message"])
             # Without the marker (a reviewer launch the outage interrupted leaves the review at needs_reconciliation) the step
@@ -972,7 +1045,7 @@ class ClaudeUnavailableTests(GraphFixture):
             self.assertIn(f"python -m workflow automatic {f.directory} --live", event["message"])
             with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
                 drive(f.runtime)
-            self.assertEqual(graph.invokes, [None, None, None])
+            self.assertEqual(graph.invokes, [None, None, None, None])
 
     def lanes_live(self):
         """Each lane's session as a live `sleep` process listed by a registry the test controls; `claude stop` ends it."""
@@ -1042,6 +1115,34 @@ class ClaudeUnavailableTests(GraphFixture):
         self.assertIn(("freeze", "running", "Resuming the freeze interrupted by: Claude session inventory unavailable for 60s: "
                                             "`claude agents --json` exited 1; its recorded stops are completed, nothing is relaunched"), messages)
         self.assertEqual([status for node, status, _ in messages if node == "freeze"], ["interrupted", "running", "stopped", "succeeded"])
+
+    def test_a_freeze_re_entry_cut_short_is_re_entered_by_the_next_controller(self):
+        # The re-entered freeze can wait up to 60 seconds on a listing: a Ctrl-C then (or a closed terminal, a kill) records
+        # nothing, so the checkpoint keeps the old TransientInfraError. The marker used to be consumed before the re-entry, and
+        # every later controller stopped at "Freeze failed: ...; non-retryable". It now stays until the re-entry's outcome is
+        # known: the next `automatic --live` re-enters the freeze and completes it.
+        from .sessions import TransientInfraError
+        f = self.fixture
+        marker = f.directory / "freeze-interrupted.json"
+        real_stop = f.runtime.stop_workers
+        outcomes = [self.unavailable(), KeyboardInterrupt()]
+        def stop_workers():
+            if outcomes:
+                raise outcomes.pop(0)
+            real_stop()
+        with patch("workflow.automatic.wait_handoffs"), patch.object(f.runtime, "stop_workers", side_effect=stop_workers), \
+                patch("workflow.pipeline.Pipeline.verify", side_effect=RuntimeError("Verification is not run in this test")) as verify:
+            with self.assertRaises(TransientInfraError):
+                drive(f.runtime, single_step=True)
+            self.assertTrue(marker.exists())
+            with self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime, single_step=True)
+            self.assertEqual(read_json(marker), {"error": str(self.unavailable())})
+            self.assertIsNone(drive(f.runtime, single_step=True))
+        self.assertEqual(verify.call_count, 2)
+        self.assertFalse(marker.exists())
+        self.assertEqual(sorted(read_json(f.directory / "snapshots.json")), ["adapter", "ui"])
+        self.assertEqual([event["status"] for event in self.events() if event["node"] == "freeze"], ["interrupted", "running", "running", "stopped", "succeeded"])
 
     def test_a_freeze_that_failed_for_another_reason_is_named_and_never_re_entered(self):
         # A stop that failed, an ownership violation, a moved HEAD: the freeze is not re-entered (the supervisor would loop),
@@ -1462,17 +1563,6 @@ sys.exit(0 if commit else 75)
         f = self.fixture
         f.sessions.reviewer_session_id = {self.ids[-1]: f.plan["nodes"]["ui"]["session_id"]}  # The bundle snapshots carry the workers' UUIDs.
         self.assert_refused_after_wait("Reviewer identity changed or is not independent")
-
-    def test_reviewer_missing_after_the_file_is_refused(self):
-        from . import automatic
-        f = self.fixture
-        real_wait = automatic.wait_reviews
-        def wait_then_vanish(runtime, state=None, **kwargs):
-            decisions = real_wait(runtime, state, **kwargs)
-            f.sessions.reviewer_row_after_file = "missing"  # A session exits right after the wait accepted its file.
-            return decisions
-        with patch("workflow.automatic.wait_reviews", side_effect=wait_then_vanish):
-            self.assert_refused_after_wait("Reviewer identity changed or is not independent")
 
     def test_reviewer_worktree_change_is_refused(self):
         f = self.fixture

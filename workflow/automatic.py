@@ -669,16 +669,37 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
     return _accept_native(runtime, bundle, digest, state)
 
 
-def check_independence(runtime, bundle: dict, state: ReviewStatus, rows: list) -> None:
-    """Every reviewer is the session its launch bound, and its UUID differs from every worker's and every other reviewer's."""
+def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None, sleep=None) -> None:
+    """Every reviewer is the session its launch bound, and its UUID differs from every worker's and every other reviewer's.
+
+    A reviewer that wrote its file is idle, which is what an update respawns under a new PID: while the listing shows a
+    bound one in that gap (UpdateGaps) it is listed again every 2 seconds, and a gap that outlasts the grace raises
+    TransientInfraError. A changed or shared UUID and every identity refusal fail at once.
+    """
+    clock = clock or time.time
+    sleep = sleep or time.sleep
     worker_ids = {item["session_id"] for item in bundle["snapshots"].values()}
     seen = set()
     for reviewer_id in state.ids:
-        row = runtime.sessions.locate(review_node(reviewer_id), rows)
         session_id = state.statuses[reviewer_id].get("session_id")
-        if row is None or not session_id or row.get("sessionId") != session_id or session_id in worker_ids or session_id in seen:
+        if not session_id or session_id in worker_ids or session_id in seen:
             raise RuntimeError(f"Reviewer identity changed or is not independent ({reviewer_id}); refusing the verdict")
         seen.add(session_id)
+    gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
+    pending = list(state.ids)
+    while True:
+        rows = runtime.sessions.inventory()
+        for reviewer_id in list(pending):
+            try:
+                row = gaps.row(review_node(reviewer_id), rows)
+            except SessionGap:
+                continue  # An update is respawning this reviewer's session; no verdict.
+            if row is None or row.get("sessionId") != state.statuses[reviewer_id]["session_id"]:
+                raise RuntimeError(f"Reviewer identity changed or is not independent ({reviewer_id}); refusing the verdict")
+            pending.remove(reviewer_id)
+        if not pending:
+            return
+        sleep(2)
 
 
 def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> dict:
@@ -690,7 +711,7 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     try:
         decisions = wait_reviews(runtime, state)
         waited = True  # From here a failure refuses the whole review: nothing accepted so far is trusted.
-        check_independence(runtime, bundle, state, runtime.sessions.inventory())
+        check_independence(runtime, bundle, state)
         if git(cwd, "rev-parse", "HEAD") != bundle["candidate_commit"] or git(cwd, "status", "--porcelain"):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
@@ -1021,15 +1042,14 @@ def review_interrupted(runtime, state) -> bool:
 
 
 def resume_interrupted_review(runtime, state) -> bool:
-    """Re-enter an interrupted review node once: review_candidate rebinds the running reviewers and launches nothing.
+    """Re-enter an interrupted review node: review_candidate rebinds the running reviewers and launches nothing.
 
-    The marker is consumed first, so a re-entry that fails for another reason is classified as that failure.
+    The marker stays until the re-entry's outcome is known (settle_interruption): a re-entry cut short (Ctrl-C, a
+    closed terminal, a kill) is re-entered by the next controller, one that fails for another reason is classified as that failure.
     """
     if not review_interrupted(runtime, state):
         return False
-    combined = read_json(combined_status_path(runtime))
-    cause = combined.pop("interrupted")
-    save_json(combined_status_path(runtime), combined)
+    cause = read_json(combined_status_path(runtime))["interrupted"]
     runtime.event("review", "running", f"Resuming the review interrupted by: {cause}; the reviewers are rebound, not relaunched")
     return True
 
@@ -1051,15 +1071,30 @@ def freeze_failure(state) -> str | None:
 
 
 def resume_interrupted_freeze(runtime) -> None:
-    """Consume the marker of a freeze that Claude Code's unavailability interrupted, right before it is re-entered once.
+    """Re-enter a freeze that Claude Code's unavailability interrupted.
 
-    freeze completes the stops recorded in `<lane>.stop.json` (stop_session confirms a recorded stop before
-    issuing another) and launches nothing; a re-entry that fails for another reason is classified as that failure.
+    freeze completes the stops recorded in `<lane>.stop.json` (stop_session confirms a stop it issued before issuing
+    another) and launches nothing. The marker stays until the re-entry's outcome is known (settle_interruption), as for a review.
+    """
+    cause = read_json(runtime.directory / FREEZE_INTERRUPTED)["error"]
+    runtime.event("freeze", "running", f"Resuming the freeze interrupted by: {cause}; its recorded stops are completed, nothing is relaunched")
+
+
+def settle_interruption(runtime, failed=None) -> None:
+    """Consume the marker of a re-entered freeze or review once LangGraph recorded the re-entry's outcome.
+
+    It ended, or failed for another reason (the next loop classifies that failure): no marker stays. `failed` is the
+    graph state after another TransientInfraError: the freeze or review it interrupted again keeps its marker, now
+    naming the new cause. A re-entry cut short records nothing, and its marker stays for the next controller.
     """
     marker = runtime.directory / FREEZE_INTERRUPTED
-    cause = read_json(marker)["error"]
-    marker.unlink()
-    runtime.event("freeze", "running", f"Resuming the freeze interrupted by: {cause}; its recorded stops are completed, nothing is relaunched")
+    if marker.exists() and not (failed is not None and freeze_failure(failed)):
+        marker.unlink()
+    path = combined_status_path(runtime)
+    if path.exists() and not (failed is not None and review_interrupted(runtime, failed)):
+        combined = read_json(path)
+        if combined.pop("interrupted", None) is not None:
+            save_json(path, combined)
 
 
 def drive(runtime, *, single_step=False) -> str | None:
@@ -1139,12 +1174,16 @@ def drive(runtime, *, single_step=False) -> str | None:
                         runtime.event("freeze", "interrupted", f"{error}. {FREEZE_RESUME_NOTE.format(directory=runtime.directory)}")
                     elif not review_interrupted(runtime, failed):  # The review node recorded its own interruption.
                         runtime.event("controller", "interrupted", f"{error}. {UNAVAILABLE_NOTE.format(directory=runtime.directory)}")
+                    settle_interruption(runtime, failed)
                     raise
+                settle_interruption(runtime)
                 if reviewer_stop_pending(runtime, failed):
                     # Not retried in this loop: the operator inspects the session first; a resumed
                     # controller retries the stop once before continuing.
                     raise RuntimeError(REVIEW_STOP_NOTE.format(error=error, directory=runtime.directory)) from error
                 # Next loop reopens the checkpointer and classifies the exact failure.
+            else:
+                settle_interruption(runtime)
             finally:
                 report(runtime, graph.get_state(config))
             if single_step:
