@@ -311,7 +311,9 @@ test(`[scenario:failed-and-paused] Show failure and awaiting-approval state with
   if (phase === 'worker') {
     await page.goto(runUrl(RUN_FAILED, 'verify_adapter'))
     await expect(page.getByTestId('worker-error')).toContainText('injected_gate_failure')
-    await expect(page.getByTestId('worker-error')).toContainText('Retrying is done through the workflow CLI')
+    // The generic retry note is gone (PRD_VIEWER_UX 8); the next step is the run's situation, repeated on its focus node.
+    await expect(page.getByTestId('worker-error')).not.toContainText('Marked retryable by the producer')
+    await expect(page.getByTestId('node-next')).toContainText('the supervisor retries by itself')
   }
 
   await page.goto(runUrl(RUN_AWAITING, 'review'))
@@ -412,6 +414,9 @@ test(`[scenario:candidate-evidence] The combined candidate node shows every lane
   const ui = page.getByTestId('lane-result:ui')
   await expect(ui).toContainText('Lane ui')
   await expect(page.getByTestId('lane-result:adapter')).toContainText('Lane adapter')
+  // Both lanes passed, so both rows start closed (PRD_VIEWER_UX 4.6); opening one shows its evidence.
+  await expect(ui).not.toHaveAttribute('open', '')
+  await ui.locator(':scope > summary').click()
   await expect(ui.getByTestId('lane-result-evidence:ui')).toBeVisible()
   await expect(ui.getByTestId('checks-list').locator('.check')).toHaveCount(3)
   await expect(ui.getByTestId('checks-list').locator('.check-failed')).toHaveCount(0)

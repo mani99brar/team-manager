@@ -162,7 +162,8 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await expect(banner).toContainText('You are viewing attempt 1 of 3. The latest is attempt 3 ›')
   await expect(banner.getByRole('link')).toHaveAttribute('href', nodeUrl('verify_ui'))
   await expect(page.getByTestId('gate-outcome')).toHaveAttribute('data-passed', 'false')
-  await expect(page.getByTestId('worker-error')).toContainText(NODE_VERIFY_FAILURE)
+  // The gate's reasons are one bullet each (S4a), so the joined error text is read back from them.
+  await expect(page.getByTestId('gate-reason')).toHaveText(NODE_VERIFY_FAILURE.split('; '))
   await expect(page.getByTestId('node-next')).toHaveCount(0)
   await attach(page, testInfo, 'node-attempts')
 
