@@ -1,3 +1,69 @@
 /* ---- Launch node sections (docs/PRD_VIEWER_UX.md 4.5) ---- */
 
-.worker-verified { margin: 0 0 8px; font-size: 0.9rem; }
+.worker-verified { margin: 8px 0 0; font-size: 0.9rem; }
+
+/* The waiting question leads the page, highlighted like the Now banner's attention. */
+.worker-questions-section { padding: 8px 12px; border: 1px solid var(--warn-border, var(--border)); border-left-width: 4px; border-radius: 6px; background: var(--warn-bg, var(--surface)); }
+.worker-questions-section .worker-questions-open { margin-top: 0; }
+.worker-questions-section h4 { margin-top: 0; }
+
+/* The report: the heading and its one honesty line, the summary clamped to three lines, the evidence behind counts. */
+.worker-report-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.worker-report-head h4 { margin: 0; }
+.worker-report-status { font-size: 0.85rem; }
+.worker-summary-block { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.worker-summary.is-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.worker-verifier-note, .worker-result-summary { margin: 4px 0; font-size: 0.9rem; }
+.report-evidence, .completion-evidence { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 16px; font-size: 0.9rem; }
+.report-evidence { margin-top: 6px; }
+.report-disclosure > summary { cursor: pointer; }
+.report-disclosure[open] { flex-basis: 100%; }
+.report-disclosure .evidence-list, .evidence-value { margin: 4px 0 0; }
+
+/* Files: one ~32 px row per file; an opened row shows its findings, then its content in its own scroll. */
+.launch-files-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.launch-files-head h4 { margin: 0; }
+.launch-files-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin: 6px 0; }
+/* The chosen filter stays readable under the pointer, as the Local/UTC toggle does. */
+.launch-files-tools .button[aria-pressed='true']:hover { background: var(--accent); color: var(--accent-contrast); }
+.launch-files-group { display: inline-flex; align-items: center; gap: 4px; font-size: 0.85rem; }
+.file-rows { list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
+.file-rows > li + li { border-top: 1px solid var(--border); }
+.file-row-summary { display: grid; grid-template-columns: 3em minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 32px; padding: 2px 4px; }
+details.file-row > summary { cursor: pointer; }
+details.file-row > summary:hover { background: var(--surface-alt); }
+.file-row-static { color: var(--text-muted); }
+/* The disclosure triangle sits before the severity; a grid summary has no native marker. */
+details.file-row > summary::-webkit-details-marker { display: none; }
+details.file-row > summary .file-row-severity::before { content: '▸ '; color: var(--text-muted); font-weight: 400; }
+details.file-row[open] > summary .file-row-severity::before { content: '▾ '; }
+.file-row-severity { font-weight: 700; font-size: 0.8rem; white-space: nowrap; }
+[data-findings]:not([data-findings='0']) .file-row-severity { color: var(--danger-text); }
+.file-row-path { justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.file-row-meta { display: inline-flex; gap: 10px; font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+.file-repair { color: var(--warn-text, var(--text)); }
+.file-row-body { display: flex; flex-direction: column; gap: 6px; padding: 4px 4px 10px calc(4px + 3em + 8px); }
+.file-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 0.85rem; }
+.file-content { max-height: 480px; overflow: auto; }
+.file-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
+.file-finding { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.file-finding-who { white-space: nowrap; }
+.file-finding-message { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.file-group { padding-top: 6px; }
+.file-group-name { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; color: var(--text-muted); }
+
+/* The Session disclosure: closed until asked for. */
+.worker-session > summary { cursor: pointer; font-weight: 600; }
+.worker-session > summary .projects-muted { font-weight: 400; }
+
+@media (max-width: 760px) {
+  /* The row's marks move under its path; the path keeps the full width. */
+  .file-row-summary { grid-template-columns: 3em minmax(0, 1fr); }
+  .file-row-meta { grid-column: 2; white-space: normal; flex-wrap: wrap; }
+  .file-row-body { padding-left: 4px; }
+  .file-finding { flex-wrap: wrap; }
+  /* Rows, filters and the controls inside an opened row are tap targets of at least 44 px (section 10). */
+  .file-row-summary, .launch-files-tools .button, .launch-files-group, .file-row-body .button, .report-disclosure > summary,
+  .worker-session > summary, .task-details > summary { min-height: 44px; }
+  .report-disclosure > summary, .worker-session > summary, .task-details > summary { box-sizing: border-box; padding-block: 10px; }
+}

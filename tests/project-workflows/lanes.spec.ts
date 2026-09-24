@@ -99,7 +99,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await expect(page.getByTestId('task-checks').locator('[data-check-id="docs-unit"]')).toContainText('exit 0')
   await expect(page.getByTestId('launch-receipt')).toContainText(DOCS_SESSION)
   await expect(page.getByTestId('worker-completion')).toContainText(DOCS_COMPLETION_SUMMARY)
-  await expect(page.getByTestId('worker-stop')).toContainText('Stop confirmed')
+  await expect(page.getByTestId('worker-stop')).toContainText('stop confirmed')
   await expect(page.getByTestId('changed-files').locator('li')).toContainText(['docs/PRD_WORKER_LANES.md'])
   await nodeListItem(page, 'verify_docs').getByRole('link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_docs')

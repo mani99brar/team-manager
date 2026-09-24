@@ -4,7 +4,7 @@
  * shows its facts and which its worker narrative. Pure, so the header and the unit tests read the same values.
  */
 import { attemptResultUris, humanizeEvent, type Instant, type Span, type SpanStatus, type Timeline } from '../../../contracts/projects/triage.ts'
-import type { RunDetail, RunInputWorker, WorkerResult, WorkflowEvent } from '../api.ts'
+import type { RunDetail, WorkerResult, WorkflowEvent } from '../api.ts'
 
 /** `reason`: a failed attempt's reasons in a few words ("unit, integration"), "same" when they repeat the attempt before; empty otherwise. */
 export type AttemptChip = { attempt: number; status: SpanStatus; start: Instant | null; ms: number | null; outcome: string; reason: string; uris: string[] }
@@ -237,23 +237,5 @@ export function verifiedSections(result: WorkerResult, options: { requirements?:
     ...(others.length > 0 ? [{ key: 'artifacts', label: 'Artifacts', count: others.length }] : []),
     ...(options.requirements ? [{ key: 'requirements', label: 'Requirements' }] : []),
     { key: 'result', label: 'Result' },
-  ]
-}
-
-/** How many rows "Files created or changed" lists: every changed file, then any captured or listed path they do not name. */
-export function filesCount(result: WorkerResult): number {
-  // As `capturedFiles` and `notCapturedFiles` (files.ts) read them; that module holds a hook, which this pure one avoids.
-  const captured = result.artifacts.flatMap(artifact => (artifact.kind === 'file' && typeof artifact.path === 'string' ? [artifact.path] : []))
-  return new Set([...result.changed_files, ...captured, ...(result.files_not_captured ?? []).map(entry => entry.path)]).size
-}
-
-/** The index entries of a launch node's sections, in page order; empty ones are absent. */
-export function workerSectionEntries(worker: RunInputWorker | null, result: WorkerResult | null): SectionEntry[] {
-  const files = result === null ? 0 : filesCount(result)
-  return [
-    ...(worker !== null && worker.questions.length > 0 ? [{ key: 'questions', label: 'Questions', count: worker.questions.length }] : []),
-    ...(result !== null ? [{ key: 'result', label: 'Result' }] : []),
-    ...(files > 0 ? [{ key: 'files', label: 'Files', count: files }] : []),
-    ...(worker !== null ? [{ key: 'report', label: 'Report' }, { key: 'session', label: 'Session' }, { key: 'task', label: 'Task' }] : []),
   ]
 }
