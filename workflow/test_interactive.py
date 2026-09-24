@@ -802,7 +802,8 @@ class AttachOneTests(unittest.TestCase):
         code, errors = self.main()
         self.assertEqual(code, 0)
         self.assertRegex(errors, r"^The controller is stopping ui \(requested at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC, not yet confirmed\); "
-                                 rf"not attaching\. Inspect it with `claude logs {self.row()['id']}` or `claude attach {self.row()['id']}`\.\n$")
+                                 rf"not attaching\. Inspect it with `claude logs {self.row()['id']}`, which only reads it: attaching could restart "
+                                 r"a session the stop already ended\.\n$")
         self.attaches.assert_not_called()
 
     def test_a_session_gone_without_a_recorded_stop_is_refused_once(self):
@@ -945,7 +946,7 @@ class AttachOneTests(unittest.TestCase):
                 self.assertEqual(self.attaches.call_count, 1 if lost else 0)
                 last = self.errors.getvalue().splitlines()[-1]
                 self.assertRegex(last, r"^The controller is stopping ui \(requested at .* UTC, not yet confirmed\); not attaching\. "
-                                       r"Inspect it with `claude logs 11111111` or `claude attach 11111111`\.$")
+                                       r"Inspect it with `claude logs 11111111`, which only reads it: attaching could restart a session the stop already ended\.$")
                 (self.directory / "ui.stop.json").unlink()
 
     def test_giving_up_names_the_last_error(self):

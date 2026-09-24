@@ -485,7 +485,8 @@ def stop_reported(directory: Path, node: str) -> bool:
         message = f"{node_title(node)} was stopped by the controller at {stop['time']} ({stop['reason']}); nothing to attach."
     else:
         message = (f"The controller is stopping {node} (requested at {stop['time']}, not yet confirmed); not attaching. "
-                   f"Inspect it with `claude logs {stop['background_id']}` or `claude attach {stop['background_id']}`.")
+                   f"Inspect it with `claude logs {stop['background_id']}`, which only reads it: attaching could restart a session the stop "
+                   "already ended.")
     print(message, file=sys.stderr, flush=True)
     return True
 
