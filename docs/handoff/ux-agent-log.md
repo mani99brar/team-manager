@@ -63,4 +63,4 @@ implement → review → fix; S3 review/fix switched to medium at the user's req
 |---|---|
 | Step 1 merge (93b9a61) | tsc and eslint clean; unit 206/206; server 40/40; contracts 22/22; browser worker 37/37, candidate 37/37; root skills suite 142/142 |
 | Step 2 merge (97e1973) | tsc and eslint clean; unit 236/236; contracts 23/23; browser worker 43/43, candidate 43/43; root skills suite 148/148; server 51/52 → one S5 assertion assumed no seeded PID rows, which S3's fixtures now have; fixed in e82403d, server 52/52 |
-
+| Step 3 merge (25b1b32) | tsc and eslint clean; unit 254/254; server 52/52; contracts 23/23; browser worker 45/45; candidate 44/45 → `ux-run.spec.ts` run-now-banner failed once on a `toHaveText` while step 4's agents ran browser tests; it passed 3/3 alone afterwards (load-sensitive flake, watched in later runs) |
