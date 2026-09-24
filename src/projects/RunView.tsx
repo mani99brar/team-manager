@@ -1,17 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
   buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import {
-  fetchEvents, fetchReviewResult, fetchRunInputs, fetchWorkerResult, NOT_RECORDED, orNotRecorded, ProjectsApiError, scopedResultPath, scopedReviewPath,
-  type RunDetail, type RunScope, type WorkerResult, type WorkflowDefinition,
-} from './api.ts'
+import { fetchEvents, fetchRunInputs, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { LanesLine, NowBanner } from './NowBanner.tsx'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { assignmentPathname, runPathname } from './routes.ts'
+import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
 import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
@@ -19,6 +16,7 @@ import { Activity, StepsTable } from './StepsTimeline.tsx'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
 import { useNow, useTimeReference, useTimeZone } from './useNow.ts'
 import { useResource, type ResourceMeta } from './useResource.ts'
+import { useRunResults, useRunReview } from './useRunData.ts'
 import { WorkflowGraph, type GraphNodeView } from './WorkflowGraph.tsx'
 import './run.css'
 
@@ -30,6 +28,8 @@ type Props = {
   /** The workflow's current definition, when the workflow list loaded; used only to say whether it changed. */
   current: WorkflowDefinition | null
   selectedNodeId: string | null
+  /** The attempt a node page shows, from `/nodes/<n>/attempts/<k>`; null for its latest. */
+  selectedAttempt?: number | null
   /** The run's view, from the path: the Run view (a node page is part of it) or Assignment. */
   tab: Tab
   refreshToken: number
@@ -50,62 +50,6 @@ const TABS: { id: Tab; label: string; testId: string }[] = [
   { id: 'assignment', label: 'Assignment', testId: 'tab-assignment' },
 ]
 
-// ---- Lane results: immutable per URI, read once for the page's lifetime (docs/PRD_VIEWER_UX.md 7) --------------------
-
-type CachedResult = { status: 'ready'; result: WorkerResult } | { status: 'absent' } | { status: 'failed'; refresh: number }
-const RESULT_CACHE_LIMIT = 200
-const cachedResults = new Map<string, CachedResult>()
-const inflight = new Set<string>()
-const resultListeners = new Set<() => void>()
-let resultVersion = 0
-
-function settleResult(uri: string, value: CachedResult) {
-  cachedResults.delete(uri)
-  cachedResults.set(uri, value)
-  if (cachedResults.size > RESULT_CACHE_LIMIT) cachedResults.delete(cachedResults.keys().next().value!)
-  resultVersion += 1
-  resultListeners.forEach(listener => listener())
-}
-
-function subscribeResults(listener: () => void) {
-  resultListeners.add(listener)
-  return () => { resultListeners.delete(listener) }
-}
-
-/**
- * The worker and candidate results the Now banner and the lanes line read (`nowResultUris`), fetched once each. A result
- * that answers 404 counts as absent, not as loading; another failure is retried by the next Refresh.
- */
-function useRunResults(scope: RunScope, uris: readonly string[], refreshToken: number): { results: ReadonlyMap<string, WorkerResult>; pending: number } {
-  const version = useSyncExternalStore(subscribeResults, () => resultVersion, () => resultVersion)
-  const key = uris.join('\n')
-  useEffect(() => {
-    for (const uri of key === '' ? [] : key.split('\n')) {
-      const known = cachedResults.get(uri)
-      if (inflight.has(uri) || (known && (known.status !== 'failed' || known.refresh === refreshToken))) continue
-      const path = scopedResultPath(scope, uri)
-      if (path === null) { settleResult(uri, { status: 'absent' }); continue }
-      inflight.add(uri)
-      fetchWorkerResult(scope, path).then(
-        result => settleResult(uri, { status: 'ready', result }),
-        (error: unknown) => settleResult(uri, error instanceof ProjectsApiError && error.notFound ? { status: 'absent' } : { status: 'failed', refresh: refreshToken }),
-      ).finally(() => inflight.delete(uri))
-    }
-  }, [scope, key, refreshToken])
-  return useMemo(() => {
-    const results = new Map<string, WorkerResult>()
-    let pending = 0
-    for (const uri of key === '' ? [] : key.split('\n')) {
-      const known = cachedResults.get(uri)
-      if (known?.status === 'ready') results.set(uri, known.result)
-      else if (!known) pending += 1
-    }
-    return { results, pending }
-    // `version` re-reads the cache whenever a result settles.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, version])
-}
-
 /** The timeline of a run whose events have not loaded yet: every step shows its status, none a time. */
 function emptyTimeline(detail: RunDetail): Timeline {
   return { runStart: { at: detail.summary.created_at, source: 'receipt' }, runEnd: null, lastActivity: null, spans: [], markers: [], gaps: [], byNode: new Map(), activity: [] }
@@ -117,7 +61,7 @@ function emptyTimeline(detail: RunDetail): Timeline {
  * the one-line run bar, the tabs, the sticky step strip and the node in full width. One clock ticks here while the run can
  * still change; selecting a step moves the focus to its heading, and coming back returns it to the step's row.
  */
-export function RunView({ scope, detail, current, selectedNodeId, tab, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
+export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
   const { summary, definition, snapshot } = detail
   const clock = useNow(summary.status !== 'succeeded' && summary.status !== 'cancelled')
   const [zone] = useTimeZone()
@@ -132,17 +76,15 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
   // The inputs are one resource per run; a 404 INPUTS_NOT_FOUND means "not recorded", which loads as null.
   const loadInputs = useCallback((signal: AbortSignal) => orNotRecorded(fetchRunInputs(scope, signal), NOT_RECORDED.inputs), [scope])
   const { state: inputs, reload: reloadInputs } = useResource(`inputs:${runKey}`, loadInputs, refreshToken, pollToken)
-  // The recorded review is immutable per URI; a run whose export predates reviews has none.
-  const reviewUri = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
-  const reviewPath = reviewUri === null ? null : scopedReviewPath(scope, reviewUri)
-  const loadReview = useCallback((signal: AbortSignal) => orNotRecorded(fetchReviewResult(scope, reviewPath!, signal), NOT_RECORDED.review), [scope, reviewPath])
-  const { state: review } = useResource(reviewPath === null ? null : `review:${reviewPath}`, loadReview, refreshToken)
+  // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
+  const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
+  const review = useRunReview(scope, reviewPath, String(refreshToken))
 
   const eventsData = events.status === 'ready' ? events.data : null
   const inputsData = inputs.status === 'ready' ? inputs.data : null
   const reviewData = review.status === 'ready' ? review.data : null
   const uris = useMemo(() => (eventsData === null ? [] : nowResultUris(detail, eventsData)), [detail, eventsData])
-  const { results, pending } = useRunResults(scope, uris, refreshToken)
+  const { results, pending } = useRunResults(scope, uris, String(refreshToken))
   const run: RunData | null = useMemo(
     () => (eventsData === null ? null : { detail, events: eventsData, inputs: inputsData, review: reviewData, results }),
     [detail, eventsData, inputsData, reviewData, results],
@@ -173,6 +115,7 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
 
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
+  const attemptHref = useCallback((nodeId: string, attempt: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, nodeId, attempt), [scope])
   const tabHref = (id: Tab) => (id === 'assignment' ? assignmentPathname(scope.projectId, scope.workflowId, scope.runId) : runHref)
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
@@ -283,7 +226,7 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
               </section>
               <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
               {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
-              {timeline && <Activity timeline={timeline} labels={labels} nodeHref={nodeHref} onNavigate={onNavigate} />}
+              {timeline && <Activity timeline={timeline} labels={labels} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
             </>
           ) : (
             <>
@@ -297,12 +240,15 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
                 )}
                 {selectedDefinition !== null && selectedState !== null && (
                   <NodeDetail
-                    key={selectedNodeId}
+                    key={`${selectedNodeId}/${selectedAttempt ?? 'latest'}`}
                     scope={scope}
+                    detail={detail}
                     definition={selectedDefinition}
-                    definitionNodes={definition.nodes}
-                    snapshotNodes={snapshot.nodes}
                     node={selectedState}
+                    attempt={selectedAttempt}
+                    timeline={timeline}
+                    now={now}
+                    clock={clock}
                     events={events}
                     onRetryEvents={reloadEvents}
                     inputs={inputs}

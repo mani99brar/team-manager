@@ -1,0 +1,4 @@
+/* ---- Verification and candidate sections (docs/PRD_VIEWER_UX.md 4.6) ---- */
+
+.worker-report-link { margin: 0; font-size: 0.85rem; color: var(--text-muted); }
+.lane-result .worker-report-link { margin-bottom: 8px; }

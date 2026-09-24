@@ -211,7 +211,9 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   await expect(page.getByTestId('node-attempt')).toHaveText(String(target.attempt))
   const result = page.getByTestId('worker-result')
   await expect(result).toBeVisible()
-  await expect(page.getByTestId('worker-summary')).not.toBeEmpty()
+  // The verify node shows the result's facts; the worker's report lives on its launch node, linked from here (PRD_VIEWER_UX 7).
+  await expect(page.getByTestId('worker-report-link')).toBeVisible()
+  await expect(page.getByTestId('worker-summary')).toHaveCount(0)
 
   // Checks actually executed, with exit codes and their log artifacts loaded on demand.
   const checks = page.getByTestId('checks-list').locator('.check')
@@ -223,19 +225,22 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   await checks.first().getByRole('button', { name: 'Hide contents' }).click()
   await expect(log).toHaveCount(0)
 
-  // Assumptions and screenshots come from the result, not from the viewer; changed files are shown on the launch node.
+  // Screenshots come from the result, not from the viewer; changed files and the assumptions are shown on the launch node.
   await expect(page.getByTestId('changed-files')).toHaveCount(0)
-  await expect(page.getByTestId('assumptions').locator('li')).toContainText([UI_ASSUMPTION])
+  await expect(page.getByTestId('assumptions')).toHaveCount(0)
   const screenshot = page.getByTestId('screenshots').locator('img').first()
   await expect(screenshot).toBeVisible()
   await expect.poll(() => screenshot.evaluate(image => (image as unknown as { naturalWidth: number }).naturalWidth)).toBeGreaterThan(0)
   await expect(page.getByTestId('node-events').or(page.getByTestId('events-none'))).toBeVisible()
-  await expect(page.getByTestId('reuse-none').or(page.getByTestId('reuse-list'))).toBeVisible()
+  // Reuse evidence is shown only when reuse events exist (PRD_VIEWER_UX 7); this run has none.
+  await expect(page.getByTestId('reuse-list')).toHaveCount(0)
   await attach(page, testInfo, 'run-evidence')
   const launchNode = target.node_id.replace(/^verify_/, 'launch_')
   await nodeListItem(page, launchNode).getByRole('link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', launchNode)
   await expect(page.getByTestId('changed-files').locator('li')).toContainText(['src/App.tsx'])
+  await expect(page.getByTestId('worker-summary')).not.toBeEmpty()
+  await expect(page.getByTestId('assumptions').locator('li')).toContainText([UI_ASSUMPTION])
 
   // Nodes without a result say so explicitly instead of showing another node's evidence.
   const unpublished = detail.snapshot.nodes.find(node => node.result_uri === null)
@@ -252,8 +257,8 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
     await expect(page.getByTestId('reuse-list')).toContainText(REUSE_MESSAGE)
     await expect(page.getByTestId('reuse-list')).toContainText('Attempt 2 reused the result of attempt 1')
   } else {
-    // The adapter decides how persisted evidence maps to reuse events; either explicit reuse or an explicit absence is shown.
-    await expect(page.getByTestId('reuse-none').or(page.getByTestId('reuse-list'))).toBeVisible()
+    // The adapter never serves reuse events today (server/projects.ts), and an empty reuse section is absent.
+    await expect(page.getByTestId('reuse-list')).toHaveCount(0)
   }
   await expectNoExecutionControls(page)
 })
@@ -296,10 +301,10 @@ test(`[scenario:failed-and-paused] Show failure and awaiting-approval state with
   await expect(nodeDetail(page).locator('.status-badge').first()).toHaveText('Failed')
   await expect(page.getByTestId('node-status-meaning')).toContainText('This step failed')
   await expect(page.getByTestId('node-attempt')).toHaveText('1')
-  // Downstream nodes have not started: attempt 0, pending, no session, no result.
+  // Downstream nodes have not started: pending, no session, no result.
   await expect(nodeListItem(page, 'candidate')).toHaveAttribute('data-status', 'pending')
   await nodeListItem(page, 'integrate').getByRole('link').click()
-  await expect(page.getByTestId('node-attempt')).toHaveText('0 (not started)')
+  await expect(page.getByTestId('node-attempt')).toHaveText('not started')
   await expect(page.getByTestId('result-none')).toBeVisible()
   if (phase === 'worker') {
     await page.goto(runUrl(RUN_FAILED, 'verify_adapter'))
