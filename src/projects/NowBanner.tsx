@@ -1,0 +1,118 @@
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import type { LaneLine, Now, Text, TextPart } from '../../contracts/projects/triage.ts'
+import { CommandBlock } from './CommandBlock.tsx'
+import { AppLink } from './panels.tsx'
+import { withoutGlyph } from './steps.ts'
+import { Time } from './Time.tsx'
+import { formatAgo, formatSpan, utcTitle } from './time.ts'
+
+/** How many lanes the lanes line lists before the rest move behind "+n more". */
+const LANES_SHOWN = 3
+
+/** One part of the triage model's rich text: a clock as `<Time>`, ages, durations and deadlines against the page's ticking clock. */
+function Part({ part, now }: { part: TextPart; now: number }): ReactNode {
+  if (typeof part === 'string') return part
+  switch (part.kind) {
+    case 'clock': return <>{part.inferred ? '≈' : ''}<Time iso={part.at} /></>
+    case 'ago': return <time dateTime={part.at} title={utcTitle(part.at)}>{formatAgo(part.at, now)}</time>
+    case 'span': return `${part.inferred ? '≈' : ''}${formatSpan(part.ms)}`
+    case 'elapsed': return formatSpan(Math.max(0, now - Date.parse(part.from)))
+    case 'left': return formatSpan(Math.max(0, Date.parse(part.until) - now))
+  }
+}
+
+/** Renders the triage model's rich text (headlines and reasons) in the viewer's zone and against its clock. */
+export function RichText({ text, now }: { text: Text; now: number }) {
+  return <>{text.map((part, index) => <Part key={index} part={part} now={now} />)}</>
+}
+
+/** The reason, clamped to two lines with a More toggle once it is longer; `after` (the focus link) stays outside the clamp. */
+function Reason({ children, after }: { children: ReactNode; after: ReactNode }) {
+  const paragraph = useRef<HTMLParagraphElement>(null)
+  const [open, setOpen] = useState(false)
+  const [clamped, setClamped] = useState(false)
+  // Measured after every change of the text: only an overflowing reason gets a More toggle.
+  useLayoutEffect(() => {
+    const element = paragraph.current
+    if (element && !open) setClamped(element.scrollHeight > element.clientHeight + 1)
+  }, [open, children])
+  return (
+    <div className="run-now-reason-row">
+      <p ref={paragraph} className={open ? 'run-now-reason' : 'run-now-reason is-clamped'} data-testid="now-reason">{children}</p>
+      {(clamped || open) && (
+        <button type="button" className="button button-small run-now-more" aria-expanded={open} onClick={() => setOpen(previous => !previous)}>{open ? 'Less' : 'More'}</button>
+      )}
+      {after}
+    </div>
+  )
+}
+
+type Props = {
+  /** Null while the events, inputs, review or the lane results the rules read are still loading. */
+  now: Now | null
+  clock: number
+  /** The focus step's page, for its "Open" link; null when there is no focus. */
+  focusHref: string | null
+  onNavigate: (pathname: string) => void
+}
+
+/**
+ * The Now banner (docs/PRD_VIEWER_UX.md 4.2, 6.2): where the run is or stopped, why, since when, and what to type next,
+ * derived from the run's current state only (`deriveNow`). `data-situation` names the matched rule. It is not a live
+ * region: the page announces only a change of situation.
+ */
+export function NowBanner({ now, clock, focusHref, onNavigate }: Props) {
+  if (now === null) {
+    return (
+      <section className="run-now run-now-loading" data-testid="run-now" aria-busy="true" aria-labelledby="run-now-title">
+        <h3 id="run-now-title" className="visually-hidden">Now</h3>
+        <p className="run-now-headline projects-muted">Reading the run's events and results…</p>
+      </section>
+    )
+  }
+  const open = now.focus && focusHref
+    ? <AppLink href={focusHref} onNavigate={onNavigate} className="run-now-open">Open {now.focus.label} ›</AppLink>
+    : null
+  return (
+    <section className={`run-now run-now-${now.tone}`} data-testid="run-now" data-situation={now.situation} aria-labelledby="run-now-title">
+      <h3 id="run-now-title" className="visually-hidden">Now</h3>
+      <p className="run-now-headline" data-testid="now-headline">
+        <span className="run-now-glyph" aria-hidden="true">{now.glyph}</span>
+        <span><RichText text={withoutGlyph(now.headline, now.glyph)} now={clock} /></span>
+        {now.reason === null && open}
+      </p>
+      {now.reason !== null && <Reason after={open}><RichText text={now.reason} now={clock} /></Reason>}
+      <CommandBlock next={now.next} />
+    </section>
+  )
+}
+
+/**
+ * The lanes line (docs/PRD_VIEWER_UX.md 4.2), for runs with two or more lanes: one line per lane with its worker, verify and
+ * candidate steps and no durations, the Steps table's job.
+ */
+export function LanesLine({ lines }: { lines: LaneLine[] }) {
+  if (lines.length < 2) return null
+  const item = (line: LaneLine) => (
+    <li key={line.lane} data-lane={line.lane}>
+      <span className="run-lane-name">{line.lane}</span>
+      <span className="run-lane-steps">
+        {line.steps.map((step, index) => (
+          <span key={step.node_id} className={`run-lane-step status-text-${step.status}`}>{index > 0 ? ' · ' : ''}{step.text}</span>
+        ))}
+      </span>
+    </li>
+  )
+  return (
+    <section className="run-lanes" data-testid="run-lanes" aria-labelledby="run-lanes-title">
+      <h3 id="run-lanes-title" className="run-lanes-title">Lanes</h3>
+      <ul className="run-lanes-list">{lines.slice(0, LANES_SHOWN).map(item)}</ul>
+      {lines.length > LANES_SHOWN && (
+        <details className="run-lanes-more">
+          <summary>+{lines.length - LANES_SHOWN} more</summary>
+          <ul className="run-lanes-list">{lines.slice(LANES_SHOWN).map(item)}</ul>
+        </details>
+      )}
+    </section>
+  )
+}

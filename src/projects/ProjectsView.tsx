@@ -4,7 +4,7 @@ import { describeApiError, fetchProjects, fetchRunDetail, fetchRuns, fetchWorkfl
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunView } from './RunView.tsx'
-import { shortRevision } from './status.ts'
+import { shortRevision, workflowTitle } from './status.ts'
 import { Time } from './Time.tsx'
 import { TimeReferenceContext } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
@@ -84,7 +84,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
 
   const projectName = projects.status === 'ready' && projectId !== null ? projects.data.find(project => project.project_id === projectId)?.name ?? projectId : projectId
   const currentWorkflow = workflows.status === 'ready' && workflowId !== null ? workflows.data.find(workflow => workflow.workflow_id === workflowId) ?? null : null
-  const workflowName = currentWorkflow?.name ?? workflowId
+  // The workflow title rule (docs/PRD_VIEWER_UX.md 4.1): a workflow under the exporter's generic name is named by its id.
+  const workflowName = currentWorkflow ? workflowTitle(currentWorkflow) : workflowId
 
   // A background poll re-announces only what changed; a load the reader started (navigation, Refresh) always announces.
   // A Refresh announces that it started and then its outcome, even when the page did not change.
@@ -117,20 +118,21 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     onAnnounce(message)
   }, [route, projects, workflows, firstPage, detail, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
 
-  const crumbs: PathCrumb[] = [{ id: 'home', label: 'Home', pathname: '/' }, { id: 'projects', label: 'Projects', pathname: projectsPathname() }]
+  // The Projects trail starts at Projects (the roots strip leads Home) and ends at the node a node page shows.
+  const crumbs: PathCrumb[] = [{ id: 'projects', label: 'Projects', pathname: projectsPathname() }]
   if (projectId !== null) crumbs.push({ id: `project:${projectId}`, label: projectName ?? projectId, pathname: projectPathname(projectId) })
   if (projectId !== null && workflowId !== null) crumbs.push({ id: `workflow:${workflowId}`, label: workflowName ?? workflowId, pathname: workflowPathname(projectId, workflowId) })
   if (projectId !== null && workflowId !== null && runId !== null) crumbs.push({ id: `run:${runId}`, label: runId, pathname: runPathname(projectId, workflowId, runId) })
+  if (projectId !== null && workflowId !== null && runId !== null && nodeId !== null) {
+    const node = detail.status === 'ready' ? detail.data.definition.nodes.find(candidate => candidate.node_id === nodeId) : undefined
+    crumbs.push({ id: `node:${nodeId}`, label: node?.label ?? nodeId, pathname: runPathname(projectId, workflowId, runId, nodeId) })
+  }
   if (route === null) crumbs.push({ id: 'invalid', label: 'Invalid link' })
 
   const notFound = (error: unknown) => error instanceof ProjectsApiError && error.notFound
 
-  let info: string
-  if (route === null) info = 'This Projects link is invalid.'
-  else if (route.level === 'projects') info = 'Registered projects. Read-only: runs are started, approved and retried from the workflow CLI, never from this page.'
-  else if (route.level === 'project') info = 'Workflow definitions registered for this project.'
-  else if (route.level === 'workflow') info = 'Runs of this workflow, newest first. Each run keeps the definition it was started with.'
-  else info = nodeId === null ? 'Run detail with its pinned definition graph.' : `Run detail, inspecting node ${nodeId}.`
+  // The read-only note is said once, on the Projects root (docs/PRD_VIEWER_UX.md 3.2); each command block repeats it in one line.
+  const info = route?.level === 'projects' ? 'Read-only: runs are started, answered and approved in the workflow CLI, never from this page.' : null
 
   const busy = projects.status === 'loading' || workflows.status === 'loading' || firstPage.status === 'loading' || detail.status === 'loading'
 
@@ -192,7 +194,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             {workflows.data.map(workflow => (
               <li key={workflow.workflow_id}>
                 <AppLink href={workflowPathname(route.projectId, workflow.workflow_id)} onNavigate={onNavigate} className="projects-card">
-                  <span className="projects-card-title">{workflow.name}</span>
+                  <span className="projects-card-title">{workflowTitle(workflow)}</span>
                   <span className="projects-muted">{workflow.workflow_id} · {workflow.nodes.length} {workflow.nodes.length === 1 ? 'node' : 'nodes'} · current revision {shortRevision(workflow.definition_revision)}</span>
                 </AppLink>
               </li>
@@ -278,7 +280,19 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       // itself (the Created fact) is read against today, so the page names the day its run started.
       content = (
         <TimeReferenceContext value={detail.data.summary.created_at}>
-          <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} freshness={detailMeta} onNavigate={onNavigate} />
+          <RunView
+            key={`${route.projectId}/${route.workflowId}/${route.runId}`}
+            scope={scope!}
+            detail={detail.data}
+            current={currentWorkflow}
+            selectedNodeId={nodeId}
+            tab={route.tab}
+            refreshToken={refreshToken}
+            pollToken={runPoll}
+            freshness={detailMeta}
+            onNavigate={onNavigate}
+            onAnnounce={onAnnounce}
+          />
         </TimeReferenceContext>
       )
     }
@@ -288,7 +302,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     <>
       <div className="navigation">
         <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
-        <p className="folder-info" data-testid="projects-info">{info}</p>
+        {info !== null && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>
       <main className="workspace workspace-projects" aria-busy={busy} data-testid="projects-workspace">
         {refreshFailure !== null && (

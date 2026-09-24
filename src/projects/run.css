@@ -1,0 +1,272 @@
+/* ---- Run page (docs/PRD_VIEWER_UX.md 4.2-4.4, 10): header, Now banner, lanes, graph, Steps, Activity, step strip ---- */
+
+/* Attention and warning tokens for both schemes: text 4.5:1 on its background, the amber ring 3:1 on the surface. */
+:root {
+  --warn-bg: #fff4d6;
+  --warn-border: #c99a2e;
+  --warn-text: #5c4100;
+  --attention: #b86e00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --warn-bg: #3a2f14;
+    --warn-border: #a88533;
+    --warn-text: #f5d98c;
+    --attention: #f0a93b;
+  }
+}
+
+.run-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+/* Status as glyph colour and bar fill; the glyph or the text always carries the status too. */
+.status-text-failed { color: var(--danger-text); }
+.status-text-succeeded { color: var(--node-location-stroke); }
+.status-text-running { color: var(--accent); }
+.status-text-paused, .status-text-awaiting_approval { color: var(--node-directory-stroke); }
+.status-text-pending, .status-text-cancelled { color: var(--text-muted); }
+.status-fill-failed { background: var(--danger-text); }
+.status-fill-succeeded { background: var(--node-location-stroke); }
+.status-fill-running { background: var(--accent); }
+.status-fill-paused, .status-fill-awaiting_approval { background: var(--node-directory-stroke); }
+.status-fill-pending, .status-fill-cancelled, .status-fill-no_record { background: var(--text-muted); }
+
+/* ---- Header: two lines on a desktop ---- */
+.run-header { display: flex; flex-direction: column; gap: 2px; }
+.run-header-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 30px; }
+/* A long title gives way (ellipsized, in full in its tooltip) so the status, span, chip and toggle keep one row. */
+.workspace-projects .run-header h2 { flex: 0 1 auto; max-width: 32%; min-width: 0; margin: 0; font-size: 1.15rem; line-height: 1.3; display: flex; align-items: baseline; gap: 0 8px; }
+.run-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-id { flex: none; font-size: 0.95rem; font-weight: 400; color: var(--text-muted); }
+.run-header-line > .run-status-line, .run-header-line > .run-span { flex: none; }
+.run-status-line { margin: 0; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.run-status-meaning { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
+.run-span { margin: 0; font-size: 0.9rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-freshness { flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.run-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 24px; font-size: 0.85rem; color: var(--text-muted); overflow-wrap: anywhere; }
+.run-facts-line code, .run-definition code { color: var(--text); }
+.run-definition { white-space: nowrap; }
+.run-definition.projects-warning { white-space: normal; }
+.run-details > summary { cursor: pointer; color: var(--accent); list-style: none; padding: 2px 6px; border-radius: 4px; }
+.run-details > summary::-webkit-details-marker { display: none; }
+.run-details > summary::after { content: ' ▸'; }
+.run-details[open] > summary::after { content: ' ▾'; }
+.run-details > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.run-details[open] { flex-basis: 100%; }
+.run-details-facts { margin: 4px 0 0; color: var(--text); font-size: 0.9rem; }
+
+/* The run bar of a node page: one line, the Now headline ellipsized. */
+.run-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.workspace-projects .run-bar h2 { margin: 0; font-size: 1rem; }
+.run-bar-status { flex: 1 1 320px; flex-wrap: nowrap; }
+.run-bar-status > .status-badge { flex: none; }
+.run-bar-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
+
+/* ---- Now banner ---- */
+.run-now { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; background: var(--surface); font-size: 0.9rem; line-height: 21px; min-width: 0; }
+.run-now-failed, .run-now-blocked { border-color: var(--danger-border); border-left-color: var(--danger-text); background: var(--danger-bg); }
+.run-now-paused, .run-now-interrupted, .run-now-waiting { border-color: var(--warn-border); border-left-color: var(--attention); background: var(--warn-bg); }
+.run-now-running { border-left-color: var(--accent); }
+.run-now-succeeded { border-color: var(--node-location-stroke); border-left-color: var(--node-location-stroke); background: var(--node-location-fill); }
+.run-now-headline { margin: 0; font-size: 1rem; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.run-now-failed .run-now-headline, .run-now-blocked .run-now-headline { color: var(--danger-text); }
+.run-now-paused .run-now-headline, .run-now-interrupted .run-now-headline, .run-now-waiting .run-now-headline { color: var(--warn-text); }
+.run-now-glyph { flex: none; }
+.run-now-headline > span:nth-child(2) { flex: 1 1 0; min-width: 0; }
+.run-now-reason-row { display: flex; align-items: flex-start; gap: 4px 12px; flex-wrap: wrap; }
+.run-now-reason { margin: 0; flex: 1 1 480px; min-width: 0; overflow-wrap: anywhere; }
+.run-now-reason.is-clamped { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.run-now-more { min-height: 22px; padding: 0 8px; font-size: 0.75rem; }
+.run-now-open { white-space: nowrap; font-size: 0.85rem; font-weight: 400; }
+
+/* The likely next step: label, numbered steps, one copyable command each, and the honesty caption. */
+.command-block { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; min-width: 0; }
+.command-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
+.command-runbook { color: var(--text-muted); font-size: 0.85rem; }
+.command-legend { font-size: 0.85rem; color: var(--text-muted); }
+.command-legend > summary { cursor: pointer; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
+.command-legend > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.command-legend[open] { flex-basis: 100%; }
+.command-legend-text { display: block; }
+.command-steps { margin: 0; padding-left: 1.6em; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.command-step { min-width: 0; }
+.command-step::marker { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.command-step-body { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.command-step-caption { color: var(--text-muted); font-size: 0.85rem; }
+.command-line { display: inline-block; min-width: 0; max-width: 100%; overflow-x: auto; white-space: pre; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; line-height: 20px; vertical-align: middle; }
+.command-line code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+.command-prompt { color: var(--text-muted); user-select: none; }
+.command-copy { min-height: 22px; padding: 0 10px; font-size: 0.75rem; }
+.command-copied { font-size: 0.8rem; color: var(--text-muted); }
+.command-copied:empty { display: none; }
+.command-prose { overflow-wrap: anywhere; }
+.command-caveat { margin: 0; font-size: 0.85rem; }
+.command-caption { margin: 0; font-size: 0.8rem; line-height: 18px; color: var(--text-muted); }
+
+/* ---- Lanes line (two or more lanes) ---- */
+.run-lanes { display: flex; align-items: baseline; gap: 12px; font-size: 0.875rem; line-height: 20px; padding: 2px 12px; min-width: 0; }
+.workspace-projects .run-lanes-title { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); font-weight: 600; }
+.run-lanes-list { list-style: none; margin: 0; padding: 0; min-width: 0; flex: 1; }
+.run-lanes-list li { display: flex; gap: 12px; min-width: 0; }
+.run-lane-name { flex: none; min-width: 7ch; font-weight: 600; }
+.run-lane-steps { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-lanes-more > summary { cursor: pointer; color: var(--accent); }
+
+/* ---- Tabs above the graph, touching their panel ---- */
+.workspace-projects:has(> .run-view) { padding-top: 8px; }
+.run-views { min-width: 0; }
+.run-tabs { padding: 0; margin: 0 0 4px; flex-wrap: wrap; }
+.run-body, .assignment { min-width: 0; }
+.run-body { display: flex; flex-direction: column; gap: 0; }
+
+/* ---- Workflow DAG: fitted to the width, dashes for the executor only, colour for the status only ---- */
+.workflow-graph-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-alt); padding: 4px; }
+.workflow-graph { display: block; height: auto; margin: 0 auto; }
+.workflow-edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+.workflow-edge-arrow { fill: var(--edge); }
+.workflow-node { cursor: default; outline: none; }
+.workflow-node[role='button'] { cursor: pointer; }
+.workflow-node-shape { fill: var(--surface); stroke: var(--node-file-stroke); stroke-width: 1.5; }
+.workflow-node-status-bar { fill: var(--text-muted); }
+.workflow-node.is-succeeded .workflow-node-status-bar { fill: var(--node-location-stroke); }
+.workflow-node.is-failed .workflow-node-status-bar { fill: var(--danger-text); }
+.workflow-node.is-failed .workflow-node-shape { stroke: var(--danger-text); fill: var(--danger-bg); }
+.workflow-node.is-running .workflow-node-status-bar { fill: var(--accent); }
+.workflow-node.is-awaiting_approval .workflow-node-status-bar, .workflow-node.is-paused .workflow-node-status-bar { fill: var(--node-directory-stroke); }
+.workflow-node.is-awaiting_approval .workflow-node-shape, .workflow-node.is-paused .workflow-node-shape { stroke: var(--node-directory-stroke); fill: var(--node-directory-fill); }
+.workflow-node.is-definition .workflow-node-status-bar { fill: var(--edge); }
+/* The status glyph sits in a badge on the node's corner, clear of its label. */
+.workflow-node-badge circle { fill: var(--surface); stroke: var(--text-muted); stroke-width: 1.5; }
+.workflow-node-glyph { font-size: 11px; font-weight: 700; fill: var(--text-muted); }
+.workflow-node.is-succeeded .workflow-node-glyph { fill: var(--node-location-stroke); }
+.workflow-node.is-succeeded .workflow-node-badge circle { stroke: var(--node-location-stroke); }
+.workflow-node.is-failed .workflow-node-glyph { fill: var(--danger-text); }
+.workflow-node.is-failed .workflow-node-badge circle { stroke: var(--danger-text); }
+.workflow-node.is-running .workflow-node-glyph { fill: var(--accent); }
+.workflow-node.is-running .workflow-node-badge circle { stroke: var(--accent); }
+.workflow-node.is-paused .workflow-node-glyph, .workflow-node.is-awaiting_approval .workflow-node-glyph { fill: var(--node-directory-stroke); }
+.workflow-node.is-paused .workflow-node-badge circle, .workflow-node.is-awaiting_approval .workflow-node-badge circle { stroke: var(--node-directory-stroke); }
+.workflow-node-ring { fill: none; stroke: none; stroke-width: 3; }
+/* Selection: a thick text-coloured outline and an offset ring, never the running colour. */
+.workflow-node.is-selected .workflow-node-shape { stroke: var(--text); stroke-width: 3; }
+.workflow-node.is-selected .workflow-node-ring { stroke: var(--text); stroke-width: 1.5; }
+/* A step that waits on the operator: an amber ring and a `?` glyph; its status stays what it is. */
+.workflow-node[data-attention] .workflow-node-ring { stroke: var(--attention); stroke-width: 3; }
+.workflow-node[data-attention] .workflow-node-glyph { fill: var(--attention); }
+.workflow-node[data-attention] .workflow-node-badge circle { stroke: var(--attention); stroke-width: 2.5; }
+.workflow-node-focus { fill: none; stroke: var(--focus); stroke-width: 3; stroke-dasharray: 4 3; display: none; }
+.workflow-node:focus-visible .workflow-node-focus { display: block; }
+.workflow-node-label { font-size: 12px; font-weight: 600; fill: var(--text); }
+.workflow-node-meta { font-size: 10px; fill: var(--text-muted); }
+.workflow-graph-legend { list-style: none; margin: 0; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 0.8rem; line-height: 20px; color: var(--text-muted); }
+.workflow-graph-legend li { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ---- Steps table: one 28 px line per step ---- */
+.run-steps { min-width: 0; }
+.steps-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+.steps-table th, .steps-table td { height: 28px; padding: 0 8px; text-align: left; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--border); font-weight: 400; }
+.steps-table thead th { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: var(--text-muted); }
+.steps-table th.step-name { width: 22%; }
+.steps-table .step-started { width: 92px; }
+.steps-table .step-took { width: 88px; }
+.steps-table .step-attempts { width: 184px; }
+.steps-table .step-bar { width: 22%; }
+.steps-hint { caption-side: bottom; text-align: left; padding-top: 6px; font-size: 0.85rem; color: var(--text-muted); }
+.step-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--text); font-weight: 600; text-decoration: none; }
+.workspace-projects .step-link { color: var(--text); }
+.step-link:hover .step-label { text-decoration: underline; }
+.step-label { overflow: hidden; text-overflow: ellipsis; }
+.step-glyph { flex: none; width: 1.1em; text-align: center; font-weight: 700; }
+.step-row[data-attention] th.step-name { box-shadow: inset 3px 0 var(--attention); }
+.step-row[data-attention] .step-glyph { color: var(--attention); }
+.step-row:hover { background: var(--surface-alt); }
+.step-marks { letter-spacing: 0.08em; }
+.step-outcome { color: var(--text-muted); }
+.step-bar-track { position: relative; display: block; height: 10px; border-radius: 2px; background: var(--surface-alt); }
+.step-bar-segment { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; }
+/* A shortened silence: a gap in the track. */
+.step-bar-break { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: var(--surface); border-left: 1px dashed var(--text-muted); }
+.step-axis { display: flex; align-items: center; gap: 6px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.step-axis-rule { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: center; border-bottom: 1px solid var(--border); line-height: 1.2; }
+
+/* ---- Activity ---- */
+.run-activity { margin-top: 16px; min-width: 0; }
+.activity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }
+.workspace-projects .activity-head h3 { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+.activity-list { list-style: none; margin: 0; padding: 0; font-size: 0.875rem; }
+.activity-row { display: grid; grid-template-columns: 6.5em minmax(8em, 15em) minmax(0, 1fr) auto; gap: 0 12px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--surface-alt); }
+.activity-time { font-variant-numeric: tabular-nums; color: var(--text-muted); white-space: nowrap; }
+.activity-who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-text { min-width: 0; overflow-wrap: anywhere; }
+.activity-row[data-marker='diagnosis'], .activity-row[data-marker='repair'] { background: var(--warn-bg); }
+.activity-row[data-marker='diagnosis'] .activity-who, .activity-row[data-marker='repair'] .activity-who { color: var(--warn-text); }
+.activity-log { color: var(--text-muted); }
+.activity-gap { display: block; color: var(--text-muted); font-style: italic; padding-left: calc(6.5em + 12px); }
+.activity-open { white-space: nowrap; }
+
+/* ---- Node pages: the sticky step strip and the node in full width ---- */
+.step-strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); min-width: 0; }
+.step-strip-run, .step-strip-step { flex: none; white-space: nowrap; font-size: 0.85rem; }
+.step-strip-step.is-disabled { color: var(--text-muted); opacity: 0.6; }
+.step-strip-nav { flex: none; display: flex; gap: 10px; }
+.step-strip-list { position: relative; list-style: none; margin: 0; padding: 2px; display: grid; grid-template-rows: repeat(var(--rows, 1), auto); grid-auto-flow: column; grid-auto-columns: max-content; align-items: center; gap: 2px 4px; overflow-x: auto; flex: 1 1 auto; min-width: 0; }
+/* Lanes stack within their column, in the graph's column order. */
+.step-strip-list li { display: flex; grid-column: var(--column, auto); grid-row: var(--row, auto); }
+.step-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 22px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 0.8rem; text-decoration: none; white-space: nowrap; }
+.workspace-projects .step-chip { color: var(--text); }
+.step-chip:hover { background: var(--surface-alt); }
+.step-chip[aria-current='page'] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); font-weight: 600; }
+.step-strip-list li[data-attention] .step-chip { border-color: var(--attention); box-shadow: 0 0 0 2px var(--attention); }
+.step-chip-took { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.run-node-area { min-width: 0; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
+.run-node-area .node-detail h3 { scroll-margin-top: 64px; }
+.run-node-area .node-detail h3:focus { outline: none; }
+.run-node-area .node-detail h3:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+/* ---- Phones and narrow windows ---- */
+@media (max-width: 760px) {
+  /* The graph is hidden; the Steps table and the step strip are the navigators. */
+  .run-graph { display: none; }
+  /* The header collapses to title, status, span and freshness; every other fact is behind Details. */
+  .run-header-line { gap: 2px 8px; }
+  /* The banner headline says it too; screen readers keep it, the badge and the span share a line. */
+  .run-header .run-status-meaning { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .workspace-projects .run-header h2 { flex-basis: 100%; max-width: none; flex-wrap: wrap; }
+  .run-title { white-space: normal; }
+  .run-freshness { flex-wrap: wrap; }
+  .run-freshness { margin-left: 0; }
+  .run-facts-line, .run-definition { display: none; }
+  .run-lanes { flex-direction: column; gap: 2px; padding: 2px 0; }
+  .run-lane-steps { white-space: normal; }
+  .command-copy, .run-now-more { min-height: 44px; min-width: 44px; }
+  /* A command and its Copy button share a line; the command scrolls sideways inside its box, never the page. */
+  .command-step-body { flex-wrap: nowrap; }
+  .command-step-caption { display: none; }
+  .command-line { flex: 1 1 0; }
+  /* The Steps rows stack into two lines; explicit roles keep the table's semantics. */
+  .steps-table, .steps-table tbody { display: block; }
+  .steps-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .steps-table caption { display: block; }
+  /* Line 1: the step, its start and how long it took; line 2: its attempts and outcome. */
+  .steps-table tr { display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--border); padding: 2px 0 4px; }
+  .steps-table th, .steps-table td { display: block; height: auto; border-bottom: none; padding: 0 4px; }
+  .steps-table th.step-name { flex: 1 1 calc(100% - 9em); width: auto; min-width: 0; }
+  .steps-table .step-started { flex: 0 0 4em; width: auto; text-align: right; }
+  .steps-table .step-took { flex: 0 0 5em; width: auto; text-align: right; }
+  .steps-table .step-attempts { flex: none; width: auto; color: var(--text-muted); font-size: 0.8rem; }
+  .steps-table .step-outcome { flex: 1 1 0; min-width: 0; font-size: 0.8rem; }
+  .steps-table .step-bar { display: none; }
+  .step-link { min-height: 44px; }
+  .activity-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .activity-text { grid-column: 1 / -1; }
+  .activity-gap { padding-left: 0; }
+  .activity-open { grid-column: 3; grid-row: 1; }
+  /* One sideways-scrolling row of chips on a phone. */
+  .step-strip-list { grid-template-rows: auto; }
+  .step-strip-list li { grid-column: auto; grid-row: auto; }
+  .step-strip-nav { display: none; }
+  .step-chip { min-height: 44px; }
+  /* Every other control is a full tap target too. */
+  .activity-head .button { min-height: 44px; }
+  .run-details > summary, .command-legend > summary, .run-lanes-more > summary { display: inline-flex; align-items: center; min-height: 44px; }
+  .activity-open, .step-strip-run, .run-now-open { display: inline-flex; align-items: center; min-height: 44px; }
+}

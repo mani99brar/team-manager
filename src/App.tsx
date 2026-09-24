@@ -630,11 +630,20 @@ function App() {
 
   return (
     <div className={inProjects ? 'app app-projects' : 'app'}>
-      <header className="app-header">
+      {/* On Projects routes the header is one row: title, roots and Refresh (docs/PRD_VIEWER_UX.md 2); the skills routes keep
+          the subtitle and show the roots on a row of their own. */}
+      <header className={inProjects ? 'app-header app-header-projects' : 'app-header'}>
         <div className="app-title">
           <h1>MD Manager</h1>
-          <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save. Projects shows workflow runs, read-only.</p>
+          {!inProjects && <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save. Projects shows workflow runs, read-only.</p>}
         </div>
+        <nav className="roots" aria-label="Roots">
+          <ul>
+            <li><a href="/browse/Pi" aria-current={rootSource === 'Pi' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Pi') }}>Pi</a></li>
+            <li><a href="/browse/Claude" aria-current={rootSource === 'Claude' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Claude') }}>Claude</a></li>
+            <li><a href={projectsPathname()} aria-current={inProjects ? 'page' : undefined} onClick={event => { event.preventDefault(); navigatePathname(projectsPathname()) }}>Projects</a></li>
+          </ul>
+        </nav>
         {inProjects ? (
           // Busy but still focusable (aria-disabled, not disabled), so a keyboard user's focus stays on it while it reloads.
           <button type="button" className="button" onClick={() => { if (!projectsRefreshing) setProjectsRefresh(previous => previous + 1) }} aria-disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
@@ -646,14 +655,6 @@ function App() {
           </button>
         )}
       </header>
-
-      <nav className="roots" aria-label="Roots">
-        <ul>
-          <li><a href="/browse/Pi" aria-current={rootSource === 'Pi' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Pi') }}>Pi</a></li>
-          <li><a href="/browse/Claude" aria-current={rootSource === 'Claude' ? 'page' : undefined} onClick={event => { event.preventDefault(); navigateToSource('Claude') }}>Claude</a></li>
-          <li><a href={projectsPathname()} aria-current={inProjects ? 'page' : undefined} onClick={event => { event.preventDefault(); navigatePathname(projectsPathname()) }}>Projects</a></li>
-        </ul>
-      </nav>
 
       <div className="visually-hidden" role="status" aria-live="polite">{announcement}</div>
 

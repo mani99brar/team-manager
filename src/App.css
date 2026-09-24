@@ -23,10 +23,16 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   padding-top: 12px;
   flex-wrap: wrap;
 }
+/* On the skills routes the roots sit on a row of their own, below the title and Refresh. */
+.app-header .roots { order: 3; flex-basis: 100%; }
+/* On Projects routes the header is one 48 px row: title, roots, Refresh (docs/PRD_VIEWER_UX.md 2 and 10). */
+.app-header-projects { flex-wrap: nowrap; justify-content: flex-start; gap: 8px 16px; min-height: 48px; padding: 6px 0; }
+.app-header-projects .roots { order: 0; flex-basis: auto; }
+.app-header-projects > .button { margin-left: auto; }
 .app-title h1 { margin: 0; font-size: 1.25rem; }
 .app-title p { margin: 0; color: var(--text-muted); font-size: 0.85rem; }
 
@@ -268,7 +274,9 @@
 
 /* ---- Projects root ---- */
 /* The Projects root is long-form reading: the page scrolls instead of an inner pane, so nothing is trapped in a small box. */
-.app-projects { height: auto; min-height: 100%; }
+.app-projects { height: auto; min-height: 100%; gap: 4px; }
+.app-projects .breadcrumbs li { min-height: 28px; }
+.app-projects .breadcrumbs a, .app-projects .breadcrumb-current { padding: 2px 6px; }
 .workspace-projects { overflow: visible; flex: 1 0 auto; padding: 16px; }
 .workspace-projects h2 { margin: 0 0 8px; font-size: 1.15rem; overflow-wrap: anywhere; }
 .workspace-projects h3 { margin: 16px 0 8px; font-size: 1rem; }
@@ -315,38 +323,7 @@
 .projects-facts dd { margin: 0; overflow-wrap: anywhere; }
 .projects-facts code, .workspace-projects code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: var(--surface-alt); padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; }
 
-/* Workflow DAG */
-.workflow-graph-scroll { overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-alt); padding: 4px; }
-.workflow-graph { display: block; }
-.workflow-edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
-.workflow-edge-arrow { fill: var(--edge); }
-.workflow-node { cursor: default; outline: none; }
-.workflow-node[role='button'] { cursor: pointer; }
-.workflow-node-shape { fill: var(--surface); stroke: var(--node-file-stroke); stroke-width: 1.5; }
-.workflow-node-worker .workflow-node-shape { stroke: var(--node-source-stroke); }
-.workflow-node-verification .workflow-node-shape { stroke: var(--node-directory-stroke); }
-.workflow-node-review .workflow-node-shape, .workflow-node-integration .workflow-node-shape { stroke: var(--node-location-stroke); }
-.workflow-node-status-bar { fill: var(--text-muted); }
-.workflow-node.is-succeeded .workflow-node-status-bar { fill: var(--node-location-stroke); }
-.workflow-node.is-failed .workflow-node-status-bar { fill: var(--danger-text); }
-.workflow-node.is-failed .workflow-node-shape { stroke: var(--danger-text); fill: var(--danger-bg); }
-.workflow-node.is-running .workflow-node-status-bar { fill: var(--accent); }
-.workflow-node.is-awaiting_approval .workflow-node-status-bar, .workflow-node.is-paused .workflow-node-status-bar { fill: var(--node-directory-stroke); }
-.workflow-node.is-awaiting_approval .workflow-node-shape { stroke: var(--node-directory-stroke); fill: var(--node-directory-fill); stroke-dasharray: 5 3; }
-.workflow-node.is-pending .workflow-node-shape { stroke-dasharray: 3 3; }
-.workflow-node.is-definition .workflow-node-status-bar { fill: var(--edge); }
-.workflow-node.is-selected .workflow-node-shape { stroke: var(--accent); stroke-width: 3; }
-.workflow-node-focus { fill: none; stroke: var(--focus); stroke-width: 3; stroke-dasharray: 4 3; display: none; }
-.workflow-node:focus-visible .workflow-node-focus { display: block; }
-.workflow-node-label { font-size: 12px; font-weight: 600; fill: var(--text); }
-.workflow-node-meta { font-size: 10px; fill: var(--text-muted); }
-
-/* Run view */
-.run-status-line { margin: 4px 0 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-/* The run status with the live chip and the Local/UTC toggle beside it (PRD_VIEWER_UX 5.3, 6.3). */
-.run-status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px; margin: 4px 0 8px; }
-.run-status-row .run-status-line { margin: 0; }
-.run-freshness { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* Run view: the run page's own rules are in src/projects/run.css. */
 .live-status { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 0.8rem; border: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); }
 .live-status-live > [aria-hidden] { color: var(--node-location-stroke); }
 .live-status-watching > [aria-hidden] { color: var(--accent); }
@@ -355,14 +332,6 @@
 /* The chosen zone stays readable under the pointer (the generic button hover would otherwise replace its background). */
 .time-zone-toggle .button[aria-pressed='true']:hover { background: var(--accent); color: var(--accent-contrast); }
 .check-duration, .reviewer-duration { font-variant-numeric: tabular-nums; }
-.run-columns { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr); gap: 16px; margin-top: 8px; }
-.run-node-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.run-node-link { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; text-decoration: none; color: var(--text); min-height: 44px; }
-.run-node-link:hover { background: var(--surface-alt); }
-.run-node-link[aria-current='page'] { border-color: var(--accent); background: var(--surface-alt); }
-.run-node-label { font-weight: 600; }
-.run-node-meta { font-size: 0.85rem; color: var(--text-muted); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.run-detail-panel { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
 .node-detail { min-width: 0; overflow-wrap: anywhere; }
 .node-detail h3 { margin-top: 0; }
 .node-detail-id { font-weight: 400; font-size: 0.9rem; }
@@ -391,9 +360,7 @@
 .event-seq { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-muted); }
 .event-type { font-weight: 600; }
 
-/* Run views: tabs above the graph, the Assignment tab, worker input panels and the review panel */
-.run-tabs { padding: 8px 0 0; margin-top: 12px; flex-wrap: wrap; }
-.run-body, .assignment { min-width: 0; }
+/* Run views: the Assignment tab, worker input panels and the review panel */
 .assignment > h3 { margin-top: 12px; }
 .assignment-worker { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); min-width: 0; }
 .assignment-worker h4 { margin-top: 0; overflow-wrap: anywhere; }
@@ -428,7 +395,11 @@
 .finding-task-link, .finding-task-note { display: block; margin-top: 4px; font-size: 0.85rem; }
 
 @media (max-width: 760px) {
-  .run-columns { grid-template-columns: 1fr; }
+  /* Two rows on a phone: the title and Refresh, then the roots. */
+  .app-header-projects { flex-wrap: wrap; }
+  .app-header-projects .roots { order: 3; flex-basis: 100%; }
+  /* The Projects trail keeps its last two steps on a phone; the roots lead back to Projects. */
+  .app-projects .breadcrumbs li:not(:nth-last-child(-n + 2)) { display: none; }
   /* Tap targets are at least 44 px on phones (PRD_VIEWER_UX section 10). */
   .time-zone-toggle .button { min-height: 44px; min-width: 44px; }
   .workspace-projects { padding: 10px; }

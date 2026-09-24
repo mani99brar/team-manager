@@ -30,7 +30,7 @@ import {
   UI_CHANGED_FILES,
   UI_QUOTE,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, phase, renderedText, runUrl, taskDetails } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl, taskDetails } from './support.ts'
 
 installHooks()
 
@@ -109,13 +109,14 @@ test(`[scenario:executor-marks] The graph shows solid worker and review nodes an
   await expect(legend.locator('li')).toContainText([/Agent session/, /Trusted verifier/, /Controller/])
   await attach(page, testInfo, 'executor-marks')
 
-  // Each node page says who executed it.
+  // Each node page says who executed it. Node pages show the step strip instead of the graph (PRD_VIEWER_UX 4.4), so the
+  // steps are opened from the Steps table and then from the strip.
   const expected: Record<string, string> = {
     launch_ui: 'agent session', handoff: 'controller', verify_ui: 'trusted verifier', candidate: 'trusted verifier',
     review: 'one agent session per reviewer', approval: 'controller', integrate: 'controller',
   }
   for (const [nodeId, executor] of Object.entries(expected)) {
-    await graphNode(page, nodeId).click()
+    await nodeListItem(page, nodeId).getByRole('link').click()
     await expect(nodeDetail(page)).toHaveAttribute('data-node-id', nodeId)
     await expect(page.getByTestId('node-executor')).toHaveText(executor)
   }

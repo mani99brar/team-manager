@@ -314,9 +314,10 @@ test(`[scenario:failed-and-paused] Show failure and awaiting-approval state with
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(page.getByTestId('awaiting-notice')).toContainText('Viewing does not approve it')
   if (phase === 'worker') await expect(page.getByTestId('awaiting-notice')).toContainText(APPROVAL_MESSAGE)
-  await expect(graphNode(page, 'review')).toHaveAttribute('data-status', 'awaiting_approval')
-  await expect(graphNode(page, 'approval')).toHaveAttribute('data-status', 'pending')
-  await expect(graphNode(page, 'integrate')).toHaveAttribute('data-status', 'pending')
+  // A node page shows the step strip, not the graph (PRD_VIEWER_UX 4.4): the strip carries each step's status.
+  await expect(nodeListItem(page, 'review')).toHaveAttribute('data-status', 'awaiting_approval')
+  await expect(nodeListItem(page, 'approval')).toHaveAttribute('data-status', 'pending')
+  await expect(nodeListItem(page, 'integrate')).toHaveAttribute('data-status', 'pending')
   // The launch nodes finished, and the viewer says what that does (not) mean.
   await nodeListItem(page, 'launch_ui').getByRole('link').click()
   await expect(page.getByTestId('node-status-meaning')).toContainText('This is not workflow completion')
