@@ -2159,7 +2159,8 @@ test('[B2] every browser fixture run serves a 1.5.0 summary whose activity names
     assert.equal(detail.summary.contract_version, '1.5.0', key)
     const activity = activityOf(detail, key)
     assert.ok(activity.headline === null || activity.headline.length <= 160, key)
-    assert.equal(activity.controller, null, `${key}: no seeded run has a PID row`)
+    // A seeded PID row (the ux-run fixtures log them) never names this run's own automatic-step: not_running, else null.
+    assert.ok(activity.controller === null || activity.controller === 'not_running', `${key}: controller ${activity.controller}`)
     const { focus, attention } = activity
     seen[key] = { feature: activity.feature, last: at(activity.last_activity_at), finished: at(activity.finished_at),
       focus: focus ? `${focus.node_id}:${focus.status}@${at(focus.since)}` : '-', attention: attention ? `${attention.kind}:${attention.node_id ?? '-'}@${at(attention.since)}` : '-',
