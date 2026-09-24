@@ -1181,9 +1181,16 @@ function hasEvidence(state: RunExport, nodeId: string, map: LaneMap): boolean {
   return state.tasks.some(task => task.result !== null && present(nodeEvidence(task.result, nodeId, map)))
 }
 
-/** "Attempt 2; revision …", and "Design challenge attempt 2 …", which the controller writes in lower case. */
+/**
+ * The attempt a row states of its own node, only at the start of the controller's phrases: "Attempt 2; revision …"
+ * (pipeline.py), and "Design challenge attempt 2 …" and "Feature files re-pinned for design challenge attempt 2 …"
+ * (guardrails.py), in lower case. Elsewhere in a message an attempt is quoted: a repair note answers other packets
+ * ("Answers candidate/ui attempt 3") after the operator's free-text reason, and neither is its node's attempt.
+ */
+const OWN_ATTEMPT = /^(?:Attempt|Design challenge attempt|Feature files re-pinned for design challenge attempt) (\d+)\b/
+
 function attemptFromMessage(message: string): number | null {
-  const match = /\battempt (\d+)\b/i.exec(message)
+  const match = OWN_ATTEMPT.exec(message)
   return match ? Number(match[1]) : null
 }
 

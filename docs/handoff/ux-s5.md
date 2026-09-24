@@ -7,7 +7,8 @@ Files changed: `server/projects.ts`, `server/projectsConfig.ts`, `server/project
 ## What shipped
 
 **B1. Projection fixes** (`server/projects.ts`, no contract change):
-- `attemptFromMessage` reads `/\battempt (\d+)\b/i`. The served challenge rows of skeleton-001 now read attempts 1, 2, 2, 2, 3, 3, 3 instead of all 1. The snapshot is unchanged, see the guard below.
+- `attemptFromMessage` reads a node's attempt only from the controller's own phrases, at the start of the message: `^(?:Attempt|Design challenge attempt|Feature files re-pinned for design challenge attempt) (\d+)\b`. The served challenge rows of skeleton-001 now read attempts 1, 2, 2, 2, 3, 3, 3 instead of all 1. The snapshot is unchanged, see the guard below.
+  - The first commit used the PRD's `/\battempt (\d+)\b/i`. The review found that it also reads the attempts a repair note quotes (see Deviations 8), so the second commit anchors it.
 - On a lane named `controller`, a raw `controller` row whose message is a controller-process row is the run's before any lane aliasing, in `normalizeEvents` and in `projectSnapshot` alike. The patterns are those of the PRD: `^Automatic checkpoint controller PID`, `^Supervisor interrupted`, `Claude Code was unavailable`, `failed identically`, `^Repair \d+ applied` and `^\[Errno`. The lane's own `controller` rows (launching, awaiting the signal) stay on `launch_controller`.
 - A PID row never sets a node's last status in `projectSnapshot`.
 - A combined-check row aliased from `candidate_<lane>` is served with the message prefix `[<lane>] `. S2's `humanizeEvent` already drops it.
@@ -107,6 +108,51 @@ npx playwright test -c tests/project-workflows/playwright.config.ts --reporter=l
 
 None. No existing assertion changed. The 40 existing server tests, the 12 existing contract tests and the 37 browser scenarios in both phases pass unchanged. The contract examples changed shape (`runDetail` and `runList` are now 1.5.0, and `legacyRunDetail` is the 1.0.0 form), and the existing 'examples and generated schemas agree' test reads them as before.
 
+## Review fixes (second commit)
+
+An independent review raised four items:
+
+| Item | Outcome |
+|---|---|
+| P2: B1's `/\battempt (\d+)\b/i` reads a repair note's quoted attempts | Fixed with anchored phrases (Deviation 8) |
+| P3: the operator follow-up names only two project IDs | Fixed: the follow-up lists every ID and gives a command to list them |
+| Gap: no guard case with a repair note that quotes another node's attempt | Fixed: new test `[B1] a repair note's quoted attempts and reason are not its node's attempt; …` |
+| Gap: the seeded-fixture test pins only attention and the headline length | Fixed: `SEEDED_ACTIVITY` pins every field. A live `questions.json` fixture is S6's (12.3) |
+
+**Red.** The new B1 test, run against the first commit:
+
+```
+npx tsx --test --test-name-pattern="repair note" server/projects.test.ts
+✖ [B1] a repair note's quoted attempts and reason are not its node's attempt; …
+  AssertionError: the repair note keeps the attempt its node was on
+  actual:   [ [ 1, 1 ], [ 2, 1 ], [ 7, 4 ], [ 10, 2 ] ]
+  expected: [ [ 1, 1 ], [ 2, 1 ], [ 7, 1 ], [ 10, 2 ] ]
+```
+
+The first match wins, so the note got attempt 4, from the operator's reason. A scratch script ran the same rows through `projectSnapshot` and printed `verify_game snapshot running attempt 4`. After the fix it prints `attempt 2`.
+
+The stronger seeded-fixture test passes on the first commit as well. It pins what the first commit already served, so it has no product red.
+
+**Green.**
+
+```
+npx tsx --test server/projects.test.ts                    ℹ tests 52  ℹ pass 52  ℹ fail 0
+npx tsx --test contracts/projects/contract.test.ts        ℹ tests 13  ℹ pass 13  ℹ fail 0
+npx tsc -b                                                clean
+npx eslint server/projects.ts server/projects.test.ts     clean
+WORKFLOW_VERIFICATION_PHASE=candidate npx playwright test -c tests/project-workflows/playwright.config.ts --reporter=line   37 passed (4.1m)
+npx playwright test -c tests/project-workflows/playwright.config.ts --reporter=line                                         37 passed (5.5m)
+```
+
+The first worker-phase run of this round ended at 24 passed and 13 failed. The host's load average was 7-8 at the time, with S3's Playwright run and an `npm ci` beside it. I did not keep the failure output.
+- A `--last-failed` re-run passed all 13.
+- A full worker-phase re-run then passed all 37 (the line above).
+- The worker phase serves mocks, and this round changed no contract and no mock, so the failures were not this change. They are worth watching if they recur on an idle host.
+
+The candidate phase still changes no browser assertion. No seed writes a repair note, and every seeded challenge row starts with an anchored phrase.
+
+The first B1 test was renamed `[B1] the design challenge's lower-case attempt phrases are read; …`, because attempts are no longer read case-insensitively anywhere in a message.
+
 ## Deviations from the PRD
 
 1. **Per-message version.** The PRD calls `activity` optional. Following the per-message convention (`runInputs` carried 1.3.0 until 1.4.0), a summary that has `activity` says `contract_version: "1.5.0"`, and a 1.0.0 summary has none.
@@ -118,13 +164,25 @@ None. No existing assertion changed. The 40 existing server tests, the 12 existi
 4. **Headline wording.** It includes the focus label, as the PRD's field comment says. A focus without a status row falls back to its latest row, for example the failure-drill row `Injected gate failure (failure drill); checks preserved`, whose raw status maps to none. Without a focus, the step with the last status row speaks, so a succeeded run reads `Integrate candidate · fast-forwarded to …`.
 5. **`attention.kind: 'interrupted'`** comes from `deriveNow`'s situation, cases (a), (b) and (d). Case (c) needs readings over 15 s, which only the client has.
 6. **The "every fixture" guard** is a table in `server/projects.test.ts`. It pins the pre-B1 snapshot `node:status:attempt` of every browser fixture run, seeded with `seedCandidate` as the candidate phase seeds it. It also reconstructs the raw rows of the three captured runs from their served events, and checks that each verification node's event-derived attempt equals the served attempt. `projectSnapshot` reads message attempts only there, through `eventAttempt` and `Math.max`.
-   - The same test file seeds every browser fixture again and checks that each run serves a valid 1.5.0 summary whose list row equals its detail. Its attention is pinned for the 15 current runs.
+   - The same test file seeds every browser fixture again and checks that each run serves a valid 1.5.0 summary whose list row equals its detail. The whole activity of the 15 current runs is pinned (`SEEDED_ACTIVITY`): feature, `last_activity_at`, `finished_at`, focus with its `since`, attention with its `since`, `waiting_questions`, the exact headline, and a null `controller`.
    - Runs added by later slices are loaded and validated, but not pinned.
+   - The captured runs have no repair note that quotes another node's attempt: in skeleton-001 #20, the quoted `worker/game attempt 2` is the lane's own. A separate test builds that case (Deviation 8).
 7. **`projectSnapshot`'s `lastController`** still takes any raw `controller` status row, including a controller lane's own rows. That was the behaviour before; B1 names only the node aliasing and the PID rule. C6 (reserve the lane ID) removes the collision.
+8. **The attempt of a row comes only from the controller's own anchored phrases**, not from the PRD's `/\battempt (\d+)\b/i`.
+   - The PRD pattern also matches the attempts that `repair.py` `finish_repair` quotes on `verify_<lane>`: `Answers <phase>/<lane> attempt N` for every blocked packet, after the operator's free-text `Reason:`.
+   - Take a candidate-phase repair, where the reason or a quoted `candidate/<lane> attempt 3` names a higher number than the lane's next attempt. `normalizeEvents` served the note with that number. `projectSnapshot` kept it through `Math.max` after the real `Attempt 2; revision …` row. The node header then showed a phantom attempt, and its result link was a 404.
+   - The old case-sensitive `\bAttempt (\d+)\b` had the same fault for a reason that contains `Attempt N`.
+   - The anchored phrases are `^Attempt N` (pipeline.py:498), `^Design challenge attempt N` (guardrails.py:333, :373, :376, :664) and `^Feature files re-pinned for design challenge attempt N` (guardrails.py:672). Every other row carries its node's current attempt. The PRD's guard holds unchanged: the served challenge attempts of the captured runs are as before, and so are the snapshots.
 
 ## Follow-ups
 
-- **Operator: serving run directories.** Once this is deployed, add `"viewer": {"expose_run_dir": ["project-b", "md-manager"]}` at the top level of `~/.config/md-manager/projects.json` (open question 2). The viewer re-reads the registry on the next request, and `workflow launch` never rewrites the key. Until S6, nothing in the UI reads `run_dir`.
+- **Operator: serving run directories.** Once this is deployed, add a top-level `"viewer": {"expose_run_dir": [...]}` to `~/.config/md-manager/projects.json` (open question 2), listing every project ID whose runs should serve `run_dir`.
+  - IDs match exactly, so the PRD's example `["project-b", "md-manager"]` is not enough.
+  - The review of this slice found the Project-B runs registered under several IDs. The list for the live registry is therefore `["project-b", "project-b-world", "project-b-ledger", "project-b-claim", "md-manager"]`. S5 did not read the live registry to confirm this, since it is off-limits to the slice.
+  - Before pasting the key, list the registered IDs with `python3 -c 'import json,os; print([p["project_id"] for p in json.load(open(os.path.expanduser("~/.config/md-manager/projects.json")))["projects"]])'`.
+  - The viewer re-reads the registry on the next request, and `workflow launch` never rewrites the key. Until S6, nothing in the UI reads `run_dir`.
+- **Owner of `triage.ts` (S3 now):** S2's client-side `ATTEMPT = /\battempt (\d+)/i` (triage.ts:259, used at :373) over-matches repair notes in the same way (Deviation 8). The timeline then gives a repair note on `verify_<lane>` a quoted attempt (3, or a number from the reason) instead of its lane's own. The server now serves the right `event.attempt` for these rows, so the client can drop its re-parse for them, or anchor its pattern like `OWN_ATTEMPT` in `server/projects.ts`. S5 may not edit `triage.ts`.
+- **S6's fixture run with a live `<lane>.questions.json`** (12.3) should get a `SEEDED_ACTIVITY` row in `server/projects.test.ts`. Today, `waiting_questions` from a live file is covered only by the harness test `[B2] waiting questions come from the live <lane>.questions.json`, because no current browser fixture seeds that file.
 - **S6** reads `activity` and `run_dir` (see Deviations 1). Worker-phase mocks for the served-activity scenario should build 1.5.0 summaries with a consistent `waiting_questions`/`attention` pair, or the summary schema refuses them.
   - `triage.ts`'s `ServedActivity` type (`attention.kind: string`) is compatible, and needs no change.
 - `server/projects.test.ts` now imports `tests/project-workflows/seed.ts`. Every fixture seed a later slice adds is loaded by the server tests too, and must project into a valid 1.5.0 summary.

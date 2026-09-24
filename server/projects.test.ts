@@ -1794,24 +1794,40 @@ const SEEDED_SNAPSHOTS: Record<string, string> = {
   'ux-time/run-short-check': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:failed:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
 }
 
-/** What each seeded browser fixture run waits on: `attention kind:node:waiting questions` (`-` for none). */
-const SEEDED_ATTENTION: Record<string, string> = {
-  'feature-flow/run-awaiting': 'approval:review:0',
-  'feature-flow/run-blocked': 'failed:review:0',
-  'feature-flow/run-succeeded': '-:-:0',
-  'feature-flow/run-failed': 'failed:verify_adapter:0',
-  'feature-flow/run-legacy': '-:-:0',
-  'lanes-flow/run-one-lane': '-:-:0',
-  'lanes-flow/run-three-lanes': '-:-:0',
-  'reviewers-flow/run-legacy-reviewer': '-:-:0',
-  'reviewers-flow/run-reviewer-blocked': 'failed:review:0',
-  'reviewers-flow/run-two-reviewers': '-:-:0',
-  'clarity-flow/run-files-captured': '-:-:0',
-  'guarded-flow/run-guarded': '-:-:0',
-  'guarded-flow/run-guarded-asking': 'question:launch_adapter:1',
-  'guarded-flow/run-guarded-blocked': 'failed:handoff:0',
-  'ux-time/run-short-check': 'failed:verify_adapter:0',
-}
+type SeededActivity = { feature: string | null; last: string; finished: string; focus: string; attention: string; waiting: number; headline: string }
+
+/**
+ * The activity each seeded browser fixture run serves, compacted: a time as `HH:MM` on the seeds' day, focus as
+ * `node:status@since`, attention as `kind:node@since`, `-` for null. No seeded run has a PID row, so `controller` is null.
+ */
+const SEEDED_ACTIVITY: Record<string, SeededActivity> = (() => {
+  const REVIEWS = 'Review visibility and run inputs in the viewer'
+  const INTEGRATED = 'Integrate candidate · Fast-forwarded the feature branch'
+  const DRILL = 'Verify adapter · Injected gate failure (failure drill); checks preserved'
+  const succeeded = (feature: string | null, at: string): SeededActivity => ({ feature, last: at, finished: at, focus: '-', attention: '-', waiting: 0, headline: INTEGRATED })
+  return {
+    'feature-flow/run-awaiting': { feature: REVIEWS, last: '10:45', finished: '-', focus: 'review:awaiting_approval@-', attention: 'approval:review@-', waiting: 0,
+      headline: 'Independent review · Independent review required before integration' },
+    'feature-flow/run-blocked': { feature: REVIEWS, last: '10:45', finished: '10:45', focus: 'review:failed@10:45', attention: 'failed:review@10:45', waiting: 0,
+      headline: 'Independent review · Independent reviewer blocked the candidate' },
+    'feature-flow/run-succeeded': succeeded(REVIEWS, '10:45'),
+    'feature-flow/run-failed': { feature: REVIEWS, last: '10:20', finished: '10:20', focus: 'verify_adapter:failed@-', attention: 'failed:verify_adapter@-', waiting: 0, headline: DRILL },
+    'feature-flow/run-legacy': succeeded(null, '10:20'),
+    'lanes-flow/run-one-lane': succeeded('Worker lanes from configuration', '10:45'),
+    'lanes-flow/run-three-lanes': succeeded('Worker lanes from configuration', '10:45'),
+    'reviewers-flow/run-legacy-reviewer': succeeded('Parallel reviewers', '10:45'),
+    'reviewers-flow/run-reviewer-blocked': { feature: 'Parallel reviewers', last: '10:45', finished: '10:45', focus: 'review:failed@10:45', attention: 'failed:review@10:45', waiting: 0,
+      headline: 'Independent review · Reviewer coverage blocked the candidate; reviewer general was stopped and superseded' },
+    'reviewers-flow/run-two-reviewers': succeeded('Parallel reviewers', '10:45'),
+    'clarity-flow/run-files-captured': succeeded('Viewer clarity', '10:45'),
+    'guarded-flow/run-guarded': succeeded('Workflow guardrails', '10:45'),
+    'guarded-flow/run-guarded-asking': { feature: 'Workflow guardrails', last: '10:45', finished: '-', focus: 'launch_adapter:running@10:45', attention: 'question:launch_adapter@10:30', waiting: 1,
+      headline: 'Launch adapter worker · Worker adapter asked question 2 of 3; its deadline is paused until `python -m workflow answer <path> adapter "<text>"`: Does a paused d…' },
+    'guarded-flow/run-guarded-blocked': { feature: 'Workflow guardrails', last: '10:45', finished: '10:45', focus: 'handoff:failed@-', attention: 'failed:handoff@-', waiting: 0,
+      headline: 'Freeze worker handoffs · Worker ui asked question 4; at most 3 are answered, so it is treated as blocked: Should the challenge page also show the concerns of e…' },
+    'ux-time/run-short-check': { feature: null, last: '10:20', finished: '10:20', focus: 'verify_adapter:failed@-', attention: 'failed:verify_adapter@-', waiting: 0, headline: DRILL },
+  }
+})()
 
 /** Seeds every browser fixture run in a temporary root and projects each one; `visit` sees `workflow/run` and the loaded run. */
 async function eachSeededRun(visit: (key: string, detail: RunDetail) => void) {
@@ -1831,7 +1847,7 @@ async function eachSeededRun(visit: (key: string, detail: RunDetail) => void) {
   } finally { await rm(root, { recursive: true, force: true }) }
 }
 
-test('[B1] attempts are read case-insensitively; the snapshot attempts of the captured runs and of every fixture are unchanged', async () => {
+test('[B1] the design challenge\'s lower-case attempt phrases are read; the snapshot attempts of the captured runs and of every fixture are unchanged', async () => {
   const challenge = (events: WorkflowEvent[]) => events.filter(event => event.node_id === 'challenge').map(event => event.attempt)
   // "Design challenge attempt N" rows were all served as attempt 1 by the case-sensitive parser.
   const expected: Record<string, number[]> = { 'skeleton-001': [1, 2, 2, 2, 3, 3, 3], 'skeleton-fixes-001': [1, 1, 1, 1, 2, 2, 2], 'workflow-guardrails-001': [] }
@@ -1840,7 +1856,7 @@ test('[B1] attempts are read case-insensitively; the snapshot attempts of the ca
     const raw = rawEventsOf(run)
     const served = normalizeEvents(run.detail.summary.run_id, run.detail.definition, raw, laneMap(run.inputs.selected_workers))
     assert.deepEqual(challenge(served), attempts, name)
-    // Every other row keeps the attempt it was served with ("Answers worker/game attempt 2" on skeleton-001 #20 already was 2).
+    // Every other row keeps the attempt it was served with (the repair note on skeleton-001 #20 stays on its node's attempt 2, whatever it quotes).
     served.forEach((event, index) => {
       const before = run.events[index]
       if (event.node_id === before.node_id && event.node_id !== 'challenge') assert.equal(event.attempt, before.attempt, `${name} #${event.sequence}`)
@@ -1856,6 +1872,41 @@ test('[B1] attempts are read case-insensitively; the snapshot attempts of the ca
   const projected: Record<string, string> = {}
   await eachSeededRun((key, detail) => { projected[key] = detail.snapshot.nodes.map(node => `${node.node_id}:${node.status}:${node.attempt}`).join(' ') })
   for (const [key, nodes] of Object.entries(SEEDED_SNAPSHOTS)) assert.equal(projected[key], nodes, key)
+})
+
+test('[B1] a repair note\'s quoted attempts and reason are not its node\'s attempt; only the controller\'s own attempt phrases are', async () => {
+  // A candidate-phase block in skeleton-001's graph, repaired as repair.py finish_repair records it: the note on `verify_game`
+  // quotes every blocked packet ("Answers <phase>/<lane> attempt N") after the operator's free-text reason, and neither is
+  // the attempt `verify_game` runs next (its packet and result are /2, from attempt_targets).
+  const run = await capturedRun('skeleton-001')
+  const note = 'Repair 1 by the operator: snapshot dddddddd = cccccccc + eeeeeeee on snapshot cccccccc (src/app.ts). '
+    + 'Reason: Attempt 4 of the combined check and attempt 5 hit a flaky runner. '
+    + 'Answers worker/game attempt 1: browser: failed tests. Answers candidate/game attempt 3: browser: failed tests. '
+    + 'Continue with python -m workflow automatic <run>'
+  const raw: RawEvent[] = [
+    { sequence: 1, time: T0, node: 'verify_game', status: 'running', message: `Attempt 1; revision ${'c'.repeat(40)}` },
+    { sequence: 2, time: T0, node: 'verify_game', status: 'succeeded', message: 'Required tests and artifacts passed; recorded for the candidate gate: browser' },
+    { sequence: 3, time: T1, node: 'candidate_game', status: 'blocked', message: `Combined revision ${'e'.repeat(40)}` },
+    { sequence: 4, time: T1, node: 'candidate_game', status: 'blocked', message: `Combined revision ${'e'.repeat(40)}` },
+    { sequence: 5, time: T1, node: 'candidate_game', status: 'blocked', message: `Combined revision ${'e'.repeat(40)}` },
+    { sequence: 6, time: T1, node: 'controller', status: 'blocked', message: 'candidate/game failed identically on attempts 2 and 3; not transient, inspect <path>' },
+    { sequence: 7, time: T2, node: 'verify_game', status: 'paused', message: note },
+    { sequence: 8, time: T2, node: 'candidate', status: 'paused', message: 'Repair 1 supersedes combined revision eeeeeeee; candidate-1 is built after the lanes re-verify' },
+    { sequence: 9, time: T2, node: 'controller', status: 'running', message: 'Repair 1 applied: checkpoint forked from 1f1b7f90 (after handoff); attempts worker:game 2, candidate:game 4' },
+    { sequence: 10, time: T2, node: 'verify_game', status: 'running', message: `Attempt 2; revision ${'d'.repeat(40)}` },
+  ]
+  const served = normalizeEvents(run.detail.summary.run_id, run.detail.definition, raw, laneMap(run.inputs.selected_workers))
+  assert.deepEqual(served.filter(event => event.node_id === 'verify_game').map(event => [event.sequence, event.attempt]), [[1, 1], [2, 1], [7, 1], [10, 2]],
+    'the repair note keeps the attempt its node was on')
+  const verify = snapshotFromEvents(run, raw).nodes.find(node => node.node_id === 'verify_game')!
+  assert.deepEqual([verify.status, verify.attempt], ['running', 2], 'verify_game runs attempt 2, never a quoted one')
+  // The design challenge's own phrases still count, in the controller's lower case.
+  const challenge = [
+    { sequence: 1, time: T0, node: 'challenge', status: 'running', message: 'Design challenge attempt 1: one print job, session s1' },
+    { sequence: 2, time: T0, node: 'challenge', status: 'running', message: 'Feature files re-pinned for design challenge attempt 2 on base aaaa' },
+    { sequence: 3, time: T0, node: 'challenge', status: 'succeeded', message: 'Design challenge attempt 2 accepted by the operator: the reviewer on attempt 7 was wrong' },
+  ]
+  assert.deepEqual(normalizeEvents(run.detail.summary.run_id, run.detail.definition, challenge, laneMap(run.inputs.selected_workers)).map(event => event.attempt), [1, 2, 2])
 })
 
 test('[B1] on a lane named controller, PID and Errno rows belong to the run while the lane\'s own controller events stay on the lane', async () => {
@@ -2102,14 +2153,19 @@ test('[B2] controller liveness: this run\'s automatic-step, started by its PID r
 })
 
 test('[B2] every browser fixture run serves a 1.5.0 summary whose activity names what it waits on', async () => {
-  const seen: Record<string, string> = {}
+  const at = (value: string | null | undefined) => value ? value.replace(/^2026-03-01T(\d\d:\d\d):00Z$/, '$1') : '-'
+  const seen: Record<string, SeededActivity> = {}
   await eachSeededRun((key, detail) => {
     assert.equal(detail.summary.contract_version, '1.5.0', key)
-    const activity = detail.summary.activity!
-    seen[key] = `${activity.attention?.kind ?? '-'}:${activity.attention?.node_id ?? '-'}:${activity.waiting_questions}`
+    const activity = activityOf(detail, key)
     assert.ok(activity.headline === null || activity.headline.length <= 160, key)
+    assert.equal(activity.controller, null, `${key}: no seeded run has a PID row`)
+    const { focus, attention } = activity
+    seen[key] = { feature: activity.feature, last: at(activity.last_activity_at), finished: at(activity.finished_at),
+      focus: focus ? `${focus.node_id}:${focus.status}@${at(focus.since)}` : '-', attention: attention ? `${attention.kind}:${attention.node_id ?? '-'}@${at(attention.since)}` : '-',
+      waiting: activity.waiting_questions, headline: activity.headline ?? '-' }
   })
-  for (const [key, expected] of Object.entries(SEEDED_ATTENTION)) assert.equal(seen[key], expected, key)
+  for (const [key, expected] of Object.entries(SEEDED_ACTIVITY)) assert.deepEqual(seen[key], expected, key)
 })
 
 test('[B3] run_dir is served with ~ only for projects listed in viewer.expose_run_dir and only under $HOME', async () => {
