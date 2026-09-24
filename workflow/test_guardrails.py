@@ -63,6 +63,14 @@ def attached_pane(pane: str, run: Path, lane: str, background_id: str) -> dict:
     return pane_process_info(pane, [PY, "-m", "workflow.interactive", "attach-one", str(run), "--node", lane], ["claude", "attach", background_id])
 
 
+def claude_screen(*typed: str) -> str:
+    """What `herdr pane read --source visible` prints for a pane showing a Claude Code session (probed live): its transcript,
+    then the input box, a labelled rule, `❯` and the input's first line, its wrapped lines, a closing rule; `typed` are those lines."""
+    rule = "─" * 40
+    return "\n".join(["● Option A or B? Use option B if the adapter owns it.", "", f"{rule} ui ─", "❯\xa0" + (typed[0] if typed else ""),
+                      *(f"  {line}" for line in typed[1:]), rule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)", ""])
+
+
 def concern(severity: str, message: str = "A concern") -> dict:
     return {"severity": severity, "kind": "assumption", "message": message, "consequence": f"{message} breaks the run"}
 
@@ -1535,10 +1543,10 @@ class AnswerDelivery(unittest.TestCase):
             record_question(runtime, lane, {"question": "Option A or B?"}, clock=lambda: 10.0)
         self.now = 100.0
 
-    def answer(self, *argv, herdr_env=True, fail=False, pane=None, fail_at=None):
+    def answer(self, *argv, herdr_env=True, fail=False, pane=None, fail_at=None, screen=""):
         """(herdr commands, output, exit code); `fail` makes every Herdr command exit 1, as for a closed pane, and `fail_at`
-        maps one pane command (send-text, send-keys) to the error it raises. `pane` is what process-info shows: by default
-        the lane's attach-one attached to its session."""
+        maps one pane command (send-text, send-keys, read) to the error it raises. `pane` is what process-info shows: by
+        default the lane's attach-one attached to its session; `screen` is what `pane read` prints."""
         calls = []
 
         def run(command, **_):
@@ -1550,6 +1558,8 @@ class AnswerDelivery(unittest.TestCase):
             if command[2] == "process-info":
                 lane = "adapter" if command[-1] == "pane-adapter" else "ui"
                 return subprocess.CompletedProcess(command, 0, json.dumps(pane or attached_pane(command[-1], self.root, lane, f"bg-{lane}")), "")
+            if command[2] == "read":
+                return subprocess.CompletedProcess(command, 0, screen, "")
             return subprocess.CompletedProcess(command, 0, "", "")
         output = io.StringIO()
         environment = {key: value for key, value in os.environ.items() if key != "HERDR_ENV"} | ({"HERDR_ENV": "1"} if herdr_env else {})
@@ -1637,24 +1647,44 @@ class AnswerDelivery(unittest.TestCase):
                                  ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
         self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, True))
 
-    def test_a_rerun_after_a_failed_enter_presses_enter_only(self):
-        # The text reached the session's input and Enter failed: a rerun must not type it again into that input.
+    def test_a_rerun_after_a_failed_enter_presses_enter_only_while_the_input_shows_the_text(self):
+        # The text reached the session's input and Enter failed: a rerun must not type it again into that input. It may
+        # be gone by the rerun (an update respawned the idle session under a new PID, whose input is empty): Enter then
+        # would submit nothing and the answer would count as delivered, so it is pressed only under the text.
         save_json(self.root / "terminals.json", {lane: {"pane_id": f"pane-{lane}", "tab_id": "t", "mode": "attach_requested"} for lane in ("ui", "adapter")})
         for lane in ("ui", "adapter"):
             calls, output, code = self.answer(lane, "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
             self.assertEqual(([call[2] for call in calls], code), (["process-info", "send-text", "send-keys"], 1), output)
-            self.assertIn("The answer to question 1 is typed into the worker's pane but was not submitted", output)
-            self.assertIn("it presses Enter only, never types the text again", output)
+            self.assertIn("The answer to question 1 was typed into the worker's pane but not submitted", output)
+            self.assertIn("presses Enter only, never types the text again, and only while the pane shows the answer in the session's input", output)
+            self.assertIn("press Enter if the session's input holds the answer, else type it first", output)
             self.assertNotIn("did not reach the worker", output)
             self.assertEqual((self.entry(lane)["typed"], self.entry(lane)["delivered"]), (True, False))
         # Back at a shell, Enter would run the typed text: refused, nothing sent.
         calls, output, code = self.answer("ui", "Use option B", pane=pane_process_info("pane-ui"))
         self.assertEqual(([call[2] for call in calls], code), (["process-info"], 1), output)
-        self.assertIn("is typed into the worker's pane but was not submitted", output)
-        # Attached: the rerun presses Enter only.
-        calls, output, code = self.answer("ui", "Use option B")
+        self.assertIn("was typed into the worker's pane but not submitted", output)
+        # Attached, but the input does not show the text (a respawned session's empty input; other text; no input line
+        # at all, as when the session shows a dialog; Herdr failing to read it; the answer in the transcript alone never
+        # counts): nothing is pressed and the operator is told to look at the pane.
+        for screen, fail_at, shown in ((claude_screen(), None, "its input line is empty"),
+                                       (claude_screen("Use option C"), None, "its input line shows 'Use option C'"),
+                                       ("● Option A or B? Use option B\n", None, "Herdr shows no Claude Code input line in it"),
+                                       (claude_screen("Use option B"), {"read": subprocess.CalledProcessError(1, ["herdr"], "", "no such pane")}, None)):
+            with self.subTest(shown=shown):
+                calls, output, code = self.answer("ui", "Use option B", screen=screen, fail_at=fail_at)
+                self.assertEqual((calls, code), ([["herdr", "pane", "process-info", "--pane", "pane-ui"],
+                                                  ["herdr", "pane", "read", "pane-ui", "--source", "visible"]], 1), output)
+                if shown:
+                    self.assertIn(f"Blocked: Pane pane-ui (ui) does not show the answer typed before in its session's input: {shown}; "
+                                  "Enter is not pressed. Look at the pane", output)
+                self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B' --no-herdr\n", output)
+                self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, False))
+        # The input shows it (wrapped, here even inside a word): the rerun presses Enter only.
+        calls, output, code = self.answer("ui", "Use option B", screen=claude_screen("Use opt", "ion B"))
         self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "read", "pane-ui", "--source", "visible"],
+                                 ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
         self.assertIn("typed into its pane, not submitted", output)
         self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, True))
         # With --no-herdr the operator is told the text may already be in the input, not to type it again blindly.

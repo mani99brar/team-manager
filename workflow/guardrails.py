@@ -865,12 +865,32 @@ def pane_attachment(process: dict, background_id: str) -> str | None:
     return f"it runs {', '.join(others)}" if others else "attach-one is between two attaches"
 
 
+def input_shown(screen: str, text: str) -> str | None:
+    """None when the Claude Code input on the pane's screen (`herdr pane read`) holds `text`, else what the screen shows.
+
+    The input is the last line starting with `❯` under a rule (a line of `─`, perhaps labelled), wrapped onto the lines
+    below it down to the closing rule; the transcript above it never counts. Whitespace is ignored: a wrap may split a word.
+    """
+    lines = screen.splitlines()
+    start = next((index for index in range(len(lines) - 1, 0, -1)
+                  if lines[index].lstrip().startswith("❯") and lines[index - 1].lstrip().startswith("─")), None)
+    end = None if start is None else next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("─")), None)
+    if end is None:
+        return "Herdr shows no Claude Code input line in it"
+    held = " ".join(" ".join([lines[start].lstrip()[1:], *lines[start + 1:end]]).split())
+    if held.replace(" ", "") == "".join(text.split()):
+        return None
+    return f"its input line shows {held!r}" if held else "its input line is empty"
+
+
 def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = True) -> str:
     """Type the answer into the worker's Herdr pane (send-text, then Enter), or say how to type it after `claude attach`.
 
     Only a pane that shows the lane's session is typed into: once attach-one ended (a detach, an interrupt, a give-up)
     the pane is a shell, which would run the text, and between two attaches the text would wait for whatever reads the
-    terminal next. `typed` is recorded once the text is in the pane, so a rerun after a failed Enter presses Enter only.
+    terminal next. `typed` is recorded once the text is in the pane, so a rerun after a failed Enter presses Enter only,
+    and only while the pane shows the text in the session's input: a session an update respawned (a new PID) has an
+    empty one, and Enter there would submit nothing while the answer counted as delivered.
     """
     receipt = read_json(directory / f"{node}.interactive.json")
     background_id = receipt.get("background_id")
@@ -879,7 +899,7 @@ def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = Tr
             return (f"The answer is typed in the worker's session but not submitted: claude attach {background_id}, then press Enter "
                     "(type it first if the session's input does not hold it)")
         return f"Type the answer in the worker's session: claude attach {background_id}"
-    from .herdr import herdr
+    from .herdr import herdr, herdr_text
     terminals = directory / "terminals.json"
     mapping = read_json(terminals) if terminals.exists() else {}  # A run started without --herdr has none.
     if node not in mapping:
@@ -894,8 +914,12 @@ def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = Tr
                            f"Attach it again in that pane ({attach}) and rerun answer, or type the answer yourself after "
                            f"`claude attach {background_id}` (--no-herdr)")
     if entry.get("typed"):
+        held = input_shown(herdr_text("pane", "read", pane, "--source", "visible"), entry["answer"])
+        if held:
+            raise RuntimeError(f"Pane {pane} ({node}) does not show the answer typed before in its session's input: {held}; Enter is not "
+                               "pressed. Look at the pane: the input may have lost it (a session an update respawned starts with an empty one)")
         herdr("pane", "send-keys", pane, "Enter")
-        return f"Enter pressed in pane {pane} ({node}), whose session's input holds the answer typed before"
+        return f"Enter pressed in pane {pane} ({node}), whose session's input showed the answer typed before"
     try:
         herdr("pane", "send-text", pane, entry["answer"])
     except subprocess.TimeoutExpired as error:
@@ -997,10 +1021,12 @@ def answer_main(argv=None):
         if delivered:
             parser.exit(1, f"Blocked: {error}\nThe answer reached the worker but is not marked delivered; do not rerun answer for this question.\n")
         if entry is not None and entry.get("typed"):
-            parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} is typed into the worker's pane but was not submitted; its "
-                           f"deadline runs. Submit it by rerunning, from a Herdr pane (it presses Enter only, never types the text again):\n"
-                           f"  {answer_command(directory, args.node, args.text)}\nor print the claude attach command and press Enter in the "
-                           f"session yourself:\n  {answer_command(directory, args.node, args.text, herdr=False)}\n")
+            parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} was typed into the worker's pane but not submitted; its "
+                           f"deadline runs. Rerunning from a Herdr pane presses Enter only, never types the text again, and only while the pane "
+                           f"shows the answer in the session's input (a session an update respawned starts with an empty one):\n"
+                           f"  {answer_command(directory, args.node, args.text)}\nor look at the pane and print the claude attach command to submit "
+                           f"it yourself (press Enter if the session's input holds the answer, else type it first):\n"
+                           f"  {answer_command(directory, args.node, args.text, herdr=False)}\n")
         if entry is not None:
             parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} stays recorded and its deadline runs, but it did not reach "
                            f"the worker. Deliver it by rerunning, from a Herdr pane:\n  {answer_command(directory, args.node, args.text)}\n"
