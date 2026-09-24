@@ -7,6 +7,8 @@
  */
 import type { Page, Route } from '@playwright/test'
 import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, workerResults, workflowLists } from './fixtures.ts'
+// Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
+import './fixtures/index.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
 const notFound = (message: string, code = 'not_found') => json({ error: { code, message } }, 404)

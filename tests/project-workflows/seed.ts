@@ -18,6 +18,8 @@
  * challenge accepted at attempt 2, the ui lane's worker packet captured a Markdown file, the review is attempt 1); two wait at
  * the handoff interrupt with no packet: one on the adapter's second question, one after the controller blocked on the ui
  * worker's fourth question (its `controller` event names no graph node).
+ * The viewer UX slices seed their own workflows through `fixtures/index.ts` (docs/PRD_VIEWER_UX.md section 11), with the
+ * writers below handed over as a `SeedContext`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -102,9 +104,10 @@ import {
   type RawInputsSection,
   type RawReviewSection,
 } from './fixtures.ts'
+import { seedUxFixtures } from './fixtures/index.ts'
 import type { WorkerResult } from '../../contracts/workflow/v1.ts'
 
-type InternalEvent = { sequence: number; time: string; node: string; status: string; message: string }
+export type InternalEvent = { sequence: number; time: string; node: string; status: string; message: string }
 type Task = { node_id: string; error: string | null; interrupts: object[]; result: object | null }
 
 function writeJson(path: string, value: unknown) {
@@ -152,7 +155,7 @@ function writePacket(runDir: string, phase: 'worker' | 'candidate', node: string
   return { phase, node_id: node, attempt, path: relative, sha256: sha256(Buffer.from(`${JSON.stringify(packet, null, 2)}\n`)) }
 }
 
-type RunOptions = {
+export type RunOptions = {
   createdAt: string; updatedAt: string; definitionNodes: typeof GRAPH_NODES; values: Record<string, unknown>; next: string[]; tasks: Task[]; events: InternalEvent[]
   packets: (runDir: string) => object[]
   /** Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane selection, 1.4.0 the reviewer set. */
@@ -205,6 +208,19 @@ function leakFor(runsRoot: string, runId: string): string {
 }
 
 const internalEvent = (sequence: number, time: string, node: string, status: string, message: string): InternalEvent => ({ sequence, time, node, status, message })
+
+/** What a viewer UX fixture module gets to write its runs in the documented storage format (`fixtures/index.ts`). */
+export type SeedContext = {
+  /** The shared repository every seeded project points at. */
+  repository: string
+  /** Creates and returns the runs root of one workflow, `<root>/runs/<workflow id>`. */
+  runsRoot: (workflowId: string) => string
+  writeRun: typeof writeRun
+  writePacket: typeof writePacket
+  receipt: typeof receipt
+  internalEvent: typeof internalEvent
+  leakFor: typeof leakFor
+}
 
 /** Seeds registry + runs under `root`; returns the registry path for MD_MANAGER_PROJECTS_CONFIG. */
 export function seedCandidate(root: string): string {
@@ -551,8 +567,21 @@ export function seedCandidate(root: string): string {
     inputs: rawInputsSection(RUN_GUARDED_BLOCKED, leakFor(guardedRunsRoot, RUN_GUARDED_BLOCKED)),
   })
 
+  // ---- viewer UX slices: each module seeds its own workflow, appended after every workflow above ----
+
+  const ux = seedUxFixtures({
+    repository,
+    runsRoot: workflowId => {
+      const directory = join(root, 'runs', workflowId)
+      mkdirSync(directory, { recursive: true })
+      return directory
+    },
+    writeRun, writePacket, receipt, internalEvent, leakFor,
+  })
+
   const registry = {
     version: 1,
+    ...ux.registry,
     projects: [
       {
         project_id: PROJECT.project_id, name: PROJECT.name, repository,
@@ -563,6 +592,7 @@ export function seedCandidate(root: string): string {
           { workflow_id: REVIEWERS_WORKFLOW_ID, runs_root: reviewersRunsRoot, definition: { name: REVIEWERS_WORKFLOW_NAME, nodes: REVIEWERS_NODES } },
           { workflow_id: CLARITY_WORKFLOW_ID, runs_root: clarityRunsRoot, definition: { name: CLARITY_WORKFLOW_NAME, nodes: CLARITY_NODES } },
           { workflow_id: GUARDED_WORKFLOW_ID, runs_root: guardedRunsRoot, definition: { name: GUARDED_WORKFLOW_NAME, nodes: GUARDED_NODES } },
+          ...ux.workflows,
         ],
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },

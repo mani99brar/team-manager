@@ -30,6 +30,9 @@
  * recorded, so none is served); and a run the controller blocked when the ui worker asked a fourth question (served as
  * `blocked` with the question's text) while the adapter had blocked without recording evidence. Every other run serves no
  * decisions, no challenge, no questions and 1.0.0 completions without evidence, as the adapter serves older exports.
+ *
+ * The viewer UX slices add their runs in `fixtures/ux-<slice>.ts` instead (docs/PRD_VIEWER_UX.md section 11):
+ * `fixtures/index.ts` merges them into the maps exported here, and the payload builders below are exported for them.
  */
 import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
@@ -135,7 +138,7 @@ export const REVIEW_DIFF = [
   '',
 ].join('\n')
 
-type DefinitionNode = WorkflowDefinition['nodes'][number]
+export type DefinitionNode = WorkflowDefinition['nodes'][number]
 
 /** The production pipeline graph (`workflow/export_state.py` GRAPH_NODES). */
 export const GRAPH_NODES: DefinitionNode[] = [
@@ -195,7 +198,7 @@ export function definitionRevision(definition: { contract_version: string; proje
   return createHash('sha256').update(canonical({ contract_version, project_id, workflow_id, name, nodes }), 'utf8').digest('hex')
 }
 
-function definition(projectId: string, workflowId: string, name: string, nodes: DefinitionNode[]): WorkflowDefinition {
+export function definition(projectId: string, workflowId: string, name: string, nodes: DefinitionNode[]): WorkflowDefinition {
   const base = { contract_version: '1.0.0' as const, project_id: projectId, workflow_id: workflowId, name, nodes }
   return validateDefinition({ ...base, definition_revision: definitionRevision(base) })
 }
@@ -276,7 +279,7 @@ export const REVIEW_DIFF_ARTIFACT_ID = `patch-review-${sha256(REVIEW_DIFF).slice
 /** `path` is set exactly for `file` artifacts: the repo-relative path of a file the verifier captured at freeze. */
 export type ArtifactFile = { artifact_id: string; kind: WorkerResult['artifacts'][number]['kind']; content: Buffer; contentType: string; path?: string }
 
-function logArtifact(id: string, command: string, exitCode: number): ArtifactFile {
+export function logArtifact(id: string, command: string, exitCode: number): ArtifactFile {
   const content = Buffer.from(`${LOG_TEXT_PREFIX} ${command}\n... output elided ...\nexit ${exitCode}\n`, 'utf8')
   return { artifact_id: id, kind: 'log', content, contentType: 'text/plain; charset=utf-8' }
 }
@@ -299,7 +302,7 @@ export const LANE_ARTIFACTS: Record<string, ArtifactFile[]> = { ui: UI_ARTIFACTS
 /** The diff the reviewer saw, served through the artifact route as a patch. */
 export const REVIEW_DIFF_ARTIFACT: ArtifactFile = { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', content: Buffer.from(REVIEW_DIFF, 'utf8'), contentType: 'text/plain; charset=utf-8' }
 
-function artifactRefs(files: ArtifactFile[]): WorkerResult['artifacts'] {
+export function artifactRefs(files: ArtifactFile[]): WorkerResult['artifacts'] {
   return files.map(file => ({ artifact_id: file.artifact_id, kind: file.kind, uri: file.artifact_id, sha256: sha256(file.content), ...(file.path === undefined ? {} : { path: file.path }) }))
 }
 
@@ -438,7 +441,7 @@ export const FOURTH_QUESTION_MESSAGE = `Worker ui asked question 4; at most 3 ar
 /** The blocked run's adapter lane: a 1.1.0 `blocked` completion, which need not carry evidence. */
 export const GUARDED_BLOCKED_ADAPTER_SUMMARY = 'Blocked: the export seam has no field for a refused question yet.'
 
-function checks(cwd: string, entries: { command: string; log: string; exit: number; start: string; finish: string }[]): WorkerResult['checks'] {
+export function checks(cwd: string, entries: { command: string; log: string; exit: number; start: string; finish: string }[]): WorkerResult['checks'] {
   return entries.map(entry => ({ command: entry.command, cwd, started_at: entry.start, finished_at: entry.finish, exit_code: entry.exit, log_artifact_id: entry.log }))
 }
 
@@ -550,9 +553,9 @@ export function laneResult(lane: string, runId: string): WorkerResult {
 
 // ---- Runs ----------------------------------------------------------------------------------------------
 
-type NodeState = { status: RunDetail['snapshot']['nodes'][number]['status']; attempt: number; session?: string | null; result?: string | null; review?: number; lanes?: { worker: string; attempt: number }[] }
+export type NodeState = { status: RunDetail['snapshot']['nodes'][number]['status']; attempt: number; session?: string | null; result?: string | null; review?: number; lanes?: { worker: string; attempt: number }[] }
 
-function runDetail(runId: string, status: RunDetail['summary']['status'], pinned: WorkflowDefinition, createdAt: string, updatedAt: string, states: Record<string, NodeState>, lastSequence: number): RunDetail {
+export function runDetail(runId: string, status: RunDetail['summary']['status'], pinned: WorkflowDefinition, createdAt: string, updatedAt: string, states: Record<string, NodeState>, lastSequence: number): RunDetail {
   const resultPath = (node: string, attempt: number) => `${apiRunPath(runId, pinned.workflow_id)}/results/${node}/${attempt}`
   return validateRunDetail({
     summary: {
@@ -575,14 +578,14 @@ function runDetail(runId: string, status: RunDetail['summary']['status'], pinned
   })
 }
 
-const done = (session?: string, result?: string): NodeState => ({ status: 'succeeded', attempt: 1, session: session ?? null, result: result ?? null })
+export const done = (session?: string, result?: string): NodeState => ({ status: 'succeeded', attempt: 1, session: session ?? null, result: result ?? null })
 /** Both launch nodes finished and, like the real adapter, link to the worker's verified result. */
 const launched = { launch_ui: done(UI_SESSION, 'ui'), launch_adapter: done(ADAPTER_SESSION, 'adapter'), handoff: done() }
 /** The candidate node links every lane's combined result, like the real adapter. */
-const candidateOf = (lanes: readonly string[]): NodeState => ({ ...done(), lanes: lanes.map(lane => ({ worker: lane, attempt: 1 })) })
+export const candidateOf = (lanes: readonly string[]): NodeState => ({ ...done(), lanes: lanes.map(lane => ({ worker: lane, attempt: 1 })) })
 const verified = { ...launched, verify_ui: done(undefined, 'ui'), verify_adapter: done(undefined, 'adapter'), candidate: candidateOf(['ui', 'adapter']) }
 /** Every selected lane launched, froze and verified, then the candidate passed: the per-lane node states of a configured run. */
-const lanesVerified = (lanes: readonly string[]): Record<string, NodeState> => ({
+export const lanesVerified = (lanes: readonly string[]): Record<string, NodeState> => ({
   ...Object.fromEntries(lanes.map(lane => [`launch_${lane}`, done(LANE_SESSIONS[lane], lane)])),
   handoff: done(),
   ...Object.fromEntries(lanes.map(lane => [`verify_${lane}`, done(undefined, lane)])),
@@ -678,7 +681,7 @@ export const workerResults: Record<string, Record<string, WorkerResult>> = {
   [RUN_GUARDED_BLOCKED]: {},
 }
 
-function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {
+export function event(runId: string, sequence: number, fields: Partial<WorkflowEvent> & Pick<WorkflowEvent, 'type' | 'message'>): WorkflowEvent {
   return eventSchema.parse({
     contract_version: '1.0.0', run_id: runId, event_id: `${runId}-event-${sequence}`, sequence,
     occurred_at: new Date(Date.parse(T0) + sequence * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
@@ -975,7 +978,7 @@ export type RawInputsSection = {
 }
 
 /** Receipts store `+00:00` offsets; the adapter normalises them to a trailing Z. */
-const offset = (iso: string) => iso.replace(/Z$/, '+00:00')
+export const offset = (iso: string) => iso.replace(/Z$/, '+00:00')
 const zulu = (value: string) => (value.endsWith('+00:00') ? `${value.slice(0, -6)}Z` : value)
 
 /** A finding both reviewers of the two-reviewer run raised independently: unioned, never merged, so it is listed twice. */
@@ -1379,7 +1382,7 @@ function lanesQuoting(requirement: string | null, tasks: Record<string, string>)
  * `review`: the adapter fills a one-entry list from the section itself and tags every finding with that id, so the viewer
  * has a single code path. The combined `reviewer` identity stays what the review node names (the first reviewer's session).
  */
-function projectReview(runId: string, section: RawReviewSection, tasks: Record<string, string>): ReviewResult {
+export function projectReview(runId: string, section: RawReviewSection, tasks: Record<string, string>, workflowId: string = runDetails[runId].summary.workflow_id): ReviewResult {
   const link = (finding: RawFinding, reviewer: string) => ({ ...finding, reviewer: finding.reviewer ?? reviewer, requirement_found_in: lanesQuoting(finding.requirement, tasks) })
   const reviewers: RawReviewer[] = section.reviewers ?? [{
     reviewer_id: DEFAULT_REVIEWER_ID, transport: section.transport, session_id: section.reviewer_session_id, verdict: section.verdict,
@@ -1398,7 +1401,7 @@ function projectReview(runId: string, section: RawReviewSection, tasks: Record<s
       status: reviewer.status,
     })),
     reviewed_at: zulu(section.reviewed_at),
-    diff: section.diff === null ? null : { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', uri: `${apiRunPath(runId, runDetails[runId].summary.workflow_id)}/artifacts/${REVIEW_DIFF_ARTIFACT_ID}`, sha256: section.diff.sha256 },
+    diff: section.diff === null ? null : { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', uri: `${apiRunPath(runId, workflowId)}/artifacts/${REVIEW_DIFF_ARTIFACT_ID}`, sha256: section.diff.sha256 },
   })
 }
 
@@ -1406,7 +1409,7 @@ function projectReview(runId: string, section: RawReviewSection, tasks: Record<s
  * The run-inputs projection at the current contract. A 1.2.0 export has neither a selection nor pinned check kinds: every
  * listed lane was selected, nothing was excluded, and the kinds are the ones its role required, exactly as the adapter serves it.
  */
-function projectInputs(runId: string, section: RawInputsSection): RunInputs {
+export function projectInputs(runId: string, section: RawInputsSection): RunInputs {
   return validateRunInputs({
     contract_version: INPUTS_CONTRACT_VERSION, run_id: runId, feature: section.feature, base_commit: section.base_commit, source_branch: section.source_branch,
     mode: section.mode, automatic: section.automatic,
