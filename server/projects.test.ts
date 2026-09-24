@@ -589,10 +589,11 @@ test('projects a fresh run, a live run awaiting handoff, and an integrated run f
     assert.equal(fresh.summary.created_at, T0)
     assert.equal(fresh.summary.updated_at, T0)
 
+    // An export without inputs cannot say the run is automatic: its handoff keeps awaiting approval, but the lanes are live.
     const live = validateRunDetail((await get(app, url('alpha', 'main', 'live'))).json())
     assert.equal(live.summary.status, 'awaiting_approval')
     const status = Object.fromEntries(live.snapshot.nodes.map(node => [node.node_id, node.status]))
-    assert.deepEqual(status, { launch_ui: 'succeeded', launch_adapter: 'succeeded', handoff: 'awaiting_approval', verify_ui: 'pending', verify_adapter: 'pending', candidate: 'pending', review: 'pending', approval: 'pending', integrate: 'pending' })
+    assert.deepEqual(status, { launch_ui: 'running', launch_adapter: 'running', handoff: 'awaiting_approval', verify_ui: 'pending', verify_adapter: 'pending', candidate: 'pending', review: 'pending', approval: 'pending', integrate: 'pending' })
     const launchUi = live.snapshot.nodes.find(node => node.node_id === 'launch_ui')!
     assert.deepEqual([launchUi.attempt, launchUi.session_id, launchUi.result_uri], [1, 'ui-session-0001', null], 'launch means a session, not a worker result')
     assert.equal(live.snapshot.last_sequence, 4)
@@ -609,6 +610,45 @@ test('projects a fresh run, a live run awaiting handoff, and an integrated run f
     // Sorted newest first, then run_id ascending.
     const runs = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
     assert.deepEqual(runs.runs.map(run => run.run_id), ['integrated', 'live', 'fresh'])
+  })
+})
+
+test('while the handoff waits on worker completion signals the lanes are running, and only a manual run awaits approval', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const waiting = { values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['handoff'],
+      tasks: [{ node_id: 'handoff', error: null, interrupts: [{ kind: 'worker_handoff', message: 'Awaiting explicit completion signals and automatic freeze.' }], result: null }] }
+    await writeRun(rootDir, { ...waiting, runId: 'automatic', events: launchEvents, inputs: inputsSection() })
+    await writeRun(rootDir, { ...waiting, runId: 'manual', events: launchEvents, inputs: inputsSection({ mode: 'manual', automatic: null }) })
+    const controller = (sequence: number, status: string) => ({ sequence, time: T1, node: 'controller', status, message: `controller ${status}` })
+    // Ctrl-C or a Claude Code outage: the workers keep running and the operator resumes with automatic --live.
+    await writeRun(rootDir, { ...waiting, runId: 'interrupted', events: [...launchEvents, controller(5, 'interrupted')], inputs: inputsSection() })
+    // The controller gave up (a deadline) and stopped the workers: nothing continues.
+    const gaveUp = [...launchEvents, controller(5, 'blocked'), { sequence: 6, time: T1, node: 'freeze', status: 'stopped', message: 'Native workers stopped' }]
+    await writeRun(rootDir, { ...waiting, runId: 'gave-up', events: gaveUp, inputs: inputsSection() })
+    // Resumed after an outage: the newer controller event wins.
+    await writeRun(rootDir, { ...waiting, runId: 'resumed', events: [...launchEvents, controller(5, 'interrupted'), controller(6, 'running')], inputs: inputsSection() })
+    // The freeze succeeded and verification runs, but the export still holds the interrupt until the next checkpoint.
+    const frozen = [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'stopped', message: 'Native workers stopped' },
+      { sequence: 6, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+      { sequence: 7, time: T1, node: 'verify_ui', status: 'running', message: `Attempt 1; revision ${OUTPUT}` }]
+    await writeRun(rootDir, { ...waiting, runId: 'frozen', events: frozen, inputs: inputsSection() })
+    const statuses = async (runId: string) => {
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
+      const nodes = Object.fromEntries(detail.snapshot.nodes.map(node => [node.node_id, node.status]))
+      return { run: detail.summary.status, launch_ui: nodes.launch_ui, launch_adapter: nodes.launch_adapter, handoff: nodes.handoff, verify_ui: nodes.verify_ui }
+    }
+    assert.deepEqual(await statuses('automatic'), { run: 'running', launch_ui: 'running', launch_adapter: 'running', handoff: 'pending', verify_ui: 'pending' })
+    assert.deepEqual(await statuses('manual'), { run: 'awaiting_approval', launch_ui: 'running', launch_adapter: 'running', handoff: 'awaiting_approval', verify_ui: 'pending' })
+    assert.deepEqual(await statuses('interrupted'), { run: 'paused', launch_ui: 'running', launch_adapter: 'running', handoff: 'paused', verify_ui: 'pending' })
+    assert.deepEqual(await statuses('gave-up'), { run: 'failed', launch_ui: 'succeeded', launch_adapter: 'succeeded', handoff: 'failed', verify_ui: 'pending' })
+    assert.deepEqual(await statuses('resumed'), { run: 'running', launch_ui: 'running', launch_adapter: 'running', handoff: 'pending', verify_ui: 'pending' })
+    assert.deepEqual(await statuses('frozen'), { run: 'running', launch_ui: 'succeeded', launch_adapter: 'succeeded', handoff: 'succeeded', verify_ui: 'running' })
+    const automatic = validateRunDetail((await get(app, url('alpha', 'main', 'automatic'))).json())
+    const launchUi = automatic.snapshot.nodes.find(node => node.node_id === 'launch_ui')!
+    assert.deepEqual([launchUi.attempt, launchUi.session_id], [1, 'ui-session-0001'])
+    const handoff = automatic.snapshot.nodes.find(node => node.node_id === 'handoff')!
+    assert.equal(handoff.attempt, 0)
   })
 })
 

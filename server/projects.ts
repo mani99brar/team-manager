@@ -1067,12 +1067,25 @@ type NodeStatus = RunSnapshot['nodes'][number]['status']
  * interrupt is awaiting approval, confirmed completion evidence is succeeded (verification nodes additionally need
  * their registered packet to load, match its hash and have passed), then the last persisted event, then pending.
  * The run succeeds only once integrated with nothing pending; contradictory evidence is paused.
+ *
+ * While the handoff holds its `worker_handoff` interrupt the lanes' sessions are still live, so a launch receipt
+ * only proves the launch: a launch node is running until a freeze record (the freeze, or the controller stopping
+ * the workers as it gives up) follows its last event. In an automatic run that interrupt waits on the workers'
+ * completion signals and the controller freezes by itself, so it is no decision: the handoff shows the latest of
+ * its own events and the controller's (blocked is failed, interrupted is paused, a freeze in progress is running),
+ * else pending. A manual run's handoff still awaits approval, since the operator freezes it. The export is rewritten
+ * only at checkpoints, so after a `freeze succeeded` event the interrupt it still holds is stale: the handoff has
+ * succeeded and the rest of the graph is read as usual.
  */
 export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, state: RunExport, rawEvents: readonly RawEvent[], packets: readonly LoadedPacket[], map: LaneMap = laneMap(LEGACY_LANES)): RunSnapshot {
   const lastEvent = new Map<string, RawEvent>()
   const eventAttempt = new Map<string, number>()
+  let lastController: RawEvent | undefined
+  let lastFreezeRecord = 0
   for (const event of rawEvents) {
+    if (event.node === 'controller' && EVENT_STATUS[event.status] !== undefined) lastController = event
     const node = eventNode(definition, event.node, map)
+    if (node === 'handoff') lastFreezeRecord = event.sequence
     if (!node) continue
     // Only a status-bearing event moves a node; a plain record (`stopped`, a note) never hides the last status.
     if (EVENT_STATUS[event.status] !== undefined) lastEvent.set(node, event)
@@ -1082,6 +1095,17 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   const latestPacket = (phase: 'worker' | 'candidate', worker: string) => packets
     .filter(packet => packet.phase === phase && packet.node_id === worker).sort((a, b) => b.attempt - a.attempt)[0]
   const workers = new Set(packets.map(packet => packet.node_id))
+  const handoffEvent = lastEvent.get('handoff')
+  const handoffInterrupted = state.tasks.some(task => task.node_id === 'handoff' && task.interrupts.some(item => item.kind === 'worker_handoff'))
+  const frozen = handoffInterrupted && handoffEvent !== undefined && EVENT_STATUS[handoffEvent.status] === 'succeeded'
+  const handoffOpen = handoffInterrupted && !frozen
+  const automatic = state.inputs?.mode === 'automatic'
+  const waitingHandoff = (): NodeStatus => {
+    const latest = [handoffEvent, lastController].filter(event => event !== undefined).sort((a, b) => b.sequence - a.sequence)[0]
+    const latestStatus = latest ? EVENT_STATUS[latest.status] : undefined
+    if (latestStatus === 'failed' || latestStatus === 'paused') return latestStatus
+    return latest === handoffEvent && latestStatus === 'running' ? 'running' : 'pending'
+  }
   const nodes = definition.nodes.map(node => {
     const task = state.tasks.find(candidate => candidate.node_id === node.node_id)
     const evidenced = map.workerOf.has(node.node_id) || node.node_id in TAIL_EVIDENCE_KEY
@@ -1120,7 +1144,10 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     if (challenge?.status === 'paused') status = 'paused'
     else if (challenge) status = 'succeeded'
     else if (task?.error) status = 'failed'
+    else if (frozen && node.node_id === 'handoff') status = 'succeeded'
+    else if (handoffOpen && automatic && node.node_id === 'handoff') status = waitingHandoff()
     else if (task && task.interrupts.length > 0) status = 'awaiting_approval'
+    else if (handoffOpen && worker && !map.verifyNodes.has(node.node_id) && hasEvidence(state, node.node_id, map) && lastFreezeRecord <= (event?.sequence ?? 0)) status = 'running'
     else if (hasEvidence(state, node.node_id, map)) {
       if (map.verifyNodes.has(node.node_id)) status = workerPacket?.ok && workerPacket.gate.status === 'passed' ? 'succeeded' : 'paused'
       else if (node.node_id === 'candidate') {
