@@ -1,11 +1,23 @@
 import type { WorkerResult } from '../workflow/v1.js'
 import type { ReviewFinding, ReviewResult, RunDetail, RunInputs } from './v1.js'
 
+/**
+ * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
+ * and the detail its `run_dir`, served home-relative because the registry lists the project in `viewer.expose_run_dir`.
+ */
 export const runDetail: RunDetail = {
   summary: {
-    contract_version: '1.0.0', project_id: 'md-manager', workflow_id: 'feature-implementation',
+    contract_version: '1.5.0', project_id: 'md-manager', workflow_id: 'feature-implementation',
     definition_revision: 'a'.repeat(64), run_id: 'run-001', status: 'running',
     created_at: '2026-01-01T12:00:00Z', updated_at: '2026-01-01T12:01:00Z',
+    activity: {
+      feature: 'Review verdict and findings in the viewer', last_activity_at: '2026-01-01T12:00:50Z', finished_at: null,
+      focus: { node_id: 'adapter', label: 'Adapter worker', status: 'running', since: '2026-01-01T12:00:50Z' },
+      attention: { kind: 'question', node_id: 'adapter', since: '2026-01-01T12:00:50Z' },
+      waiting_questions: 1,
+      headline: 'Adapter worker · Worker adapter asked question 1 of 3; its deadline is paused until `python -m workflow answer <path> adapter "<text>"`',
+      controller: 'running',
+    },
   },
   definition: {
     contract_version: '1.0.0', project_id: 'md-manager', workflow_id: 'feature-implementation',
@@ -24,6 +36,18 @@ export const runDetail: RunDetail = {
       { node_id: 'review', kind: 'review', depends_on: ['ui', 'adapter'], status: 'pending', attempt: 0, session_id: null, result_uri: null, lane_results: [] },
     ],
   },
+  run_dir: '~/.local/state/md-manager-workflows/feature-implementation/run-001',
+}
+
+/** The same run from a server before contract 1.5.0 (and in the viewer's worker-phase mocks): a 1.0.0 summary, neither field. */
+export const legacyRunDetail: RunDetail = {
+  summary: {
+    contract_version: '1.0.0', project_id: 'md-manager', workflow_id: 'feature-implementation',
+    definition_revision: 'a'.repeat(64), run_id: 'run-001', status: 'running',
+    created_at: '2026-01-01T12:00:00Z', updated_at: '2026-01-01T12:01:00Z',
+  },
+  definition: runDetail.definition,
+  snapshot: runDetail.snapshot,
 }
 export const projectList = { projects: [{ project_id: 'md-manager', name: 'MD Manager' }] }
 export const workflowList = { workflows: [runDetail.definition] }

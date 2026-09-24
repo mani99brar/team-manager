@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, type RunDetail } from '../contracts/projects/v1.ts'
-import { eventSchema, validateWorkerResult } from '../contracts/workflow/v1.ts'
+import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
+import { seedCandidate } from '../tests/project-workflows/seed.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { PROJECTS_CONFIG_ENV, ProjectsConfigError, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
+import { RunStore, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
+import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
  * Every test builds disposable run roots in the documented producer format (plan.json, atomic run-state.json,
@@ -1741,4 +1744,433 @@ test('a served worker result names the checks its gate deferred to the candidate
     const combined = validateWorkerResult((await get(app, url('alpha', 'main', 'reviewed', '/results/candidate_ui/1'))).json())
     assert.equal(combined.deferred_checks, undefined, 'a gate without deferred checks serves no field at all')
   })
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Viewer UX S5 (docs/PRD_VIEWER_UX.md 9.2): B1 projection fixes, B2 run activity, B3 the opt-in run directory
+
+type CapturedRun = { detail: RunDetail; events: WorkflowEvent[]; inputs: RunInputs }
+
+/** A live run as the viewer captured it (served payloads, trimmed by S2): skeleton-001, skeleton-fixes-001, workflow-guardrails-001. */
+async function capturedRun(name: string): Promise<CapturedRun> {
+  return JSON.parse(await readFile(new URL(`../tests/unit/fixtures/runs/${name}.json`, import.meta.url), 'utf8')) as CapturedRun
+}
+
+/** The `events.jsonl` rows a captured run was served from: lane and freeze aliases undone, `blocked` back for failures and controller blocks. */
+function rawEventsOf(run: CapturedRun): RawEvent[] {
+  return run.events.map(event => {
+    const node = event.node_id === null ? 'controller' : event.node_id === 'handoff' ? 'freeze' : event.node_id.startsWith('launch_') ? event.node_id.slice('launch_'.length) : event.node_id
+    const status = event.status === 'failed' ? 'blocked' : event.status !== null ? event.status : event.node_id !== null ? 'stopped'
+      : /^(?:Automatic checkpoint controller PID|Repair \d+ applied)/.test(event.message) ? 'running' : 'blocked'
+    return { sequence: event.sequence, time: event.occurred_at, node, status, message: event.message }
+  })
+}
+
+/** Projects a captured run's events onto its graph with no evidence at all, so each verification node's attempt comes from its events alone. */
+function snapshotFromEvents(run: CapturedRun, raw: RawEvent[]) {
+  const { summary, definition } = run.detail
+  const scope = { project: { project_id: summary.project_id, name: 'Captured', repository: '/captured', workflows: [] }, workflow: { workflow_id: summary.workflow_id, runs_root: '/captured', definition } }
+  const state = { version: '1.5.0', run_id: summary.run_id, base_commit: BASE, created_at: summary.created_at, updated_at: summary.updated_at,
+    definition: { name: definition.name, nodes: definition.nodes }, values: {}, next: [], tasks: [], events: [], verification_packets: [], review: null, inputs: null }
+  return projectSnapshot(scope as Parameters<typeof projectSnapshot>[0], definition, state as unknown as Parameters<typeof projectSnapshot>[2], raw, [], laneMap(run.inputs.selected_workers))
+}
+
+/** Every browser fixture run as the candidate phase seeds it, projected before B1: `node:status:attempt` in definition order. */
+const SEEDED_SNAPSHOTS: Record<string, string> = {
+  'feature-flow/run-awaiting': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:awaiting_approval:1 approval:pending:0 integrate:pending:0',
+  'feature-flow/run-blocked': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:failed:1 approval:pending:0 integrate:pending:0',
+  'feature-flow/run-succeeded': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'feature-flow/run-failed': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:failed:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'feature-flow/run-legacy': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'lanes-flow/run-one-lane': 'launch_docs:succeeded:1 handoff:succeeded:1 verify_docs:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'lanes-flow/run-three-lanes': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 launch_docs:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 verify_docs:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'reviewers-flow/run-legacy-reviewer': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'reviewers-flow/run-reviewer-blocked': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:failed:1 approval:pending:0 integrate:pending:0',
+  'reviewers-flow/run-two-reviewers': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'clarity-flow/run-files-captured': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'guarded-flow/run-guarded': 'challenge:succeeded:2 launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'guarded-flow/run-guarded-asking': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:pending:0 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'guarded-flow/run-guarded-blocked': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:failed:1 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-time/run-short-check': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:failed:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+}
+
+/** What each seeded browser fixture run waits on: `attention kind:node:waiting questions` (`-` for none). */
+const SEEDED_ATTENTION: Record<string, string> = {
+  'feature-flow/run-awaiting': 'approval:review:0',
+  'feature-flow/run-blocked': 'failed:review:0',
+  'feature-flow/run-succeeded': '-:-:0',
+  'feature-flow/run-failed': 'failed:verify_adapter:0',
+  'feature-flow/run-legacy': '-:-:0',
+  'lanes-flow/run-one-lane': '-:-:0',
+  'lanes-flow/run-three-lanes': '-:-:0',
+  'reviewers-flow/run-legacy-reviewer': '-:-:0',
+  'reviewers-flow/run-reviewer-blocked': 'failed:review:0',
+  'reviewers-flow/run-two-reviewers': '-:-:0',
+  'clarity-flow/run-files-captured': '-:-:0',
+  'guarded-flow/run-guarded': '-:-:0',
+  'guarded-flow/run-guarded-asking': 'question:launch_adapter:1',
+  'guarded-flow/run-guarded-blocked': 'failed:handoff:0',
+  'ux-time/run-short-check': 'failed:verify_adapter:0',
+}
+
+/** Seeds every browser fixture run in a temporary root and projects each one; `visit` sees `workflow/run` and the loaded run. */
+async function eachSeededRun(visit: (key: string, detail: RunDetail) => void) {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-seeded-'))
+  try {
+    const path = seedCandidate(root)
+    const store = new RunStore(await parseProjectsConfig(await readFile(path, 'utf8'), path))
+    for (const project of store.config.projects) for (const workflow of project.workflows) {
+      const scope = store.scope(project.project_id, workflow.workflow_id)
+      const summaries = await store.listRuns(scope)
+      for (const summary of summaries) {
+        const { detail } = await store.loadRun(scope, summary.run_id)
+        assert.deepEqual(summary, detail.summary, `${workflow.workflow_id}/${summary.run_id}: the list serves the detail's summary`)
+        visit(`${workflow.workflow_id}/${summary.run_id}`, detail)
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+}
+
+test('[B1] attempts are read case-insensitively; the snapshot attempts of the captured runs and of every fixture are unchanged', async () => {
+  const challenge = (events: WorkflowEvent[]) => events.filter(event => event.node_id === 'challenge').map(event => event.attempt)
+  // "Design challenge attempt N" rows were all served as attempt 1 by the case-sensitive parser.
+  const expected: Record<string, number[]> = { 'skeleton-001': [1, 2, 2, 2, 3, 3, 3], 'skeleton-fixes-001': [1, 1, 1, 1, 2, 2, 2], 'workflow-guardrails-001': [] }
+  for (const [name, attempts] of Object.entries(expected)) {
+    const run = await capturedRun(name)
+    const raw = rawEventsOf(run)
+    const served = normalizeEvents(run.detail.summary.run_id, run.detail.definition, raw, laneMap(run.inputs.selected_workers))
+    assert.deepEqual(challenge(served), attempts, name)
+    // Every other row keeps the attempt it was served with ("Answers worker/game attempt 2" on skeleton-001 #20 already was 2).
+    served.forEach((event, index) => {
+      const before = run.events[index]
+      if (event.node_id === before.node_id && event.node_id !== 'challenge') assert.equal(event.attempt, before.attempt, `${name} #${event.sequence}`)
+    })
+    // `projectSnapshot` reads message attempts only through `eventAttempt` and `Math.max` on verification nodes: from the events alone
+    // they reach exactly the attempts the run was served with, so no packet attempt is ever raised.
+    const snapshot = snapshotFromEvents(run, raw)
+    for (const node of snapshot.nodes.filter(item => item.node_id.startsWith('verify_'))) {
+      assert.equal(node.attempt, run.detail.snapshot.nodes.find(item => item.node_id === node.node_id)!.attempt, `${name} ${node.node_id}`)
+    }
+  }
+  // Every browser fixture projects the statuses and attempts it projected before B1.
+  const projected: Record<string, string> = {}
+  await eachSeededRun((key, detail) => { projected[key] = detail.snapshot.nodes.map(node => `${node.node_id}:${node.status}:${node.attempt}`).join(' ') })
+  for (const [key, nodes] of Object.entries(SEEDED_SNAPSHOTS)) assert.equal(projected[key], nodes, key)
+})
+
+test('[B1] on a lane named controller, PID and Errno rows belong to the run while the lane\'s own controller events stay on the lane', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T1, node: 'controller', status: 'interactive', message: 'Awaiting explicit completion signal; idle is not acceptance' },
+      { sequence: 4, time: T1, node: 'ui', status: 'interactive', message: 'Awaiting explicit completion signal; idle is not acceptance' },
+      { sequence: 5, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 2088885' },
+      { sequence: 6, time: T2, node: 'controller', status: 'blocked', message: '[Errno 2] No such file or directory: \'claude\'' },
+    ]
+    // No launch receipt was exported yet, so each lane's state comes from its own events.
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type, event.attempt]), [
+      [1, 'launch_controller', 'running', 'status_changed', 1], [2, 'launch_ui', 'running', 'status_changed', 1],
+      [3, 'launch_controller', 'running', 'status_changed', 1], [4, 'launch_ui', 'running', 'status_changed', 1],
+      [5, null, 'running', 'log', 0], [6, null, 'failed', 'log', 0]])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the controller process\'s own error never fails the lane')
+    assert.equal(detail.summary.status, 'running')
+  })
+})
+
+test('[B1] candidate events name the lane whose combined check they report', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'combined', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets })
+    const served = ((await get(app, url('alpha', 'main', 'combined', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.filter(event => event.node_id === 'candidate').map(event => event.message), [`[ui] Combined revision ${OUTPUT}`, `[adapter] Combined revision ${OUTPUT}`])
+    assert.ok(served.filter(event => event.node_id !== 'candidate').every(event => !event.message.startsWith('[')), 'only aliased candidate rows are prefixed')
+  })
+})
+
+test('[B1] node-less controller rows keep their status: a deadline block is served failed and fails the handoff; a PID row is served running', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const events: RawEvent[] = [...launchEvents,
+      { sequence: 5, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 3242976' },
+      { sequence: 6, time: T2, node: 'controller', status: 'blocked', message: 'Worker ui deadline exhausted; no automatic relaunch' },
+      { sequence: 7, time: T2, node: 'freeze', status: 'stopped', message: 'Native workers stopped before snapshot capture: ui, adapter' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'deadline', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['handoff'], events, inputs: inputsSection(),
+      tasks: [{ node_id: 'handoff', error: null, interrupts: [{ kind: 'worker_handoff', message: 'Awaiting explicit completion signals and automatic freeze.' }], result: null }] })
+    const served = ((await get(app, url('alpha', 'main', 'deadline', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.slice(4).map(event => [event.node_id, event.status, event.type, event.attempt, event.message]), [
+      [null, 'running', 'log', 0, 'Automatic checkpoint controller PID 3242976'],
+      [null, 'failed', 'log', 0, 'Worker ui deadline exhausted; no automatic relaunch'],
+      ['handoff', null, 'log', 1, 'Native workers stopped before snapshot capture: ui, adapter']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'deadline'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'handoff')!.status, 'failed')
+    assert.equal(detail.summary.status, 'failed')
+  })
+})
+
+/** A run waiting in the handoff interrupt for its workers' completion signals; `live` workers have no completion, handoff or stop yet. */
+const waitingRun = { values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['handoff'],
+  tasks: [{ node_id: 'handoff', error: null, interrupts: [{ kind: 'worker_handoff', message: 'Awaiting explicit completion signals and automatic freeze.' }], result: null }] }
+const liveWorker: Partial<WorkerInput> = { completion: null, handoff: null, stop: null }
+const stoppedWorker: Partial<WorkerInput> = { stop: { stopped: true, confirmed_at: T1 } }
+
+/** The activity a served run detail carries; its absence is the failure, not a TypeError further on. */
+function activityOf(detail: RunDetail, what: string) {
+  assert.ok(detail.summary.activity, `${what}: the run summary carries its activity`)
+  return detail.summary.activity
+}
+
+test('[B2] a run summary carries its activity: feature, recency, focus, attention and headline; lists serve the same summary', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    await writeRun(rootDir, { runId: 'fresh', next: ['launch_ui', 'launch_adapter'], updated: T0 })
+    const integrated: RawEvent[] = [...reviewedEvents,
+      { sequence: 10, time: T2, node: 'review', status: 'approved', message: REVIEWER },
+      { sequence: 11, time: T2, node: 'integrate', status: 'succeeded', message: `Fast-forwarded to ${OUTPUT}; no push performed` }]
+    await writeRun(rootDir, { runId: 'integrated', values: reviewedValues({ review: { verdict: 'approved' }, approved_bundle: BUNDLE, integrated_commit: OUTPUT }), next: [], events: integrated, updated: T2,
+      packets: reviewedPackets, review: reviewSection(), inputs: inputsSection({}, { ui: stoppedWorker, adapter: stoppedWorker }), diffFile: DIFF })
+    const failed: RawEvent[] = [...launchEvents,
+      { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+      { sequence: 6, time: T1, node: 'verify_adapter', status: 'running', message: `Attempt 1; revision ${OUTPUT}` },
+      { sequence: 7, time: T2, node: 'verify_adapter', status: 'blocked', message: `backend-unit: exit 1; see ${root}/runs/alpha/main/failed/verification/worker/adapter/1/packet.json` }]
+    await writeRun(rootDir, { runId: 'failed', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events: failed,
+      tasks: [{ node_id: 'verify_adapter', error: 'adapter verification blocked', interrupts: [], result: null }],
+      packets: [{ node: 'adapter', gate: { status: 'blocked', reasons: ['backend-unit: exit 1'] } }], inputs: inputsSection({}, { ui: stoppedWorker, adapter: stoppedWorker }) })
+    await writeRun(rootDir, { ...waitingRun, runId: 'approval', events: launchEvents, inputs: inputsSection({ mode: 'manual', automatic: null }, { ui: liveWorker, adapter: liveWorker }) })
+    const interrupted = { sequence: 5, time: T2, node: 'controller', status: 'interrupted', message: `Supervisor interrupted. Native workers were NOT stopped and keep running; resume with: python -m workflow automatic ${root}/runs/alpha/main/interrupted --live` }
+    await writeRun(rootDir, { ...waitingRun, runId: 'interrupted', events: [...launchEvents, interrupted], inputs: inputsSection({}, { ui: liveWorker, adapter: liveWorker }) })
+    await writeRun(rootDir, { runId: 'paused', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: [], events: [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' }] })
+
+    const feature = 'Review verdict and findings in the viewer'
+    const details = new Map<string, RunDetail>()
+    for (const runId of ['fresh', 'integrated', 'failed', 'approval', 'interrupted', 'paused']) {
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
+      assert.equal(detail.summary.contract_version, '1.5.0', runId)
+      assert.equal(detail.run_dir, null, `${runId}: the temporary run roots are outside $HOME and the project is not listed`)
+      details.set(runId, detail)
+    }
+    const activity = (runId: string) => activityOf(details.get(runId)!, runId)
+    const none = { focus: null, attention: null, waiting_questions: 0, controller: null }
+    assert.deepEqual(activity('fresh'), { ...none, feature: null, last_activity_at: null, finished_at: null, headline: null })
+    // A finished run: the latest activity is its last step; with no focus the headline names the step that ended it.
+    assert.deepEqual(activity('integrated'), { ...none, feature, last_activity_at: T2, finished_at: T2, headline: 'Integrate candidate · fast-forwarded to bbbbbbb · no push performed' })
+    assert.deepEqual(activity('failed'), {
+      ...none, feature, last_activity_at: T2, finished_at: T2, headline: 'Verify adapter · backend-unit: exit 1; see <path>',
+      focus: { node_id: 'verify_adapter', label: 'Verify adapter', status: 'failed', since: T2 }, attention: { kind: 'failed', node_id: 'verify_adapter', since: T2 },
+    })
+    assert.deepEqual(activity('approval'), {
+      ...none, feature, last_activity_at: T1, finished_at: null, headline: 'Freeze worker handoffs',
+      focus: { node_id: 'handoff', label: 'Freeze worker handoffs', status: 'awaiting_approval', since: null }, attention: { kind: 'approval', node_id: 'handoff', since: null },
+    })
+    // The in-scope controller row is the headline (6.2 reason source 0), and the run waits on its controller.
+    const stopped = activity('interrupted')!
+    assert.deepEqual({ ...stopped, headline: null }, {
+      ...none, feature, last_activity_at: T2, finished_at: null, headline: null,
+      focus: { node_id: 'handoff', label: 'Freeze worker handoffs', status: 'paused', since: null }, attention: { kind: 'interrupted', node_id: 'handoff', since: T2 },
+    })
+    assert.match(stopped.headline!, /^Freeze worker handoffs · Supervisor interrupted\. Native workers were NOT stopped/)
+    assert.ok(stopped.headline!.length <= 160 && !stopped.headline!.includes(root), stopped.headline!)
+    assert.deepEqual(activity('paused'), {
+      ...none, feature: null, last_activity_at: T1, finished_at: null, headline: 'Freeze worker handoffs · Immutable snapshots captured',
+      focus: { node_id: 'handoff', label: 'Freeze worker handoffs', status: 'paused', since: T1 }, attention: { kind: 'paused', node_id: 'handoff', since: T1 },
+    })
+    const runs = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    for (const summary of runs.runs) assert.deepEqual(summary, details.get(summary.run_id)!.summary, summary.run_id)
+  })
+})
+
+test('[B2] waiting questions come from the live <lane>.questions.json, which wins over a stale export', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const asked = { n: 1, question: 'Keep the seed on rematch, or reroll it?', asked_at: '2026-03-01T10:06:00+00:00', answer: null, answered_at: null }
+    const answered = { ...asked, answer: 'Keep it.', answered_at: '2026-03-01T10:08:00+00:00' }
+    const write = async (runId: string, exported: WorkerInput['questions'], live: string) => {
+      const dir = await writeRun(rootDir, { ...waitingRun, runId, version: '1.5.0', events: launchEvents, inputs: inputsSection({}, { ui: { ...liveWorker, questions: exported }, adapter: liveWorker }) })
+      await writeFile(join(dir, 'ui.questions.json'), live)
+    }
+    // run-state.json is not re-exported during the handoff wait: only the live file knows the question waits.
+    await write('asking', [], json({ node_id: 'ui', questions: [asked] }))
+    // The export still shows it waiting, but the operator has answered it since.
+    await write('answered', [asked], json({ node_id: 'ui', questions: [answered] }))
+    // A live file that is malformed or contradicts itself is not read: the export's record stands.
+    await write('malformed', [asked], json({ node_id: 'ui', questions: [{ ...asked, n: 2 }] }))
+    await write('unparsable', [asked], '{"node_id": "ui", "questions": [')
+    const waiting = async (runId: string) => {
+      const activity = activityOf(validateRunDetail((await get(app, url('alpha', 'main', runId))).json()), runId)
+      return { waiting_questions: activity.waiting_questions, attention: activity.attention }
+    }
+    const question = { waiting_questions: 1, attention: { kind: 'question', node_id: 'launch_ui', since: '2026-03-01T10:06:00Z' } }
+    assert.deepEqual(await waiting('asking'), question)
+    assert.deepEqual(await waiting('answered'), { waiting_questions: 0, attention: null })
+    assert.deepEqual(await waiting('malformed'), question)
+    assert.deepEqual(await waiting('unparsable'), question)
+    // The served inputs stay the export's record; only the run's activity reads the live file.
+    assert.deepEqual(validateRunInputs((await get(app, url('alpha', 'main', 'asking', '/inputs'))).json()).workers[0].questions, [])
+  })
+})
+
+test('[B2] a pane that needs attention is attention until any later event for its node', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const inputs = inputsSection({}, { ui: liveWorker, adapter: liveWorker })
+    const pane: RawEvent = { sequence: 5, time: T2, node: 'ui', status: 'interactive', message: 'Worker ui needs attention in its pane (native state blocked); waiting until its deadline' }
+    await writeRun(rootDir, { ...waitingRun, runId: 'pane', events: [...launchEvents, pane], inputs })
+    await writeRun(rootDir, { ...waitingRun, runId: 'went-on', inputs, events: [...launchEvents, pane,
+      { sequence: 6, time: T2, node: 'ui', status: 'interactive', message: 'Awaiting explicit completion signal; idle is not acceptance' }] })
+    const reviewer: RawEvent = { sequence: 10, time: T2, node: 'review', status: 'interactive', message: 'Reviewer general needs attention in its pane (native state blocked); waiting until the deadline' }
+    await writeRun(rootDir, { runId: 'reviewer', values: reviewedValues(), next: ['review'], events: [...reviewedEvents, reviewer], packets: reviewedPackets, inputs: inputsSection() })
+    const attention = async (runId: string) => activityOf(validateRunDetail((await get(app, url('alpha', 'main', runId))).json()), runId).attention
+    assert.deepEqual(await attention('pane'), { kind: 'pane', node_id: 'launch_ui', since: T2 })
+    assert.equal(await attention('went-on'), null)
+    assert.deepEqual(await attention('reviewer'), { kind: 'pane', node_id: 'review', since: T2 })
+  })
+})
+
+/** A fake `/proc`: `self/stat`, `btime` in `stat`, and optionally one process with its `cmdline` and `stat` (field 22: start ticks since boot). */
+async function fakeProc(root: string, name: string, child?: { pid: number; argv: string[]; startedAt: string }, readable = true): Promise<string> {
+  const proc = join(root, name)
+  const boot = Date.parse(T0) / 1000 - 3600
+  await mkdir(proc, { recursive: true })
+  if (readable) {
+    await mkdir(join(proc, 'self'))
+    await writeFile(join(proc, 'self', 'stat'), '1 (node) S 0')
+    await writeFile(join(proc, 'stat'), `cpu  1 2 3 4\nbtime ${boot}\nprocesses 7\n`)
+  }
+  if (child) {
+    const dir = join(proc, String(child.pid))
+    await mkdir(dir)
+    await writeFile(join(dir, 'cmdline'), `${child.argv.join('\0')}\0`)
+    const ticks = Math.round((Date.parse(child.startedAt) / 1000 - boot) * 100)
+    // The command name may hold spaces and parentheses; the fields after it are counted from its closing parenthesis.
+    const fields = [String(child.pid), '(python3 (step))', 'S', ...Array.from({ length: 18 }, (_, index) => String(index + 1)), String(ticks), '0', '0']
+    await writeFile(join(dir, 'stat'), fields.join(' '))
+  }
+  return proc
+}
+
+test('[B2] controller liveness: this run\'s automatic-step, started by its PID row, is running; a gone or reused PID is not; anything unclear is unknown', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-proc-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    await mkdir(runsRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }])), 'test registry')
+    const pid = 4242
+    const pidRow = (sequence: number, controller = pid): RawEvent => ({ sequence, time: T1, node: 'controller', status: 'running', message: `Automatic checkpoint controller PID ${controller}` })
+    const inputs = inputsSection({}, { ui: liveWorker, adapter: liveWorker })
+    const liveDir = await writeRun(runsRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(5)], inputs })
+    const otherDir = await writeRun(runsRoot, { ...waitingRun, runId: 'other', events: [...launchEvents, pidRow(5, 4343)], inputs })
+    // A manual run records no PID row; a finished run's controller is not asked about.
+    await writeRun(runsRoot, { runId: 'manual', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_ui'],
+      events: [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' }, { sequence: 6, time: T2, node: 'verify_ui', status: 'running', message: `Attempt 1; revision ${OUTPUT}` }],
+      inputs: inputsSection({ mode: 'manual', automatic: null }) })
+    await writeRun(runsRoot, { ...waitingRun, runId: 'blocked', inputs, events: [...launchEvents, pidRow(5), { sequence: 6, time: T2, node: 'controller', status: 'blocked', message: 'Worker ui deadline exhausted; no automatic relaunch' }] })
+    const step = (dir: string) => ['/home/you/dev/md-manager/.venv/bin/python', '-m', 'workflow', 'automatic-step', dir, '--live']
+    const started = (at: string) => ({ pid, argv: step(liveDir), startedAt: at })
+    const running = await fakeProc(root, 'proc-running', started('2026-03-01T10:04:30Z'))
+    const cases: [string, string][] = [
+      ['running', running],
+      // Clock ticks are coarse: a start within a second after the row is still the process that logged it.
+      ['running', await fakeProc(root, 'proc-tolerance', started('2026-03-01T10:05:00.900Z'))],
+      ['not_running', await fakeProc(root, 'proc-gone')],
+      ['not_running', await fakeProc(root, 'proc-reused', { pid, argv: ['/usr/bin/vim', 'notes.md'], startedAt: '2026-03-01T10:30:00Z' })],
+      ['not_running', await fakeProc(root, 'proc-other-run', { pid, argv: step(otherDir), startedAt: '2026-03-01T10:04:00Z' })],
+      ['unknown', await fakeProc(root, 'proc-later', started('2026-03-01T10:05:02Z'))],
+      ['unknown', await fakeProc(root, 'proc-missing', started('2026-03-01T10:04:30Z'), false)],
+    ]
+    for (const [expected, procRoot] of cases) {
+      const store = new RunStore(config, { procRoot })
+      const scope = store.scope('alpha', 'main')
+      assert.equal(activityOf((await store.loadRun(scope, 'live')).detail, procRoot).controller, expected, procRoot)
+      assert.equal((await store.listRuns(scope)).find(summary => summary.run_id === 'live')!.activity?.controller, expected, `${procRoot} (list)`)
+    }
+    const store = new RunStore(config, { procRoot: running })
+    const scope = store.scope('alpha', 'main')
+    assert.equal((await store.loadRun(scope, 'manual')).detail.summary.status, 'running')
+    assert.equal((await store.loadRun(scope, 'manual')).detail.summary.activity!.controller, null)
+    assert.equal((await store.loadRun(scope, 'blocked')).detail.summary.status, 'failed')
+    assert.equal((await store.loadRun(scope, 'blocked')).detail.summary.activity!.controller, null)
+    // The real /proc: this test's own PID runs no automatic-step, so a row naming it is a reused PID, never a live controller.
+    if (existsSync('/proc/self/stat')) {
+      await writeRun(runsRoot, { ...waitingRun, runId: 'reused', events: [...launchEvents, pidRow(5, process.pid)], inputs })
+      assert.equal((await new RunStore(config).loadRun(scope, 'reused')).detail.summary.activity!.controller, 'not_running')
+    }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[B2] every browser fixture run serves a 1.5.0 summary whose activity names what it waits on', async () => {
+  const seen: Record<string, string> = {}
+  await eachSeededRun((key, detail) => {
+    assert.equal(detail.summary.contract_version, '1.5.0', key)
+    const activity = detail.summary.activity!
+    seen[key] = `${activity.attention?.kind ?? '-'}:${activity.attention?.node_id ?? '-'}:${activity.waiting_questions}`
+    assert.ok(activity.headline === null || activity.headline.length <= 160, key)
+  })
+  for (const [key, expected] of Object.entries(SEEDED_ATTENTION)) assert.equal(seen[key], expected, key)
+})
+
+test('[B3] run_dir is served with ~ only for projects listed in viewer.expose_run_dir and only under $HOME', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-rundir-'))
+  try {
+    const projects = [{ id: 'alpha', workflows: [{ id: 'main' }] }, { id: 'beta', workflows: [{ id: 'main' }] }, { id: 'gamma', workflows: [{ id: 'spaced', runsRoot: join(root, 'runs with space') }] }]
+    for (const runsRoot of [join(root, 'runs', 'alpha', 'main'), join(root, 'runs', 'beta', 'main'), join(root, 'runs with space')]) {
+      await mkdir(runsRoot, { recursive: true })
+      await writeRun(runsRoot, { runId: 'r1', next: ['launch_ui', 'launch_adapter'] })
+    }
+    await symlink(root, join(root, 'home-link'))
+    const config = await parseProjectsConfig(JSON.stringify({ ...registry(root, projects), viewer: { expose_run_dir: ['alpha', 'gamma'] } }), 'viewer registry')
+    const runDir = async (options: RunStoreOptions, project: string, workflow = 'main') => {
+      const store = new RunStore(config, options)
+      return (await store.loadRun(store.scope(project, workflow), 'r1')).detail.run_dir
+    }
+    // With the temporary root as the viewer's home, a listed project's runs are served home-relative; an unlisted project's never are.
+    assert.equal(await runDir({ home: root }, 'alpha'), '~/runs/alpha/main/r1')
+    assert.equal(await runDir({ home: join(root, 'home-link') }, 'alpha'), '~/runs/alpha/main/r1', 'home and run directory compare by realpath')
+    assert.equal(await runDir({ home: root }, 'beta'), null)
+    // A path the shell would split is not paste-ready.
+    assert.equal(await runDir({ home: root }, 'gamma', 'spaced'), null)
+    // Outside $HOME (the temporary roots) nothing is served, listed or not.
+    if (!root.startsWith(`${homedir()}/`)) assert.equal(await runDir({}, 'alpha'), null)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[B3] the registry accepts a top-level viewer key and keeps it across reloads; unknown keys are still refused', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-viewer-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    await mkdir(runsRoot, { recursive: true })
+    await writeRun(runsRoot, { runId: 'r1', next: ['launch_ui', 'launch_adapter'] })
+    const base = registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }])
+    // A project that a later launch registers may be listed ahead of time.
+    const loaded = await parseProjectsConfig(JSON.stringify({ ...base, viewer: { expose_run_dir: ['alpha', 'not-registered-yet'] } }), 'viewer')
+    assert.deepEqual(loaded.viewer, { expose_run_dir: ['alpha', 'not-registered-yet'] })
+    assert.deepEqual(assertProjectsConfig(loaded).viewer, loaded.viewer, 're-validating a built registry keeps the key')
+    const refused: [string, unknown][] = [
+      ['unknown top-level key', { ...base, viewers: { expose_run_dir: [] } }],
+      ['unknown viewer key', { ...base, viewer: { expose_run_dir: [], show_paths: true } }],
+      ['a path instead of a project ID', { ...base, viewer: { expose_run_dir: ['/home/you/state'] } }],
+      ['a list instead of an object', { ...base, viewer: ['alpha'] }],
+    ]
+    for (const [label, config] of refused) await assert.rejects(parseProjectsConfig(JSON.stringify(config), label), ProjectsConfigError, label)
+    // The operator adds the key while the viewer runs: the next request serves the run directory.
+    const path = join(root, 'projects.json')
+    await writeFile(path, JSON.stringify(base))
+    const store = new RunStore(await parseProjectsConfig(JSON.stringify(base), path), { home: root, refresh: projectsConfigReloader(path) })
+    const runDir = async () => {
+      await store.sync()
+      return (await store.loadRun(store.scope('alpha', 'main'), 'r1')).detail.run_dir
+    }
+    assert.equal(await runDir(), null)
+    await writeFile(path, JSON.stringify({ ...base, viewer: { expose_run_dir: ['alpha'] } }))
+    assert.equal(await runDir(), '~/runs/alpha/main/r1')
+    // Through the app, a reloaded registry with the key still serves (outside $HOME the directory itself stays null).
+    const app = createApp([], { projects: await parseProjectsConfig(JSON.stringify(base), path), refreshProjects: projectsConfigReloader(path) })
+    try {
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', 'r1'))).json())
+      if (!root.startsWith(`${homedir()}/`)) assert.equal(detail.run_dir, null)
+    } finally { await app.close() }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

@@ -47,7 +47,14 @@ const projectSchema = z.strictObject({
   workflows: z.array(workflowSchema),
 })
 
-const fileSchema = z.strictObject({ version: z.literal(SUPPORTED_VERSION), projects: z.array(projectSchema) })
+/**
+ * Viewer-only settings, top-level so they survive every launch (the workflow CLI rewrites spans inside `projects` only).
+ * `expose_run_dir` lists the project IDs whose runs serve their directory, `~`-relative (docs/PRD_VIEWER_UX.md B3); an ID
+ * may name a project a later launch registers.
+ */
+const viewerSchema = z.strictObject({ expose_run_dir: z.array(z.string().regex(ID_PATTERN)) })
+
+const fileSchema = z.strictObject({ version: z.literal(SUPPORTED_VERSION), projects: z.array(projectSchema), viewer: viewerSchema.optional() })
 
 export type StoredDefinition = z.infer<typeof storedDefinitionSchema>
 
@@ -67,7 +74,10 @@ export type ProjectConfig = {
   workflows: WorkflowConfig[]
 }
 
-export type ProjectsConfig = { projects: ProjectConfig[] }
+export type ViewerConfig = z.infer<typeof viewerSchema>
+
+/** `viewer` is present only when the registry file has the key. */
+export type ProjectsConfig = { projects: ProjectConfig[]; viewer?: ViewerConfig }
 
 export const EMPTY_PROJECTS: ProjectsConfig = { projects: [] }
 
@@ -147,7 +157,8 @@ export function validateProjectsConfig(input: unknown): ProjectsConfig {
     }
     projects.push({ project_id: project.project_id, name: project.name.trim(), repository: resolve(project.repository), workflows })
   }
-  return { projects }
+  const viewer = parsed.data.viewer
+  return viewer ? { projects, viewer: { expose_run_dir: [...viewer.expose_run_dir] } } : { projects }
 }
 
 /**
@@ -157,6 +168,7 @@ export function validateProjectsConfig(input: unknown): ProjectsConfig {
 export function assertProjectsConfig(config: ProjectsConfig): ProjectsConfig {
   return validateProjectsConfig({
     version: SUPPORTED_VERSION,
+    ...(config.viewer ? { viewer: config.viewer } : {}),
     projects: config.projects.map(project => ({
       project_id: project.project_id, name: project.name, repository: project.repository,
       workflows: project.workflows.map(workflow => ({

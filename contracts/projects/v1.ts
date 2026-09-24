@@ -6,7 +6,8 @@ const version = z.literal('1.0.0')
 /**
  * Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs), 1.3.0 (configured
  * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
- * (decisions, the design challenge, completion evidence and worker questions).
+ * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
+ * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`.
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -33,20 +34,73 @@ export const definitionSchema = z.strictObject({
   })).min(1),
 })
 
+// ---- Run activity and the run directory (1.5.0) --------------------------------------------------------------------
+
+/**
+ * What a run waits on, by precedence: a worker's `question`, a worker or reviewer `pane` that needs attention, an
+ * `approval`, then an `interrupted` controller, a `paused` or a `failed` run. The first three wait on the operator.
+ */
+export const ATTENTION_KINDS = ['question', 'pane', 'approval', 'interrupted', 'paused', 'failed'] as const
+/** Whether the run's `automatic-step` controller process is alive, read from `/proc`; `unknown` when it cannot be told. */
+export const CONTROLLER_STATES = ['running', 'not_running', 'unknown'] as const
+const status = runSnapshotSchema.shape.status
+const FINISHED_STATUSES: readonly string[] = ['succeeded', 'failed', 'cancelled']
+const LIVE_STATUSES: readonly string[] = ['running', 'paused']
+
+/**
+ * A run's state for list rows (1.5.0), computed from the files a run detail reads plus each lane's live questions file,
+ * with the rules of `triage.ts` the run page uses, so the two agree. `headline` is redacted and at most 160 characters.
+ */
+export const runActivitySchema = z.strictObject({
+  /** The export's `inputs.feature`; null for exports without an inputs section. */
+  feature: z.string().min(1).nullable(),
+  /** The latest event that is not a controller PID checkpoint (or a later stop receipt or review verdict). */
+  last_activity_at: timestamp.nullable(),
+  /** A finished run's last non-controller activity; null while the run can still move. */
+  finished_at: timestamp.nullable(),
+  /** The first failed, paused or awaiting node in definition order, else the first running one. */
+  focus: z.strictObject({ node_id: id, label: z.string().min(1), status, since: timestamp.nullable() }).nullable(),
+  attention: z.strictObject({ kind: z.enum(ATTENTION_KINDS), node_id: id.nullable(), since: timestamp.nullable() }).nullable(),
+  /** Lanes whose question waits on the operator, from each lane's live `<lane>.questions.json` over the export's record. */
+  waiting_questions: z.number().int().nonnegative(),
+  /** The focus step's label and its last status message, or the in-scope controller row that stopped the run. */
+  headline: z.string().min(1).max(160).nullable(),
+  /** Only while the run is running or paused and has logged a controller PID; null otherwise. */
+  controller: z.enum(CONTROLLER_STATES).nullable(),
+})
+
+/**
+ * A run directory as the registry's `viewer.expose_run_dir` serves it: home-relative, without `.` or `..` segments, and made
+ * of characters a shell takes unquoted, so `RUN=<run_dir>` pastes as is. The server serves null for any other path.
+ */
+export const RUN_DIR_PATTERN = /^~(?!.*\/\.\.?(?:\/|$))\/[A-Za-z0-9._@+/-]+$/
+
 export const runSummarySchema = z.strictObject({
-  contract_version: version,
+  /** 1.5.0 carries `activity`; 1.0.0 (a server before it, and the viewer's worker-phase mocks) does not. */
+  contract_version: z.enum(['1.0.0', '1.5.0']),
   ...scope,
   definition_revision: revision,
   run_id: id,
-  status: runSnapshotSchema.shape.status,
+  status,
   created_at: timestamp,
   updated_at: timestamp,
+  activity: runActivitySchema.optional(),
+}).superRefine((summary, context) => {
+  const issue = (message: string) => context.addIssue({ code: 'custom', message, path: ['activity'] })
+  const { activity } = summary
+  if ((summary.contract_version === '1.5.0') !== (activity !== undefined)) issue('A summary carries activity exactly when it is 1.5.0')
+  if (!activity) return
+  if (activity.finished_at !== null && !FINISHED_STATUSES.includes(summary.status)) issue('Only a finished run has a finish time')
+  if (activity.controller !== null && !LIVE_STATUSES.includes(summary.status)) issue('The controller is read only while the run is running or paused')
+  if ((activity.attention?.kind === 'question') !== (activity.waiting_questions > 0)) issue('Attention is a question exactly when a question waits')
 })
 
 export const runDetailSchema = z.strictObject({
   summary: runSummarySchema,
   definition: definitionSchema,
   snapshot: runSnapshotSchema,
+  /** 1.5.0: the run directory, `~`-relative, for projects the registry lists in `viewer.expose_run_dir`; null otherwise. */
+  run_dir: z.string().regex(RUN_DIR_PATTERN).nullable().optional(),
 })
 
 // ---- Review results (1.1.0, finding links 1.2.0, lanes from configuration 1.3.0, parallel reviewers 1.4.0) ----
@@ -283,6 +337,7 @@ export const schemas = {
 export type Project = z.infer<typeof projectSchema>
 export type WorkflowDefinition = z.infer<typeof definitionSchema>
 export type RunSummary = z.infer<typeof runSummarySchema>
+export type RunActivity = z.infer<typeof runActivitySchema>
 export type RunDetail = z.infer<typeof runDetailSchema>
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>
 export type ReviewerEntry = z.infer<typeof reviewerEntrySchema>
@@ -326,6 +381,13 @@ export function validateRunDetail(input: unknown): RunDetail {
     const definition = definitions.get(node.node_id)
     if (!definition || definition.kind !== node.kind || JSON.stringify([...definition.depends_on].sort()) !== JSON.stringify([...node.depends_on].sort()))
       throw new Error('Snapshot graph differs from pinned definition')
+  }
+  if ((detail.summary.contract_version === '1.5.0') !== (detail.run_dir !== undefined)) throw new Error('A run detail carries run_dir exactly when its summary is 1.5.0')
+  const activity = detail.summary.activity
+  if (activity) {
+    const focus = activity.focus
+    if (focus && detail.snapshot.nodes.find(node => node.node_id === focus.node_id)?.status !== focus.status) throw new Error('The focus names a node of the run in its snapshot status')
+    if (activity.attention?.node_id && !definitions.has(activity.attention.node_id)) throw new Error('Attention names a node of the run')
   }
   return detail
 }
