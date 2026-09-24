@@ -1,0 +1,1119 @@
+{
+ "detail": {
+  "summary": {
+   "contract_version": "1.0.0",
+   "project_id": "project-b",
+   "workflow_id": "skeleton-fixes",
+   "definition_revision": "1d261e8e11869fbaefbf89b1ac170a1a49d68be48211e6b27a0410a94b2ec8c0",
+   "run_id": "skeleton-fixes-001",
+   "status": "succeeded",
+   "created_at": "2026-09-24T09:42:17.339484Z",
+   "updated_at": "2026-09-24T10:14:07.277615Z"
+  },
+  "definition": {
+   "contract_version": "1.0.0",
+   "project_id": "project-b",
+   "workflow_id": "skeleton-fixes",
+   "name": "Feature implementation",
+   "definition_revision": "1d261e8e11869fbaefbf89b1ac170a1a49d68be48211e6b27a0410a94b2ec8c0",
+   "nodes": [
+    {
+     "node_id": "challenge",
+     "label": "Design challenge",
+     "kind": "review",
+     "depends_on": []
+    },
+    {
+     "node_id": "launch_game",
+     "label": "Launch game worker",
+     "kind": "worker",
+     "depends_on": [
+      "challenge"
+     ]
+    },
+    {
+     "node_id": "handoff",
+     "label": "Freeze worker handoffs",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_game"
+     ]
+    },
+    {
+     "node_id": "verify_game",
+     "label": "Verify game",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ]
+    },
+    {
+     "node_id": "candidate",
+     "label": "Verify combined candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_game"
+     ]
+    },
+    {
+     "node_id": "review",
+     "label": "Independent review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ]
+    },
+    {
+     "node_id": "approval",
+     "label": "Integration approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ]
+    },
+    {
+     "node_id": "integrate",
+     "label": "Integrate candidate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ]
+    }
+   ]
+  },
+  "snapshot": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "status": "succeeded",
+   "last_sequence": 25,
+   "nodes": [
+    {
+     "node_id": "challenge",
+     "kind": "review",
+     "depends_on": [],
+     "status": "succeeded",
+     "attempt": 2,
+     "session_id": "9ebdf03d-5ccb-4878-b689-c5b8889c3785",
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "launch_game",
+     "kind": "worker",
+     "depends_on": [
+      "challenge"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "ea141956-349c-4418-9ae8-a3692c1b348d",
+     "result_uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/results/game/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "handoff",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_game"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "verify_game",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "ea141956-349c-4418-9ae8-a3692c1b348d",
+     "result_uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/results/game/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_game"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": [
+      {
+       "worker": "game",
+       "attempt": 1,
+       "result_uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/results/candidate_game/1"
+      }
+     ]
+    },
+    {
+     "node_id": "review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "a8e3ee2a-6391-4584-bd3b-0325884aa1bc, 972ceba4-7d4b-4e2c-85ae-8c177dd36f7a",
+     "result_uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/reviews/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "integrate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:1",
+   "sequence": 1,
+   "occurred_at": "2026-09-24T09:42:18.929271Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Design challenge attempt 1: one print job, session 81e2b324-da2f-47a3-9d66-e9f8ad35e964",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:2",
+   "sequence": 2,
+   "occurred_at": "2026-09-24T09:44:48.404067Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "paused",
+   "message": "Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s)",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:3",
+   "sequence": 3,
+   "occurred_at": "2026-09-24T09:46:51.097894Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Revised feature files committed on feature/skeleton-fixes/skeleton-fixes-001 as 0cebfa15fa4ccd4965aa02863aca8a88b992ed17: features/skeleton-fixes/decisions.md, features/skeleton-fixes/game-task.md",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:4",
+   "sequence": 4,
+   "occurred_at": "2026-09-24T09:46:51.158583Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Run worktrees moved from base a8e132c025c17d15f8e299ad7ce3a692e7d290a0 to 0cebfa15fa4ccd4965aa02863aca8a88b992ed17 (2); plan.json pins it with the re-pinned files next; no worker exists yet",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:5",
+   "sequence": 5,
+   "occurred_at": "2026-09-24T09:46:51.165066Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Feature files re-pinned for design challenge attempt 2 on base 0cebfa15fa4ccd4965aa02863aca8a88b992ed17",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:6",
+   "sequence": 6,
+   "occurred_at": "2026-09-24T09:46:51.185271Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Design challenge attempt 2: one print job, session 9ebdf03d-5ccb-4878-b689-c5b8889c3785",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:7",
+   "sequence": 7,
+   "occurred_at": "2026-09-24T09:52:07.511633Z",
+   "node_id": "challenge",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Design challenge attempt 2 passed (8 P2 concern(s)); launching workers",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:8",
+   "sequence": 8,
+   "occurred_at": "2026-09-24T09:52:07.529009Z",
+   "node_id": "launch_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching or reconciling the exact native session",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:9",
+   "sequence": 9,
+   "occurred_at": "2026-09-24T09:52:10.944761Z",
+   "node_id": "launch_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Awaiting explicit completion signal; idle is not acceptance",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:10",
+   "sequence": 10,
+   "occurred_at": "2026-09-24T09:52:12.667048Z",
+   "node_id": null,
+   "attempt": 0,
+   "type": "log",
+   "status": null,
+   "message": "Automatic checkpoint controller PID 3297986",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:11",
+   "sequence": 11,
+   "occurred_at": "2026-09-24T10:07:53.041183Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "log",
+   "status": null,
+   "message": "Native workers stopped before snapshot capture: game",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:12",
+   "sequence": 12,
+   "occurred_at": "2026-09-24T10:07:53.101006Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Immutable snapshots captured; worker-reported checks are not trusted",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:13",
+   "sequence": 13,
+   "occurred_at": "2026-09-24T10:07:53.104998Z",
+   "node_id": "verify_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 1; revision 33c4947b3b00b0cafd75bd58804d3e74b1c0e596",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:14",
+   "sequence": 14,
+   "occurred_at": "2026-09-24T10:09:02.720386Z",
+   "node_id": "verify_game",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Required tests and artifacts passed; recorded for the candidate gate: browser, build",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:15",
+   "sequence": 15,
+   "occurred_at": "2026-09-24T10:10:12.463874Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Combined revision ee7429895a10fa0f24c21ae9d448f2da73b13f51",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:16",
+   "sequence": 16,
+   "occurred_at": "2026-09-24T10:10:12.686699Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching the native reviewer session general",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:17",
+   "sequence": 17,
+   "occurred_at": "2026-09-24T10:10:17.137227Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Reviewer general session a8e3ee2a-6391-4584-bd3b-0325884aa1bc launched; awaiting review-general.completion.json",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:18",
+   "sequence": 18,
+   "occurred_at": "2026-09-24T10:10:18.072782Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Reviewer general pane attached",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:19",
+   "sequence": 19,
+   "occurred_at": "2026-09-24T10:10:18.131166Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching the native reviewer session coverage",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:20",
+   "sequence": 20,
+   "occurred_at": "2026-09-24T10:10:22.212724Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Reviewer coverage session 972ceba4-7d4b-4e2c-85ae-8c177dd36f7a launched; awaiting review-coverage.completion.json",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:21",
+   "sequence": 21,
+   "occurred_at": "2026-09-24T10:10:22.812731Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Reviewer coverage pane attached",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:22",
+   "sequence": 22,
+   "occurred_at": "2026-09-24T10:14:04.817758Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "log",
+   "status": null,
+   "message": "Reviewer general session stopped; its transcript stays resumable",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:23",
+   "sequence": 23,
+   "occurred_at": "2026-09-24T10:14:07.067786Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "log",
+   "status": null,
+   "message": "Reviewer coverage session stopped; its transcript stays resumable",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:24",
+   "sequence": 24,
+   "occurred_at": "2026-09-24T10:14:07.103891Z",
+   "node_id": "review",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "a8e3ee2a-6391-4584-bd3b-0325884aa1bc, 972ceba4-7d4b-4e2c-85ae-8c177dd36f7a",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "event_id": "skeleton-fixes-001:25",
+   "sequence": 25,
+   "occurred_at": "2026-09-24T10:14:07.256177Z",
+   "node_id": "integrate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Fast-forwarded to ee7429895a10fa0f24c21ae9d448f2da73b13f51; no push performed",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  }
+ ],
+ "inputs": {
+  "contract_version": "1.4.0",
+  "run_id": "skeleton-fixes-001",
+  "feature": "Pirate Sea Race skeleton review fixes",
+  "base_commit": "0cebfa15fa4ccd4965aa02863aca8a88b992ed17",
+  "source_branch": "feature/skeleton-fixes/skeleton-fixes-001",
+  "mode": "automatic",
+  "automatic": {
+   "finish": "verified-feature-branch",
+   "permission_mode": "bypassPermissions",
+   "worker_timeout_seconds": 10800,
+   "review_timeout_seconds": 3600,
+   "reviewer_transport": "native"
+  },
+  "setup": [
+   {
+    "command": "npm ci",
+    "timeout_seconds": 900
+   }
+  ],
+  "max_verification_attempts": 3,
+  "selected_workers": [
+   "game"
+  ],
+  "excluded_workers": [],
+  "workers": [
+   {
+    "node_id": "game",
+    "launch_node_id": "launch_game",
+    "role": "fullstack",
+    "required_check_kinds": [
+     "typecheck",
+     "unit",
+     "integration",
+     "build",
+     "browser"
+    ],
+    "task": {
+     "text": "(trimmed for the triage fixture)",
+     "truncated": true
+    },
+    "prompt": null,
+    "owned_paths": [
+     "package.json",
+     "package-lock.json",
+     "tsconfig.json",
+     "tsconfig.base.json",
+     "vitest.config.ts",
+     ".gitignore",
+     ".npmrc",
+     "README.md",
+     "CLAUDE.md",
+     "docs/architecture.md",
+     "apps",
+     "packages",
+     "tests",
+     "assets",
+     "infra",
+     "scripts"
+    ],
+    "checks": [
+     {
+      "id": "typecheck",
+      "kind": "typecheck",
+      "command": "npm run typecheck",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "unit",
+      "kind": "unit",
+      "command": "npm run test:unit",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "integration",
+      "kind": "integration",
+      "command": "npm run test:integration",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "build",
+      "kind": "build",
+      "command": "npm run build",
+      "timeout_seconds": 600,
+      "scenarios": []
+     },
+     {
+      "id": "browser",
+      "kind": "browser",
+      "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+      "timeout_seconds": 600,
+      "scenarios": [
+       {
+        "id": "join-private-match",
+        "description": "One browser opens the landing page, enters a private match code and joins; the HUD shows the code, the protocol version, one player and a connected status."
+       },
+       {
+        "id": "two-ships-sync",
+        "description": "Two browsers join the same private match; one moves its ship with the keyboard and the other browser's view shows that ship at the new server-authoritative position."
+       }
+      ]
+     }
+    ],
+    "launch": {
+     "session_id": "ea141956-349c-4418-9ae8-a3692c1b348d",
+     "launch_requested_at": "2026-09-24T09:52:08.012547Z",
+     "native_started_at": "2026-09-24T09:52:09.991Z",
+     "observed_state": "working",
+     "status": "attached_session_available",
+     "launcher_invocations": 1
+    },
+    "completion": {
+     "version": "1.1.0",
+     "status": "completed",
+     "summary": "Findings 1-11 fixed (9 needed no change). F1: three admission layers. (a) authorizeEntry refuses neither/both code+createToken and malformed tokens (400) befor…",
+     "open_assumptions": [
+      "A malformed code without a token keeps the existing 404 'No match with that cod…",
+      "Room-level refusals: 404 NO_SUCH_MATCH for another match's code; new 403 'Joini…"
+     ],
+     "untested": [
+      "The browser displaying the protocol-mismatch and full-match refusals in #join-e…",
+      "That the last-seat race test actually hit the MATCHMAKE_INVALID_CRITERIA branch…"
+     ],
+     "falsifying_check": "integration",
+     "verify_yourself": "That Colyseus 0.18.16 never stores the create request's filterBy metadata (with…",
+     "question": null
+    },
+    "handoff": {
+     "summary": "Findings 1-11 fixed (9 needed no change). F1: three admission layers. (a) authorizeEntry refuses neither/both code+createToken and malformed tokens (400) befor…",
+     "open_assumptions": []
+    },
+    "stop": {
+     "stopped": true,
+     "confirmed_at": "2026-09-24T10:07:52.673785Z"
+    },
+    "questions": []
+   }
+  ],
+  "decisions": "# Decisions: skeleton-fixes\n\n(trimmed for the triage fixture)\n",
+  "challenge": {
+   "status": "passed",
+   "attempt": 2,
+   "attempts": 2,
+   "session_id": "9ebdf03d-5ccb-4878-b689-c5b8889c3785",
+   "pinned": {
+    "tasks_sha256": "ee89703c143bcf145d8ca903e7f93c6d29cc29dbda5603ef42915cf170e6b2cc",
+    "decisions_sha256": "27d2cc40ddeb9b64da55210a07e5b0522a816ed484903456a0b8af10fdfcefbe",
+    "prd_sha256": "99329c4b04e5b65287196d384f9629a81e12e03943fb81f579d91b68fd0396ba"
+   },
+   "concerns": [
+    {
+     "severity": "P2",
+     "kind": "assumption",
+     "message": "Layer (b) says onCreate must 'replace the metadata (setMatchmaking)'. In Colyseus 0.16/0.17, setMat…",
+     "consequence": "The acceptance test 'listing metadata never contains the token' fails, or a worker who tests only f…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "The acceptance test 'a joinOrCreate carrying a token creates a new match and never lands in an exis…",
+     "consequence": "A test that always passes stands as proof of layer (b). A listing that keeps its token (see the mer…"
+    },
+    {
+     "severity": "P2",
+     "kind": "other",
+     "message": "'join, joinOrCreate and joinById without a code … are refused with the exact short message' only ma…",
+     "consequence": "A worker who reads 'without a code' literally writes a token-only join test that expects the projec…"
+    },
+    {
+     "severity": "P2",
+     "kind": "assumption",
+     "message": "The browser has to generate the createToken. `crypto.randomUUID()` gives only 122 random bits, belo…",
+     "consequence": "If the worker uses randomUUID, the token is under the decided strength, and creating a match throws…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "Room-level refusals and joinById outcomes are new SDK error shapes: a room error after the WebSocke…",
+     "consequence": "The unit tests can pass against made-up error shapes while the real SDK's errors take a different b…"
+    },
+    {
+     "severity": "P2",
+     "kind": "failure_mode",
+     "message": "The smoke script's child server outlives the script unless it is killed explicitly. On Linux a spaw…",
+     "consequence": "If an uncaught SDK rejection skips the finally block, or SIGTERM hangs, a server stays running duri…"
+    },
+    {
+     "severity": "P2",
+     "kind": "other",
+     "message": "Refusal messages are required to stay under 100 bytes, but protocolMismatchMessage embeds the clien…",
+     "consequence": "A worker who asserts the byte limit on every refusal, including the new code-less requests, finds i…"
+    },
+    {
+     "severity": "P2",
+     "kind": "assumption",
+     "message": "Finding 6's clock test may show that the base is wrong. It is unclear whether `setFixedTimestep(cb,…",
+     "consequence": "Fixing the rate then speeds ships up about 3.6×. That changes how far the finding-10 movement test…"
+    }
+   ],
+   "simpler_alternative": "Drop the createToken. Add one custom HTTP route on the Colyseus server (e.g. POST /match) that call…",
+   "cheap_experiment": "Spend about 15 minutes on the base commit before any worker starts. Write a throwaway script run wi…",
+   "accepted_reason": null,
+   "decided_at": "2026-09-24T09:52:07.505768Z"
+  }
+ },
+ "review": {
+  "contract_version": "1.4.0",
+  "run_id": "skeleton-fixes-001",
+  "node_id": "review",
+  "attempt": 1,
+  "reviewer": {
+   "session_id": "a8e3ee2a-6391-4584-bd3b-0325884aa1bc, 972ceba4-7d4b-4e2c-85ae-8c177dd36f7a",
+   "transport": "native",
+   "independent": true
+  },
+  "bundle_sha256": "1cd67793ec58b8efc5c811ceb5136c4b4013f78fec3aa45f21a6589475e74ef3",
+  "candidate_commit": "ee7429895a10fa0f24c21ae9d448f2da73b13f51",
+  "verdict": "approved",
+  "findings": [
+   {
+    "severity": "P2",
+    "message": "packages/protocol/src/join.ts protocolMismatchMessage changes the server's 426 refusal text from 'Protocol version mismatch: this client speaks vX, the server speaks vY. Reload the page to update.' to 'Protocol version mismatch: client vX,…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": "the server's own 404/409/426 refusals keep their exact messages",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "general"
+   },
+   {
+    "severity": "P2",
+    "message": "Residual seat squatting through joinById, as decisions.md accepts. MatchRoom.authorizeEntry passes any well-formed createToken, and any code of another live match (which anyone gets by creating their own match). So a caller who knows a roo…",
+    "disposition": "accepted",
+    "worker": "game",
+    "requirement": "Finding 1: a private match can be neither joined nor have a seat reserved in it without its code, as the three layers i…",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "general"
+   },
+   {
+    "severity": "P2",
+    "message": "tests/integration/admission.test.ts 'reserves no seat for requests without the code, so players with the code still fill the match' sends every code-less request through the @colyseus/sdk Client, which opens the WebSocket right after the H…",
+    "disposition": "open",
+    "worker": "game",
+    "requirement": "code-less requests reserve no seat: after several of them, a player with the real code still joins a match that has roo…",
+    "requirement_found_in": [
+     "game"
+    ],
+    "reviewer": "coverage"
+   }
+  ],
+  "reviewers": [
+   {
+    "reviewer_id": "general",
+    "transport": "native",
+    "session_id": "a8e3ee2a-6391-4584-bd3b-0325884aa1bc",
+    "verdict": "approved",
+    "findings": [
+     {
+      "severity": "P2",
+      "message": "packages/protocol/src/join.ts protocolMismatchMessage changes the server's 426 refusal text from 'Protocol version mismatch: this client speaks vX, the server speaks vY. Reload the page to update.' to 'Protocol version mismatch: client vX,…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": "the server's own 404/409/426 refusals keep their exact messages",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "general"
+     },
+     {
+      "severity": "P2",
+      "message": "Residual seat squatting through joinById, as decisions.md accepts. MatchRoom.authorizeEntry passes any well-formed createToken, and any code of another live match (which anyone gets by creating their own match). So a caller who knows a roo…",
+      "disposition": "accepted",
+      "worker": "game",
+      "requirement": "Finding 1: a private match can be neither joined nor have a seat reserved in it without its code, as the three layers i…",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "general"
+     }
+    ],
+    "launched_at": "2026-09-24T10:10:13.246800Z",
+    "accepted_at": "2026-09-24T10:14:02.199946Z",
+    "status": "accepted"
+   },
+   {
+    "reviewer_id": "coverage",
+    "transport": "native",
+    "session_id": "972ceba4-7d4b-4e2c-85ae-8c177dd36f7a",
+    "verdict": "approved",
+    "findings": [
+     {
+      "severity": "P2",
+      "message": "tests/integration/admission.test.ts 'reserves no seat for requests without the code, so players with the code still fill the match' sends every code-less request through the @colyseus/sdk Client, which opens the WebSocket right after the H…",
+      "disposition": "open",
+      "worker": "game",
+      "requirement": "code-less requests reserve no seat: after several of them, a player with the real code still joins a match that has roo…",
+      "requirement_found_in": [
+       "game"
+      ],
+      "reviewer": "coverage"
+     }
+    ],
+    "launched_at": "2026-09-24T10:10:18.805627Z",
+    "accepted_at": "2026-09-24T10:12:22.444735Z",
+    "status": "accepted"
+   }
+  ],
+  "reviewed_at": "2026-09-24T10:14:02.661535Z",
+  "diff": {
+   "artifact_id": "patch-review-013334759e16",
+   "kind": "patch",
+   "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/patch-review-013334759e16",
+   "sha256": "013334759e169049cde6b0e2c67522860aacd25799b89f61c9a47bdd1a43c659"
+  }
+ },
+ "results": {
+  "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/results/candidate_game/1": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "node_id": "candidate_game",
+   "attempt": 1,
+   "session_id": "ea141956-349c-4418-9ae8-a3692c1b348d",
+   "status": "succeeded",
+   "base_commit": "0cebfa15fa4ccd4965aa02863aca8a88b992ed17",
+   "output_commit": "ee7429895a10fa0f24c21ae9d448f2da73b13f51",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run typecheck",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T10:09:30.661757Z",
+     "finished_at": "2026-09-24T10:09:33.097350Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-1-f6a2e7f9b0b2"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T10:09:33.098771Z",
+     "finished_at": "2026-09-24T10:09:35.635666Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-2-089d4751f559"
+    },
+    {
+     "command": "npm run test:integration",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T10:09:35.637358Z",
+     "finished_at": "2026-09-24T10:09:44.453344Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-3-5111488d3c96"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T10:09:44.455736Z",
+     "finished_at": "2026-09-24T10:09:49.756630Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-4-e7d0914a943e"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+     "cwd": "verification/candidate/game/1/worktree",
+     "started_at": "2026-09-24T10:09:49.757945Z",
+     "finished_at": "2026-09-24T10:10:12.360693Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-5-d5ac036cbd8a"
+    }
+   ],
+   "open_assumptions": [],
+   "artifacts": [
+    {
+     "artifact_id": "log-1-f6a2e7f9b0b2",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-1-f6a2e7f9b0b2",
+     "sha256": "f6a2e7f9b0b226e310ece20624a44963bfbc50ad58519e84b4593c5064c226b0"
+    },
+    {
+     "artifact_id": "log-2-089d4751f559",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-2-089d4751f559",
+     "sha256": "089d4751f5592727b59ad53e12802c5977baf2e23055f878dbf8569ac2e112df"
+    },
+    {
+     "artifact_id": "log-3-5111488d3c96",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-3-5111488d3c96",
+     "sha256": "5111488d3c96f7f0acc420b1923113c672e9e325e810d4c6a2402fc4e5de9b08"
+    },
+    {
+     "artifact_id": "log-4-e7d0914a943e",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-4-e7d0914a943e",
+     "sha256": "e7d0914a943e56e859fe3a01d511875fb2e1aec10eb09977785b22f07c1546f2"
+    },
+    {
+     "artifact_id": "log-5-d5ac036cbd8a",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-5-d5ac036cbd8a",
+     "sha256": "d5ac036cbd8a58a859a439040ed056bcb78d38f0c81b5fd4cbd28ac0169942df"
+    },
+    {
+     "artifact_id": "screenshot-6-03540c51c79c",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/screenshot-6-03540c51c79c",
+     "sha256": "03540c51c79c226838b6ed9902bba27aa9cdee9a143167c831199832c85bed97"
+    },
+    {
+     "artifact_id": "screenshot-7-3468a955b3c9",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/screenshot-7-3468a955b3c9",
+     "sha256": "3468a955b3c9ffe54a1cc83c08279c6d68e59bc3e01a20ea88482af0b7a65c3d"
+    },
+    {
+     "artifact_id": "test_report-8-b1b48bc8e591",
+     "kind": "test_report",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/test_report-8-b1b48bc8e591",
+     "sha256": "b1b48bc8e591ca018f6dc8774c056423f6f2549db6b8632c234c590c000a07bc"
+    }
+   ],
+   "summary": "Trusted candidate check capture; not integration approval",
+   "error": null
+  },
+  "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/results/game/1": {
+   "contract_version": "1.0.0",
+   "run_id": "skeleton-fixes-001",
+   "node_id": "game",
+   "attempt": 1,
+   "session_id": "ea141956-349c-4418-9ae8-a3692c1b348d",
+   "status": "succeeded",
+   "base_commit": "0cebfa15fa4ccd4965aa02863aca8a88b992ed17",
+   "output_commit": "33c4947b3b00b0cafd75bd58804d3e74b1c0e596",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run typecheck",
+     "cwd": "verification/worker/game/1/worktree",
+     "started_at": "2026-09-24T10:08:21.165398Z",
+     "finished_at": "2026-09-24T10:08:23.900753Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-22-f6a2e7f9b0b2"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/worker/game/1/worktree",
+     "started_at": "2026-09-24T10:08:23.903205Z",
+     "finished_at": "2026-09-24T10:08:26.085758Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-23-30572de8f542"
+    },
+    {
+     "command": "npm run test:integration",
+     "cwd": "verification/worker/game/1/worktree",
+     "started_at": "2026-09-24T10:08:26.089160Z",
+     "finished_at": "2026-09-24T10:08:34.952436Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-24-6756dcce0529"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/worker/game/1/worktree",
+     "started_at": "2026-09-24T10:08:34.954936Z",
+     "finished_at": "2026-09-24T10:08:40.764600Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-25-34b9f4a4d4da"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/e2e/playwright.config.ts",
+     "cwd": "verification/worker/game/1/worktree",
+     "started_at": "2026-09-24T10:08:40.768521Z",
+     "finished_at": "2026-09-24T10:09:02.585040Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-26-e8c1310a7ac1"
+    }
+   ],
+   "open_assumptions": [
+    "A malformed code without a token keeps the existing 404 'No match with that cod…",
+    "Room-level refusals: 404 NO_SUCH_MATCH for another match's code; new 403 'Joini…"
+   ],
+   "artifacts": [
+    {
+     "artifact_id": "log-22-f6a2e7f9b0b2",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-22-f6a2e7f9b0b2",
+     "sha256": "f6a2e7f9b0b226e310ece20624a44963bfbc50ad58519e84b4593c5064c226b0"
+    },
+    {
+     "artifact_id": "log-23-30572de8f542",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-23-30572de8f542",
+     "sha256": "30572de8f5425d7a8f217ee82e09e51d1312eb1ee128905590bafa61077515af"
+    },
+    {
+     "artifact_id": "log-24-6756dcce0529",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-24-6756dcce0529",
+     "sha256": "6756dcce05294469bf0e7331a24065b9982e51ee8b6c00d0857045f3d97958cb"
+    },
+    {
+     "artifact_id": "log-25-34b9f4a4d4da",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-25-34b9f4a4d4da",
+     "sha256": "34b9f4a4d4daa0c845f7d5172cefe9e06a9c313075a7ac78a401cd68c3e5fd6f"
+    },
+    {
+     "artifact_id": "log-26-e8c1310a7ac1",
+     "kind": "log",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/log-26-e8c1310a7ac1",
+     "sha256": "e8c1310a7ac12e3905b6b1a1f092caa8a1287d99e761fec5d3aab6921f1672db"
+    },
+    {
+     "artifact_id": "screenshot-27-283c194fa927",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/screenshot-27-283c194fa927",
+     "sha256": "283c194fa927d09daacad56e4edc80cc6f8e841ec1a18b2589f4104427f4047c"
+    },
+    {
+     "artifact_id": "screenshot-28-b86a7d06f9d3",
+     "kind": "screenshot",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/screenshot-28-b86a7d06f9d3",
+     "sha256": "b86a7d06f9d32cf5afde61672f804ae37c985324f375ff9105c5c85facad7c15"
+    },
+    {
+     "artifact_id": "test_report-29-183d79108d53",
+     "kind": "test_report",
+     "uri": "/api/projects/project-b/workflows/skeleton-fixes/runs/skeleton-fixes-001/artifacts/test_report-29-183d79108d53",
+     "sha256": "183d79108d53d9c9804f031f020da9d180b66476b4c30e6b720d8ae4b1628d41"
+    }
+   ],
+   "summary": "Findings 1-11 fixed (9 needed no change). F1: three admission layers. (a) authorizeEntry refuses neither/both code+createToken and malformed tokens (400) before a seat is reserved, and keeps 426/404/409. (b) filterBy(['code','createToken']…",
+   "error": null,
+   "deferred_checks": [
+    {
+     "id": "build",
+     "check_index": 3
+    },
+    {
+     "id": "browser",
+     "check_index": 4
+    }
+   ],
+   "files_not_captured": []
+  }
+ }
+}

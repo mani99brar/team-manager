@@ -1,0 +1,1261 @@
+{
+ "detail": {
+  "summary": {
+   "contract_version": "1.0.0",
+   "project_id": "md-manager",
+   "workflow_id": "workflow-guardrails",
+   "definition_revision": "df7f38bec69cb7993e0e265af02a31a576a0901cc5d3873d90de0775a556812b",
+   "run_id": "workflow-guardrails-001",
+   "status": "failed",
+   "created_at": "2026-09-23T19:32:52.774049Z",
+   "updated_at": "2026-09-23T20:27:14.542119Z"
+  },
+  "definition": {
+   "contract_version": "1.0.0",
+   "project_id": "md-manager",
+   "workflow_id": "workflow-guardrails",
+   "name": "Feature implementation",
+   "definition_revision": "df7f38bec69cb7993e0e265af02a31a576a0901cc5d3873d90de0775a556812b",
+   "nodes": [
+    {
+     "node_id": "launch_controller",
+     "label": "Launch controller worker",
+     "kind": "worker",
+     "depends_on": []
+    },
+    {
+     "node_id": "launch_ui",
+     "label": "Launch ui worker",
+     "kind": "worker",
+     "depends_on": []
+    },
+    {
+     "node_id": "handoff",
+     "label": "Freeze worker handoffs",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_controller",
+      "launch_ui"
+     ]
+    },
+    {
+     "node_id": "verify_controller",
+     "label": "Verify controller",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ]
+    },
+    {
+     "node_id": "verify_ui",
+     "label": "Verify ui",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ]
+    },
+    {
+     "node_id": "candidate",
+     "label": "Verify combined candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_controller",
+      "verify_ui"
+     ]
+    },
+    {
+     "node_id": "review",
+     "label": "Independent review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ]
+    },
+    {
+     "node_id": "approval",
+     "label": "Integration approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ]
+    },
+    {
+     "node_id": "integrate",
+     "label": "Integrate candidate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ]
+    }
+   ]
+  },
+  "snapshot": {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "status": "failed",
+   "last_sequence": 32,
+   "nodes": [
+    {
+     "node_id": "launch_controller",
+     "kind": "worker",
+     "depends_on": [],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "3520787a-4a30-4962-bd75-5e4f165e834b",
+     "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/controller/2",
+     "lane_results": []
+    },
+    {
+     "node_id": "launch_ui",
+     "kind": "worker",
+     "depends_on": [],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "28930c4a-9b3f-4480-8f43-ac8ecc3447c6",
+     "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/ui/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "handoff",
+     "kind": "prepare",
+     "depends_on": [
+      "launch_controller",
+      "launch_ui"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "verify_controller",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ],
+     "status": "succeeded",
+     "attempt": 2,
+     "session_id": "3520787a-4a30-4962-bd75-5e4f165e834b",
+     "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/controller/2",
+     "lane_results": []
+    },
+    {
+     "node_id": "verify_ui",
+     "kind": "verification",
+     "depends_on": [
+      "handoff"
+     ],
+     "status": "succeeded",
+     "attempt": 1,
+     "session_id": "28930c4a-9b3f-4480-8f43-ac8ecc3447c6",
+     "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/ui/1",
+     "lane_results": []
+    },
+    {
+     "node_id": "candidate",
+     "kind": "verification",
+     "depends_on": [
+      "verify_controller",
+      "verify_ui"
+     ],
+     "status": "failed",
+     "attempt": 2,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": [
+      {
+       "worker": "controller",
+       "attempt": 1,
+       "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/candidate_controller/1"
+      },
+      {
+       "worker": "ui",
+       "attempt": 2,
+       "result_uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/candidate_ui/2"
+      }
+     ]
+    },
+    {
+     "node_id": "review",
+     "kind": "review",
+     "depends_on": [
+      "candidate"
+     ],
+     "status": "pending",
+     "attempt": 0,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "approval",
+     "kind": "integration",
+     "depends_on": [
+      "review"
+     ],
+     "status": "pending",
+     "attempt": 0,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    },
+    {
+     "node_id": "integrate",
+     "kind": "integration",
+     "depends_on": [
+      "approval"
+     ],
+     "status": "pending",
+     "attempt": 0,
+     "session_id": null,
+     "result_uri": null,
+     "lane_results": []
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:1",
+   "sequence": 1,
+   "occurred_at": "2026-09-23T19:32:54.413466Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching or reconciling the exact native session",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:2",
+   "sequence": 2,
+   "occurred_at": "2026-09-23T19:32:54.415424Z",
+   "node_id": "launch_ui",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Launching or reconciling the exact native session",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:3",
+   "sequence": 3,
+   "occurred_at": "2026-09-23T19:32:58.205435Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Awaiting explicit completion signal; idle is not acceptance",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:4",
+   "sequence": 4,
+   "occurred_at": "2026-09-23T19:32:58.330413Z",
+   "node_id": "launch_ui",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Awaiting explicit completion signal; idle is not acceptance",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:5",
+   "sequence": 5,
+   "occurred_at": "2026-09-23T19:33:02.972451Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2088885",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:6",
+   "sequence": 6,
+   "occurred_at": "2026-09-23T19:33:10.270469Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "[Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:7",
+   "sequence": 7,
+   "occurred_at": "2026-09-23T19:33:10.275747Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Could not confirm worker stop: [Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:8",
+   "sequence": 8,
+   "occurred_at": "2026-09-23T19:34:05.437468Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2089342",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:9",
+   "sequence": 9,
+   "occurred_at": "2026-09-23T19:42:47.497241Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "[Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:10",
+   "sequence": 10,
+   "occurred_at": "2026-09-23T19:42:47.499315Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Could not confirm worker stop: [Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:11",
+   "sequence": 11,
+   "occurred_at": "2026-09-23T19:47:43.805342Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2096982",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:12",
+   "sequence": 12,
+   "occurred_at": "2026-09-23T19:48:29.310206Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "[Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:13",
+   "sequence": 13,
+   "occurred_at": "2026-09-23T19:48:29.315428Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Could not confirm worker stop: [Errno 2] No such file or directory: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:14",
+   "sequence": 14,
+   "occurred_at": "2026-09-23T19:55:04.157548Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2101678",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:15",
+   "sequence": 15,
+   "occurred_at": "2026-09-23T20:03:10.893272Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "[Errno 8] Exec format error: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:16",
+   "sequence": 16,
+   "occurred_at": "2026-09-23T20:03:10.896501Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Could not confirm worker stop: [Errno 8] Exec format error: 'claude'",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:17",
+   "sequence": 17,
+   "occurred_at": "2026-09-23T20:04:47.137154Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2145610",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:18",
+   "sequence": 18,
+   "occurred_at": "2026-09-23T20:08:49.736893Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "log",
+   "status": null,
+   "message": "Native workers stopped before snapshot capture: controller, ui",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:19",
+   "sequence": 19,
+   "occurred_at": "2026-09-23T20:08:49.967206Z",
+   "node_id": "handoff",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Immutable snapshots captured; worker-reported checks are not trusted",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:20",
+   "sequence": 20,
+   "occurred_at": "2026-09-23T20:08:49.973180Z",
+   "node_id": "verify_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 1; revision bcbabde3b6c4782403027cc1368962ef9fe974f5",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:21",
+   "sequence": 21,
+   "occurred_at": "2026-09-23T20:08:49.975382Z",
+   "node_id": "verify_ui",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 1; revision 89468eb72aa9975efb7983fe09aab4fed3bdf87d",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:22",
+   "sequence": 22,
+   "occurred_at": "2026-09-23T20:09:51.968320Z",
+   "node_id": "verify_ui",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Required tests and artifacts passed; recorded for the candidate gate: frontend-build, project-workflows-browser",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:23",
+   "sequence": 23,
+   "occurred_at": "2026-09-23T20:13:31.832521Z",
+   "node_id": "verify_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Executed check failed: <path> -m workflow.run_tests; workflow-unit: no passing test evidence or failed tests; workflow-unit: exit 1",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:24",
+   "sequence": 24,
+   "occurred_at": "2026-09-23T20:13:33.187525Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2175979",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:25",
+   "sequence": 25,
+   "occurred_at": "2026-09-23T20:13:33.204632Z",
+   "node_id": "verify_controller",
+   "attempt": 2,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Attempt 2; revision bcbabde3b6c4782403027cc1368962ef9fe974f5",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:26",
+   "sequence": 26,
+   "occurred_at": "2026-09-23T20:18:00.698910Z",
+   "node_id": "verify_controller",
+   "attempt": 2,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Required tests and artifacts passed; recorded for the candidate gate: backend-build",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:27",
+   "sequence": 27,
+   "occurred_at": "2026-09-23T20:22:25.511515Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:28",
+   "sequence": 28,
+   "occurred_at": "2026-09-23T20:24:50.432818Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:29",
+   "sequence": 29,
+   "occurred_at": "2026-09-23T20:24:52.060291Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2222088",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:30",
+   "sequence": 30,
+   "occurred_at": "2026-09-23T20:24:52.148675Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "succeeded",
+   "message": "Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:31",
+   "sequence": 31,
+   "occurred_at": "2026-09-23T20:27:13.212910Z",
+   "node_id": "candidate",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "failed",
+   "message": "Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  },
+  {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "event_id": "workflow-guardrails-001:32",
+   "sequence": 32,
+   "occurred_at": "2026-09-23T20:27:14.542119Z",
+   "node_id": "launch_controller",
+   "attempt": 1,
+   "type": "status_changed",
+   "status": "running",
+   "message": "Automatic checkpoint controller PID 2223200",
+   "artifact": null,
+   "result_uri": null,
+   "reused_from_attempt": null
+  }
+ ],
+ "inputs": {
+  "contract_version": "1.4.0",
+  "run_id": "workflow-guardrails-001",
+  "feature": "Workflow guardrails",
+  "base_commit": "30f465c9cd0459371fecf1dd14c7228aa7fd0bed",
+  "source_branch": "feature/workflow-guardrails/workflow-guardrails-001",
+  "mode": "automatic",
+  "automatic": {
+   "finish": "verified-feature-branch",
+   "permission_mode": "bypassPermissions",
+   "worker_timeout_seconds": 7200,
+   "review_timeout_seconds": 3600,
+   "reviewer_transport": "print"
+  },
+  "setup": [
+   {
+    "command": "npm ci",
+    "timeout_seconds": 600
+   }
+  ],
+  "max_verification_attempts": 3,
+  "selected_workers": [
+   "controller",
+   "ui"
+  ],
+  "excluded_workers": [],
+  "workers": [
+   {
+    "node_id": "controller",
+    "launch_node_id": "launch_controller",
+    "role": "backend",
+    "required_check_kinds": [
+     "contract",
+     "unit"
+    ],
+    "task": {
+     "text": "(trimmed for the triage fixture)",
+     "truncated": true
+    },
+    "prompt": null,
+    "owned_paths": [
+     "workflow",
+     "contracts",
+     "server"
+    ],
+    "checks": [
+     {
+      "id": "workflow-unit",
+      "kind": "unit",
+      "command": "/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests",
+      "timeout_seconds": 900,
+      "scenarios": []
+     },
+     {
+      "id": "shared-contract",
+      "kind": "contract",
+      "command": "npm run test:contracts",
+      "timeout_seconds": 120,
+      "scenarios": []
+     },
+     {
+      "id": "server-projects",
+      "kind": "unit",
+      "command": "npx --no-install tsx --test server/projects.test.ts",
+      "timeout_seconds": 300,
+      "scenarios": []
+     },
+     {
+      "id": "backend-regression",
+      "kind": "unit",
+      "command": "npm run test:unit",
+      "timeout_seconds": 180,
+      "scenarios": []
+     },
+     {
+      "id": "backend-build",
+      "kind": "build",
+      "command": "npm run build",
+      "timeout_seconds": 180,
+      "scenarios": []
+     }
+    ],
+    "launch": {
+     "session_id": "3520787a-4a30-4962-bd75-5e4f165e834b",
+     "launch_requested_at": "2026-09-23T19:32:54.832038Z",
+     "native_started_at": "2026-09-23T19:32:57.830Z",
+     "observed_state": "working",
+     "status": "attached_session_available",
+     "launcher_invocations": 1
+    },
+    "completion": {
+     "version": "1.0.0",
+     "status": "completed",
+     "summary": "Implemented the controller half of PRD_PORTABLE_WORKFLOW slice 2. New: workflow/guardrails.py (outcome-brief headings, decisions.md pinning, design challenge p…",
+     "open_assumptions": [
+      "Completion 1.1.0 and every guardrail plan key apply only to runs prepared from…",
+      "The migration note goes to stderr and the dry-run JSON key `guardrails`, not in…"
+     ],
+     "untested": null,
+     "falsifying_check": null,
+     "verify_yourself": null,
+     "question": null
+    },
+    "handoff": {
+     "summary": "Implemented the controller half of PRD_PORTABLE_WORKFLOW slice 2. New: workflow/guardrails.py (outcome-brief headings, decisions.md pinning, design challenge p…",
+     "open_assumptions": []
+    },
+    "stop": {
+     "stopped": true,
+     "confirmed_at": "2026-09-23T20:08:47.560684Z"
+    },
+    "questions": []
+   },
+   {
+    "node_id": "ui",
+    "launch_node_id": "launch_ui",
+    "role": "frontend",
+    "required_check_kinds": [
+     "build",
+     "browser"
+    ],
+    "task": {
+     "text": "(trimmed for the triage fixture)",
+     "truncated": true
+    },
+    "prompt": null,
+    "owned_paths": [
+     "src/projects",
+     "tests/project-workflows",
+     "src/document/Markdown.tsx"
+    ],
+    "checks": [
+     {
+      "id": "frontend-build",
+      "kind": "build",
+      "command": "npm run build",
+      "timeout_seconds": 180,
+      "scenarios": []
+     },
+     {
+      "id": "frontend-unit-regression",
+      "kind": "unit",
+      "command": "npm run test:unit",
+      "timeout_seconds": 180,
+      "scenarios": []
+     },
+     {
+      "id": "project-workflows-browser",
+      "kind": "browser",
+      "command": "npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts",
+      "timeout_seconds": 420,
+      "scenarios": [
+       {
+        "id": "challenge-node-page",
+        "description": "The graph starts with Design challenge; its page shows status, concerns by severity with consequences, the simpler alternative, the cheap experiment and an accepted reason"
+       },
+       {
+        "id": "completion-evidence-shown",
+        "description": "The launch node shows untested, the falsifying check linked to the verify node's check, and verify-yourself; a legacy run says evidence was not recorded"
+       },
+       {
+        "id": "worker-questions-shown",
+        "description": "Answered and waiting worker questions are listed with their times, and the waiting one is marked"
+       },
+       {
+        "id": "decisions-shown",
+        "description": "The Assignment page renders decisions.md as Markdown; a run without it says so"
+       },
+       {
+        "id": "inert-markdown",
+        "description": "Captured Markdown and decisions.md with a remote image and an external link make no network request, and the link renders as text"
+       }
+      ]
+     }
+    ],
+    "launch": {
+     "session_id": "28930c4a-9b3f-4480-8f43-ac8ecc3447c6",
+     "launch_requested_at": "2026-09-23T19:32:54.843251Z",
+     "native_started_at": "2026-09-23T19:32:57.933Z",
+     "observed_state": "working",
+     "status": "attached_session_available",
+     "launcher_invocations": 1
+    },
+    "completion": {
+     "version": "1.0.0",
+     "status": "completed",
+     "summary": "Implemented the viewer half of slice 2 (PRD_PORTABLE_WORKFLOW 4.5-4.8). Markdown.tsx: opt-in `inert` prop (default and non-project callers unchanged): links re…",
+     "open_assumptions": [
+      "The raw 1.5.0 export inputs section (what seed.ts writes and the real server re…",
+      "Served run inputs are pinned at contract_version 1.4.0 for every run, older one…"
+     ],
+     "untested": null,
+     "falsifying_check": null,
+     "verify_yourself": null,
+     "question": null
+    },
+    "handoff": {
+     "summary": "Implemented the viewer half of slice 2 (PRD_PORTABLE_WORKFLOW 4.5-4.8). Markdown.tsx: opt-in `inert` prop (default and non-project callers unchanged): links re…",
+     "open_assumptions": []
+    },
+    "stop": {
+     "stopped": true,
+     "confirmed_at": "2026-09-23T20:08:49.378705Z"
+    },
+    "questions": []
+   }
+  ],
+  "decisions": null,
+  "challenge": null
+ },
+ "review": null,
+ "results": {
+  "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/candidate_controller/1": {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "node_id": "candidate_controller",
+   "attempt": 1,
+   "session_id": "3520787a-4a30-4962-bd75-5e4f165e834b",
+   "status": "succeeded",
+   "base_commit": "30f465c9cd0459371fecf1dd14c7228aa7fd0bed",
+   "output_commit": "1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests",
+     "cwd": "verification/candidate/controller/1/worktree",
+     "started_at": "2026-09-23T20:18:12.109044Z",
+     "finished_at": "2026-09-23T20:21:50.694666Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-1-c29dfbf266a6"
+    },
+    {
+     "command": "npm run test:contracts",
+     "cwd": "verification/candidate/controller/1/worktree",
+     "started_at": "2026-09-23T20:21:50.696859Z",
+     "finished_at": "2026-09-23T20:21:52.023821Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-2-47f1ae6034fa"
+    },
+    {
+     "command": "npx --no-install tsx --test server/projects.test.ts",
+     "cwd": "verification/candidate/controller/1/worktree",
+     "started_at": "2026-09-23T20:21:52.025653Z",
+     "finished_at": "2026-09-23T20:22:04.718941Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-3-2dbfb5280390"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/candidate/controller/1/worktree",
+     "started_at": "2026-09-23T20:22:04.745986Z",
+     "finished_at": "2026-09-23T20:22:10.335076Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-4-4d66ce350686"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/candidate/controller/1/worktree",
+     "started_at": "2026-09-23T20:22:10.349560Z",
+     "finished_at": "2026-09-23T20:22:25.440349Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-5-370a077f299f"
+    }
+   ],
+   "open_assumptions": [],
+   "artifacts": [
+    {
+     "artifact_id": "log-1-c29dfbf266a6",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-1-c29dfbf266a6",
+     "sha256": "c29dfbf266a6cdbeb1baed3e5225e3144edb29510fe542705df9d3614bc011c2"
+    },
+    {
+     "artifact_id": "log-2-47f1ae6034fa",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-2-47f1ae6034fa",
+     "sha256": "47f1ae6034fa4877c315906d21993b333eaa9d43f247d1ca4f4c93477c15294b"
+    },
+    {
+     "artifact_id": "log-3-2dbfb5280390",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-3-2dbfb5280390",
+     "sha256": "2dbfb5280390f8b13ee4b5f31c25c598fd4f808d5f1c3e6842e2f2c156551f57"
+    },
+    {
+     "artifact_id": "log-4-4d66ce350686",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-4-4d66ce350686",
+     "sha256": "4d66ce350686006608d559c504e88861df2ea05efeb475595fbd54ac13b84e06"
+    },
+    {
+     "artifact_id": "log-5-370a077f299f",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-5-370a077f299f",
+     "sha256": "370a077f299f87412e3d71c39f695149ba7d3be7067163c5e5696ff62aa9253a"
+    }
+   ],
+   "summary": "Trusted candidate check capture; not integration approval",
+   "error": null
+  },
+  "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/candidate_ui/2": {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "node_id": "candidate_ui",
+   "attempt": 2,
+   "session_id": "28930c4a-9b3f-4480-8f43-ac8ecc3447c6",
+   "status": "failed",
+   "base_commit": "30f465c9cd0459371fecf1dd14c7228aa7fd0bed",
+   "output_commit": "1ab6b9505a4269f5b6f68195fc4915446a5944ae",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run build",
+     "cwd": "verification/candidate/ui/2/worktree",
+     "started_at": "2026-09-23T20:25:04.281999Z",
+     "finished_at": "2026-09-23T20:25:21.047431Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-1-e1ba077d2972"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/candidate/ui/2/worktree",
+     "started_at": "2026-09-23T20:25:21.051864Z",
+     "finished_at": "2026-09-23T20:25:26.738457Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-2-ca656962b757"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts",
+     "cwd": "verification/candidate/ui/2/worktree",
+     "started_at": "2026-09-23T20:25:26.754828Z",
+     "finished_at": "2026-09-23T20:27:13.098476Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-3-52f357349492"
+    }
+   ],
+   "open_assumptions": [],
+   "artifacts": [
+    {
+     "artifact_id": "log-1-e1ba077d2972",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-1-e1ba077d2972",
+     "sha256": "e1ba077d2972818a172c90e5c4068d04194f009d9bb4df1e5b6d7f194935b976"
+    },
+    {
+     "artifact_id": "log-2-ca656962b757",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-2-ca656962b757",
+     "sha256": "ca656962b757f9cd43df2181826db11ce5aaede81f4f6c3830ce0e250183b5f3"
+    },
+    {
+     "artifact_id": "log-3-52f357349492",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-3-52f357349492",
+     "sha256": "52f357349492006ef5f4714779cd5c43d702b5e327d9a2aa19de0cf3cc115535"
+    },
+    {
+     "artifact_id": "screenshot-4-6e77e471a8f0",
+     "kind": "screenshot",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/screenshot-4-6e77e471a8f0",
+     "sha256": "6e77e471a8f04a92d102eacfad8986e8a4768dd6323c2b5f09ae07ca8b223b5a"
+    },
+    {
+     "artifact_id": "screenshot-5-68ca0077be6e",
+     "kind": "screenshot",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/screenshot-5-68ca0077be6e",
+     "sha256": "68ca0077be6ecf9a2bab90ad265c08b54c5c2e1e0defb93235476b74ee6fd2e5"
+    },
+    {
+     "artifact_id": "screenshot-6-8a9f44c2993f",
+     "kind": "screenshot",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/screenshot-6-8a9f44c2993f",
+     "sha256": "8a9f44c2993f5dcddc8c7bf0b51bb5125c7becb0567c4a1cb9bfe2d36d253876"
+    },
+    {
+     "artifact_id": "screenshot-7-994774af17a3",
+     "kind": "screenshot",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/screenshot-7-994774af17a3",
+     "sha256": "994774af17a3e3eb9ee8f16131bf8f860388413cd1d99bdb77c82e4c6a306372"
+    }
+   ],
+   "summary": "Trusted candidate check capture; not integration approval",
+   "error": {
+    "code": "VERIFICATION_BLOCKED",
+    "message": "project-workflows-browser: no passing test evidence or failed tests; project-workflows-browser: missing/unknown browser scenarios; project-workflows-browser: Expected one screenshot attachment for inert-markdown",
+    "retryable": true
+   }
+  },
+  "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/controller/2": {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "node_id": "controller",
+   "attempt": 2,
+   "session_id": "3520787a-4a30-4962-bd75-5e4f165e834b",
+   "status": "succeeded",
+   "base_commit": "30f465c9cd0459371fecf1dd14c7228aa7fd0bed",
+   "output_commit": "bcbabde3b6c4782403027cc1368962ef9fe974f5",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests",
+     "cwd": "verification/worker/controller/2/worktree",
+     "started_at": "2026-09-23T20:13:43.460734Z",
+     "finished_at": "2026-09-23T20:17:25.087966Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-29-782dc9393a8e"
+    },
+    {
+     "command": "npm run test:contracts",
+     "cwd": "verification/worker/controller/2/worktree",
+     "started_at": "2026-09-23T20:17:25.090409Z",
+     "finished_at": "2026-09-23T20:17:26.568694Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-30-bfccf447e0a9"
+    },
+    {
+     "command": "npx --no-install tsx --test server/projects.test.ts",
+     "cwd": "verification/worker/controller/2/worktree",
+     "started_at": "2026-09-23T20:17:26.572622Z",
+     "finished_at": "2026-09-23T20:17:39.935880Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-31-2a4167095465"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/worker/controller/2/worktree",
+     "started_at": "2026-09-23T20:17:39.955841Z",
+     "finished_at": "2026-09-23T20:17:45.512995Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-32-3e33846f04de"
+    },
+    {
+     "command": "npm run build",
+     "cwd": "verification/worker/controller/2/worktree",
+     "started_at": "2026-09-23T20:17:45.525997Z",
+     "finished_at": "2026-09-23T20:18:00.589621Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-33-68970cb20377"
+    }
+   ],
+   "open_assumptions": [
+    "Completion 1.1.0 and every guardrail plan key apply only to runs prepared from…",
+    "The migration note goes to stderr and the dry-run JSON key `guardrails`, not in…"
+   ],
+   "artifacts": [
+    {
+     "artifact_id": "log-29-782dc9393a8e",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-29-782dc9393a8e",
+     "sha256": "782dc9393a8e84fc07444119927396a36a10ae5e3b255baa4cd09776a6fb6db8"
+    },
+    {
+     "artifact_id": "log-30-bfccf447e0a9",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-30-bfccf447e0a9",
+     "sha256": "bfccf447e0a9a4623262e4f6dbee93438241a21925eee85a308738cbbe13efa0"
+    },
+    {
+     "artifact_id": "log-31-2a4167095465",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-31-2a4167095465",
+     "sha256": "2a41670954657b0e57abd49510c5d4ad95d0551a2fea298c21526ba87e556fbe"
+    },
+    {
+     "artifact_id": "log-32-3e33846f04de",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-32-3e33846f04de",
+     "sha256": "3e33846f04de653661c6d5542337249d4507959a374cc89784395f90b625e00c"
+    },
+    {
+     "artifact_id": "log-33-68970cb20377",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-33-68970cb20377",
+     "sha256": "68970cb20377b631b0bfba6c1901794833f83f2499f0ac108860fa3d02b6907c"
+    }
+   ],
+   "summary": "Implemented the controller half of PRD_PORTABLE_WORKFLOW slice 2. New: workflow/guardrails.py (outcome-brief headings, decisions.md pinning, design challenge print job with pause/resume/--accept-challenge, worker questions with persisted d…",
+   "error": null,
+   "deferred_checks": [
+    {
+     "id": "backend-build",
+     "check_index": 4
+    }
+   ],
+   "files_not_captured": []
+  },
+  "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/results/ui/1": {
+   "contract_version": "1.0.0",
+   "run_id": "workflow-guardrails-001",
+   "node_id": "ui",
+   "attempt": 1,
+   "session_id": "28930c4a-9b3f-4480-8f43-ac8ecc3447c6",
+   "status": "succeeded",
+   "base_commit": "30f465c9cd0459371fecf1dd14c7228aa7fd0bed",
+   "output_commit": "89468eb72aa9975efb7983fe09aab4fed3bdf87d",
+   "changed_files": [],
+   "checks": [
+    {
+     "command": "npm run build",
+     "cwd": "verification/worker/ui/1/worktree",
+     "started_at": "2026-09-23T20:09:04.912476Z",
+     "finished_at": "2026-09-23T20:09:33.957361Z",
+     "exit_code": 2,
+     "log_artifact_id": "log-12-3a0adac2d8cc"
+    },
+    {
+     "command": "npm run test:unit",
+     "cwd": "verification/worker/ui/1/worktree",
+     "started_at": "2026-09-23T20:09:33.962297Z",
+     "finished_at": "2026-09-23T20:09:46.715665Z",
+     "exit_code": 0,
+     "log_artifact_id": "log-13-ecb3941f2a95"
+    },
+    {
+     "command": "npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts",
+     "cwd": "verification/worker/ui/1/worktree",
+     "started_at": "2026-09-23T20:09:46.773416Z",
+     "finished_at": "2026-09-23T20:09:51.858773Z",
+     "exit_code": 1,
+     "log_artifact_id": "log-14-438533eb5734"
+    }
+   ],
+   "open_assumptions": [
+    "The raw 1.5.0 export inputs section (what seed.ts writes and the real server re…",
+    "Served run inputs are pinned at contract_version 1.4.0 for every run, older one…"
+   ],
+   "artifacts": [
+    {
+     "artifact_id": "log-12-3a0adac2d8cc",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-12-3a0adac2d8cc",
+     "sha256": "3a0adac2d8cc88a39f22c1a015cdf7c50cf12eb0f64187ce5456379542d45668"
+    },
+    {
+     "artifact_id": "log-13-ecb3941f2a95",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-13-ecb3941f2a95",
+     "sha256": "ecb3941f2a951b307e7abeeb138da82c92fa0967fd0c93230e1b1bed64232b5a"
+    },
+    {
+     "artifact_id": "log-14-438533eb5734",
+     "kind": "log",
+     "uri": "/api/projects/md-manager/workflows/workflow-guardrails/runs/workflow-guardrails-001/artifacts/log-14-438533eb5734",
+     "sha256": "438533eb57346d6e46b0e0560d85aa733ab2daa5c59eeb6e62085d926686583e"
+    }
+   ],
+   "summary": "Implemented the viewer half of slice 2 (PRD_PORTABLE_WORKFLOW 4.5-4.8). Markdown.tsx: opt-in `inert` prop (default and non-project callers unchanged): links render as text plus target, images as labelled placeholders, nothing fetched. New…",
+   "error": null,
+   "deferred_checks": [
+    {
+     "id": "frontend-build",
+     "check_index": 0
+    },
+    {
+     "id": "project-workflows-browser",
+     "check_index": 2
+    }
+   ],
+   "files_not_captured": []
+  }
+ }
+}
