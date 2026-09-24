@@ -9,8 +9,9 @@
   A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
   that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
-  in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane. A delivery that
-  fails leaves the answer recorded but undelivered; rerunning `answer` delivers it, once.
+  in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane, only while that pane
+  shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
+  delivers it, typing the text at most once.
 
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
@@ -817,25 +818,70 @@ def undelivered_answer(directory: Path, node: str, text: str) -> dict | None:
     return entry
 
 
-def mark_delivered(directory: Path, node: str, number: int) -> None:
+def mark_delivered(directory: Path, node: str, number: int, step: str = "delivered") -> None:
+    """One delivery step of the answer: `typed` once its text is in the pane, `delivered` once it reached the worker."""
     with question_lock(directory):
         questions = load_questions(directory, node)
-        questions[number - 1]["delivered"] = True
+        questions[number - 1][step] = True
         save_questions(directory, node, questions)
 
 
-def deliver_answer(directory: Path, node: str, text: str, use_herdr: bool = True) -> str:
-    """Type the answer into the worker's Herdr pane (send-text, then Enter), or say how to type it after `claude attach`."""
+def pane_attachment(process: dict, background_id: str) -> str | None:
+    """None when the pane's foreground runs `claude attach <background_id>` (attach-one's, or one typed by hand), else what it shows.
+
+    `process` is `herdr pane process-info`'s: the pane's shell and every process of its foreground process group, so
+    attach-one's `claude attach` is listed beside attach-one while it is attached, and attach-one alone while it waits.
+    """
+    foreground = process.get("foreground_processes") or []
+    argvs = [item.get("argv") or [] for item in foreground]
+    if any(argv[-2:] == ["attach", background_id] and any("claude" in Path(arg).name for arg in argv[:-2]) for argv in argvs):
+        return None
+    if not foreground:
+        return "Herdr lists no foreground process in it"
+    if all(item.get("pid") == process.get("shell_pid") for item in foreground):
+        return "its shell is in the foreground (attach-one ended: a detach, an interrupt or a give-up)"
+    others = [f"`{item.get('cmdline') or shlex.join(argv)}`" for item, argv in zip(foreground, argvs) if "attach-one" not in argv]
+    return f"it runs {', '.join(others)}" if others else "attach-one is between two attaches"
+
+
+def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = True) -> str:
+    """Type the answer into the worker's Herdr pane (send-text, then Enter), or say how to type it after `claude attach`.
+
+    Only a pane that shows the lane's session is typed into: once attach-one ended (a detach, an interrupt, a give-up)
+    the pane is a shell, which would run the text, and between two attaches the text would wait for whatever reads the
+    terminal next. `typed` is recorded once the text is in the pane, so a rerun after a failed Enter presses Enter only.
+    """
     receipt = read_json(directory / f"{node}.interactive.json")
+    background_id = receipt.get("background_id")
     if not use_herdr:
-        return f"Type the answer in the worker's session: claude attach {receipt.get('background_id')}"
+        if entry.get("typed"):
+            return (f"The answer is typed in the worker's session but not submitted: claude attach {background_id}, then press Enter "
+                    "(type it first if the session's input does not hold it)")
+        return f"Type the answer in the worker's session: claude attach {background_id}"
     from .herdr import herdr
     terminals = directory / "terminals.json"
     mapping = read_json(terminals) if terminals.exists() else {}  # A run started without --herdr has none.
     if node not in mapping:
         raise RuntimeError(f"No Herdr pane is recorded for {node} in {terminals}")
+    if not background_id:
+        raise RuntimeError(f"No background session id is recorded for {node}; cannot tell whether its pane shows it")
     pane = mapping[node]["pane_id"]
-    herdr("pane", "send-text", pane, text)
+    shown = pane_attachment((herdr("pane", "process-info", "--pane", pane).get("result") or {}).get("process_info") or {}, background_id)
+    if shown:
+        attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(directory), "--node", node])
+        raise RuntimeError(f"Pane {pane} ({node}) is not attached to its session {background_id}: {shown}; nothing is typed into it. "
+                           f"Attach it again in that pane ({attach}) and rerun answer, or type the answer yourself after "
+                           f"`claude attach {background_id}` (--no-herdr)")
+    if entry.get("typed"):
+        herdr("pane", "send-keys", pane, "Enter")
+        return f"Enter pressed in pane {pane} ({node}), whose session's input holds the answer typed before"
+    try:
+        herdr("pane", "send-text", pane, entry["answer"])
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"Herdr did not confirm the text within {error.timeout:g}s, so it may be in pane {pane}'s input already: look "
+                           "before rerunning answer, and if the input holds the text, press Enter there instead") from error
+    mark_delivered(directory, node, entry["n"], "typed")
+    entry["typed"] = True
     herdr("pane", "send-keys", pane, "Enter")
     return f"Answer typed into pane {pane} ({node})"
 
@@ -920,14 +966,20 @@ def answer_main(argv=None):
             entry = record_answer(directory, args.node, args.text, delivered=False)
             print(f"Recorded the answer to question {entry['n']} of {args.node}; its deadline runs again.")
         else:
-            print(f"Question {entry['n']} of {args.node} was answered at {entry['answered_at']} and never delivered; delivering it now "
+            typed = " (typed into its pane, not submitted)" if entry.get("typed") else ""
+            print(f"Question {entry['n']} of {args.node} was answered at {entry['answered_at']} and never delivered{typed}; delivering it now "
                   "(nothing is recorded again, and its deadline has run since).")
-        print(deliver_answer(directory, args.node, args.text, not args.no_herdr))
+        print(deliver_answer(directory, args.node, entry, not args.no_herdr))
         delivered = True
         mark_delivered(directory, args.node, entry["n"])
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         if delivered:
             parser.exit(1, f"Blocked: {error}\nThe answer reached the worker but is not marked delivered; do not rerun answer for this question.\n")
+        if entry is not None and entry.get("typed"):
+            parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} is typed into the worker's pane but was not submitted; its "
+                           f"deadline runs. Submit it by rerunning, from a Herdr pane (it presses Enter only, never types the text again):\n"
+                           f"  {answer_command(directory, args.node, args.text)}\nor print the claude attach command and press Enter in the "
+                           f"session yourself:\n  {answer_command(directory, args.node, args.text, herdr=False)}\n")
         if entry is not None:
             parser.exit(1, f"Blocked: {error}\nThe answer to question {entry['n']} stays recorded and its deadline runs, but it did not reach "
                            f"the worker. Deliver it by rerunning, from a Herdr pane:\n  {answer_command(directory, args.node, args.text)}\n"

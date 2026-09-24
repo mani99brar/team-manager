@@ -48,6 +48,21 @@ def two_lane_policy() -> dict:
                         {"node_id": "adapter", "role": "backend", "required_check_kinds": ["unit"], "owned_paths": ["backend.py"], "checks": [{"id": "unit", **check}]}]}
 
 
+def pane_process_info(pane: str, *argvs: list[str]) -> dict:
+    """What `herdr pane process-info` prints (Herdr 0.9, probed live) for a pane whose shell (pid 100) runs these argvs in its
+    foreground, as one process group; with none, the shell itself is its foreground."""
+    foreground = [{"argv": argv, "cmdline": " ".join(argv), "name": Path(argv[0]).name, "pid": 101 + index} for index, argv in enumerate(argvs)]
+    shell = [{"argv": ["/bin/bash"], "cmdline": "/bin/bash", "name": "bash", "pid": 100}]
+    return {"id": "cli:pane:process_info", "type": "pane_process_info",
+            "result": {"process_info": {"pane_id": pane, "shell_pid": 100, "foreground_process_group_id": 101 if argvs else 100,
+                                        "foreground_processes": foreground or shell}}}
+
+
+def attached_pane(pane: str, run: Path, lane: str, background_id: str) -> dict:
+    """A pane whose attach-one (the command attach_pane types into it) runs `claude attach <background_id>`."""
+    return pane_process_info(pane, [PY, "-m", "workflow.interactive", "attach-one", str(run), "--node", lane], ["claude", "attach", background_id])
+
+
 def concern(severity: str, message: str = "A concern") -> dict:
     return {"severity": severity, "kind": "assumption", "message": message, "consequence": f"{message} breaks the run"}
 
@@ -1046,7 +1061,8 @@ class WorkerQuestion(unittest.TestCase):
         calls = []
         output = io.StringIO()
         with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.guardrails.time.time", lambda: self.now), \
-                patch("workflow.herdr.subprocess.run", side_effect=lambda command, **_: calls.append(command) or subprocess.CompletedProcess(command, 0, "", "")), \
+                patch("workflow.herdr.subprocess.run", side_effect=lambda command, **_: calls.append(command) or subprocess.CompletedProcess(
+                    command, 0, json.dumps(attached_pane("pane-ui", self.root, "ui", "bg-ui")) if command[2] == "process-info" else "", "")), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             try:
                 answer_main([str(self.root), *argv])
@@ -1086,8 +1102,9 @@ class WorkerQuestion(unittest.TestCase):
             if len(rounds) == 1:
                 calls, output, code = self.answer("ui", "Use option B")
                 self.assertEqual(code, 0, output)
-                # A fake Herdr receives the text, then Enter, in the worker's pane.
-                self.assertEqual(calls, [["herdr", "pane", "send-text", "pane-ui", "Use option B"], ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+                # A fake Herdr shows the worker's session attached in its pane, then receives the text, then Enter.
+                self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", "Use option B"],
+                                         ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
             else:
                 self.now = extended + 1  # The deadline runs again from the answer: past the extended deadline, ui expires.
         with self.assertRaisesRegex(RuntimeError, "Worker ui deadline exhausted"):
@@ -1310,7 +1327,7 @@ class WorkerQuestion(unittest.TestCase):
                     self.assertEqual(read_json(self.root / "ui.deadline.json")["paused_at"], "1970-01-01T00:00:10Z")
                     self.now = 70.0
                     calls, output, code = self.answer("ui", "Use option B")
-                    self.assertEqual((len(calls), code), (2, 0), output)
+                    self.assertEqual((len(calls), code), (3, 0), output)
                     self.states["ui"] = "working"
                 steps = iter([answer, lambda: (self.states.update(ui="done"), self.completion("ui"))])
                 self.wait(on_sleep=lambda: next(steps)())
@@ -1341,7 +1358,7 @@ class WorkerQuestion(unittest.TestCase):
                       lambda: (self.states.update(ui="done"), self.completion("ui"))])
         self.wait(on_sleep=lambda: next(steps)())
         calls, output, code = answers[0]
-        self.assertEqual((len(calls), code), (2, 0), output)
+        self.assertEqual((len(calls), code), (3, 0), output)
         entry = read_json(self.root / "ui.questions.json")["questions"][0]
         self.assertEqual((entry["answer"], entry["answered_at"], entry["delivered"]), ("Use option B", "1970-01-01T00:00:50Z", True))
         # The deadline ran again from t=40, when the session worked; `answer` moved nothing.
@@ -1396,7 +1413,7 @@ class WorkerQuestion(unittest.TestCase):
                     self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 90.0, "paused_at": "1970-01-01T00:01:40Z"})
                     self.now = 130.0
                     calls, output, code = self.answer("ui", "Use option C")
-                    self.assertEqual((len(calls), code), (2, 0), output)
+                    self.assertEqual((len(calls), code), (3, 0), output)
                     self.states["ui"] = "done"
                     self.completion("ui")
                 steps = iter([reply_turn_ends, answer_second])
@@ -1459,14 +1476,21 @@ class AnswerDelivery(unittest.TestCase):
             record_question(runtime, lane, {"question": "Option A or B?"}, clock=lambda: 10.0)
         self.now = 100.0
 
-    def answer(self, *argv, herdr_env=True, fail=False):
-        """(herdr commands, output, exit code); `fail` makes every Herdr command exit 1, as for a closed pane."""
+    def answer(self, *argv, herdr_env=True, fail=False, pane=None, fail_at=None):
+        """(herdr commands, output, exit code); `fail` makes every Herdr command exit 1, as for a closed pane, and `fail_at`
+        maps one pane command (send-text, send-keys) to the error it raises. `pane` is what process-info shows: by default
+        the lane's attach-one attached to its session."""
         calls = []
 
         def run(command, **_):
             calls.append(command)
             if fail:
                 raise subprocess.CalledProcessError(1, command, "", "no such pane")
+            if command[2] in (fail_at or {}):
+                raise fail_at[command[2]]
+            if command[2] == "process-info":
+                lane = "adapter" if command[-1] == "pane-adapter" else "ui"
+                return subprocess.CompletedProcess(command, 0, json.dumps(pane or attached_pane(command[-1], self.root, lane, f"bg-{lane}")), "")
             return subprocess.CompletedProcess(command, 0, "", "")
         output = io.StringIO()
         environment = {key: value for key, value in os.environ.items() if key != "HERDR_ENV"} | ({"HERDR_ENV": "1"} if herdr_env else {})
@@ -1502,19 +1526,20 @@ class AnswerDelivery(unittest.TestCase):
         self.assertEqual((calls, code), ([], 1), output)
         self.assertIn("already answered", output)
         self.assertIn("'Use option B'", output)
-        # The pane is gone: the same command fails again and records nothing.
+        # The pane is gone: the same command fails again, reading the pane, and records nothing.
         calls, output, code = self.answer("ui", "Use option B", fail=True)
         self.assertEqual((len(calls), code), (1, 1), output)
-        self.assertIn("Blocked: Command '['herdr', 'pane', 'send-text'", output)
+        self.assertIn("Blocked: Command '['herdr', 'pane', 'process-info'", output)
         self.assertNotIn("Recorded the answer", output)
         # The pane is back: the rerun types the recorded answer once, and neither the answer nor the deadline changes.
         self.now = 200.0
         calls, output, code = self.answer("ui", "Use option B")
         self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [["herdr", "pane", "send-text", "pane-ui", "Use option B"], ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", "Use option B"],
+                                 ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
         self.assertIn("never delivered; delivering it now", output)
         self.assertNotIn("Recorded the answer", output)
-        self.assertEqual(self.entry(), {**recorded, "delivered": True})
+        self.assertEqual(self.entry(), {**recorded, "typed": True, "delivered": True})
         self.assertEqual(read_json(self.root / "ui.deadline.json"), deadline)
         self.assertEqual(len(read_json(self.root / "ui.questions.json")["questions"]), 1)
         # Delivered: every further answer is refused, with or without Herdr.
@@ -1525,6 +1550,77 @@ class AnswerDelivery(unittest.TestCase):
         # The export serves the entry without the delivery flag.
         from .export_state import worker_questions
         self.assertEqual(worker_questions(self.root / "ui.questions.json"), [{key: recorded[key] for key in ("n", "question", "asked_at", "answer", "answered_at")}])
+
+    def test_a_pane_that_does_not_show_the_session_is_never_typed_into(self):
+        # attach-one ended (a detach with Ctrl+Z, an interrupt, a give-up) and left the pane at its shell, which would run
+        # the text as a command; it waits between two attaches, and the text would wait for whatever reads the terminal
+        # next; or the pane shows another session. Only the pane is read: the answer stays recorded and undelivered.
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        wrapper = [PY, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", "ui"]
+        for pane, shown in ((pane_process_info("pane-ui"), "its shell is in the foreground (attach-one ended: a detach, an interrupt or a give-up)"),
+                            (pane_process_info("pane-ui", wrapper), "attach-one is between two attaches"),
+                            (pane_process_info("pane-ui", [*wrapper[:-1], "adapter"], ["claude", "attach", "bg-adapter"]), "it runs `claude attach bg-adapter`"),
+                            ({"id": "cli:pane:process_info"}, "Herdr lists no foreground process in it")):
+            with self.subTest(shown=shown):
+                calls, output, code = self.answer("ui", "Use B > A; record it", pane=pane)
+                self.assertEqual((calls, code), ([["herdr", "pane", "process-info", "--pane", "pane-ui"]], 1), output)
+                self.assertIn(f"Blocked: Pane pane-ui (ui) is not attached to its session bg-ui: {shown}; nothing is typed into it. ", output)
+                self.assertIn(f"-m workflow.interactive attach-one {self.root.resolve()} --node ui", output)
+                self.assertIn("`claude attach bg-ui`", output)
+                self.assertIn("did not reach the worker", output)
+                self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use B > A; record it' --no-herdr\n", output)
+                entry = self.entry()
+                self.assertEqual((entry["answer"], entry["delivered"], "typed" in entry), ("Use B > A; record it", False, False))
+        # Attached again (here with `claude attach` typed by hand in the pane's shell): the rerun types it, once.
+        calls, output, code = self.answer("ui", "Use B > A; record it", pane=pane_process_info("pane-ui", ["claude", "attach", "bg-ui"]))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", "Use B > A; record it"],
+                                 ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+        self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, True))
+
+    def test_a_rerun_after_a_failed_enter_presses_enter_only(self):
+        # The text reached the session's input and Enter failed: a rerun must not type it again into that input.
+        save_json(self.root / "terminals.json", {lane: {"pane_id": f"pane-{lane}", "tab_id": "t", "mode": "attach_requested"} for lane in ("ui", "adapter")})
+        for lane in ("ui", "adapter"):
+            calls, output, code = self.answer(lane, "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
+            self.assertEqual(([call[2] for call in calls], code), (["process-info", "send-text", "send-keys"], 1), output)
+            self.assertIn("The answer to question 1 is typed into the worker's pane but was not submitted", output)
+            self.assertIn("it presses Enter only, never types the text again", output)
+            self.assertNotIn("did not reach the worker", output)
+            self.assertEqual((self.entry(lane)["typed"], self.entry(lane)["delivered"]), (True, False))
+        # Back at a shell, Enter would run the typed text: refused, nothing sent.
+        calls, output, code = self.answer("ui", "Use option B", pane=pane_process_info("pane-ui"))
+        self.assertEqual(([call[2] for call in calls], code), (["process-info"], 1), output)
+        self.assertIn("is typed into the worker's pane but was not submitted", output)
+        # Attached: the rerun presses Enter only.
+        calls, output, code = self.answer("ui", "Use option B")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
+        self.assertIn("typed into its pane, not submitted", output)
+        self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, True))
+        # With --no-herdr the operator is told the text may already be in the input, not to type it again blindly.
+        calls, output, code = self.answer("adapter", "Use option B", "--no-herdr")
+        self.assertEqual((calls, code), ([], 0), output)
+        self.assertIn("The answer is typed in the worker's session but not submitted: claude attach bg-adapter, then press Enter", output)
+        self.assertEqual((self.entry("adapter")["typed"], self.entry("adapter")["delivered"]), (True, True))
+
+    def test_a_rerun_after_a_failed_send_text_types_the_answer_and_a_timeout_says_to_look_first(self):
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        # Herdr refused the text: nothing was typed.
+        calls, output, code = self.answer("ui", "Use option B", fail_at={"send-text": subprocess.CalledProcessError(1, ["herdr"], "", "no such pane")})
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "send-text"], 1), output)
+        self.assertIn("did not reach the worker", output)
+        self.assertNotIn("typed", self.entry())
+        # Herdr did not answer: the text may be in the input already, so the operator looks before rerunning.
+        calls, output, code = self.answer("ui", "Use option B", fail_at={"send-text": subprocess.TimeoutExpired(["herdr"], 15)})
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "send-text"], 1), output)
+        self.assertIn("Blocked: Herdr did not confirm the text within 15s, so it may be in pane pane-ui's input already", output)
+        self.assertNotIn("typed", self.entry())
+        # The rerun types the text and presses Enter.
+        calls, output, code = self.answer("ui", "Use option B")
+        self.assertEqual(code, 0, output)
+        self.assertEqual([call[2] for call in calls], ["process-info", "send-text", "send-keys"])
+        self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, True))
 
     def test_a_run_without_a_pane_for_the_lane_delivers_the_recorded_answer_with_no_herdr(self):
         # Launched without Herdr: no terminals.json, a clear refusal instead of a missing-file error.
