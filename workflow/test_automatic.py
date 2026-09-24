@@ -536,7 +536,9 @@ class ReviewCompletionTests(unittest.TestCase):
             self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), [last])
             self.rows[first]["state"] = "idle"
             self.write(last)
+        # A reviewer never accepted whose session is gone is a verdict; an accepted one is read from its file first.
         del self.rows[last]
+        self.never_accepted(last)
         with self.assertRaisesRegex(RuntimeError, f"Native reviewer {last} missing; reconciliation"):
             wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
 
@@ -557,6 +559,7 @@ class ReviewCompletionTests(unittest.TestCase):
         self.assertEqual(list(decisions), self.ids)
         self.assertEqual(self.events, [])
         del self.rows[last]
+        self.never_accepted(last)  # An accepted verdict is read from its file first, whatever its session does.
         now = [1.0]
         with self.assertRaisesRegex(TransientInfraError, rf"^Claude Code has not listed a live {self.node(last)} session "
                                                          rf"\({self.uuid(last)[:8]}\) for {DEAD_PID_GRACE_SECONDS}s"):
@@ -744,6 +747,30 @@ class ReviewCompletionTests(unittest.TestCase):
 class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
     reviewers = ["general", "coverage"]
+
+    def test_a_verdict_accepted_before_a_restart_is_kept_when_a_reviewer_declared_before_it_expires(self):
+        # coverage (declared second) is accepted at t=100 while general works; the controller goes away and resumes past
+        # every deadline with general still without its file. The expired deadline blocks the review, and coverage's
+        # verdict is kept exactly as a controller that never stopped would have kept it.
+        from .automatic import ReviewStatus, _accept_native, wait_reviews
+        from .sessions import TransientInfraError
+        timeout = DEFAULTS["review_timeout_seconds"]
+        first, second = self.ids
+        self.write(second)
+        self.rows[first]["state"] = "working"
+        def away(_seconds):
+            raise TransientInfraError("Claude session inventory unavailable: timed out")
+        with contextlib.suppress(TransientInfraError):
+            wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=away)
+        accepted_at = ReviewStatus.load(self.runtime).statuses[second]["accepted_at"]
+        with patch("workflow.automatic.time.time", lambda: timeout + 100.0), \
+                self.assertRaisesRegex(RuntimeError, f"Reviewer {first} deadline exhausted; no second reviewer is launched"):
+            _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
+        review = read_json(self.root / "review.json")
+        self.assertEqual(([(entry["reviewer_id"], entry["verdict"]) for entry in review["reviewers"]], review["verdict"]),
+                         ([(first, None), (second, "approved")], "blocked"))
+        status = read_json(self.root / f"automatic-{self.node(second)}.json")
+        self.assertEqual((status["status"], status["accepted_at"]), ("accepted", accepted_at))
 
 
 class PrintReviewerLaunchTests(unittest.TestCase):
