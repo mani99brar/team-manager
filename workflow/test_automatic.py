@@ -960,12 +960,101 @@ class ClaudeUnavailableTests(GraphFixture):
             self.assertEqual(graph.invokes, [None, None])
             self.assertNotIn("interrupted", read_json(combined))
             self.assertIn("Resuming the review interrupted by: timed out", self.events()[-1]["message"])
-            # Without the marker a review failure stays non-retryable, transient or not: nothing loops or relaunches.
+            # Without the marker (a reviewer launch the outage interrupted leaves the review at needs_reconciliation) the step
+            # still ends as Claude Code unavailable, exit 69, never as a persisted checkpoint (75) that the supervisor would
+            # continue from; the next controller finds the review non-retryable. Nothing loops or relaunches.
             graph.outcome = self.unavailable()
             save_json(combined, {"transport": "native", "status": "needs_reconciliation", "reviewers": ["review"]})
+            with self.assertRaises(TransientInfraError):
+                drive(f.runtime, single_step=True)
+            event = self.events()[-1]
+            self.assertEqual((event["node"], event["status"]), ("controller", "interrupted"))
+            self.assertIn(f"python -m workflow automatic {f.directory} --live", event["message"])
             with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
                 drive(f.runtime)
             self.assertEqual(graph.invokes, [None, None, None])
+
+    def lanes_live(self):
+        """Each lane's session as a live `sleep` process listed by a registry the test controls; `claude stop` ends it."""
+        from .sessions import TransientInfraError
+        f = self.fixture
+        self.processes, self.live, self.stops = {}, {}, []
+        self.outage = False
+        for node in ("ui", "adapter"):
+            process = self.processes[node] = subprocess.Popen(["sleep", "60"])
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            self.live[node] = {"id": f.sessions.background_id(node), "sessionId": f.sessions.native_id(node), "kind": "background",
+                               "state": "idle", "pid": process.pid}
+            # Every lane finished: its completion signal says what FakeSessions' handoff says.
+            save_json(f.directory / f"{node}.completion.json", {"version": "1.0.0", "run_id": f.plan["run_id"], "node_id": node,
+                                                                "launch_token": f.plan["nodes"][node]["session_id"], "status": "completed",
+                                                                **read_json(f.directory / f"{node}.handoff.json")})
+        def inventory():
+            if self.outage:
+                raise TransientInfraError("Claude session inventory unavailable for 60s: `claude agents --json` exited 1")
+            return [dict(row) for row in self.live.values()]
+        def stop(command, **kwargs):
+            node = next(node for node, row in self.live.items() if command[-2:] == ["stop", row["id"]])
+            self.stops.append(node)
+            self.processes[node].kill()
+            self.processes[node].wait()
+            del self.live[node]
+            self.outage = len(self.stops) == 1  # The background service goes away right after the freeze's first stop.
+            return subprocess.CompletedProcess(command, 0)
+        f.sessions.inventory = inventory
+        return stop
+
+    def test_an_outage_while_the_freeze_stops_the_workers_is_resumed_and_relaunches_nothing(self):
+        # Every lane finished and the freeze stops them before the snapshots. Claude Code goes away right after ui's `claude stop`,
+        # before that stop is confirmed: the step exits 69 (automatic then exits 75), not 75 "checkpoint persisted", after which
+        # the next step used to find no next graph step and block ("No verified feature-branch completion"). The next
+        # `automatic --live` completes the recorded stop, stops adapter once and captures the snapshots; nothing is relaunched.
+        from .automatic import UNAVAILABLE_EXIT
+        f = self.fixture
+        stop = self.lanes_live()
+        starts = list(f.sessions.starts)
+        with patch("workflow.pipeline.run_claude", side_effect=stop):
+            code, errors = self.cli(["automatic-step", str(f.directory), "--live"])
+            self.assertEqual(code, UNAVAILABLE_EXIT, errors)
+            self.assertIn("Interrupted: Claude session inventory unavailable", errors)
+            self.assertEqual(self.stops, ["ui"])
+            self.assertEqual(read_json(f.directory / "ui.stop.json")["stopped"], False)
+            self.assertFalse((f.directory / "adapter.stop.json").exists())
+            self.assertFalse((f.directory / "snapshots.json").exists())
+            event = self.events()[-1]
+            self.assertEqual((event["node"], event["status"]), ("freeze", "interrupted"))
+            for expected in ("Claude session inventory unavailable", "stops it recorded", f"python -m workflow automatic {f.directory} --live"):
+                self.assertIn(expected, event["message"])
+            # Claude Code works again. Verification is not run here: the graph reaching it is the point.
+            self.outage = False
+            with patch("workflow.pipeline.Pipeline.verify", side_effect=RuntimeError("Verification is not run in this test")) as verify:
+                code, errors = self.cli(["automatic-step", str(f.directory), "--live"])
+            self.assertEqual(code, 75, errors)
+        self.assertIn("Checkpoint persisted", errors)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(self.stops, ["ui", "adapter"])  # The recorded ui stop was confirmed, not issued again.
+        self.assertTrue(all(read_json(f.directory / f"{node}.stop.json")["stopped"] for node in ("ui", "adapter")))
+        self.assertEqual(sorted(read_json(f.directory / "snapshots.json")), ["adapter", "ui"])
+        self.assertEqual(f.sessions.starts, starts)
+        self.assertFalse((f.directory / "freeze-interrupted.json").exists())
+        messages = [(event["node"], event["status"], event["message"]) for event in self.events()]
+        self.assertIn(("freeze", "running", "Resuming the freeze interrupted by: Claude session inventory unavailable for 60s: "
+                                            "`claude agents --json` exited 1; its recorded stops are completed, nothing is relaunched"), messages)
+        self.assertEqual([status for node, status, _ in messages if node == "freeze"], ["interrupted", "running", "stopped", "succeeded"])
+
+    def test_a_freeze_that_failed_for_another_reason_is_named_and_never_re_entered(self):
+        # A stop that failed, an ownership violation, a moved HEAD: the freeze is not re-entered (the supervisor would loop),
+        # and the next controller names that failure instead of "No verified feature-branch completion".
+        f = self.fixture
+        failure = "Stop failed for ui; inspect native session before retrying"
+        with patch("workflow.automatic.wait_handoffs"), patch.object(f.runtime, "stop_workers", side_effect=RuntimeError(failure)) as stop:
+            self.assertIsNone(drive(f.runtime, single_step=True))
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, rf"^Freeze failed: .*{failure}.*; non-retryable graph failure, inspect retained evidence"):
+                    drive(f.runtime)
+        stop.assert_called_once()
+        self.assertFalse((f.directory / "snapshots.json").exists())
 
 
 class AutomaticGraphTests(SharedGraphTests, GraphFixture):

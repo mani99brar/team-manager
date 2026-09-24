@@ -1034,6 +1034,34 @@ def resume_interrupted_review(runtime, state) -> bool:
     return True
 
 
+FREEZE_INTERRUPTED = "freeze-interrupted.json"
+FREEZE_RESUME_NOTE = ("The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches "
+                      "nothing. Once `claude` works, resume with: python -m workflow automatic {directory} --live")
+
+
+def freeze_failure(state) -> str | None:
+    """The error of a freeze that failed after its worker_handoff interrupt was resumed, else None.
+
+    LangGraph then lists no next step: the handoff task keeps the error and its interrupt, and only
+    resuming that interrupt again re-enters the freeze.
+    """
+    if state.next:
+        return None
+    return next((str(task.error) for task in state.tasks if task.name == "handoff" and task.error and task.interrupts), None)
+
+
+def resume_interrupted_freeze(runtime) -> None:
+    """Consume the marker of a freeze that Claude Code's unavailability interrupted, right before it is re-entered once.
+
+    freeze completes the stops recorded in `<lane>.stop.json` (stop_session confirms a recorded stop before
+    issuing another) and launches nothing; a re-entry that fails for another reason is classified as that failure.
+    """
+    marker = runtime.directory / FREEZE_INTERRUPTED
+    cause = read_json(marker)["error"]
+    marker.unlink()
+    runtime.event("freeze", "running", f"Resuming the freeze interrupted by: {cause}; its recorded stops are completed, nothing is relaunched")
+
+
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import build_pipeline, graph_config, report
@@ -1050,7 +1078,11 @@ def drive(runtime, *, single_step=False) -> str | None:
             state = graph.get_state(config)
             if not state.values or any(name.startswith("launch_") for name in state.next):
                 raise RuntimeError("Automatic supervision requires a completed start; reconcile uncertain launches explicitly")
-            if not state.next:
+            frozen = freeze_failure(state)
+            if frozen and not (runtime.directory / FREEZE_INTERRUPTED).exists():
+                # A stop that failed, an ownership violation, a moved HEAD: never re-entered, or the supervisor would loop.
+                raise RuntimeError(f"Freeze failed: {frozen}; non-retryable graph failure, inspect retained evidence")
+            if not state.next and not frozen:
                 commit = state.values.get("integrated_commit")
                 if (not commit or git(Path(runtime.plan["repository"]), "rev-parse", "HEAD") != commit
                         or git(Path(runtime.plan["repository"]), "status", "--porcelain")):
@@ -1085,6 +1117,8 @@ def drive(runtime, *, single_step=False) -> str | None:
                         runtime.event("freeze", "blocked", f"Could not confirm worker stop: {cleanup_error}")
                     report(runtime, state)
                     raise
+                if frozen:
+                    resume_interrupted_freeze(runtime)
                 value = Command(resume={"freeze": True})
             elif pending:
                 raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
@@ -1097,12 +1131,19 @@ def drive(runtime, *, single_step=False) -> str | None:
                 failed = graph.get_state(config)
                 if not any(task.error for task in failed.tasks):
                     raise
+                if isinstance(error, TransientInfraError):
+                    # Claude Code itself was unavailable, whichever node called it: no verdict on any session. Raised, so
+                    # the step exits 69 (75 would claim a persisted checkpoint to continue from) and `automatic` exits 75.
+                    if freeze_failure(failed):
+                        save_json(runtime.directory / FREEZE_INTERRUPTED, {"error": str(error)})
+                        runtime.event("freeze", "interrupted", f"{error}. {FREEZE_RESUME_NOTE.format(directory=runtime.directory)}")
+                    elif not review_interrupted(runtime, failed):  # The review node recorded its own interruption.
+                        runtime.event("controller", "interrupted", f"{error}. {UNAVAILABLE_NOTE.format(directory=runtime.directory)}")
+                    raise
                 if reviewer_stop_pending(runtime, failed):
                     # Not retried in this loop: the operator inspects the session first; a resumed
                     # controller retries the stop once before continuing.
                     raise RuntimeError(REVIEW_STOP_NOTE.format(error=error, directory=runtime.directory)) from error
-                if isinstance(error, TransientInfraError) and review_interrupted(runtime, failed):
-                    raise  # The review node recorded the interruption; a new controller re-enters it.
                 # Next loop reopens the checkpointer and classifies the exact failure.
             finally:
                 report(runtime, graph.get_state(config))
