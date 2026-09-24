@@ -52,8 +52,8 @@ const clarityRunUrl = (runId: string, nodeId?: string) => runUrl(runId, nodeId, 
 const questionItems = (page: Page) => page.getByTestId('worker-questions').getByTestId('worker-question')
 const UI_BROWSER_COMMAND = 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts'
 
-/** The formatted times the viewer shows for an ISO timestamp (`formatTime`). */
-const shown = (iso: string) => iso.replace('T', ' ').replace(/Z$/, ' UTC')
+/** The `<time>` the viewer shows for an ISO timestamp: whatever zone its text uses, its tooltip is the full UTC time. */
+const shown = (scope: Locator, iso: string) => scope.locator(`time[title="${iso.replace('T', ' ').replace(/Z$/, ' UTC')}"]`)
 
 /**
  * Records every request the page makes to a host other than the local app and aborts it, so a regression shows up as a
@@ -219,16 +219,18 @@ test(`[scenario:worker-questions-shown] Answered and waiting worker questions ar
   await expect(answered).toHaveAttribute('data-question', '1')
   await expect(answered).toHaveAttribute('data-answered', 'true')
   await expect(answered).toContainText(first.question)
-  await expect(answered).toContainText(`asked at ${shown(first.asked_at)}`)
+  await expect(answered).toContainText('asked at')
+  await expect(shown(answered, first.asked_at)).toBeVisible()
   await expect(answered.getByTestId('question-answer')).toContainText(first.answer!)
-  await expect(answered.getByTestId('question-answer')).toContainText(`at ${shown(first.answered_at!)}`)
+  await expect(shown(answered.getByTestId('question-answer'), first.answered_at!)).toBeVisible()
   await expect(answered.getByTestId('question-waiting')).toHaveCount(0)
 
   const waiting = questionItems(page).nth(1)
   await expect(waiting).toHaveAttribute('data-question', '2')
   await expect(waiting).toHaveAttribute('data-answered', 'false')
   await expect(waiting).toContainText(second.question)
-  await expect(waiting).toContainText(`asked at ${shown(second.asked_at)}`)
+  await expect(waiting).toContainText('asked at')
+  await expect(shown(waiting, second.asked_at)).toBeVisible()
   await expect(waiting.getByTestId('question-waiting')).toHaveText('Waiting on the operator')
   await expect(waiting.getByTestId('question-answer')).toHaveCount(0)
   await expect(page.getByTestId('worker-questions-waiting')).toContainText('One question is waiting on the operator')

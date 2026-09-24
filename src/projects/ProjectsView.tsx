@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
-import { fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
+import { describeApiError, fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunView } from './RunView.tsx'
-import { formatTime, shortRevision } from './status.ts'
+import { shortRevision } from './status.ts'
+import { Time } from './Time.tsx'
+import { TimeReferenceContext } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
+
+const LOADING_FAILED = 'Loading failed.'
 
 type Props = {
   /** Null when the pathname is under /projects but malformed. */
   route: ProjectsRoute | null
   refreshToken: number
+  /** Whether a header Refresh is still loading in the background, for the button's busy state. */
+  onRefreshingChange: (refreshing: boolean) => void
   onNavigate: (pathname: string) => void
   onAnnounce: (message: string) => void
 }
@@ -22,7 +28,7 @@ type Props = {
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Props) {
+export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
   const projectId = route && route.level !== 'projects' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
@@ -30,9 +36,9 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
 
   // The registry itself changes while the viewer runs (a launch registers its workflow); both lists are cheap to re-read.
   const registryPoll = usePoll(route?.level === 'projects' || route?.level === 'project')
-  const { state: projects, reload: reloadProjects } = useResource('projects', fetchProjects, refreshToken, registryPoll)
+  const { state: projects, reload: reloadProjects, meta: projectsMeta } = useResource('projects', fetchProjects, refreshToken, registryPoll)
   const loadWorkflows = useCallback((signal: AbortSignal) => fetchWorkflows(projectId!, signal), [projectId])
-  const { state: workflows, reload: reloadWorkflows } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken, registryPoll)
+  const { state: workflows, reload: reloadWorkflows, meta: workflowsMeta } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken, registryPoll)
   const loadRuns = useCallback((signal: AbortSignal) => fetchRuns(projectId!, workflowId!, {}, signal), [projectId, workflowId])
   const runsKey = workflowId === null ? null : `runs:${projectId}/${workflowId}`
   // Run lists and run details re-read themselves while shown (a finished run no longer changes). A list stops polling
@@ -44,12 +50,20 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   useEffect(() => { setMorePages({ base: null, pages: [], loading: false, error: null }) }, [listGeneration])
   const listPoll = usePoll(route?.level === 'workflow' && !morePages.loading && morePages.pages.length === 0)
   const runPoll = usePoll(route?.level === 'run' && !finished)
-  const { state: firstPage, reload: reloadRuns } = useResource(runsKey, loadRuns, refreshToken, listPoll)
+  const { state: firstPage, reload: reloadRuns, meta: runsMeta } = useResource(runsKey, loadRuns, refreshToken, listPoll)
   const scope = useMemo(() => (projectId === null || workflowId === null || runId === null ? null : { projectId, workflowId, runId }), [projectId, workflowId, runId])
   const loadDetail = useCallback((signal: AbortSignal) => fetchRunDetail({ projectId: projectId!, workflowId: workflowId!, runId: runId! }, signal), [projectId, workflowId, runId])
-  const { state: detail, reload: reloadDetail } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
+  const { state: detail, reload: reloadDetail, meta: detailMeta } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
   const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
   useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
+
+  // A Refresh re-reads every shown level in the background; the header button stays busy until they have all settled.
+  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing
+  useEffect(() => { onRefreshingChange(refreshing) }, [refreshing, onRefreshingChange])
+  useEffect(() => () => onRefreshingChange(false), [onRefreshingChange])
+  // A failed Refresh keeps the page as it was, so it says so until a later load of that level succeeds.
+  const refreshFailure = [detailMeta, runsMeta, workflowsMeta, projectsMeta].find(meta => meta.refreshError !== null) ?? null
+  const refreshFailed = refreshFailure !== null
 
   // Additional run pages are appended on demand; they belong to exactly one loaded first page and are dropped with it.
   const firstPageData = firstPage.status === 'ready' ? firstPage.data : null
@@ -73,20 +87,35 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   const workflowName = currentWorkflow?.name ?? workflowId
 
   // A background poll re-announces only what changed; a load the reader started (navigation, Refresh) always announces.
+  // A Refresh announces that it started and then its outcome, even when the page did not change.
   const announced = useRef<string | null>(null)
+  const refreshAnnounced = useRef(false)
   useEffect(() => {
+    if (refreshing) {
+      if (!refreshAnnounced.current) onAnnounce('Refreshing.')
+      refreshAnnounced.current = true
+      return
+    }
     let message: string | null = null
     if (route === null) message = 'This Projects link is invalid.'
     else if (route.level === 'projects' && projects.status === 'ready') message = `Loaded ${projects.data.length} ${projects.data.length === 1 ? 'project' : 'projects'}.`
     else if (route.level === 'project' && workflows.status === 'ready') message = `Loaded ${workflows.data.length} ${workflows.data.length === 1 ? 'workflow' : 'workflows'} for ${projectName ?? route.projectId}.`
     else if (route.level === 'workflow' && firstPage.status === 'ready') message = `Loaded ${firstPage.data.runs.length} ${firstPage.data.runs.length === 1 ? 'run' : 'runs'} for ${workflowName ?? route.workflowId}.`
     else if (route.level === 'run' && detail.status === 'ready') message = `Loaded run ${route.runId}: ${detail.data.summary.status.replace('_', ' ')}.`
-    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') message = 'Loading failed.'
+    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') message = LOADING_FAILED
+    if (refreshAnnounced.current) {
+      refreshAnnounced.current = false
+      announced.current = message
+      if (refreshFailed) onAnnounce('Refresh failed. The page still shows the data loaded before, which may be outdated.')
+      else if (message === LOADING_FAILED) onAnnounce('Refresh failed.')
+      else onAnnounce(message === null ? 'Refreshed.' : `Refreshed. ${message}`)
+      return
+    }
     if (message === null) { announced.current = null; return }
     if (message === announced.current) return
     announced.current = message
     onAnnounce(message)
-  }, [route, projects, workflows, firstPage, detail, projectName, workflowName, onAnnounce])
+  }, [route, projects, workflows, firstPage, detail, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
 
   const crumbs: PathCrumb[] = [{ id: 'home', label: 'Home', pathname: '/' }, { id: 'projects', label: 'Projects', pathname: projectsPathname() }]
   if (projectId !== null) crumbs.push({ id: `project:${projectId}`, label: projectName ?? projectId, pathname: projectPathname(projectId) })
@@ -200,7 +229,7 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
                   <li key={run.run_id} data-run-id={run.run_id} data-status={run.status}>
                     <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate} className="projects-card">
                       <span className="projects-card-title">{run.run_id} <StatusBadge status={run.status} explain /></span>
-                      <span className="projects-muted">updated {formatTime(run.updated_at)} · created {formatTime(run.created_at)} · pinned revision {shortRevision(run.definition_revision)}</span>
+                      <span className="projects-muted">updated <Time iso={run.updated_at} /> · created <Time iso={run.created_at} /> · pinned revision {shortRevision(run.definition_revision)}</span>
                     </AppLink>
                   </li>
                 ))}
@@ -244,7 +273,15 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
         </div>
       )
     } else if (detail.status === 'error') content = <ErrorPanel error={detail.error} what={`Run ${route.runId}`} onRetry={reloadDetail} />
-    else content = <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} onNavigate={onNavigate} />
+    else {
+      // Every time on the run page reads against the run's start day: only a time on another day shows its date. The start
+      // itself (the Created fact) is read against today, so the page names the day its run started.
+      content = (
+        <TimeReferenceContext value={detail.data.summary.created_at}>
+          <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} freshness={detailMeta} onNavigate={onNavigate} />
+        </TimeReferenceContext>
+      )
+    }
   }
 
   return (
@@ -254,6 +291,14 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
         <p className="folder-info" data-testid="projects-info">{info}</p>
       </div>
       <main className="workspace workspace-projects" aria-busy={busy} data-testid="projects-workspace">
+        {refreshFailure !== null && (
+          <div className="projects-notice" role="alert" data-testid="refresh-failed">
+            <p>
+              <strong>Refresh failed.</strong> {describeApiError(refreshFailure.refreshError)} The page still shows the data loaded
+              {refreshFailure.settledAt === null ? ' before' : <> at <Time iso={new Date(refreshFailure.settledAt).toISOString()} seconds /></>}, which may be outdated.
+            </p>
+          </div>
+        )}
         {content}
       </main>
     </>

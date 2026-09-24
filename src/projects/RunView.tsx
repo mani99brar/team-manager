@@ -1,11 +1,15 @@
 import { useCallback, useState, type KeyboardEvent } from 'react'
 import { fetchEvents, fetchRunInputs, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel, INPUTS_NONE_SENTENCE } from './Assignment.tsx'
+import { LiveStatus } from './LiveStatus.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { runPathname } from './routes.ts'
-import { deadlinesLabel, formatTime, KIND_LABEL, RUN_STATUS_MEANING, shortRevision, STATUS_LABEL } from './status.ts'
-import { useResource } from './useResource.ts'
+import { deadlinesLabel, KIND_LABEL, RUN_STATUS_MEANING, shortRevision } from './status.ts'
+import { Time } from './Time.tsx'
+import { TimeZoneToggle } from './TimeZoneToggle.tsx'
+import { useNow } from './useNow.ts'
+import { useResource, type ResourceMeta } from './useResource.ts'
 import { WorkflowGraph, type GraphNodeView } from './WorkflowGraph.tsx'
 
 type Props = {
@@ -17,6 +21,8 @@ type Props = {
   refreshToken: number
   /** Ticks while the run page polls live state; the run's events and inputs re-read in the background with it. */
   pollToken?: number
+  /** How fresh the polled run detail is, for the live chip. */
+  freshness: ResourceMeta
   onNavigate: (pathname: string) => void
 }
 
@@ -29,9 +35,13 @@ const TABS: { id: Tab; label: string; testId: string }[] = [
   { id: 'assignment', label: 'Assignment', testId: 'tab-assignment' },
 ]
 
-/** One run: its summary and pinned inputs, its definition graph coloured by actual node statuses, the selected node, and the assignment. */
-export function RunView({ scope, detail, current, selectedNodeId, refreshToken, pollToken = 0, onNavigate }: Props) {
+/**
+ * One run: its summary and pinned inputs, its definition graph coloured by actual node statuses, the selected node, and the
+ * assignment. One clock ticks here while the run can still change (it feeds the live chip's ages).
+ */
+export function RunView({ scope, detail, current, selectedNodeId, refreshToken, pollToken = 0, freshness, onNavigate }: Props) {
   const { summary, definition, snapshot } = detail
+  const now = useNow(summary.status !== 'succeeded' && summary.status !== 'cancelled')
   const snapshotById = new Map(snapshot.nodes.map(node => [node.node_id, node]))
   const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
     const state = snapshotById.get(node.node_id)!
@@ -92,12 +102,18 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
     <div className="run-view" data-testid="run-view" data-run-id={summary.run_id} data-run-status={summary.status}>
       <section className="run-summary" aria-labelledby="run-summary-title">
         <h2 id="run-summary-title">Run {summary.run_id}</h2>
-        <p className="run-status-line" data-testid="run-status">
-          <StatusBadge status={summary.status} /> <span data-testid="run-status-meaning">{RUN_STATUS_MEANING[summary.status]}</span>
-        </p>
+        <div className="run-status-row">
+          <p className="run-status-line" data-testid="run-status">
+            <StatusBadge status={summary.status} /> <span data-testid="run-status-meaning">{RUN_STATUS_MEANING[summary.status]}</span>
+          </p>
+          <div className="run-freshness">
+            <LiveStatus status={summary.status} meta={freshness} now={now} />
+            <TimeZoneToggle />
+          </div>
+        </div>
         <dl className="projects-facts">
-          <div><dt>Created</dt><dd>{formatTime(summary.created_at)}</dd></div>
-          <div><dt>Updated</dt><dd>{formatTime(summary.updated_at)}</dd></div>
+          <div><dt>Created</dt><dd><Time iso={summary.created_at} anchor /></dd></div>
+          <div><dt>Updated</dt><dd><Time iso={summary.updated_at} /></dd></div>
           <div><dt>Last event</dt><dd>{snapshot.last_sequence === 0 ? 'none' : `sequence ${snapshot.last_sequence}`}</dd></div>
           <div>
             <dt>Pinned definition</dt>
@@ -214,7 +230,6 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
           </div>
         </div>
       )}
-      <p className="projects-muted run-footnote">Statuses: {Object.entries(STATUS_LABEL).map(([key, label]) => `${label} (${key})`).join(', ')}. Only a succeeded run is a completed workflow.</p>
     </div>
   )
 }

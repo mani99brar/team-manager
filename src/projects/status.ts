@@ -18,6 +18,20 @@ export const STATUS_LABEL: Record<RunStatus, string> = {
   cancelled: 'Cancelled',
 }
 
+/**
+ * A status badge's tooltip, true of a run and of one of its steps alike. It replaces the status footnotes the run and node
+ * pages used to repeat (docs/PRD_VIEWER_UX.md section 8).
+ */
+export const STATUS_TITLE: Record<RunStatus, string> = {
+  pending: 'Pending: not started.',
+  running: 'Running: in progress, not complete.',
+  awaiting_approval: 'Awaiting approval: waits on a decision made in the workflow CLI; viewing approves nothing.',
+  paused: 'Paused: stopped with unresolved state, not complete.',
+  succeeded: 'Succeeded. Only a succeeded run is a completed workflow; a succeeded worker step is not.',
+  failed: 'Failed: not complete.',
+  cancelled: 'Cancelled before completion.',
+}
+
 /** What a run in this status means for the workflow as a whole. */
 export const RUN_STATUS_MEANING: Record<RunStatus, string> = {
   pending: 'Nothing has started yet.',
@@ -95,12 +109,6 @@ export function executorOf(kind: NodeKind, transport?: ReviewResult['reviewer'][
 
 export function shortRevision(revision: string): string {
   return revision.slice(0, 12)
-}
-
-export function formatTime(iso: string): string {
-  const time = Date.parse(iso)
-  if (Number.isNaN(time)) return iso
-  return new Date(time).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')
 }
 
 /** Compact duration for deadlines and timeouts: 14400 → "4h", 5400 → "1h30m", 45 → "45s". */

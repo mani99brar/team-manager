@@ -374,6 +374,7 @@ function App() {
 
   // ---- Projects root (read-only workflow runs; a separate domain from the skill sources) ----
   const [projectsRefresh, setProjectsRefresh] = useState(0)
+  const [projectsRefreshing, setProjectsRefreshing] = useState(false)
   /** Navigates to any app pathname (Projects pages or Home) through history, keeping the unsaved-edit guards. */
   const navigatePathname = useCallback((pathname: string) => {
     guardLeave(() => {
@@ -635,7 +636,10 @@ function App() {
           <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save. Projects shows workflow runs, read-only.</p>
         </div>
         {inProjects ? (
-          <button type="button" className="button" onClick={() => setProjectsRefresh(previous => previous + 1)}>Refresh</button>
+          // Busy but still focusable (aria-disabled, not disabled), so a keyboard user's focus stays on it while it reloads.
+          <button type="button" className="button" onClick={() => { if (!projectsRefreshing) setProjectsRefresh(previous => previous + 1) }} aria-disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
+            {projectsRefreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
         ) : (
           <button type="button" className="button" onClick={() => void refresh()} disabled={!ready || refreshing} aria-busy={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -693,7 +697,7 @@ function App() {
       )}
 
       {inProjects && (
-        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onNavigate={navigatePathname} onAnnounce={announce} />
+        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce} />
       )}
 
       {!inProjects && <div className="navigation">
