@@ -366,16 +366,16 @@ class Pipeline:
                 save_json(marker, intent)
                 try:
                     result = run_claude([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
-                except TransientInfraError:
-                    intent["issued"] = False  # Its exec failed for the whole grace: nothing ran, the stop is still owed.
-                    save_json(marker, intent)
-                    raise
-                if result.returncode != 0:
-                    # It ran and failed (a restarting background service refuses it, then respawns the session): nothing
-                    # confirms it, so it is still owed and a retry looks through the respawn gap instead of trusting absence.
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
+                except Exception:
+                    # Nothing confirms it: its exec failed (nothing ran), or it exited non-zero or hung past its timeout, as
+                    # `claude` calls can while the background service restarts, which then respawns the session. It is still
+                    # owed, so a retry looks through the respawn gap instead of trusting absence. A Ctrl-C while it runs
+                    # leaves it issued, as a controller killed then does.
                     intent["issued"] = False
                     save_json(marker, intent)
-                    raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")
+                    raise
             # Recover stop-before-receipt without issuing another stop command.
             rows = self.sessions.inventory()
             if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):

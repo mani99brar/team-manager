@@ -580,44 +580,62 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             run([[respawned], [respawned]], run_claude=Mock(side_effect=TransientInfraError("Claude Code unavailable for 60s")))
         self.assertEqual(read_json(marker), {**intent, "pid": os.getpid()})
 
-    def test_a_stop_that_exited_non_zero_is_issued_again_to_the_session_an_update_respawned(self):
-        # `claude stop` ran and exited non-zero while an update restarted the background service, which then respawned the idle
-        # session under a new PID. The retry in that gap found the session left out of the listing and the old PID ended, and
-        # recorded `stopped: true` with no stop issued: the respawned session kept running. A stop that failed is still owed:
-        # the retry looks through the gap, records nothing while it lasts, and stops the respawned process once.
+    def test_a_stop_that_failed_is_issued_again_to_the_session_an_update_respawned(self):
+        # `claude stop` exited non-zero, hung past its timeout (as `claude` calls can while the background service restarts) or
+        # could not be executed while an update restarted the service, which then respawned the idle session under a new PID.
+        # The retry in that gap found the session left out of the listing and the old PID ended, and recorded `stopped: true`
+        # with no stop issued: the respawned session kept running. A stop that failed is still owed: the retry looks through
+        # the gap, records nothing while it lasts, and stops the respawned process once.
+        import errno
         from .sessions import TransientInfraError
-        old = subprocess.Popen(["sleep", "60"])
-        self.addCleanup(old.wait)
-        self.addCleanup(old.kill)
         save_json(self.directory / "ui.interactive.json", {"background_id": "id-ui", "session_id": "session-ui"})
-        row = {**self.native_rows()["ui"], "pid": old.pid}
-        respawned = {**row, "pid": os.getpid()}
         marker = self.directory / "ui.stop.json"
-        fake = SimpleNamespace(now=0.0, listings=iter(()), codes=iter(()))
+        fake = SimpleNamespace(now=0.0, listings=iter(()), answers=iter(()))
         self.runtime.sessions = SimpleNamespace(executable="claude", inventory=lambda: next(fake.listings),
                                                locate=lambda node, rows: next((item for item in rows if item["id"] == f"id-{node}"), None))
-        def run(listings, codes):
-            fake.listings, fake.codes = iter(listings), iter(codes)
+        def answer(argv, **_kwargs):
+            result = next(fake.answers)
+            if isinstance(result, BaseException):
+                raise result
+            return subprocess.CompletedProcess(argv, result)
+        def run(listings, answers):
+            fake.listings, fake.answers = iter(listings), iter(answers)
             with patch("workflow.pipeline.time") as fake_time, patch("workflow.pipeline.pid_alive", return_value=False), \
-                    patch("workflow.pipeline.subprocess.run", side_effect=lambda argv, **_: subprocess.CompletedProcess(argv, next(fake.codes))) as command:
+                    patch("workflow.pipeline.subprocess.run", side_effect=answer) as command:
                 fake_time.monotonic.side_effect = lambda: fake.now
                 fake_time.sleep.side_effect = lambda seconds: setattr(fake, "now", fake.now + seconds)
                 try:
                     self.runtime.stop_session("ui")
                 finally:
                     self.commands = [item.args[0] for item in command.call_args_list]
-        with self.assertRaisesRegex(RuntimeError, "Stop failed for ui"):
-            run([[row], [row]], [1])
-        self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
-        self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": old.pid, "stopped": False, "issued": False})
-        old.kill()
-        old.wait()  # The restart ended the process the failed stop was for.
-        with self.assertRaises(TransientInfraError):
-            run([[]] * 20, [])
-        self.assertEqual((self.commands, read_json(marker)["stopped"]), ([], False))
-        run([[], [respawned], []], [0])
-        self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
-        self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True, "issued": True})
+        failures = {"exited non-zero": (1, RuntimeError, "^Stop failed for ui"),
+                    "timed out": (subprocess.TimeoutExpired(["claude", "stop", "id-ui"], 20), subprocess.TimeoutExpired, "timed out after 20 seconds"),
+                    "could not be executed": (OSError(errno.EACCES, "Permission denied"), PermissionError, "Permission denied")}
+        for failure, (refusal, error, message) in failures.items():
+            with self.subTest(failure):
+                marker.unlink(missing_ok=True)
+                old = subprocess.Popen(["sleep", "60"])
+                self.addCleanup(old.wait)
+                self.addCleanup(old.kill)
+                row = {**self.native_rows()["ui"], "pid": old.pid}
+                respawned = {**row, "pid": os.getpid()}
+                with self.assertRaisesRegex(error, message):
+                    run([[row], [row]], [refusal])
+                self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
+                self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": old.pid, "stopped": False, "issued": False})
+                old.kill()
+                old.wait()  # The restart ended the process the failed stop was for.
+                with self.assertRaises(TransientInfraError):
+                    run([[]] * 20, [])
+                self.assertEqual((self.commands, read_json(marker)["stopped"]), ([], False))
+                run([[], [respawned], []], [0])
+                self.assertEqual(self.commands, [["claude", "stop", "id-ui"]])
+                self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True, "issued": True})
+        # A Ctrl-C while `claude stop` runs leaves it issued, as a controller killed then does: the stop may have been sent.
+        marker.unlink()
+        with self.assertRaises(KeyboardInterrupt):
+            run([[respawned], [respawned]], [KeyboardInterrupt()])
+        self.assertEqual(read_json(marker), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": False, "issued": True})
 
     def test_stop_workers_stops_every_lane_and_names_each_stop_it_could_not_confirm(self):
         # A blocked wait stops the workers, and the lane that blocked it (a `stopped` or `failed` row, a changed identity) is
