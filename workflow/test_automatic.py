@@ -657,6 +657,42 @@ class ReviewCompletionTests(unittest.TestCase):
             self.assertFalse(review_interrupted(self.runtime, failed), status)
 
 
+    def test_a_verdict_accepted_in_time_decides_when_the_controller_resumes_after_the_deadline(self):
+        # Every verdict is written and accepted at t=600; then Claude Code is unavailable while the controller checks the
+        # reviewers' identity (exit 75). The operator resumes after every reviewer's deadline: the files are read again and
+        # decide. The deadline binds only a reviewer without a valid completion file.
+        from unittest.mock import Mock
+        from .automatic import ReviewStatus, _accept_native, resume_interrupted_review, wait_reviews
+        from .sessions import TransientInfraError
+        timeout = DEFAULTS["review_timeout_seconds"]
+        self.runtime.stop_reviewer = Mock()
+        listing = self.runtime.sessions.inventory
+        self.runtime.sessions.inventory = Mock(side_effect=[listing(), TransientInfraError("Claude session inventory unavailable: timed out")])
+        for reviewer_id in self.ids:
+            self.write(reviewer_id)
+        with patch("workflow.automatic.time.time", lambda: 600.0), self.assertRaises(TransientInfraError):
+            _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
+        self.runtime.stop_reviewer.assert_not_called()
+        failed = SimpleNamespace(next=("review",), tasks=[SimpleNamespace(name="review", error="TransientInfraError('Claude session inventory unavailable')")])
+        self.assertTrue(resume_interrupted_review(self.runtime, failed))
+        self.runtime.sessions.inventory = listing
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, clock=lambda: timeout + 300, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, dict.fromkeys(self.ids, "approved"))
+        self.assertFalse([status for status in state.statuses.values() if "error" in status])
+        # A reviewer still without its file past its deadline blocks the run as before: every reviewer is stopped, and the
+        # verdicts accepted from the others are kept in review.json.
+        last = self.ids[-1]
+        (self.root / f"{self.node(last)}.completion.json").unlink()
+        with patch("workflow.automatic.time.time", lambda: timeout + 300.0), \
+                self.assertRaisesRegex(RuntimeError, f"Reviewer {last} deadline exhausted; no second reviewer is launched"):
+            _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
+        self.assertEqual(self.runtime.stop_reviewer.call_count, len(self.ids))
+        if len(self.ids) > 1:
+            review = read_json(self.root / "review.json")
+            self.assertEqual(([(entry["reviewer_id"], entry["verdict"]) for entry in review["reviewers"]], review["verdict"]),
+                             ([(self.ids[0], "approved"), (last, None)], "blocked"))
+
 class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
     reviewers = ["general", "coverage"]

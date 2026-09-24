@@ -461,10 +461,6 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 continue
             node = review_node(reviewer_id)
             status = state.statuses[reviewer_id]
-            if clock() >= started[reviewer_id] + timeout:
-                status.update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
-                state.save()
-                raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
             try:
                 row = gaps.row(node, rows)
             except SessionGap:
@@ -488,6 +484,11 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 state.save()
                 if decision_blocks(decision):
                     return decisions  # The first block decides; nobody waits for the other reviewers.
+                continue  # Its file met the deadline, also when first read after it (a controller resumed late).
+            if clock() >= started[reviewer_id] + timeout:
+                status.update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
+                state.save()
+                raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
         if set(decisions) == set(state.ids):
             return decisions
         sleep(2)
