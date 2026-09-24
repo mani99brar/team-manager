@@ -1,5 +1,7 @@
 /**
- * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/nodes/<node>]]]]`.
+ * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/assignment | /nodes/<node>]]]]`. A run's views
+ * live in the path (docs/PRD_VIEWER_UX.md 3.1): the Run view (with its node pages) and the Assignment view, so each can be
+ * linked and survives a reload.
  *
  * Every ID is an opaque contract identifier: it must match the shared ID pattern and is percent-encoded
  * as one path segment. Anything else is malformed rather than looked up. This domain is read-only and
@@ -15,7 +17,7 @@ export type ProjectsRoute =
   | { level: 'projects' }
   | { level: 'project'; projectId: string }
   | { level: 'workflow'; projectId: string; workflowId: string }
-  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null }
+  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null; tab: 'run' | 'assignment' }
 
 export function isContractId(value: string): boolean {
   return PROJECT_ID_PATTERN.test(value)
@@ -43,12 +45,19 @@ export function runPathname(projectId: string, workflowId: string, runId: string
   return encode(segments)
 }
 
+/** The literal after a run id that selects its Assignment view. */
+export const ASSIGNMENT_SEGMENT = 'assignment'
+
+export function assignmentPathname(projectId: string, workflowId: string, runId: string): string {
+  return encode([PROJECTS_ROUTE, projectId, 'workflows', workflowId, 'runs', runId, ASSIGNMENT_SEGMENT])
+}
+
 export function routeToPathname(route: ProjectsRoute): string {
   switch (route.level) {
     case 'projects': return projectsPathname()
     case 'project': return projectPathname(route.projectId)
     case 'workflow': return workflowPathname(route.projectId, route.workflowId)
-    case 'run': return runPathname(route.projectId, route.workflowId, route.runId, route.nodeId)
+    case 'run': return route.tab === 'assignment' ? assignmentPathname(route.projectId, route.workflowId, route.runId) : runPathname(route.projectId, route.workflowId, route.runId, route.nodeId)
   }
 }
 
@@ -78,7 +87,8 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
   if (workflowsLiteral !== 'workflows' || workflowId === undefined || !isContractId(workflowId)) return null
   if (runsLiteral === undefined) return { level: 'workflow', projectId, workflowId }
   if (runsLiteral !== 'runs' || runId === undefined || !isContractId(runId)) return null
-  if (nodesLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null }
+  if (nodesLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'run' }
+  if (nodesLiteral === ASSIGNMENT_SEGMENT && nodeId === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'assignment' }
   if (nodesLiteral !== 'nodes' || nodeId === undefined || !isContractId(nodeId) || rest.length > 0) return null
-  return { level: 'run', projectId, workflowId, runId, nodeId }
+  return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run' }
 }
