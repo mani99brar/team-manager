@@ -115,6 +115,9 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     return id === null ? null : nodeLink(id)
   }
   const lane = isWorker ? worker?.node_id ?? node.node_id.replace(/^launch_/, '') : null
+  // A verification reads its lane's declared checks (they name the executed ones and key the gate's reasons) and requirements.
+  const declaredOf = (id: string) => recordedInputs?.workers.find(candidate => candidate.node_id === id)?.checks ?? null
+  const verifiedWorker = isVerify ? recordedInputs?.workers.find(candidate => candidate.node_id === node.node_id.replace(/^verify_/, '')) ?? null : null
   const verifyId = lane !== null && hasNode(`verify_${lane}`) ? `verify_${lane}` : null
   const verifyState = verifyId === null ? null : snapshotNodes.find(candidate => candidate.node_id === verifyId) ?? null
   const verifyNode = verifyId === null ? null : { ...nodeLink(verifyId), status: verifyState?.status ?? 'pending' as const, attempt: verifyState?.attempt ?? 0 }
@@ -138,7 +141,9 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const revision = (isVerify || isCandidate) && recorded && timeline !== null && cap !== null && (headerStatus === 'running' || headerStatus === 'failed')
     ? { attempt: revisionAttempt(timeline, node.node_id, shownAttempt), of: cap }
     : null
-  const next = isLatest && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required') ? now.next : null
+  // A failed verification also says what happens next when nothing is to be typed (it replaces the old retry note, 8).
+  const failedCheck = (isVerify || isCandidate) && node.status === 'failed'
+  const next = isLatest && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required' || failedCheck) ? now.next : null
   const attemptHref = (value: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id, value)
   const nodeHref = runPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id)
 
@@ -160,7 +165,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const sections: SectionEntry[] = [
     ...(isWorker ? workerSectionEntries(worker, resultData) : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
-    ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData) : []),
+    ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData, { requirements: verifiedWorker !== null }) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
     ...(isReview && reviewTransport !== undefined ? [{ key: 'review', label: 'Review' }] : []),
     ...(isChallenge && recordedInputs?.challenge ? [{ key: 'challenge', label: 'Challenge' }] : []),
@@ -247,8 +252,21 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           <ControllerSections scope={scope} renderResult={renderResult} />
         ) : (
           <>
-            {lanes.length > 0 && <CandidateLanes scope={scope} lanes={lanes} launchNodeOf={launchNodeOf} stamp={stamp} onNavigate={onNavigate} />}
-            {renderResult(data => <VerifiedEvidence scope={scope} result={data} phase="worker" anchored />)}
+            {lanes.length > 0 && (
+              <CandidateLanes
+                scope={scope} lanes={lanes} launchNodeOf={launchNodeOf} declaredOf={declaredOf} timeline={timeline} cap={cap}
+                repairLanes={isLatest && now?.situation === 'blocked_identical' && now.lane ? now.lane.split(',') : []}
+                stamp={stamp} onNavigate={onNavigate}
+              />
+            )}
+            {renderResult(data => (
+              <VerifiedEvidence
+                scope={scope} result={data} phase="worker" anchored
+                declared={verifiedWorker?.checks ?? null}
+                attemptStart={timing?.start?.at ?? null}
+                requirements={verifiedWorker && { worker: verifiedWorker, cap: recordedInputs?.max_verification_attempts ?? null }}
+              />
+            ))}
           </>
         )
       )}

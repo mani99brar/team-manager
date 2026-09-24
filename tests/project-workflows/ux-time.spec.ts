@@ -155,8 +155,9 @@ test(`[scenario:live-freshness] A live chip says whether the run is polled and h
   await page.goto(runUrl(RUN_FAILED, 'verify_adapter'))
   await expect(page.getByTestId('checks-list')).toBeVisible()
   await expect(page.getByTestId('node-events')).toBeVisible()
-  await page.evaluate('window.scrollTo(0, 200)')
-  await expect.poll(() => scrollY(page)).toBe(200)
+  // A scroll the compact verify page allows in both phases (its closed disclosures leave about 180 px to scroll at 720 px).
+  await page.evaluate('window.scrollTo(0, 120)')
+  await expect.poll(() => scrollY(page)).toBe(120)
   const scrolled = await scrollY(page)
   let release = () => {}
   const held = new Promise<void>(resolve => { release = resolve })

@@ -1,4 +1,81 @@
-/* ---- Verification and candidate sections (docs/PRD_VIEWER_UX.md 4.6) ---- */
+/* ---- Verification and candidate sections (docs/PRD_VIEWER_UX.md 4.6, 7) ---- */
 
 .worker-report-link { margin: 0; font-size: 0.85rem; color: var(--text-muted); }
-.lane-result .worker-report-link { margin-bottom: 8px; }
+
+/* The gate: a headline, the error code, one bullet per reason; the candidate's ownership tag follows the line. */
+.gate-line { margin: 0; }
+.gate-code { color: var(--text-muted); font-weight: normal; }
+.gate-tag { display: inline-block; max-width: 100%; margin-left: 8px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 0.8rem; font-weight: normal; color: var(--text-muted); }
+.gate-reasons { margin: 6px 0 0; padding-left: 20px; }
+.gate-reasons .check-id { font-weight: 600; }
+
+/* One dense row per check: glyph, id, command (truncated; the full text is in the tooltip), offset, duration, exit. */
+.check-list { gap: 4px; }
+.check-list .check { padding: 4px 8px; }
+.check-list .check-head { flex-wrap: nowrap; justify-content: flex-start; gap: 8px; min-width: 0; font-size: 0.9rem; }
+.check-glyph { flex: none; width: 1em; text-align: center; font-weight: 700; }
+.check-passed .check-glyph { color: var(--node-location-stroke); }
+.check-failed .check-glyph, .check-rejected .check-glyph { color: var(--danger-text); }
+.check-id { flex: none; font-weight: 600; }
+.check-list .check-command { flex: 0 1 auto; margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-offset, .check-list .check-duration { flex: none; color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.check-list .check-exit { flex: none; }
+.check-list .artifact-text { margin-top: 4px; }
+.check-list .screenshot-grid { margin-top: 6px; }
+/* Rejected by the gate: red even at exit 0. */
+.check-rejected { border-left: 4px solid var(--danger-text); background: var(--danger-bg); }
+.check-rejected .check-exit { color: var(--danger-text); }
+.check-reasons { margin: 4px 0 0; padding-left: 28px; font-size: 0.85rem; color: var(--danger-text); }
+
+/* Screenshots: thumbnails at most 220 px wide, captioned; a click opens the full size in a dialog. */
+.screenshot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 220px)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+.screenshot-grid figure { margin: 0; min-width: 0; }
+.screenshot-grid figcaption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.8rem; color: var(--text-muted); }
+.screenshot-thumb { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 220px; }
+.screenshot-thumb img { max-width: 220px; max-height: 160px; }
+.screenshot-thumb:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.screenshot-dialog { max-width: 95vw; max-height: 95vh; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); }
+.screenshot-dialog::backdrop { background: rgb(0 0 0 / 0.6); }
+.screenshot-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.screenshot-dialog img { display: block; max-width: 100%; max-height: 85vh; }
+
+/* Closed sections (Artifacts, Requirements) carry their heading in the summary. */
+.closed-section > summary { cursor: pointer; }
+.closed-section > summary h4 { display: inline; }
+.identifiers { margin-top: 6px; font-size: 0.9rem; }
+.identifiers > summary { cursor: pointer; color: var(--text-muted); }
+.identifiers code { overflow-wrap: anywhere; }
+.identifiers-artifacts { margin: 4px 0 0; padding-left: 20px; font-size: 0.85rem; }
+
+/* The candidate's lane table: one summary row per lane, failing lanes first and open. */
+.lane-results { display: flex; flex-direction: column; }
+.lane-results-head, .lane-summary { display: grid; grid-template-columns: 1.2em minmax(7rem, 13rem) 5rem minmax(8rem, 12rem) minmax(0, 1fr) 7rem auto; gap: 8px; align-items: baseline; }
+.lane-results-head { padding: 0 8px 4px; border-bottom: 1px solid var(--border); font-size: 0.8rem; color: var(--text-muted); }
+.lane-result { margin: 0; padding: 0; border-bottom: 1px solid var(--border); }
+.lane-result-pending { padding: 6px 8px; }
+.lane-summary { padding: 6px 8px; cursor: pointer; list-style: none; font-size: 0.9rem; }
+.lane-summary::-webkit-details-marker { display: none; }
+.lane-summary:hover { background: var(--surface-alt); }
+.lane-toggle { color: var(--text-muted); }
+.lane-result[open] > .lane-summary .lane-toggle { display: inline-block; transform: rotate(90deg); }
+.lane-name { font-weight: 600; }
+/* Under a failing lane's row: which attempt of the cap it is, and a repair when it failed identically. */
+.lane-note { grid-column: 2 / -1; font-size: 0.85rem; color: var(--danger-text); }
+.lane-gate[data-passed='false'], .lane-result[data-passed='false'] .lane-reason { color: var(--danger-text); }
+.lane-gate[data-passed='true'] { color: var(--node-location-stroke); }
+.lane-reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-checks, .lane-screenshots { font-variant-numeric: tabular-nums; }
+.lane-links { white-space: nowrap; }
+.lane-result > .worker-evidence { padding: 0 8px 12px 28px; }
+.lane-result > .worker-report-link { padding: 4px 8px 0 28px; }
+
+@media (max-width: 760px) {
+  /* Rows wrap instead of scrolling the page: the command takes a line of its own, the lane table becomes cards. */
+  .check-list .check-head { flex-wrap: wrap; }
+  .check-list .check-command { flex-basis: 100%; order: 3; }
+  .lane-results-head { display: none; }
+  .lane-summary { display: flex; flex-wrap: wrap; gap: 4px 12px; min-height: 44px; }
+  .lane-reason, .lane-note { flex-basis: 100%; white-space: normal; }
+  .lane-result > .worker-evidence, .lane-result > .worker-report-link { padding-left: 8px; }
+  .screenshot-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+}
