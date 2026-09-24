@@ -8,7 +8,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ReviewFinding, RunInputWorker, WorkerResult } from '../../src/projects/api.ts'
-import { answerNext, fileRows, filterRows, folderOf, launchSectionEntries, repairMarks, reportDelta, waitingQuestions } from '../../src/projects/node/launch.ts'
+import { answerNext, fileRows, filterRows, folderOf, launchSectionEntries, repairBadge, repairFilterLabel, repairMarks, repairTitle, reportDelta, waitingQuestions } from '../../src/projects/node/launch.ts'
 
 const sha = (seed: string) => seed.repeat(64).slice(0, 64)
 const file = (path: string, seed = 'a') => ({ artifact_id: `file-${path}`, kind: 'file' as const, uri: `/artifacts/file-${path}`, sha256: sha(seed), path })
@@ -48,6 +48,17 @@ describe('repairMarks', () => {
   test('the freeze itself, or a missing freeze, marks nothing', () => {
     assert.equal(repairMarks(FROZEN, FROZEN, 'repair 1').size, 0)
     assert.equal(repairMarks(null, REPAIRED, 'repair 1').size, 0)
+  })
+})
+
+describe('repair wording', () => {
+  test('a recorded repair is named; without one the mark says only that the file changed after the freeze', () => {
+    assert.equal(repairBadge({ kind: 'changed', label: 'repair 1' }), '⚒ repair 1 · changed')
+    assert.equal(repairTitle({ kind: 'added', label: 'repair 1' }), "Added by the operator's repair 1 after the worker's freeze")
+    assert.equal(repairFilterLabel('repair 1'), 'Repair 1')
+    assert.equal(repairBadge({ kind: 'changed', label: '' }), '⚒ changed after the freeze')
+    assert.equal(repairTitle({ kind: 'added', label: '' }), "Added after the worker's freeze; no repair is recorded for it")
+    assert.equal(repairFilterLabel(''), 'After the freeze')
   })
 })
 
@@ -96,11 +107,19 @@ describe('the Questions section', () => {
   test('leads the index only while a question waits', () => {
     const waiting = worker([question(1, 'Keep it.'), question(2, null)])
     assert.equal(waitingQuestions(waiting), 1)
-    assert.deepEqual(launchSectionEntries(waiting, null).map(entry => entry.key), ['questions', 'report', 'task', 'session'])
+    assert.deepEqual(launchSectionEntries(waiting, null, null).map(entry => entry.key), ['questions', 'report', 'task', 'session'])
     const answered = worker([question(1, 'Keep it.')])
     assert.equal(waitingQuestions(answered), 0)
-    assert.deepEqual(launchSectionEntries(answered, REPAIRED).map(entry => entry.key), ['report', 'files', 'task', 'session'])
-    assert.equal(launchSectionEntries(answered, REPAIRED).find(entry => entry.key === 'files')?.count, 6)
+    assert.deepEqual(launchSectionEntries(answered, null, REPAIRED).map(entry => entry.key), ['report', 'files', 'task', 'session'])
+    assert.equal(launchSectionEntries(answered, null, REPAIRED).find(entry => entry.key === 'files')?.count, 6)
+  })
+  test('the Files chip counts the rows the list shows: the freeze plus what a repair added, or dropped from the later result', () => {
+    const answered = worker([question(1, 'Keep it.')])
+    const filesChip = (first: WorkerResult | null, latest: WorkerResult) => launchSectionEntries(answered, first, latest).find(entry => entry.key === 'files')?.count
+    assert.equal(filesChip(FROZEN, REPAIRED), fileRows(FROZEN, REPAIRED, null, 'repair 1').length)
+    assert.equal(filesChip(FROZEN, REPAIRED), 6)
+    const dropped = result(3, [file(CLAUDE), file(MATCH_ROOM)], { files_not_captured: [], changed_files: [CLAUDE, MATCH_ROOM] })
+    assert.equal(filesChip(FROZEN, dropped), 5)
   })
   test('both answer forms name the lane; --no-herdr is the second', () => {
     const next = answerNext('duel')

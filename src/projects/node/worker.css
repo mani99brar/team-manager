@@ -62,4 +62,8 @@ details.file-row[open] > summary .file-row-severity::before { content: '▾ '; }
   .file-row-meta { grid-column: 2; white-space: normal; flex-wrap: wrap; }
   .file-row-body { padding-left: 4px; }
   .file-finding { flex-wrap: wrap; }
+  /* Rows, filters and the controls inside an opened row are tap targets of at least 44 px (section 10). */
+  .file-row-summary, .launch-files-tools .button, .launch-files-group, .file-row-body .button, .report-disclosure > summary,
+  .worker-session > summary, .task-details > summary { min-height: 44px; }
+  .report-disclosure > summary, .worker-session > summary, .task-details > summary { box-sizing: border-box; padding-block: 10px; }
 }

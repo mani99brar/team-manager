@@ -8,7 +8,7 @@ import type { NextStep } from '../../../contracts/projects/triage.ts'
 import type { ReviewFinding, RunInputWorker, WorkerResult } from '../api.ts'
 import type { CapturedFile, NotCapturedFile } from '../files.ts'
 import { findingsForFile } from '../findings.ts'
-import { filesCount, type SectionEntry } from './model.ts'
+import type { SectionEntry } from './model.ts'
 
 /** How the latest result differs from the freeze for one path, and the repair it is credited to ("repair 1"). */
 export type RepairMark = { kind: 'changed' | 'added'; label: string }
@@ -95,6 +95,21 @@ export function fileRows(first: WorkerResult | null, latest: WorkerResult, findi
   return rows.map((row, index) => ({ row, index })).sort((a, b) => group(a.row) - group(b.row) || a.index - b.index).map(entry => entry.row)
 }
 
+/** The row's mark: `⚒ repair 1 · changed`; without a recorded repair, only that the file changed after the freeze. */
+export function repairBadge(mark: RepairMark): string {
+  return mark.label ? `⚒ ${mark.label} · ${mark.kind}` : `⚒ ${mark.kind} after the freeze`
+}
+
+export function repairTitle(mark: RepairMark): string {
+  const kind = mark.kind === 'added' ? 'Added' : 'Changed'
+  return mark.label ? `${kind} by the operator's ${mark.label} after the worker's freeze` : `${kind} after the worker's freeze; no repair is recorded for it`
+}
+
+/** The filter's name for the files a repair touched: "Repair 1", or "After the freeze" when no repair is recorded. */
+export function repairFilterLabel(label: string): string {
+  return label ? `${label.charAt(0).toUpperCase()}${label.slice(1)}` : 'After the freeze'
+}
+
 export function filterRows(rows: readonly FileRow[], filter: FileFilter): FileRow[] {
   if (filter === 'findings') return rows.filter(row => row.findings.length > 0)
   if (filter === 'repair') return rows.filter(row => row.repair !== null)
@@ -118,9 +133,14 @@ export function waitingQuestions(worker: RunInputWorker | null): number {
   return worker === null ? 0 : worker.questions.filter(question => question.answer === null).length
 }
 
+/** How many rows Files lists (4.5 "Files 75"): the freeze's paths plus those only the latest result lists. */
+export function launchFilesCount(frozen: WorkerResult | null, latest: WorkerResult): number {
+  return fileRows(frozen, latest, null, '').length
+}
+
 /** The index entries of a launch node's sections, in page order; empty ones are absent. */
-export function launchSectionEntries(worker: RunInputWorker | null, result: WorkerResult | null): SectionEntry[] {
-  const files = result === null ? 0 : filesCount(result)
+export function launchSectionEntries(worker: RunInputWorker | null, frozen: WorkerResult | null, result: WorkerResult | null): SectionEntry[] {
+  const files = result === null ? 0 : launchFilesCount(frozen, result)
   return [
     ...(waitingQuestions(worker) > 0 ? [{ key: 'questions', label: 'Questions', count: worker!.questions.length }] : []),
     ...(worker !== null || result !== null ? [{ key: 'report', label: 'Report' }] : []),
@@ -130,7 +150,9 @@ export function launchSectionEntries(worker: RunInputWorker | null, result: Work
 }
 
 /**
- * The two ways to answer a waiting question (4.5; guardrails.py:996-1001, RUNBOOK:56), worded as the Now banner words them:
+ * The two ways to answer a waiting question (4.5; guardrails.py:996-1001, RUNBOOK:56), worded as the Now banner words them.
+ * The page uses the banner's own step when the Now situation is this lane's question; this copy serves a second lane whose
+ * question waits behind it, until `triage.ts` (S2/S3 only) exports its builder:
  * inside Herdr the answer is typed into the lane's pane; from any other shell `--no-herdr` records it and prints the session
  * to type it into.
  */
@@ -145,4 +167,5 @@ export function answerNext(lane: string): NextStep {
     caveat: 'Outside Herdr the first form records the answer and restarts the deadline, then exits 1: the worker has not received it.',
   }
 }
+
 

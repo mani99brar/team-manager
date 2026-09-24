@@ -163,7 +163,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
   // The section index: what the kind lists, only when it lists something, then reuse (only with reuse events) and History.
   const sections: SectionEntry[] = [
-    ...(isWorker ? launchSectionEntries(worker, resultData) : []),
+    ...(isWorker ? launchSectionEntries(worker, frozen, resultData) : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
     ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
@@ -224,6 +224,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             frozenCommit={frozenCommit}
             repairNote={repairNote}
             repairLabel={repairLabel}
+            answer={answered ? now.next : null}
             inputs={inputs}
             onRetryInputs={onRetryInputs}
             worker={worker}

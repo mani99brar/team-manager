@@ -1,12 +1,12 @@
 import { useState, type ReactNode } from 'react'
+import type { NextStep } from '../../../contracts/projects/triage.ts'
 import type { RunDetail, RunInputs, RunInputWorker, RunScope, WorkerResult } from '../api.ts'
 import { CreatedFiles } from '../CreatedFiles.tsx'
 import { AppLink, ErrorPanel, LoadingPanel } from '../panels.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
 import type { Resource } from '../useResource.ts'
 import { LaunchReceipt, ResultReport, StopLine, TaskPanel, WorkerQuestions, WorkerReport } from '../WorkerInputs.tsx'
-import { answerNext, waitingQuestions } from './launch.ts'
-import { filesCount } from './model.ts'
+import { answerNext, launchFilesCount, waitingQuestions } from './launch.ts'
 import type { CheckTarget } from './Requirements.tsx'
 import { ResultError, ResultFacts } from './ResultFacts.tsx'
 import './worker.css'
@@ -93,6 +93,8 @@ type Props = {
   repairNote: string
   /** The repair a changed file is credited to ("repair 1"); empty when none is recorded. */
   repairLabel: string
+  /** The Now banner's next step when it is this lane's waiting question, so both say the same; null otherwise. */
+  answer: NextStep | null
   inputs: Resource<RunInputs | null>
   onRetryInputs: () => void
   worker: RunInputWorker | null
@@ -110,15 +112,15 @@ type Props = {
  * worker's report, said once; the files it froze at handoff as dense rows; the task, and the session behind closed
  * disclosures.
  */
-export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied }: Props) {
+export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, answer, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied }: Props) {
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
-  const files = result.status === 'ready' ? filesCount(result.data) : 0
+  const files = result.status === 'ready' ? launchFilesCount(frozen, result.data) : 0
   const lane = worker?.node_id ?? null
   return (
     <>
       {worker !== null && waitingQuestions(worker) > 0 && (
         <NodeSection sectionKey="questions" labelledBy="worker-questions-title" className="worker-questions-section">
-          <WorkerQuestions questions={worker.questions} answer={answerNext(lane!)} />
+          <WorkerQuestions questions={worker.questions} answer={answer ?? answerNext(lane!)} />
         </NodeSection>
       )}
 
@@ -127,7 +129,7 @@ export function WorkerSections({ scope, renderResult, result, role, checksNode, 
         {renderResult(data => (
           <div className="worker-evidence" data-testid="worker-result" data-view="produced">
             {!role.facts && checksNode !== null && <VerifiedLine result={data} checksNode={checksNode} frozenCommit={frozenCommit} repairNote={repairNote} onNavigate={onNavigate} />}
-            {worker === null && role.narrative && <ResultReport result={data} />}
+            {(worker === null || worker.completion === null) && role.narrative && <ResultReport result={data} />}
             {role.facts && <>{worker === null && <ResultFacts result={data} />}<ResultError result={data} /></>}
           </div>
         ))}

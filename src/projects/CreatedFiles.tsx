@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
-import { fetchArtifactText, paths, type ReviewFinding, type RunDetail, type RunScope, type WorkerResult } from './api.ts'
+import { fetchArtifactText, fetchReviewResult, NOT_RECORDED, orNotRecorded, paths, type ReviewFinding, type RunDetail, type RunScope, type WorkerResult } from './api.ts'
 import { fileAnchorId, NOT_CAPTURED_WORDING } from './files.ts'
 import { linesNamed } from './findings.ts'
-import { fileRows, filterRows, folderOf, type FileFilter, type FileRow } from './node/launch.ts'
+import { fileRows, filterRows, folderOf, repairBadge, repairFilterLabel, repairTitle, type FileFilter, type FileRow } from './node/launch.ts'
 import { ErrorPanel, LoadingPanel } from './panels.tsx'
 import { keepInView } from './scroll.ts'
 import { useResource, type Resource } from './useResource.ts'
@@ -31,11 +31,13 @@ type Props = {
 /** From this many rows on, the list can be grouped by folder. */
 const GROUP_MIN = 10
 
-/** The review a finding list comes from, the same way the review node finds it; null when none is recorded. */
-function reviewUriOf(scope: RunScope, node: SnapshotNode | null): string | null {
-  if (node === null) return null
-  if (node.result_uri !== null) return node.result_uri
-  return node.status === 'pending' ? null : paths.review(scope, Math.max(node.attempt, 1))
+/**
+ * Where the review is recorded before the snapshot links it: an older export has no link, so the review node's first attempt
+ * is asked for once the node ran, the way the review node finds it. Null when the node links its review, or has not run.
+ */
+function guessedReviewPath(scope: RunScope, node: SnapshotNode | null): string | null {
+  if (node === null || node.result_uri !== null || node.status === 'pending') return null
+  return paths.review(scope, Math.max(node.attempt, 1))
 }
 
 function rangeText([from, to]: Range): string {
@@ -98,9 +100,7 @@ function RowMarks({ row }: { row: FileRow }) {
   return (
     <span className="file-row-meta">
       {row.repair && (
-        <span className="file-repair" title={`${row.repair.kind === 'added' ? 'Added' : 'Changed'} by the operator's ${row.repair.label} after the worker's freeze`}>
-          ⚒ {row.repair.label} · {row.repair.kind}
-        </span>
+        <span className="file-repair" title={repairTitle(row.repair)}>{repairBadge(row.repair)}</span>
       )}
       {hint && <span>{hint}</span>}
       {row.markdown && <span>Markdown</span>}
@@ -159,7 +159,7 @@ function CapturedFileRow({ scope, row, findings, focused }: { scope: RunScope; r
       {open && (
         <div className="file-row-body">
           <div className="file-row-facts">
-            <span className="projects-muted">sha256 <code title={file.sha256}>{file.sha256.slice(0, 12)}…</code>{row.repair && ` · as after ${row.repair.label}`}</span>
+            <span className="projects-muted">sha256 <code title={file.sha256}>{file.sha256.slice(0, 12)}…</code>{row.repair && ` · as ${row.repair.label ? `after ${row.repair.label}` : 'changed after the freeze'}`}</span>
             {row.markdown && (
               <span role="group" aria-label={`View of ${row.path}`} className="task-toggle">
                 <button type="button" className="button button-small" aria-pressed={view === 'rendered'} onClick={() => setView('rendered')}>Rendered</button>
@@ -211,12 +211,17 @@ function FileRowItem({ scope, row, findings, focused }: { scope: RunScope; row: 
 export function CreatedFiles({ scope, result, frozen, repairLabel, reviewNode, refreshToken, focusPath, onFocusApplied }: Props) {
   const listed = frozen ?? result
   const recorded = listed.files_not_captured !== undefined || listed.artifacts.some(artifact => artifact.kind === 'file')
-  const repair = repairLabel || 'a repair'
-  // Read through the run's cache; a review that was not there yet is asked again once the review node moves on, or on Refresh.
-  const review = useRunReview(scope, recorded ? reviewUriOf(scope, reviewNode) : null, `${refreshToken}:${reviewNode?.status}:${reviewNode?.attempt}`)
+  // A linked review is immutable: read once through the run's cache. A guessed path is not linked yet and may not exist, so
+  // it is read outside that cache and asked again when the review node moves on or on Refresh; a 404 there reads as none.
+  const linked = recorded ? reviewNode?.result_uri ?? null : null
+  const guessed = recorded ? guessedReviewPath(scope, reviewNode) : null
+  const cached = useRunReview(scope, linked, String(refreshToken))
+  const loadGuessed = useCallback((signal: AbortSignal) => orNotRecorded(fetchReviewResult(scope, guessed!, signal), NOT_RECORDED.review), [scope, guessed])
+  const { state: fallback } = useResource(guessed === null ? null : `${guessed}|${reviewNode?.status}:${reviewNode?.attempt}`, loadGuessed, refreshToken)
+  const review = linked !== null ? cached : fallback
   const findings: Resource<ReviewFinding[] | null> = review.status === 'ready' ? { status: 'ready', data: review.data?.findings ?? null } : review
   const findingList = findings.status === 'ready' ? findings.data : null
-  const rows = useMemo(() => fileRows(frozen, result, findingList, repair), [frozen, result, findingList, repair])
+  const rows = useMemo(() => fileRows(frozen, result, findingList, repairLabel), [frozen, result, findingList, repairLabel])
   const withFindings = rows.filter(row => row.findings.length > 0).length
   const repaired = rows.filter(row => row.repair !== null).length
   const [filter, setFilter] = useState<FileFilter>('all')
@@ -231,7 +236,7 @@ export function CreatedFiles({ scope, result, frozen, repairLabel, reviewNode, r
 
   const filters: { key: FileFilter; label: string; count: number }[] = [
     ...(withFindings > 0 ? [{ key: 'findings' as const, label: 'With findings', count: withFindings }] : []),
-    ...(repaired > 0 ? [{ key: 'repair' as const, label: `${repair.charAt(0).toUpperCase()}${repair.slice(1)} ·`, count: repaired }] : []),
+    ...(repaired > 0 ? [{ key: 'repair' as const, label: `${repairFilterLabel(repairLabel)}${repairLabel ? ' ·' : ''}`, count: repaired }] : []),
   ]
   const item = (row: FileRow) => <FileRowItem key={row.path} scope={scope} row={row} findings={findings} focused={focus === row.path} />
   return (
@@ -241,7 +246,7 @@ export function CreatedFiles({ scope, result, frozen, repairLabel, reviewNode, r
         <span className="projects-muted" data-testid="files-summary">
           {plural(rows.length, 'file')} {frozen ? 'frozen at handoff' : 'in the result'}
           {withFindings > 0 && ` · ${withFindings} with findings`}
-          {repaired > 0 && ` · ${repaired} by ${repair}`}
+          {repaired > 0 && ` · ${repaired} ${repairLabel ? `by ${repairLabel}` : 'changed after the freeze'}`}
         </span>
       </div>
       {rows.length === 0 ? (

@@ -46,7 +46,7 @@ The list comes from the worker's own freeze, `results/<lane>/1` (the verify node
 
 **Task** stays closed (`task-details`), and the finding → requirement flow still opens it.
 
-**New pure module** `src/projects/node/launch.ts`: `repairMarks`, `fileRows`, `filterRows`, `folderOf`, `reportDelta`, `waitingQuestions`, `launchSectionEntries` (replaces `model.ts`'s `workerSectionEntries` in NodeDetail; the old function is left unused for whoever owns `model.ts`), and `answerNext`.
+**New pure module** `src/projects/node/launch.ts`: `repairMarks`, `fileRows`, `filterRows`, `folderOf`, `reportDelta`, `waitingQuestions`, `launchSectionEntries` (replaces `model.ts`'s `workerSectionEntries`, removed in the review fixes with the then-unused `filesCount`), `launchFilesCount`, the repair wording helpers, and `answerNext`.
 
 **Page height**: the launch page of `launch-repaired` (42 files, 3 with findings, 2 touched by repair 1) is **2,248 px** at 1440×900, full page: `scratchpad/ux/after/s4b-launch-files-1440.png`. The question page is 1,382 px: `s4b-launch-question-1440.png`. Before this slice the live 77-file page was about 19,800 px.
 
@@ -103,10 +103,10 @@ Those 11 spec files are the whole project-workflows suite. The candidate phase w
    - `NodeDetail.tsx`: launch entries only; it passes `frozen` and `repairLabel`, uses `launchSectionEntries`, and drops the header's repeated answer commands
    - `model.ts`, `ResultFacts.tsx`, `triage.ts` and `CommandBlock.tsx` are imported, not edited. `WorkerNarrative` in `ResultFacts.tsx` is no longer used by the launch node; S4a owns that file.
 2. **Section order** follows 4.5, not the S4-core order that `output-first` pinned (migration above).
-3. **Index chip detail.** The Files chip shows only the count, not "· 3 with findings · +3 repair". NodeDetail does not read the review, so the detail line sits on the Files heading instead (`files-summary`).
+3. **Index chip detail.** The Files chip shows only the count, not "· 3 with findings · +3 repair". NodeDetail does not read the review, and `SectionEntry`/`SectionIndex` carry no detail text, so the detail line sits on the Files heading instead (`files-summary`). Since the review fixes the count is the list's own (the freeze plus the repair-added paths).
 4. **Findings inside a row stay in review order**, which `findings-on-files` pins. The row's severity is the most severe one.
 5. **Show-lines button text.** The button keeps "Show line 3" / "Show lines 12–14" rather than the PRD's bare "[Show lines]", because clarity pins the text.
-6. **`answerNext` duplicates the strings of `triage.ts`'s `questionNow`**, which is not exported and not in this slice's files. Follow-up: export one builder from `triage.ts`.
+6. **`answerNext` duplicates the strings of `triage.ts`'s `questionNow`**, which is not exported; section 11 lets only S2 and S3 edit `triage.ts`. Since the review fixes the Questions section uses the Now banner's own step when the Now situation is this lane's question; `answerNext` only serves a second lane whose question waits behind it. Follow-up: export one builder from `triage.ts`.
 7. **The worker-header "Working 12m · deadline …" line (end of 4.5) is not done.** `NodeHeader.tsx` is not in this slice.
 8. **`npx tsc -b` reports pre-existing errors** in 13 test files this slice did not touch: `tests/document*.spec.ts`, `graph.spec.ts`, `helpers.ts`, `clarity`, `inputs`, `lanes`, `reviewers`, `ux-run`. The message is "Property 'getAttribute' does not exist on type 'SVGElement'" in Playwright `evaluate` callbacks. This looks like a DOM typing change in the shared `node_modules`. No error is in a file or line this slice wrote.
 9. **The asking fixture is dated 2026-03-04**, so its "running 4905h26m" reads against the real clock, as in the other synthetic running fixtures.
@@ -116,4 +116,41 @@ Those 11 spec files are the whole project-workflows suite. The candidate phase w
 - Export the question next-step builder from `triage.ts` and use it in `answerNext`.
 - The worker header's working and deadline line (4.5), in `NodeHeader`.
 - S7: A/M/D marks and per-file diff hunks from `review.diff` on the file rows.
-- Remove `workerSectionEntries` (`model.ts`) and `WorkerNarrative` (`ResultFacts.tsx`) once their owners agree; both are unused now.
+- Remove `WorkerNarrative` (`ResultFacts.tsx`, owned by S4a); it is unused now.
+- The Files chip detail (`· 3 with findings · +2 repair`, 4.5): needs a `detail` on `SectionEntry`/`SectionIndex` (S4-core files) and the review read in NodeDetail; best done after S4a merges.
+- 4.4 says `node-next` repeats the Now banner's next step. On a launch node whose question waits, it does not: the Questions section shows the same step (the S4b brief asked for this). Worth a line in the PRD.
+
+## 7. Review fixes (second commit)
+
+An independent review of the first commit found these; each was verified first.
+
+| Item | Outcome |
+|---|---|
+| P1 review cache poisoned by a guessed `reviews/<n>` URL | Fixed. The launch Files section read the guessed path (review node not linked yet) through the shared, never-expiring review cache; the 404 became a `ready` null for good, also for the run page's Now banner. Now only the snapshot's linked `result_uri` goes through `useRunReview`; a guessed path is read with `useResource`, keyed on the review node's status and attempt, as before the slice. |
+| P3 result summary missing when the inputs record no completion | Fixed. `ResultReport` (the result's summary and assumptions) also shows when the worker's `completion` is null. |
+| P3 Files chip counted the latest result | Fixed. `launchFilesCount(frozen, latest)` counts the list's rows; the chip, the Files section and the heading agree. |
+| P3 "a repair" fallback | Fixed. Without a repair marker a row reads `⚒ changed after the freeze`, the filter `After the freeze n`, the tooltip "Changed after the worker's freeze; no repair is recorded for it". |
+| P3 dead code and duplicated answer step | `workerSectionEntries` and `filesCount` removed from `model.ts`; the Questions section uses the Now banner's step for this lane. Deferred: `WorkerNarrative` (S4a's `ResultFacts.tsx`) and the `triage.ts` export (S2/S3 only). |
+| gap: worker header "Working 12m · deadline …" | Deferred: `NodeHeader.tsx` is S4-core's, outside S4b. |
+| gap: Files chip detail | Count fixed; the detail is deferred (follow-ups). |
+| gap: 44 px tap targets at ≤760 px | Fixed in `worker.css`: file rows, filters, the group toggle, the controls inside an opened row and the Report/Task/Session summaries. |
+| gap: `node-next` suppressed on a question | Not a defect: intended by the brief; noted in the follow-ups for the PRD. |
+| gap: question header and RUNBOOK line not asserted | Fixed. A waiting question reads `Question 2 of 3 · asked at 09:40 (… ago) · Waiting on the operator · deadline paused`; the scenario asserts that and `RUNBOOK “Worker questions”`. |
+
+**Red** (tests first, against the first commit, with skeleton exports `repairBadge`/`repairTitle`/`repairFilterLabel` returning the old wording and `launchSectionEntries` taking the freeze but ignoring it):
+- `npx tsx --test tests/unit/launch.test.ts`: 13 tests, 2 failed: `'⚒ a repair · changed'` vs `'⚒ changed after the freeze'`; the Files chip `2` vs `5` when the later result drops paths.
+- `npx playwright test -c tests/project-workflows/playwright.config.ts ux-launch.spec.ts`: 4 failed:
+  ```
+  files-dense (390 px):       summary height   Expected: >= 44   Received: 30
+  launch-review-late:         rows.first() data-path   Expected: "src/game/room.ts"   Received: "vitest.config.ts"   (the 404 stays cached)
+  launch-report-no-signal:    worker-summary containing the result's summary   element(s) not found
+  launch-question-first:      Expected substring: "Question 2 of 3"   Received: "Question 2 asked at 09:40 · Waiting on the operator…"
+  ```
+
+**Green**:
+- unit `tests/unit/*.test.ts` 165 passed; `server/projects.test.ts` 52 passed
+- `npx tsc -b`: no error in `src/` or in the files changed here (the pre-existing test-file errors of section 5 remain)
+- `npx eslint` on every changed file: clean
+- Playwright `clarity`, `inputs`, `lanes`, `guardrails`, `ux-node`, `ux-launch`: 25 passed in the worker phase and 25 passed in the candidate phase
+
+Files outside the S4b list touched by the fixes: `src/projects/node/model.ts` (dead code removed only).

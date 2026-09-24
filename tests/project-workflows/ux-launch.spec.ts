@@ -9,7 +9,8 @@ import {
   LAUNCH_ADDED_PATH, LAUNCH_FINDING_PATHS, LAUNCH_FROZEN_PATHS, LAUNCH_QUESTIONS, LAUNCH_README_PATH, LAUNCH_REPAIRED_PATH, LAUNCH_ROOM_PATH,
   LAUNCH_SUMMARY, REPAIR_SUMMARY_NOTE, RUN_LAUNCH_ASKING, RUN_LAUNCH_REPAIRED, UX_LAUNCH_WORKFLOW_ID,
 } from './fixtures/ux-launch.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl } from './support.ts'
+import { runDetails, runInputs } from './fixtures.ts'
+import { apiRun, attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl } from './support.ts'
 
 installHooks()
 
@@ -77,7 +78,56 @@ test(`[scenario:files-dense] The files are dense rows from the worker's freeze, 
   await expect(room.getByTestId('file-findings').getByTestId('file-finding')).toHaveCount(1)
   await expect(room.getByTestId('file-finding')).toContainText('P1')
   await expect(room.getByTestId('show-lines')).toHaveText('Show lines 44–50')
+
+  // At phone width a row and a filter are tap targets of at least 44 px (section 10).
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect((await row(page, LAUNCH_ADDED_PATH).locator('summary').boundingBox())?.height).toBeGreaterThanOrEqual(44)
+  expect((await filter(page, /^All/).boundingBox())?.height).toBeGreaterThanOrEqual(44)
   await expectNoExecutionControls(page)
+})
+
+test(`[scenario:launch-review-late] A review recorded while the launch page is open reaches its files without a reload (${phase})`, async ({ page }) => {
+  // The review is still running when the page opens: its snapshot links nothing and reviews/1 answers 404.
+  const runPath = apiRun(RUN_LAUNCH_REPAIRED, UX_LAUNCH_WORKFLOW_ID)
+  const running = structuredClone(runDetails[RUN_LAUNCH_REPAIRED])
+  const reviewState = running.snapshot.nodes.find(node => node.node_id === 'review')!
+  reviewState.status = 'running'
+  reviewState.result_uri = null
+  let recorded = false
+  let missing = 0
+  await page.route(url => url.pathname === runPath, async route => {
+    if (recorded) return route.fallback()
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(running) })
+  })
+  await page.route(url => url.pathname === `${runPath}/reviews/1`, async route => {
+    if (recorded) return route.fallback()
+    missing += 1
+    await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: { code: 'REVIEW_NOT_FOUND', message: 'No review is recorded for that attempt.' } }) })
+  })
+  await page.goto(launchUrl(RUN_LAUNCH_REPAIRED))
+  await expect(rows(page)).toHaveCount(ALL_PATHS.length)
+  await expect.poll(() => missing).toBeGreaterThan(0)
+  await expect(page.getByTestId('file-filters').getByRole('button', { name: /^With findings/ })).toHaveCount(0)
+
+  // The review finishes; the next poll links it, and its findings sort their files first.
+  recorded = true
+  await expect(rows(page).first()).toHaveAttribute('data-path', LAUNCH_ROOM_PATH, { timeout: 15_000 })
+  await expect(filter(page, /^With findings/)).toHaveText('With findings 3')
+})
+
+test(`[scenario:launch-report-no-signal] Without a completion signal the launch node still shows the result's own summary and assumptions (${phase})`, async ({ page }) => {
+  const inputsPath = `${apiRun(RUN_LAUNCH_REPAIRED, UX_LAUNCH_WORKFLOW_ID)}/inputs`
+  const inputs = structuredClone(runInputs[RUN_LAUNCH_REPAIRED])
+  for (const worker of inputs.workers) {
+    worker.completion = null
+    worker.handoff = null
+  }
+  await page.route(url => url.pathname === inputsPath, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(inputs) }))
+  await page.goto(launchUrl(RUN_LAUNCH_REPAIRED))
+  const report = nodeDetail(page).locator('section[data-section="report"]')
+  await expect(report).toContainText('No completion signal recorded.')
+  await expect(report.getByTestId('worker-summary')).toContainText(REPAIR_SUMMARY_NOTE)
+  await expect(report.getByTestId('assumptions-details')).toBeVisible()
 })
 
 test(`[scenario:launch-question-first] While a question waits, the Questions section comes first with both answer forms; a running worker's Session shows its state at launch (${phase})`, async ({ page }, testInfo) => {
@@ -96,6 +146,11 @@ test(`[scenario:launch-question-first] While a question waits, the Questions sec
     '"$PY" -m workflow answer "$RUN" ui "<your answer>" --no-herdr',
   ])
   await expect(questions).toContainText('Outside Herdr the first form records the answer')
+  await expect(questions).toContainText('RUNBOOK “Worker questions”')
+  // The waiting question's own line: its place among the three a worker may ask, and the paused deadline.
+  const waitingQuestion = questions.locator('[data-testid="worker-question"][data-answered="false"]')
+  await expect(waitingQuestion).toContainText('Question 2 of 3')
+  await expect(waitingQuestion).toContainText('deadline paused')
   await expect(questions.getByTestId('copy-command')).toHaveText(['Copy', 'Copy'])
 
   // The commands are said once on the page: not repeated in the header's next step.

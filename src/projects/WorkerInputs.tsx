@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
-import type { NextStep } from '../../contracts/projects/triage.ts'
+import { MAX_QUESTIONS, type NextStep } from '../../contracts/projects/triage.ts'
 import type { RunInputWorker, WorkerResult } from './api.ts'
 import { CommandBlock } from './CommandBlock.tsx'
 import { reportDelta } from './node/launch.ts'
@@ -8,6 +8,8 @@ import { OwnedPaths, RequiredChecks, type CheckTarget } from './node/Requirement
 import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
 import { Time } from './Time.tsx'
+import { formatAgo } from './time.ts'
+import { useNow } from './useNow.ts'
 import type { Resource } from './useResource.ts'
 
 type TaskProps = {
@@ -280,6 +282,7 @@ function CompletionEvidence({ completion, worker, result, checksNode, onNavigate
  */
 export function WorkerQuestions({ questions, answer = null }: { questions: RunInputWorker['questions']; answer?: NextStep | null }) {
   const waiting = questions.filter(question => question.answer === null).length
+  const now = useNow(waiting > 0, 30_000)
   return (
     <section className={`evidence-section${waiting > 0 ? ' worker-questions-open' : ''}`} aria-labelledby="worker-questions-title" data-testid="worker-questions">
       <h4 id="worker-questions-title">Questions to the operator</h4>
@@ -298,8 +301,9 @@ export function WorkerQuestions({ questions, answer = null }: { questions: RunIn
               return (
                 <li key={question.n} data-testid="worker-question" data-question={question.n} data-answered={answered ? 'true' : 'false'}>
                   <p>
-                    <strong>Question {question.n}</strong> <span className="projects-muted">asked at <Time iso={question.asked_at} /></span>
-                    {!answered && <> · <span className="status-badge status-awaiting_approval" data-testid="question-waiting"><span>Waiting on the operator</span></span></>}
+                    <strong>Question {question.n}{answered ? '' : ` of ${MAX_QUESTIONS}`}</strong>{' '}
+                    <span className="projects-muted">asked at <Time iso={question.asked_at} />{!answered && ` (${formatAgo(question.asked_at, now)})`}</span>
+                    {!answered && <> · <span className="status-badge status-awaiting_approval" data-testid="question-waiting"><span>Waiting on the operator</span></span> · <span className="projects-muted">deadline paused</span></>}
                   </p>
                   <p className="worker-question-text">{question.question}</p>
                   {answered && (
