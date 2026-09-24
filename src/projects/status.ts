@@ -43,6 +43,31 @@ export const RUN_STATUS_MEANING: Record<RunStatus, string> = {
   cancelled: 'The run was cancelled before completion.',
 }
 
+/**
+ * A run's status in a few words, beside its badge in the run header and the node pages' run bar (section 8). The cause and
+ * the next step are the Now banner's; a paused run is never called failed.
+ */
+export const RUN_STATUS_SHORT: Record<RunStatus, string> = {
+  pending: 'not started',
+  running: 'in progress, not complete',
+  awaiting_approval: 'waits on you, not complete',
+  paused: 'stopped, not complete',
+  succeeded: 'integrated, complete',
+  failed: 'did not complete',
+  cancelled: 'cancelled before completion',
+}
+
+/** The exporter's generic definition name (workflow/export_state.py), which every workflow registered by a launch carries. */
+export const GENERIC_WORKFLOW_NAME = 'Feature implementation'
+
+/**
+ * A workflow's title in crumbs, headings and cards (section 4.1, rules 2 and 3; rule 1, the latest run's feature, needs the
+ * served `activity.feature`): its id when its name is the exporter's generic one, else its name.
+ */
+export function workflowTitle(workflow: { workflow_id: string; name: string }): string {
+  return workflow.name === GENERIC_WORKFLOW_NAME ? workflow.workflow_id : workflow.name
+}
+
 /** What a node in this status means, given its kind. */
 export function nodeStatusMeaning(kind: NodeKind, status: RunStatus): string {
   switch (status) {

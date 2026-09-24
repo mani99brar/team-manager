@@ -15,7 +15,7 @@ import {
   sha256,
   uiPathQuote,
 } from './fixtures.ts'
-import { apiRun, attach, expectNoExecutionControls, fetchFromPage, graphNode, installHooks, nodeDetail, phase, renderedText, runUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, fetchFromPage, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
 
 installHooks()
 
@@ -101,9 +101,10 @@ test(`[scenario:review-blocked] A blocked review shows the verdict, the failed n
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(nodeDetail(page).locator('.status-badge').first()).toHaveText('Failed')
   await expect(page.getByTestId('node-status-meaning')).toContainText('This step failed')
-  await expect(graphNode(page, 'review')).toHaveAttribute('data-status', 'failed')
-  await expect(graphNode(page, 'approval')).toHaveAttribute('data-status', 'pending')
-  await expect(graphNode(page, 'integrate')).toHaveAttribute('data-status', 'pending')
+  // A node page shows the step strip, not the graph (PRD_VIEWER_UX 4.4): the strip carries each step's status.
+  await expect(nodeListItem(page, 'review')).toHaveAttribute('data-status', 'failed')
+  await expect(nodeListItem(page, 'approval')).toHaveAttribute('data-status', 'pending')
+  await expect(nodeListItem(page, 'integrate')).toHaveAttribute('data-status', 'pending')
 
   const verdict = page.getByTestId('review-verdict')
   await expect(verdict).toHaveText('Blocked')

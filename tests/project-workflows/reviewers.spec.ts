@@ -23,7 +23,7 @@ import {
   reviewFindings,
   reviewerFindings,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, phase, renderedText, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -132,8 +132,9 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
   // ---- One reviewer blocked while the other was superseded: the headline says which, and the strip shows both outcomes. ----
   await page.goto(reviewersRunUrl(RUN_REVIEWER_BLOCKED, 'review'))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'failed')
-  await expect(graphNode(page, 'review')).toHaveAttribute('data-status', 'failed')
-  await expect(graphNode(page, 'approval')).toHaveAttribute('data-status', 'pending')
+  // A node page shows the step strip, not the graph (PRD_VIEWER_UX 4.4): the strip carries each step's status.
+  await expect(nodeListItem(page, 'review')).toHaveAttribute('data-status', 'failed')
+  await expect(nodeListItem(page, 'approval')).toHaveAttribute('data-status', 'pending')
   await expect(reviewPanel(page)).toHaveAttribute('data-reviewer-count', '2')
   await expect(page.getByTestId('review-verdict')).toHaveText('Blocked')
   const blockedBy = page.getByTestId('review-blocked-by')

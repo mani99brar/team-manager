@@ -244,11 +244,16 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'legacy-run')
 
-  // The 1.0.0 export without sections still renders its graph and says what is not recorded, without an error.
-  await page.goto(runUrl(RUN_LEGACY, 'review'))
+  // The 1.0.0 export without sections still renders its graph and says what is not recorded, without an error. The run
+  // page's header says the inputs are not recorded; a node page shows the step strip instead of the graph (PRD_VIEWER_UX 4.4).
+  await page.goto(runUrl(RUN_LEGACY))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
   await expect(graphNodes(page)).toHaveCount(GRAPH_NODES.length)
   await expect(page.getByTestId('inputs-none')).toBeVisible()
+  await page.goto(runUrl(RUN_LEGACY, 'review'))
+  await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
+  await expect(nodeListItem(page, 'review')).toHaveAttribute('data-status', 'succeeded')
+  await expect(page.locator('[data-testid="run-node-list"] [data-node-id]')).toHaveCount(GRAPH_NODES.length)
   await expect(page.getByTestId('review-none')).toBeVisible()
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
 })

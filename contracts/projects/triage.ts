@@ -1370,7 +1370,9 @@ function checkFailedNow(context: Context): Draft | null {
 function reviewBlockedNow(context: Context): Draft | null {
   const review = context.run.review
   if (review?.verdict !== 'blocked') return null
-  const reviewers = review.reviewers.map(entry => {
+  // The cause first: the reviewers that blocked, then the others in their declared order.
+  const ordered = [...review.reviewers].sort((a, b) => Number(b.status === 'blocked') - Number(a.status === 'blocked'))
+  const reviewers = ordered.map(entry => {
     if (entry.status === 'superseded') return `${entry.reviewer_id} was superseded (no verdict)`
     if (entry.status === 'pending') return `${entry.reviewer_id} gave no verdict`
     const blocking = entry.findings.filter(isBlockingFinding)

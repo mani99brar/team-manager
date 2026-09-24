@@ -426,6 +426,14 @@ describe('deriveNow', () => {
     for (const invented of ['skeleton', 'Pirate', 'skeleton-001', '<run id>']) assert.ok(!everything.includes(invented), `no concrete ${invented}`)
   })
 
+  it('review_blocked: the reviewer that blocked is named first, whatever the declared order (S3)', () => {
+    // A feature can declare the superseded reviewer first (reviewers-flow: general, then coverage, which blocked).
+    const review = { ...skeleton.review!, reviewers: [...skeleton.review!.reviewers].reverse() }
+    assert.deepEqual(review.reviewers.map(entry => entry.status), ['superseded', 'blocked'])
+    const reason = textToString(checked({ ...runData(skeleton), review }).reason, T0)
+    assert.match(reason, /^general blocked the candidate: 1 open P1 — .*\. coverage was superseded \(no verdict\)\.$/)
+  })
+
   it('blocked_identical', () => {
     const now = checked(guardrailsFull())
     assert.equal(now.situation, 'blocked_identical')

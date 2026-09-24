@@ -362,7 +362,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
 
   return (
     <section className="node-detail" aria-labelledby="node-detail-title" data-testid="node-detail" data-node-id={node.node_id}>
-      <h3 id="node-detail-title">{definition.label} <span className="projects-muted node-detail-id">({node.node_id})</span></h3>
+      <h3 id="node-detail-title" tabIndex={-1}>{definition.label} <span className="projects-muted node-detail-id">({node.node_id})</span></h3>
       <dl className="projects-facts">
         <div><dt>Kind</dt><dd>{KIND_LABEL[definition.kind]}</dd></div>
         <div><dt>Executed by</dt><dd data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport, definition.node_id)}</dd></div>

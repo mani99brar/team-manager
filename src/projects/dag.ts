@@ -16,9 +16,10 @@ export type DagLayout = {
   edges: { from: string; to: string }[]
 }
 
-export const DAG_NODE_WIDTH = 150
+/** Fitted to the page (docs/PRD_VIEWER_UX.md 10): eight columns are 1,316 px wide, inside the run page's box at 1440 px. */
+export const DAG_NODE_WIDTH = 136
 export const DAG_NODE_HEIGHT = 56
-export const DAG_COLUMN_GAP = 64
+export const DAG_COLUMN_GAP = 28
 export const DAG_ROW_GAP = 24
 export const DAG_PADDING = 16
 
