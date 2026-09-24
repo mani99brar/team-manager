@@ -484,7 +484,7 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
 
     Returns the accepted decisions by reviewer id (also kept in `state.decisions`) as soon as every reviewer approved,
     or as soon as one accepted file blocks (the others are not waited for). A rejected file, an expired deadline or
-    a missing session raises.
+    a missing session raises. A verdict accepted before a controller restart is read again and stays accepted.
     """
     clock = clock or time.time
     sleep = sleep or time.sleep
@@ -511,12 +511,17 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 continue  # An update is respawning this reviewer's session; no verdict.
             if row is None:
                 raise RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required")
-            if row["state"] == "blocked" and reviewer_id not in attention:
+            # Accepted before this controller started (resumed after exit 75 or Ctrl-C), its verdict was final: its file is
+            # read again whatever its session does now (a follow-up typed in its pane), since without the restart nothing
+            # would have looked at it again. Only `accepted_at` says so: saved, the combined status overwrites the default
+            # reviewer's `status`.
+            accepted = status.get("accepted_at")
+            if row["state"] == "blocked" and not accepted and reviewer_id not in attention:
                 # A native session reports `blocked` when it needs a human: a question or a prompt
                 # it cannot answer itself. The operator may answer in the pane; the deadline bounds it.
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the deadline")
-            if row["state"] in {"idle", "done"} and (runtime.directory / f"{node}.completion.json").exists():
+            if accepted or (row["state"] in {"idle", "done"} and (runtime.directory / f"{node}.completion.json").exists()):
                 try:
                     decision = read_review_completion(runtime, reviewer_id)
                 except RuntimeError as error:
@@ -524,7 +529,7 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                     state.save()
                     raise
                 decisions[reviewer_id] = decision
-                status.update(status="accepted", accepted_at=now())
+                status.update(status="accepted", accepted_at=accepted or now())
                 state.save()
                 if decision_blocks(decision):
                     return decisions  # The first block decides; nobody waits for the other reviewers.

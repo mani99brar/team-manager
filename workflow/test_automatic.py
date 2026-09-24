@@ -414,6 +414,11 @@ class ReviewCompletionTests(unittest.TestCase):
     def write(self, reviewer_id="review", **updates):
         save_json(self.root / f"{self.node(reviewer_id)}.completion.json", self.completion(reviewer_id, **updates))
 
+    def never_accepted(self, reviewer_id):
+        """Its status as before its first acceptance: a verdict accepted once is read again whatever its session does."""
+        path = self.root / f"automatic-{self.node(reviewer_id)}.json"
+        save_json(path, {key: value for key, value in read_json(path).items() if key != "accepted_at"})
+
     def test_completion_prompt_spells_out_every_enum_the_schema_enforces(self):
         # Seen live: a reviewer given only an example invented severity "P3" and its whole file was
         # rejected; the prompt must name every allowed value rather than rely on one example.
@@ -527,6 +532,7 @@ class ReviewCompletionTests(unittest.TestCase):
             # One blocked verdict returns at once; the other reviewers are not waited for.
             self.write(last, verdict="blocked")
             self.rows[first]["state"] = "working"
+            self.never_accepted(first)
             self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), [last])
             self.rows[first]["state"] = "idle"
             self.write(last)
@@ -680,10 +686,11 @@ class ReviewCompletionTests(unittest.TestCase):
         decisions = wait_reviews(self.runtime, state, clock=lambda: timeout + 300, sleep=lambda _: self.fail("Unexpected wait"))
         self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, dict.fromkeys(self.ids, "approved"))
         self.assertFalse([status for status in state.statuses.values() if "error" in status])
-        # A reviewer still without its file past its deadline blocks the run as before: every reviewer is stopped, and the
-        # verdicts accepted from the others are kept in review.json.
+        # A reviewer never accepted, still without its file past its deadline, blocks the run as before: every reviewer is
+        # stopped, and the verdicts accepted from the others are kept in review.json.
         last = self.ids[-1]
         (self.root / f"{self.node(last)}.completion.json").unlink()
+        self.never_accepted(last)
         with patch("workflow.automatic.time.time", lambda: timeout + 300.0), \
                 self.assertRaisesRegex(RuntimeError, f"Reviewer {last} deadline exhausted; no second reviewer is launched"):
             _accept_native(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime))
@@ -692,6 +699,47 @@ class ReviewCompletionTests(unittest.TestCase):
             review = read_json(self.root / "review.json")
             self.assertEqual(([(entry["reviewer_id"], entry["verdict"]) for entry in review["reviewers"]], review["verdict"]),
                              ([(self.ids[0], "approved"), (last, None)], "blocked"))
+
+    def test_a_verdict_accepted_before_a_restart_stays_accepted_while_its_session_works_again(self):
+        # The first reviewer's verdict is accepted at t=100 while the others work; then the controller goes away (exit 75,
+        # Ctrl-C) and a follow-up typed in that reviewer's pane has it working or blocked when the controller resumes, past
+        # every deadline. Without the restart it was never looked at again: its file is read again whatever its session
+        # does, keeping its accepted_at. A reviewer still without its file past its deadline blocks as before.
+        from .automatic import ReviewStatus, wait_reviews
+        from .sessions import TransientInfraError
+        timeout = DEFAULTS["review_timeout_seconds"]
+        first, others = self.ids[0], self.ids[1:]
+        self.write(first)
+        for reviewer_id in others:
+            self.rows[reviewer_id]["state"] = "working"
+        def away(_seconds):
+            raise TransientInfraError("Claude session inventory unavailable: timed out")
+        with contextlib.suppress(TransientInfraError):
+            wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=away)
+        accepted_at = ReviewStatus.load(self.runtime).statuses[first]["accepted_at"]
+        resumed = dict(clock=lambda: timeout + 100, sleep=lambda _: self.fail("Unexpected wait"))
+        self.rows[first]["state"] = "working"
+        if others:
+            for reviewer_id in others:
+                self.rows[reviewer_id]["state"] = "idle"
+            with self.assertRaisesRegex(RuntimeError, f"Reviewer {others[0]} deadline exhausted; no second reviewer is launched"):
+                wait_reviews(self.runtime, ReviewStatus.load(self.runtime), **resumed)
+            for reviewer_id in others:
+                self.write(reviewer_id)
+        for session in ("working", "blocked"):
+            with self.subTest(session=session):
+                self.rows[first]["state"] = session
+                self.events.clear()
+                decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), **resumed)
+                self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, dict.fromkeys(self.ids, "approved"))
+                self.assertEqual(ReviewStatus.load(self.runtime).statuses[first]["accepted_at"], accepted_at)
+                self.assertEqual(self.events, [])  # Nothing waits on it: no attention event.
+        # Read again, its file is validated again: a rejected one blocks as on its first read.
+        self.write(first, bundle_sha256="0" * 64)
+        with self.assertRaisesRegex(RuntimeError, f"Stale or foreign review completion signal \\({first}\\)"):
+            wait_reviews(self.runtime, ReviewStatus.load(self.runtime), **resumed)
+        self.assertEqual(read_json(self.root / f"automatic-{self.node(first)}.json")["error"], f"Stale or foreign review completion signal ({first})")
+
 
 class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
