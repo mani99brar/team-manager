@@ -114,6 +114,13 @@ def continuation(runtime, executable: str = sys.executable) -> str:
     return f"{executable} -m workflow retry {directory}"
 
 
+def check_retry(runtime, phase: str, node: str, executable: str = sys.executable) -> str:
+    """Rerunning one check at its next attempt: `retry` runs it on a manual plan; on an automatic plan `retry` only raises
+    the attempt, and the supervisor's controller runs it."""
+    command = f"{executable} -m workflow retry {shlex.quote(str(runtime.directory))} --phase {phase} --node {node}"
+    return f"{command}, then {continuation(runtime, executable)}" if runtime.plan.get("automatic") else command
+
+
 # ---- State refusals (S0) -----------------------------------------------------------------------------------------
 
 def parse_lanes(value: str, workers: list[str]) -> list[str]:
@@ -161,7 +168,7 @@ def blocked_step(runtime, state) -> dict:
         for node in runtime.workers:
             folder = directory / "verification" / phase / node / str(raw_attempt(directory, phase, node))
             if folder.is_dir() and not (folder / "packet.json").exists():
-                raise ValueError(f"Interrupted check at {folder}; use retry --phase {phase} --node {node}")
+                raise ValueError(f"Interrupted check at {folder}; rerun it at its next attempt with: {check_retry(runtime, phase, node)}")
     failed = [task.name for task in state.tasks if task.error and task.name in state.next]
     verifies = {f"verify_{node}" for node in runtime.workers}
     if failed == ["candidate"] and tuple(state.next) == ("candidate",):

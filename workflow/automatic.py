@@ -914,8 +914,23 @@ def gate_reasons(packet: Path) -> list[str]:
     return [reason.replace(str(packet.parent), "<attempt>") for reason in read_json(packet)["gate"]["reasons"]]
 
 
+RETRY_REQUESTS = "retry-requests.json"
+
+
+def request_retry(runtime, phase: str, node: str, attempt: int) -> None:
+    """`retry --phase/--node` on an automatic plan raised this check's attempt and leaves the rerun to the controller.
+
+    It is the operator's call after a check that left no verdict (an interrupted check, a worktree Git could not
+    create): advance_failed_checks runs the raised attempt once, and only while it has not started.
+    """
+    path = runtime.directory / RETRY_REQUESTS
+    requests = read_json(path) if path.exists() else {}
+    requests[f"{phase}:{node}"] = attempt
+    save_json(path, requests)
+
+
 def advance_failed_checks(runtime, state) -> bool:
-    """Retry only recorded failing verification packets, never launches or review."""
+    """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review."""
     from .repair import attempt_floor
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
@@ -925,14 +940,19 @@ def advance_failed_checks(runtime, state) -> bool:
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]
     if not failures or any(name not in retryable for name in failures):
         return False
-    targets = []
+    requests_path = runtime.directory / RETRY_REQUESTS
+    requests = read_json(requests_path) if requests_path.exists() else {}
+    targets, requested = [], []
     for name in failures:
         phase = "candidate" if name == "candidate" else "worker"
-        stage_targets = []
+        stage_targets, stage_requested = [], []
         for node in workers if phase == "candidate" else (name.removeprefix("verify_"),):
             attempt = runtime.attempt(phase, node)
-            path = runtime.directory / "verification" / phase / node / str(attempt) / "packet.json"
-            if path.exists() and read_json(path)["gate"]["status"] != "passed":
+            folder = runtime.directory / "verification" / phase / node / str(attempt)
+            path = folder / "packet.json"
+            if requests.get(f"{phase}:{node}") == attempt and not folder.exists():
+                stage_requested.append(f"{phase}:{node}")
+            elif path.exists() and read_json(path)["gate"]["status"] != "passed":
                 previous = runtime.directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
                 if attempt > 1 and previous.exists() and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
                     # Retries rerun immutable code; two identical failures mean the cause is
@@ -940,16 +960,23 @@ def advance_failed_checks(runtime, state) -> bool:
                     raise RuntimeError(f"{phase}/{node} failed identically on attempts {attempt - 1} and {attempt}; "
                                        f"not transient, inspect {path}. Before review a code fix is a lane repair (RUNBOOK)")
                 stage_targets.append((phase, node))
-        if not stage_targets:
+        if not stage_targets and not stage_requested:
             return False
         targets.extend(stage_targets)
-    if not targets:
-        return False
+        requested.extend(stage_requested)
     # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision.
     if any(runtime.attempt(p, n) >= attempt_floor(runtime.directory, p, n) + runtime.policy.get("max_verification_attempts", 3) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
     for phase, node in targets:
         runtime.retry_check(phase, node)
+    if requested:
+        # Consumed before the rerun: one that fails before its check starts is classified as that failure, never rerun again.
+        remaining = {key: value for key, value in requests.items() if key not in requested}
+        if remaining:
+            save_json(requests_path, remaining)
+        else:
+            requests_path.unlink()
+        runtime.event("controller", "running", f"Rerunning {', '.join(requested)} at the attempt retry raised")
     return True
 
 

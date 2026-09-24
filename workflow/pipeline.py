@@ -1071,7 +1071,16 @@ def main():
                         step = f"verify_{args.node}" if args.phase == "worker" else "candidate"
                         if step not in state.next:
                             parser.error("Selected check is not a failed/pending step")
-                        runtime.retry_check(args.phase, args.node)
+                        attempt = runtime.retry_check(args.phase, args.node)
+                        if runtime.plan.get("automatic"):
+                            # Invoked here, the graph would run the review node, reviewer launches included, in this
+                            # process; the supervisor's controller reruns the check at the raised attempt instead.
+                            from .automatic import request_retry
+                            from .repair import continuation
+                            request_retry(runtime, args.phase, args.node, attempt)
+                            print(f"{args.phase}/{args.node} will run attempt {attempt}; nothing ran. An automatic run continues "
+                                  f"under its supervisor: {continuation(runtime)}")
+                            return
                     # No new agent launch is ever permitted during retry.
                     if any(step.startswith("launch_") for step in state.next):
                         parser.error("Launch failure requires explicit session reconciliation; do not blindly retry")

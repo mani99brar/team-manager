@@ -20,12 +20,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.pregel.main import Pregel
 from langgraph.types import Command
 
-from . import pipeline, repair
+from . import checks, pipeline, repair
 from .automatic import advance_failed_checks, automatic_settings, drive
 from .pipeline import ExportRuntime, Pipeline, build_pipeline, export_run, graph_config
 from .sessions import git, prepare, read_json, run_lock, save_json
 from .test_pipeline import FakeSessions, OfflinePipeline
 from .verification import policy_digest
+from .worktrees import WorktreeError
 
 # Declared order: the candidate checks adapter before ui, as 001's checked controller before ui. docs is never selected.
 LANES = ["adapter", "ui", "docs"]
@@ -588,6 +589,86 @@ class RefusedStates(RepairFixture):
             del plan["workers"], plan["excluded_workers"]
             save_json(self.directory / "plan.json", plan)
             self.refused("pinned before configured lanes", *early)
+
+
+def ui_worktree_fails_once():
+    """Git cannot create the ui lane's worker verification worktree on attempt 1: its attempt directory keeps no packet."""
+    real = checks.git_worktree
+    def locked(repository, *arguments):
+        if "/verification/worker/ui/1/" in arguments[-2]:
+            raise WorktreeError(128, ["git", "worktree", *arguments], "", "fatal: cannot lock ref 'HEAD': File exists")
+        return real(repository, *arguments)
+    return patch("workflow.checks.git_worktree", side_effect=locked)
+
+
+class InterruptedCheckOnAnAutomaticRun(RepairFixture):
+    """A check whose attempt directory has no packet (Git could not create its worktree, or its verify was interrupted)
+    is no verdict: repair refuses it and names the continuation of the run's mode."""
+
+    def test_retry_raises_the_attempt_and_the_supervisor_reruns_the_check(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        with ui_worktree_fails_once(), patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(self.runtime)
+        folder = directory / "verification/worker/ui/1"
+        self.assertTrue(folder.is_dir() and not (folder / "packet.json").exists())
+        retry = f"{sys.executable} -m workflow retry {directory} --phase worker --node ui"
+        automatic = f"{sys.executable} -m workflow automatic {directory} --live"
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 1)
+        self.assertIn(f"Interrupted check at {folder}; rerun it at its next attempt with: {retry}, then {automatic}\n", err)
+        # retry only raises the attempt: it runs no check, and no review node, outside the supervisor.
+        launches = (directory / "fake-launches.log").read_text()
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"worker/ui will run attempt 2; nothing ran. An automatic run continues under its supervisor: {automatic}", out)
+        self.assertEqual(read_json(directory / "attempts.json"), {"worker:ui": 2})
+        self.assertFalse((directory / "verification/worker/ui/2").exists())
+        self.assertEqual((directory / "fake-launches.log").read_text(), launches)
+        # A rerun that fails before its check starts is not rerun again: the request is consumed first.
+        with patch.object(self.runtime, "verify", side_effect=RuntimeError("before the check")), patch("workflow.automatic.wait_handoffs"), \
+                self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(self.runtime)
+        self.assertFalse((directory / "retry-requests.json").exists())
+        self.assertFalse((directory / "verification/worker/ui/2").exists())
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
+        self.assertEqual((code, read_json(directory / "retry-requests.json")), (0, {"worker:ui": 3}), err)
+        # automatic --live's controller reruns the check at the raised attempt and carries the run to the feature branch.
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        self.assertEqual(read_json(directory / "verification/worker/ui/3/packet.json")["gate"]["status"], "passed")
+        self.assertFalse((directory / "verification/worker/adapter/2").exists())
+        self.assertFalse((directory / "retry-requests.json").exists())
+        self.assertIn(("controller", "running", "Rerunning worker:ui at the attempt retry raised"),
+                      [(event["node"], event["status"], event["message"]) for event in self.events()])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
+
+
+class InterruptedCheckOnAManualRun(RepairFixture):
+    automatic = False
+
+    def test_retry_reruns_the_check_itself_up_to_the_review_gate(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        with ui_worktree_fails_once(), self.graph() as (graph, config), self.assertRaises(WorktreeError):
+            graph.invoke(Command(resume={"freeze": True}), config)
+        folder = directory / "verification/worker/ui/1"
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 1)
+        self.assertIn(f"Interrupted check at {folder}; rerun it at its next attempt with: {sys.executable} -m workflow retry {directory} "
+                      "--phase worker --node ui\n", err)
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(read_json(directory / "verification/worker/ui/2/packet.json")["gate"]["status"], "passed")
+        with self.graph() as (graph, config):
+            state = graph.get_state(config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
 
 
 class CrashRecovery(RepairFixture):
