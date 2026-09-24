@@ -4,7 +4,7 @@
  * Pure helpers, kept out of the component file so it only exports components.
  */
 import type { ReviewFinding, RunDetail, RunInputs } from './api.ts'
-import type { Resource } from './useResource.ts'
+import type { Resource } from './resource.ts'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 

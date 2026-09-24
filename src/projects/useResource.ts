@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Resource } from './resource.ts'
 
-export type Resource<T> =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; data: T }
-  | { status: 'error'; error: unknown }
+export type { Resource } from './resource.ts'
 
 /** How fresh a resource is (docs/PRD_VIEWER_UX.md 6.3): the live chip's ages, the Refresh button's busy state and the failed-Refresh notice read it. */
 export type ResourceMeta = {

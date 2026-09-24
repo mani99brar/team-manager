@@ -6,7 +6,7 @@
  */
 import type { NextStep } from '../../../contracts/projects/triage.ts'
 import type { ReviewFinding, RunInputWorker, WorkerResult } from '../api.ts'
-import type { CapturedFile, NotCapturedFile } from '../files.ts'
+import type { CapturedFile, NotCapturedFile } from '../capture.ts'
 import { findingsForFile } from '../findings.ts'
 import type { SectionEntry } from './model.ts'
 
