@@ -157,10 +157,13 @@ export type Now = {
   since: string | null
   headline: Text
   reason: Text | null
-  /** 6.2 reason sources: 0 controller row, 1 review, 2 lane result, 3 the worker's completion, 4 the focus node's last message. */
+  /**
+   * 6.2 reason sources: 0 controller row, 1 review, 2 lane result, 3 the worker's completion, 4 the focus node's last
+   * message (for a focus with none, the failed dependency row that opened the scope window).
+   */
   reasonSource: 0 | 1 | 2 | 3 | 4 | null
   next: NextStep
-  /** Result URIs the rules would read but were not given: fetch them (`nowResultUris`) and derive again. */
+  /** Result URIs the rules would read but were not given (among `nowResultUris(detail, events)`): fetch them and derive again. */
   missing: string[]
 }
 export type NowInput = RunData & { controller?: readonly ControllerReading[]; activity?: ServedActivity | null }
@@ -238,7 +241,8 @@ const REPAIR_BY_OPERATOR = /^Repair (\d+) by the operator: snapshot ([0-9a-f]+) 
 const CONTINUE_WITH = /Continue with python -m workflow (automatic|retry)\b/
 /** automatic.py RESUME_NOTE (:1116) and UNAVAILABLE_NOTE (:1121). */
 const INTERRUPTED_ROW = /^Supervisor interrupted|Claude Code was unavailable/
-const UNAVAILABLE = /Claude Code (?:was|is) unavailable/
+/** UNAVAILABLE_NOTE, and the outage errors a node's own note quotes (sessions.py:272, interactive.py:63). */
+const UNAVAILABLE = /Claude Code (?:was |is )?unavailable|Claude session inventory unavailable/
 /** REVIEW_RESUME_NOTE (:337) and FREEZE_RESUME_NOTE (:1194), recorded on the review node or the freeze. */
 const NODE_RESUME_NOTE = /interrupted|resume with: python -m workflow automatic/
 const FREEZE_NOTE = /The freeze was stopping the workers/
@@ -383,6 +387,44 @@ function classify(detail: RunDetail, events: readonly WorkflowEvent[]): Row[] {
     if (event.status === 'failed' && recovered && (ERRNO_ROW.test(message) || STOP_UNCONFIRMED.test(message))) return row('controller_error', event.node_id, null)
     return row(null, event.node_id, event.status)
   })
+}
+
+function statusRows(rows: readonly Row[], nodeId: string): Row[] {
+  return rows.filter(row => row.node === nodeId && row.status !== null && row.marker === null)
+}
+
+/** An automatic run: from the run inputs, else from the controller's PID checkpoints. */
+function automaticRun(run: Pick<RunData, 'inputs'>, rows: readonly Row[]): boolean {
+  return run.inputs ? run.inputs.mode === 'automatic' : rows.some(row => row.marker === 'controller_start')
+}
+
+/**
+ * The row that re-entered a node the server still serves failed: a retried check, a resumed freeze or review. A failed
+ * task keeps its graph error until the step that re-enters it ends (`retry_check` clears nothing), so the step runs
+ * while its node, and the run, read failed. The row counts while it is the node's latest status row and, in an
+ * automatic run, no controller started after it: automatic-step exits only once its step ended, so a later PID row
+ * means the step ended without a verdict row. A manual run has no such row, so there only a retry counts (an earlier
+ * attempt of the node failed).
+ */
+function reentered(detail: RunDetail, rows: readonly Row[], nodeId: string, automatic: boolean): Row | null {
+  if (snapshotNode(detail, nodeId)?.status !== 'failed') return null
+  const own = statusRows(rows, nodeId)
+  const latest = own.at(-1)
+  if (latest?.status !== 'running') return null
+  const ended = automatic ? rows.some(row => row.marker === 'controller_start' && row.event.sequence > latest.event.sequence)
+    : !own.some(row => row.status === 'failed')
+  return ended ? null : latest
+}
+
+/**
+ * The attempt whose verdict a failed verify node shows: its latest, or while a retry runs (`reentered`), the latest one
+ * with a recorded failure before it (0 when there is none). `running` is the retry's opening row.
+ */
+function verdictAttempt(detail: RunDetail, rows: readonly Row[], nodeId: string, automatic: boolean): { attempt: number; running: Row | null } {
+  const running = reentered(detail, rows, nodeId, automatic)
+  if (!running) return { attempt: snapshotNode(detail, nodeId)?.attempt ?? 0, running: null }
+  const failed = statusRows(rows, nodeId).filter(row => row.status === 'failed' && row.event.sequence < running.event.sequence).at(-1)
+  return { attempt: failed ? failed.attempt ?? failed.event.attempt : 0, running }
 }
 
 // ---- buildTimeline (5.1, 5.2) -------------------------------------------------------------------------------------
@@ -563,6 +605,7 @@ function computeTimeline(run: RunData): Timeline {
   const lastReview = spans.filter(span => span.node_id === 'review').at(-1)
   if (review && lastReview?.end) lastReview.outcome = reviewOutcome(review)
   const runStatus = detail.snapshot.status
+  const automatic = automaticRun(run, rows)
   for (const span of spans) {
     if (span.node_id.startsWith('verify_') && span.lane) span.result_uri = resultUri(detail, 'worker', span.lane, span.attempt)
     const result = span.result_uri ? results.get(span.result_uri) : undefined
@@ -572,7 +615,9 @@ function computeTimeline(run: RunData): Timeline {
       span.split = { setup_ms: Math.max(0, ms(first.started_at) - ms(span.start.at)), checks_ms: Math.max(0, ms(finish.finished_at) - ms(first.started_at)) }
     }
     const nodeStatus = statusOf(span.node_id)
-    span.live = span.end === null && !FINISHED_RUN.has(runStatus) && (nodeStatus === 'running' || nodeStatus === 'awaiting_approval')
+    // A retried check or a resumed freeze or review runs while its node (and the run) still read failed: see `reentered`.
+    const rerun = open.get(span.node_id) === span && reentered(detail, rows, span.node_id, automatic) !== null
+    span.live = span.end === null && (rerun || (!FINISHED_RUN.has(runStatus) && (nodeStatus === 'running' || nodeStatus === 'awaiting_approval')))
     if (span.end === null && !span.live && span.status === 'running') span.status = nodeStatus
   }
   const began = (span: Span) => { const at = span.start?.at ?? span.end?.at; return at ? ms(at) : Infinity }
@@ -756,10 +801,6 @@ function depths(detail: RunDetail): Map<string, number> {
   return depth
 }
 
-function statusRows(rows: readonly Row[], nodeId: string): Row[] {
-  return rows.filter(row => row.node === nodeId && row.status !== null && row.marker === null)
-}
-
 function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
   const depth = depths(detail)
   const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? null
@@ -915,10 +956,19 @@ export function attemptResultUris(detail: RunDetail, nodeId: string, options: { 
   return []
 }
 
-/** The results the run page's Now banner and lanes line read: the failing focus's latest two attempts, plus each lane's candidate result. */
-export function nowResultUris(detail: RunDetail): string[] {
-  const focus = focusOf(detail, [])
-  const uris = focus?.status === 'failed' ? attemptResultUris(detail, focus.node_id, { last: 2 }).map(item => item.uri) : []
+/**
+ * The results the run page's Now banner and lanes line read: the failing focus's latest two attempts, plus each lane's
+ * candidate result. Given the events, a verify retry that is still running is left out: its result exists only once it
+ * ends, so the two attempts before it are read instead.
+ */
+export function nowResultUris(detail: RunDetail, events: readonly WorkflowEvent[] = []): string[] {
+  const rows = classify(detail, events)
+  const focus = focusOf(detail, rows)
+  const uris: string[] = []
+  if (focus?.status === 'failed' && focus.node_id.startsWith('verify_')) {
+    const { attempt } = verdictAttempt(detail, rows, focus.node_id, automaticRun({}, rows))
+    uris.push(...attemptResultUris(detail, focus.node_id).filter(item => item.attempt <= attempt).slice(-2).map(item => item.uri))
+  } else if (focus?.status === 'failed') uris.push(...attemptResultUris(detail, focus.node_id, { last: 2 }).map(item => item.uri))
   if (lanesOf({ detail }).length >= 2) uris.push(...(snapshotNode(detail, 'candidate')?.lane_results ?? []).map(entry => entry.result_uri))
   return [...new Set(uris)]
 }
@@ -954,7 +1004,7 @@ export function deriveNow(run: NowInput): Now {
   const focus = focusOf(run.detail, rows)
   const context: Context = {
     run, timeline, rows, focus, scope: scopeStart(run.detail, rows, focus), status: run.detail.snapshot.status, results: run.results ?? new Map(), missing: new Set(),
-    automatic: run.inputs ? run.inputs.mode === 'automatic' : timeline.markers.some(marker => marker.kind === 'controller_start'),
+    automatic: automaticRun(run, rows),
   }
   const rules = [questionNow, paneNow, approvalNow, challengeNow, interruptedNow, blockedBeforeFreezeNow, identicalNow, checkFailedNow, reviewBlockedNow, runningNow, succeededNow, inactiveNow, unmatchedNow]
   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
@@ -1065,17 +1115,46 @@ function challengeNow(context: Context): Draft | null {
   }
 }
 
+/**
+ * Rule 5 (b)'s note: the focus node's latest row is its own raw `interrupted` status (served paused on the row) with a
+ * resume note. After Ctrl-C the node is served paused (automatic.py:804); after an outage its task keeps the graph error
+ * and the node is served failed (the freeze's note at :1314, the review's at :624 and :811). `resumed` is the PID row of
+ * a controller started since: it re-enters the node, and a resumed review may record nothing more until its verdict.
+ */
+function interruptionNote(context: Context): { row: Row; resumed: Marker | null } | null {
+  const { focus } = context
+  if (!focus || (focus.status !== 'paused' && focus.status !== 'failed')) return null
+  const latest = context.rows.filter(other => other.node === focus.node_id && other.marker === null).at(-1)
+  if (!latest || latest.status !== 'paused' || !NODE_RESUME_NOTE.test(latest.event.message) || CONTINUE_WITH.test(latest.event.message)) return null
+  const resumed = context.timeline.markers.find(marker => marker.kind === 'controller_start' && marker.sequence !== null && marker.sequence > latest.event.sequence) ?? null
+  return { row: latest, resumed }
+}
+
+/**
+ * The run moves without the operator: it is served running, the supervisor retries a failed check (rule 8), or a
+ * resumed controller re-entered a step that still reads failed or paused until it ends.
+ */
+function moving(context: Context): boolean {
+  if (context.status === 'running' || interruptionNote(context)?.resumed) return true
+  if (context.run.detail.snapshot.nodes.some(node => context.timeline.byNode.get(node.node_id)?.at(-1)?.live)) return true
+  return context.automatic && retryPlan(context) !== null
+}
+
 function interruptedNow(context: Context): Draft | null {
-  if (context.status !== 'paused' && context.status !== 'running') return null
+  // A failed run too: a freeze or review interrupted by an outage, and a check being retried, keep their task's graph
+  // error until they are re-entered, so the server serves the node and the run failed (projectSnapshot ranks task.error first).
+  if (context.status !== 'paused' && context.status !== 'running' && context.status !== 'failed') return null
   const { focus } = context
   const where = focus?.label ?? 'the run'
   const resume = (caption?: string) => [command(workflow('automatic', '--live'), caption)]
   const claudeWorks = 'Once `claude --version` works:'
   const base = { situation: 'interrupted' as const, tone: 'interrupted' as const, glyph: '‖' as const }
   const label = 'Resume the controller: it waits for the same sessions and relaunches nothing'
-  // (a) A run-level interrupted row, with no status row after it.
+  // (a) A run-level interrupted row that nothing followed: no status row, no resumed controller (its PID row) and no block.
   const row = controllerRow(context, ['interrupted'])
-  if (row && !context.rows.some(other => other.event.sequence > row.sequence! && other.status !== null && other.marker === null)) {
+  const followed = (sequence: number) => context.rows.some(other => other.event.sequence > sequence
+    && ((other.status !== null && other.marker === null) || other.marker === 'controller_start' || other.blocked))
+  if (row && !followed(row.sequence!)) {
     const unavailable = UNAVAILABLE.test(row.raw)
     return {
       ...base, interruption: 'a', since: row.at, reasonSource: 0,
@@ -1084,10 +1163,10 @@ function interruptedNow(context: Context): Draft | null {
       next: { action: 'required', label, runbook: unavailable ? [RUNBOOK.unavailable] : [RUNBOOK.launch, RUNBOOK.reviewInterruption], steps: resume(unavailable ? claudeWorks : undefined), caveat: null },
     }
   }
-  const latest = focus ? lastMessage(context, focus.node_id) : null
-  const lastForNode = focus ? context.rows.filter(other => other.node === focus.node_id && other.marker === null).at(-1) : null
-  // (b) The review or the freeze recorded the interruption on its own node.
-  if (focus?.status === 'paused' && latest && latest === lastForNode && NODE_RESUME_NOTE.test(latest.event.message) && !CONTINUE_WITH.test(latest.event.message)) {
+  // (b) The review or the freeze recorded the interruption on its own node, and no controller has resumed it since.
+  const note = interruptionNote(context)
+  if (note && !note.resumed) {
+    const { row: latest } = note
     const freeze = FREEZE_NOTE.test(latest.event.message)
     return {
       ...base, interruption: 'b', since: latest.event.occurred_at, reasonSource: 4,
@@ -1097,10 +1176,11 @@ function interruptedNow(context: Context): Draft | null {
       next: { action: 'required', label, runbook: freeze ? [RUNBOOK.unavailable] : [RUNBOOK.reviewInterruption], steps: resume(UNAVAILABLE.test(latest.event.message) ? claudeWorks : undefined), caveat: null },
     }
   }
-  // (c) The run is running but its controller process is gone.
-  if (context.status === 'running' && controllerNotRunning(context.run.controller ?? [])) {
+  // (c) The run would move by itself, but its controller process is gone.
+  const readings = context.run.controller ?? []
+  if (controllerNotRunning(readings) && moving(context)) {
     return {
-      ...base, interruption: 'c', since: context.run.controller!.find(reading => reading.value === 'not_running')?.at ?? null,
+      ...base, interruption: 'c', since: notRunningSince(readings),
       headline: [`‖ Interrupted at ${where}: the controller is not running; sessions keep running`],
       next: { action: 'required', label, runbook: [RUNBOOK.launch, RUNBOOK.reviewInterruption], steps: resume(), caveat: null },
     }
@@ -1151,42 +1231,74 @@ function blockedBeforeFreezeNow(context: Context): Draft | null {
   }
 }
 
-type LaneVerdict = { lane: string; attempt: number; result: WorkerResult | null; previous: WorkerResult | null; phase: 'worker' | 'candidate' }
+type LaneVerdict = {
+  lane: string
+  attempt: number
+  result: WorkerResult | null
+  /** The attempt before, read only when it checked the lane's current revision (a repair restarts the comparison). */
+  previous: WorkerResult | null
+  phase: 'worker' | 'candidate'
+  /** The row that opened a retry still running (`reentered`); `attempt` is then the failed attempt before it. */
+  running: Row | null
+}
 
 /** The failing lanes of a failed verify or candidate focus, with their latest two results (reason source 2). */
 function failingLanes(context: Context): LaneVerdict[] {
   const { focus } = context
   if (!focus || focus.status !== 'failed') return []
   const detail = context.run.detail
+  const previousOf = (phase: 'worker' | 'candidate', lane: string, attempt: number) =>
+    attempt - 1 > attemptFloor(context, phase, lane) ? result(context, resultUri(detail, phase, lane, attempt - 1)) : null
   if (focus.node_id.startsWith('verify_')) {
     const lane = focus.node_id.slice('verify_'.length)
-    const attempt = snapshotNode(detail, focus.node_id)!.attempt
-    return [{ lane, attempt, phase: 'worker', result: result(context, resultUri(detail, 'worker', lane, attempt)), previous: attempt > 1 ? result(context, resultUri(detail, 'worker', lane, attempt - 1)) : null }]
+    const { attempt, running } = verdictAttempt(detail, context.rows, focus.node_id, context.automatic)
+    if (attempt < 1) return []
+    return [{ lane, attempt, phase: 'worker', running, result: result(context, resultUri(detail, 'worker', lane, attempt)), previous: previousOf('worker', lane, attempt) }]
   }
   if (focus.node_id !== 'candidate') return []
   const lanes = snapshotNode(detail, 'candidate')!.lane_results.map(entry => ({
-    lane: entry.worker, attempt: entry.attempt, phase: 'candidate' as const, result: result(context, entry.result_uri),
-    previous: entry.attempt > 1 ? result(context, resultUri(detail, 'candidate', entry.worker, entry.attempt - 1)) : null,
+    lane: entry.worker, attempt: entry.attempt, phase: 'candidate' as const, running: null, result: result(context, entry.result_uri),
+    previous: previousOf('candidate', entry.worker, entry.attempt),
   }))
   const failed = lanes.filter(lane => lane.result?.status === 'failed')
   return failed.length ? failed : lanes.filter(lane => lane.result === null)
 }
 
-/** The first attempt on the lane's current revision: a repair restarts the budget ("attempts worker:game 3"). */
+/** The attempts before the lane's current revision: a repair restarts the budget at its floor ("attempts worker:game 3" gives 2). */
 function attemptFloor(context: Context, phase: 'worker' | 'candidate', lane: string): number {
   const repaired = context.timeline.markers.filter(marker => marker.kind === 'repair').map(marker => new RegExp(`\\b${phase}:${lane} (\\d+)`).exec(marker.raw)).filter(match => match !== null).at(-1)
   return repaired ? Number(repaired[1]) - 1 : 0
 }
 
+/** automatic.py same_revision: both attempts checked one revision; an unknown commit counts as the same. */
+function sameRevision(a: WorkerResult, b: WorkerResult): boolean {
+  return a.output_commit === null || b.output_commit === null || a.output_commit === b.output_commit
+}
+
+function diagnoses(context: Context): Marker[] {
+  const { focus } = context
+  return context.timeline.markers.filter(marker => marker.kind === 'diagnosis' && marker.sequence! > context.scope && marker.node_id === focus?.node_id)
+}
+
+/**
+ * Rule 7: the failing lanes the controller stops on before review. A diagnosis row for the lane in scope, or its latest
+ * two attempts on one revision failing with one reason (advance_failed_checks: same_revision and equal gate reasons).
+ */
+function identicalLanes(context: Context): LaneVerdict[] {
+  const { focus } = context
+  if (!focus || focus.status !== 'failed' || !(focus.node_id.startsWith('verify_') || focus.node_id === 'candidate')) return []
+  if (context.run.review || snapshotNode(context.run.detail, 'review')?.status !== 'pending') return []
+  const diagnosed = diagnoses(context)
+  return failingLanes(context).filter(lane => diagnosed.some(marker => marker.lane === lane.lane)
+    || (lane.result?.status === 'failed' && lane.previous?.status === 'failed' && lane.result.error?.message === lane.previous.error?.message
+      && sameRevision(lane.result, lane.previous)))
+}
+
 function identicalNow(context: Context): Draft | null {
   const { focus } = context
-  if (!focus || focus.status !== 'failed' || !(focus.node_id.startsWith('verify_') || focus.node_id === 'candidate')) return null
-  if (context.run.review || snapshotNode(context.run.detail, 'review')?.status !== 'pending') return null
-  const diagnosed = context.timeline.markers.filter(marker => marker.kind === 'diagnosis' && marker.sequence! > context.scope && marker.node_id === focus.node_id)
-  const lanes = failingLanes(context)
-  const identical = lanes.filter(lane => diagnosed.some(marker => marker.lane === lane.lane)
-    || (lane.result?.status === 'failed' && lane.previous?.status === 'failed' && lane.result.error?.message === lane.previous.error?.message))
-  if (!identical.length) return null
+  const identical = identicalLanes(context)
+  if (!focus || !identical.length) return null
+  const diagnosed = diagnoses(context)
   const names = identical.map(lane => lane.lane).join(',')
   const [first] = identical
   const diagnosis = diagnosed.map(marker => IDENTICAL.exec(marker.raw)).find(match => match?.[2] === first.lane)
@@ -1211,28 +1323,47 @@ function identicalNow(context: Context): Draft | null {
   }
 }
 
-function checkFailedNow(context: Context): Draft | null {
+type RetryPlan = { lane: LaneVerdict; attempt: number; offset: number; cap: number }
+
+/**
+ * Rule 8's premise: a failed verify or candidate below its attempt cap on the lane's revision, not identical (rule 7),
+ * and with no controller row in scope that stopped the run (such a row goes to rule 13 as reason source 0). An
+ * automatic run reads failed for its whole retry: the task keeps its graph error until the retry ends.
+ */
+function retryPlan(context: Context): RetryPlan | null {
   const { focus } = context
   if (!focus || focus.status !== 'failed' || !(focus.node_id.startsWith('verify_') || focus.node_id === 'candidate')) return null
-  if (context.automatic && context.status !== 'running') return null  // A failed automatic run was stopped by something else (rule 13).
-  const cap = context.run.inputs?.max_verification_attempts ?? 3
   const [lane] = failingLanes(context)
   if (!lane) return null
-  const attempt = lane.attempt - attemptFloor(context, lane.phase, lane.lane)
-  if (attempt >= cap) return null
-  const summary = lane.result ? gateSummary(lane.result, checksOf(context, lane.lane)) : lastMessage(context, focus.node_id)?.text ?? 'the gate did not pass'
+  const cap = context.run.inputs?.max_verification_attempts ?? 3
+  const offset = attemptFloor(context, lane.phase, lane.lane)
+  if (lane.attempt - offset >= cap || identicalLanes(context).length || controllerRow(context, ['controller_blocked', 'diagnosis'])) return null
+  return { lane, attempt: lane.attempt - offset, offset, cap }
+}
+
+function checkFailedNow(context: Context): Draft | null {
+  const plan = retryPlan(context)
+  const { focus } = context
+  if (!plan || !focus) return null
+  const { lane, attempt, offset, cap } = plan
+  const failed = statusRows(context.rows, focus.node_id).filter(row => row.status === 'failed').at(-1)
+  const summary = lane.result ? gateSummary(lane.result, checksOf(context, lane.lane)) : failed?.text ?? 'the gate did not pass'
   const candidate = focus.node_id === 'candidate'
+  const headline: Text = [`✗ ${focus.label} failed attempt ${attempt} of ${cap}${candidate ? ` (lane ${lane.lane})` : ''}: ${summary}`]
+  const running = lane.running ? (lane.running.attempt ?? lane.attempt + 1) - offset : null
+  if (lane.running) headline.push(` · attempt ${running} running since `, clock(lane.running.event.occurred_at))
+  const runbook = [candidate ? RUNBOOK.failedCandidate : RUNBOOK.failedVerification]
   return {
-    situation: 'check_failed', tone: 'failed', glyph: '✗', lane: lane.lane,
-    headline: [`✗ ${focus.label} failed attempt ${attempt} of ${cap}${candidate ? ` (lane ${lane.lane})` : ''}: ${summary}`],
+    situation: 'check_failed', tone: 'failed', glyph: '✗', lane: lane.lane, since: failed?.event.occurred_at ?? focus.since, headline,
     reason: lane.result?.error ? [lane.result.error.message] : null, reasonSource: lane.result ? 2 : 4,
     next: context.automatic
-      ? { action: 'none', label: 'No action: the supervisor retries by itself within the limit.', runbook: [candidate ? RUNBOOK.failedCandidate : RUNBOOK.failedVerification], steps: [], caveat: null }
-      : {
-        action: 'required', label: 'Rerun the check at the same revision when the failure was transient', caveat: null,
-        runbook: [candidate ? RUNBOOK.failedCandidate : RUNBOOK.failedVerification],
-        steps: [command(workflow('retry', '--phase', lane.phase, '--node', lane.lane))],
-      },
+      ? { action: 'none', label: 'No action: the supervisor retries by itself within the limit.', runbook, steps: [], caveat: null }
+      : lane.running
+        ? { action: 'none', label: `No action needed while attempt ${running} runs.`, runbook, steps: [], caveat: null }
+        : {
+          action: 'required', label: 'Rerun the check at the same revision when the failure was transient', caveat: null, runbook,
+          steps: [command(workflow('retry', '--phase', lane.phase, '--node', lane.lane))],
+        },
   }
 }
 
@@ -1266,10 +1397,13 @@ function reviewBlockedNow(context: Context): Draft | null {
 }
 
 function runningNow(context: Context): Draft | null {
-  const running = context.run.detail.snapshot.nodes.filter(node => node.status === 'running')
-  if (!running.length && context.status !== 'running') return null
+  // Also a step re-entered while it still reads failed (a live span), and the focus a resumed controller re-entered (5 b).
+  const resumed = interruptionNote(context)?.resumed ?? null
+  const running = context.run.detail.snapshot.nodes.filter(node => node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live)
+  if (!running.length && !resumed && context.status !== 'running') return null
   const headline: Text = ['● Running']
-  if (!running.length) headline.push(' · between steps')
+  if (resumed && context.focus) headline.push(` · ${context.focus.label} · resumed at `, clock(resumed.at))
+  else if (!running.length) headline.push(' · between steps')
   for (const node of running.slice(0, 2)) {
     headline.push(` · ${labelOf(context.run.detail, node.node_id)}`)
     const span = context.timeline.byNode.get(node.node_id)?.at(-1)
@@ -1283,7 +1417,8 @@ function runningNow(context: Context): Draft | null {
   if (last) headline.push(' · last activity ', ago(last.at), `: ${INTERNAL.get(context.timeline)?.lastActivityText ?? ''}`)
   const watch = running.flatMap(node => node.node_id.startsWith('launch_') ? [command(`"$PY" -m workflow.interactive attach-one "$RUN" --node ${laneOf(node.node_id)}`, 'Optional, to watch a pane:')] : [])
   return {
-    situation: 'running', tone: 'running', glyph: '●', since: running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : null, headline,
+    situation: 'running', tone: 'running', glyph: '●', headline,
+    since: resumed?.at ?? (running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : null),
     next: { action: 'none', label: context.automatic ? 'No action needed: the controller is supervising.' : 'No action needed while the steps run.', runbook: [], steps: watch, caveat: null },
   }
 }
@@ -1337,7 +1472,14 @@ function unmatchedNow(context: Context): Draft {
   if (row) { reason = row.message; source = 0 }
   else if (failing[0]?.result) { reason = gateSummary(failing[0].result, checksOf(context, failing[0].lane)); source = 2 }
   else if (completion && (completion.status === 'blocked' || completion.status === 'question')) { reason = completion.question ?? completion.summary; source = 3 }
-  else { reason = (focus && lastMessage(context, focus.node_id)?.text) || 'no reason was recorded'; source = focus && lastMessage(context, focus.node_id) ? 4 : null }
+  else {
+    // A focus without a status row of its own takes the failed dependency row that opened the scope window: the handoff a
+    // controller block failed when that block was aliased onto a lane named `controller` (C6; B1's patterns keep it there).
+    const own = focus ? lastMessage(context, focus.node_id) : null
+    const quoted = own ?? context.rows.find(other => other.event.sequence === context.scope && other.marker === null && other.status === 'failed' && other.node !== focus?.node_id) ?? null
+    reason = quoted?.text || 'no reason was recorded'
+    source = quoted ? 4 : null
+  }
   const paused = context.status === 'paused'
   return {
     situation: 'no_rule_matched', tone: paused ? 'paused' : 'failed', glyph: paused ? '‖' : '✗', reasonSource: source,
@@ -1367,9 +1509,12 @@ export function laneLines(run: RunData): LaneLine[] {
     if (launch) steps.push({ node_id: launch.node_id, step: 'worker', status: launch.status, text: `worker ${GLYPH[launch.status]}` })
     const verify = snapshotNode(detail, `verify_${lane}`)
     if (verify) {
-      const failed = (timeline.byNode.get(verify.node_id) ?? []).filter(span => span.status === 'failed').length
-      steps.push({ node_id: verify.node_id, step: 'verify', status: verify.status,
-        text: `verify ${GLYPH[verify.status]}${verify.attempt > 1 ? ` attempt ${verify.attempt}${failed ? ` (${failed} failed)` : ''}` : ''}` })
+      const spans = timeline.byNode.get(verify.node_id) ?? []
+      const failed = spans.filter(span => span.status === 'failed').length
+      // A retry that still reads failed is running (see `reentered`).
+      const status: NodeStatus = spans.at(-1)?.live ? 'running' : verify.status
+      steps.push({ node_id: verify.node_id, step: 'verify', status,
+        text: `verify ${GLYPH[status]}${verify.attempt > 1 ? ` attempt ${verify.attempt}${failed ? ` (${failed} failed)` : ''}` : ''}` })
     }
     if (candidate) {
       const entry = candidate.lane_results.find(item => item.worker === lane)
@@ -1387,10 +1532,16 @@ export function laneLines(run: RunData): LaneLine[] {
 
 // ---- Controller liveness (6.3) -------------------------------------------------------------------------------------
 
-/** True when the latest readings have said `not_running` for at least `minMs`: one reading can be a checkpoint hand-over. */
-export function controllerNotRunning(readings: readonly ControllerReading[], minMs = CONTROLLER_DEBOUNCE_MS): boolean {
+/** Where the current run of `not_running` readings began, or null when the latest reading is something else. */
+function notRunningSince(readings: readonly ControllerReading[]): string | null {
   let since: string | null = null
   for (const reading of readings) since = reading.value === 'not_running' ? since ?? reading.at : null
+  return since
+}
+
+/** True when the latest readings have said `not_running` for at least `minMs`: one reading can be a checkpoint hand-over. */
+export function controllerNotRunning(readings: readonly ControllerReading[], minMs = CONTROLLER_DEBOUNCE_MS): boolean {
+  const since = notRunningSince(readings)
   const latest = readings.at(-1)
   return since !== null && latest !== undefined && ms(latest.at) - ms(since) >= minMs
 }

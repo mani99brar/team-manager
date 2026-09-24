@@ -106,8 +106,12 @@ function synthetic(options: {
   inputs?: (inputs: RunInputs) => void
   review?: ReviewResult | null
   results?: Record<string, WorkerResult>
+  /** The captured run whose definition and inputs it starts from (skeleton-001 by default). */
+  base?: Bundle
 }): RunData {
-  const base = skeleton.detail
+  const from = options.base ?? skeleton
+  const base = from.detail
+  const runId = base.summary.run_id
   const last = options.events.length ? Math.max(...options.events.map(([second]) => second)) : 0
   const summary = { ...base.summary, status: options.status, created_at: t(-60), updated_at: t(last + 1) }
   const nodes = base.snapshot.nodes.map(node => {
@@ -121,20 +125,59 @@ function synthetic(options: {
     const parsed = /\bAttempt (\d+)\b/.exec(message)
     if (node && parsed) attempts.set(node, Number(parsed[1]))
     return eventSchema.parse({
-      contract_version: '1.0.0', run_id: 'skeleton-001', event_id: `skeleton-001:${index + 1}`, sequence: index + 1, occurred_at: t(second),
+      contract_version: '1.0.0', run_id: runId, event_id: `${runId}:${index + 1}`, sequence: index + 1, occurred_at: t(second),
       node_id: node, attempt: node ? attempts.get(node) ?? 1 : 0, type: status ? 'status_changed' : 'log', status, message,
       artifact: null, result_uri: null, reused_from_attempt: null,
     })
   })
-  const inputs = structuredClone(skeleton.inputs)
-  const worker = inputs.workers[0]
-  worker.launch = { ...worker.launch!, launch_requested_at: t(-2), native_started_at: t(0) }
-  worker.stop = null
-  worker.completion = null
-  worker.handoff = null
+  const inputs = structuredClone(from.inputs)
+  for (const worker of inputs.workers) {
+    worker.launch = { ...worker.launch!, launch_requested_at: t(-2), native_started_at: t(0) }
+    worker.stop = null
+    worker.completion = null
+    worker.handoff = null
+  }
   options.inputs?.(inputs)
   return { detail, events, inputs: validateRunInputs(inputs), review: options.review ?? null, results: new Map(Object.entries(options.results ?? {})) }
 }
+
+type LaneResult = RunDetail['snapshot']['nodes'][number]['lane_results'][number]
+
+/**
+ * A captured run as the server served it right after event `last`: its events up to there, and the node states the
+ * server's projection gives at that point (a task keeps its graph error, and so its node and the run read `failed`,
+ * until the step that re-enters it ends).
+ */
+function servedAt(bundle: Bundle, last: number, status: NodeStatusName, states: Record<string, NodeState>,
+  extra: { laneResults?: LaneResult[]; results?: Record<string, WorkerResult>; events?: WorkflowEvent[] } = {}): RunData {
+  const base = bundle.detail
+  const events = [...bundle.events.filter(event => event.sequence <= last), ...extra.events ?? []]
+  const nodes = base.snapshot.nodes.map(node => {
+    const state = states[node.node_id] ?? 'pending'
+    const [nodeStatus, attempt] = Array.isArray(state) ? state : [state, state === 'pending' ? 0 : 1]
+    const pending = nodeStatus === 'pending'
+    return { ...node, status: nodeStatus, attempt, session_id: pending ? null : node.session_id, result_uri: pending ? null : node.result_uri,
+      lane_results: node.node_id === 'candidate' && !pending ? extra.laneResults ?? [] : [] }
+  })
+  const detail = validateRunDetail({ summary: { ...base.summary, status, updated_at: events.at(-1)!.occurred_at }, definition: base.definition,
+    snapshot: { ...base.snapshot, status, last_sequence: events.at(-1)!.sequence, nodes } })
+  return { detail, events, inputs: bundle.inputs, review: null, results: new Map(Object.entries(extra.results ?? {})) }
+}
+
+/** A later copy of a captured event (a PID checkpoint, say) at another sequence and time. */
+function laterEvent(bundle: Bundle, like: number, sequence: number, at: string, change: Partial<WorkflowEvent> = {}): WorkflowEvent {
+  return eventSchema.parse({ ...eventAt(bundle, like), sequence, event_id: `${bundle.detail.summary.run_id}:${sequence}`, occurred_at: at, ...change })
+}
+
+const GAME_1 = `${SKELETON_RUN}/results/game/1`
+const BEFORE_VERIFY: Record<string, NodeState> = { challenge: ['succeeded', 3], launch_game: 'succeeded', handoff: 'succeeded' }
+/** skeleton-001 as served between #14 (attempt 1 failed) and #15: the supervisor has not started the retry yet. */
+const skeletonFailedOnce = () => servedAt(skeleton, 14, 'failed', { ...BEFORE_VERIFY, verify_game: 'failed' }, { results: { [GAME_1]: skeletonGame1 } })
+/** skeleton-001 as served between #16 ("Attempt 2" running) and #17: results/game/2 does not exist until the attempt ends. */
+const skeletonRetrying = () => servedAt(skeleton, 16, 'failed', { ...BEFORE_VERIFY, verify_game: ['failed', 2] }, { results: { [GAME_1]: skeletonGame1 } })
+
+/** A Claude Code outage as sessions.py:272 words it. */
+const OUTAGE = "Claude Code unavailable for 60s ([Errno 2] No such file or directory: 'claude'); an update may be replacing it."
 
 const LAUNCHED: EventSpec[] = [
   [0, 'launch_game', 'running', 'Launching or reconciling the exact native session'],
@@ -343,6 +386,15 @@ describe('buildTimeline', () => {
     }
   })
 
+  it('keeps a retried attempt running while the export still serves its node failed; a later controller start ends it', () => {
+    const retrying = buildTimeline(skeletonRetrying())
+    assert.deepEqual(retrying.byNode.get('verify_game')?.map(span => [span.attempt, span.status, span.end === null, span.live]),
+      [[1, 'failed', false, false], [2, 'running', true, true]])
+    // A later checkpoint controller means the process that ran attempt 2 exited: it ended, and failed without a verdict row.
+    const exited = servedAt(skeleton, 16, 'failed', { ...BEFORE_VERIFY, verify_game: ['failed', 2] }, { events: [laterEvent(skeleton, 15, 17, '2026-09-24T09:22:00Z')] })
+    assert.deepEqual(buildTimeline(exited).byNode.get('verify_game')?.map(span => [span.attempt, span.status, span.live]), [[1, 'failed', false], [2, 'failed', false]])
+  })
+
   it('is memoized on the served state: an identical poll returns the same timeline, a new event rebuilds it', () => {
     const first = runData(skeleton)
     const again = buildTimeline({ ...first, detail: structuredClone(first.detail), events: [...first.events] })
@@ -393,6 +445,53 @@ describe('deriveNow', () => {
     assert.deepEqual(now.missing, [])
     const partial = deriveNow(runData(guardrails))
     assert.deepEqual(partial.missing, [`${GUARDRAILS_RUN}/results/candidate_ui/1`], 'names the result it still needs')
+  })
+
+  describe('blocked_identical needs one revision, as advance_failed_checks does (same_revision)', () => {
+    const OLD = '5c1a734e71c3312a8d9174f50951e27fcd26d0b7'
+    const NEW = '50b14b3c766005cf076331e8e8a59261cf90d16b'
+    const gate = eventAt(skeleton, 14).message
+    const result = (attempt: number, revision: string) => validateWorkerResult({ ...skeletonGame1, attempt, output_commit: revision })
+    const uri = (attempt: number) => `${SKELETON_RUN}/results/game/${attempt}`
+    const twice = (second: string, mode: 'automatic' | 'manual' = 'automatic') => synthetic({
+      status: 'failed', nodes: { ...BEFORE_VERIFY, verify_game: ['failed', 2] },
+      events: [[0, 'verify_game', 'running', `Attempt 1; revision ${OLD}`], [60, 'verify_game', 'failed', gate],
+        [62, null, null, 'Automatic checkpoint controller PID 5151'], [62, 'verify_game', 'running', `Attempt 2; revision ${second}`], [120, 'verify_game', 'failed', gate]],
+      results: { [uri(1)]: result(1, OLD), [uri(2)]: result(2, second) },
+      inputs: inputs => { if (mode === 'manual') { inputs.mode = 'manual'; inputs.automatic = null } },
+    })
+
+    it('two failures with one reason on one revision are identical, without a diagnosis row', () => {
+      const now = checked(twice(OLD))
+      assert.equal(now.situation, 'blocked_identical')
+      assert.match(textToString(now.headline, T0), /lane game failed identically on attempts 1 and 2/)
+    })
+
+    it('the same reason on another revision is not', () => {
+      assert.equal(checked(twice(NEW)).situation, 'check_failed')
+    })
+
+    it('attempts on either side of a repair are not: attempt 3 is attempt 1 of 3 on the repaired revision', () => {
+      const repaired = (mode: 'automatic' | 'manual') => synthetic({
+        status: 'failed', nodes: { ...BEFORE_VERIFY, verify_game: ['failed', 3] },
+        events: [[0, 'verify_game', 'running', `Attempt 1; revision ${OLD}`], [60, 'verify_game', 'failed', gate],
+          [62, null, null, 'Automatic checkpoint controller PID 5151'], [62, 'verify_game', 'running', `Attempt 2; revision ${OLD}`], [120, 'verify_game', 'failed', gate],
+          [122, null, null, 'Automatic checkpoint controller PID 5152'],
+          [122, null, null, 'worker/game failed identically on attempts 1 and 2; not transient, inspect <path> Before review a code fix is a lane repair (RUNBOOK)'],
+          [400, 'verify_game', 'paused', 'Repair 1 by the operator: snapshot 50b14b3c = 5c1a734e + b27d726a on snapshot 5c1a734e (vitest.config.ts). Reason: Vitest summaries. Continue with python -m workflow automatic <path> --live'],
+          [400, null, null, 'Repair 1 applied: checkpoint forked from 1f1b7f90 (after handoff); attempts worker:game 3'],
+          [460, null, null, 'Automatic checkpoint controller PID 5153'], [460, 'verify_game', 'running', `Attempt 3; revision ${NEW}`], [520, 'verify_game', 'failed', gate]],
+        results: { [uri(2)]: result(2, OLD), [uri(3)]: result(3, NEW) },
+        inputs: inputs => { if (mode === 'manual') { inputs.mode = 'manual'; inputs.automatic = null } },
+      })
+      const automatic = checked(repaired('automatic'))
+      assert.equal(automatic.situation, 'check_failed')
+      assert.match(textToString(automatic.headline, T0), /^✗ Verify game failed attempt 1 of 3: unit, integration — /)
+      assert.deepEqual(commands(automatic), [], 'the supervisor retries by itself')
+      assert.deepEqual(commands(checked(repaired('manual'))), ['"$PY" -m workflow retry "$RUN" --phase worker --node game'])
+      const withoutAttempt2 = deriveNow({ ...repaired('automatic'), results: new Map([[uri(3), result(3, NEW)]]) })
+      assert.deepEqual(withoutAttempt2.missing, [], 'attempt 2 checked another revision, so it is not read')
+    })
   })
 
   it('succeeded', () => {
@@ -456,13 +555,40 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
   })
 
-  it('interrupted (b): the review node recorded it, with no controller row', () => {
+  it('interrupted (a): the resumed controller\'s PID row ends it, before B1 (no status) and with B1 (running)', () => {
+    for (const status of [null, 'running'] as const) {
+      // As served after `automatic --live`: the PID row is the latest controller row, so the handoff is pending again.
+      const now = checked(synthetic({
+        status: 'running', nodes: WORKING,
+        events: [...LAUNCHED, [1800, null, null, 'Supervisor interrupted. Native workers were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live'],
+          [1900, null, status, 'Automatic checkpoint controller PID 5151']],
+      }))
+      assert.equal(now.situation, 'running', `PID row status ${status}`)
+      assert.doesNotMatch(prose(now), /Interrupted/)
+      assert.deepEqual(commands(now), ['"$PY" -m workflow.interactive attach-one "$RUN" --node game'], 'never another `automatic`: the run is locked by the resumed controller')
+    }
+  })
+
+  it('interrupted (a): also on a run served failed, when the review keeps its error (automatic.py:1316)', () => {
     const done = { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded' } as const
     const now = checked(synthetic({
-      status: 'paused', nodes: { ...done, review: 'paused' },
-      events: [[0, 'review', 'running', 'Launching the native reviewer session general'],
-        [300, 'review', 'paused', 'Controller interrupted while waiting for the reviewers. The native reviewer sessions were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live']],
+      status: 'failed', nodes: { ...done, review: 'failed' },
+      events: [[0, 'review', 'running', 'Launching the native reviewer session general'], [300, 'review', 'running', 'Could not confirm reviewer stop: timed out; resume retries the stop'],
+        [301, null, null, `${OUTAGE} Claude Code was unavailable (an update replacing it, or its background service restarting). Nothing was stopped: the native sessions keep running. Once \`claude\` works, resume with: python -m workflow automatic <path> --live`]],
     }))
+    assert.equal(now.situation, 'interrupted')
+    assert.equal(now.interruption, 'a')
+    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Independent review · 10:05: Claude Code was unavailable; sessions keep running/)
+    assert.doesNotMatch(prose(now), /Failed/)
+  })
+
+  const REVIEWED = { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded' } as const
+  const REVIEW_NOTE = 'Controller interrupted while waiting for the reviewers. The native reviewer sessions were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live'
+  const REVIEW_LAUNCH: EventSpec = [0, 'review', 'running', 'Launching the native reviewer session general']
+
+  it('interrupted (b): the review node recorded it, with no controller row', () => {
+    // Ctrl-C (automatic.py:804) records no graph error: the raw `interrupted` row serves the review, and the run, paused.
+    const now = checked(synthetic({ status: 'paused', nodes: { ...REVIEWED, review: 'paused' }, events: [REVIEW_LAUNCH, [300, 'review', 'paused', REVIEW_NOTE]] }))
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'b')
     assert.equal(now.tone, 'interrupted')
@@ -471,15 +597,45 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
   })
 
-  it('interrupted (b): the freeze recorded it on the handoff', () => {
+  it('interrupted (b): the review recorded an outage, and keeps its graph error, so it is served failed (automatic.py:811)', () => {
     const now = checked(synthetic({
-      status: 'paused', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'paused' },
-      events: [...LAUNCHED, [1800, 'handoff', 'paused', 'Claude Code is unavailable. The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches nothing. Once `claude` works, resume with: python -m workflow automatic <path> --live']],
+      status: 'failed', nodes: { ...REVIEWED, review: 'failed' },
+      events: [REVIEW_LAUNCH, [300, 'review', 'paused', `${OUTAGE} ${REVIEW_NOTE}`]],
     }))
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'b')
-    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs/)
+    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Independent review/)
+    assert.doesNotMatch(prose(now), /Failed/)
     assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+  })
+
+  const FREEZE_NOTE: EventSpec = [1800, 'handoff', 'paused', `${OUTAGE} The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches nothing. Once \`claude\` works, resume with: python -m workflow automatic <path> --live`]
+
+  it('interrupted (b): the freeze recorded it on the handoff, which keeps its graph error, so it is served failed', () => {
+    const now = checked(synthetic({ status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'failed' }, events: [...LAUNCHED, FREEZE_NOTE] }))
+    assert.equal(now.situation, 'interrupted')
+    assert.equal(now.interruption, 'b')
+    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs/)
+    assert.doesNotMatch(prose(now), /Failed/)
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    // Resumed: the freeze runs again (automatic.py resume_interrupted_freeze) while the handoff still reads failed.
+    const resumed = checked(synthetic({
+      status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'failed' },
+      events: [...LAUNCHED, FREEZE_NOTE, [1900, null, null, 'Automatic checkpoint controller PID 5151'],
+        [1901, 'handoff', 'running', 'Resuming the freeze interrupted by: Claude Code unavailable for 60s; its recorded stops are completed, nothing is relaunched']],
+    }))
+    assert.equal(resumed.situation, 'running')
+    assert.match(textToString(resumed.headline, T0), /^● Running · Freeze worker handoffs/)
+  })
+
+  it('interrupted (b): a resumed controller\'s PID row ends it; the review is running again though still served paused', () => {
+    const now = checked(synthetic({
+      status: 'paused', nodes: { ...REVIEWED, review: 'paused' },
+      events: [REVIEW_LAUNCH, [300, 'review', 'paused', REVIEW_NOTE], [360, null, null, 'Automatic checkpoint controller PID 5151']],
+    }))
+    assert.equal(now.situation, 'running')
+    assert.match(textToString(now.headline, T0), /^● Running · Independent review · resumed at 10:06/)
+    assert.deepEqual(commands(now), [])
   })
 
   it('interrupted (c): the controller is not running on polls 20 s apart; a single poll does not match', () => {
@@ -490,6 +646,20 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
     assert.equal(deriveNow({ ...run, controller: [{ at: t(120), value: 'not_running' }] }).situation, 'running')
     assert.equal(controllerNotRunning([{ at: t(120), value: 'not_running' }, { at: t(130), value: 'not_running' }]), false, '10 s is a checkpoint hand-over')
+  })
+
+  it('interrupted (c): since is the start of the current not-running streak, not an earlier hand-over', () => {
+    const run = synthetic({ status: 'running', nodes: WORKING, events: LAUNCHED })
+    const now = deriveNow({ ...run, controller: [{ at: t(10), value: 'not_running' }, { at: t(15), value: 'running' }, { at: t(3000), value: 'not_running' }, { at: t(3020), value: 'not_running' }] })
+    assert.equal(now.interruption, 'c')
+    assert.equal(now.since, t(3000))
+  })
+
+  it('interrupted (c): also while an automatic retry is served failed', () => {
+    const now = checked({ ...skeletonRetrying(), controller: [{ at: '2026-09-24T09:21:00Z', value: 'not_running' }, { at: '2026-09-24T09:21:20Z', value: 'not_running' }] })
+    assert.equal(now.situation, 'interrupted')
+    assert.equal(now.interruption, 'c')
+    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Verify game: the controller is not running/)
   })
 
   it('interrupted (d): a repair applied and not yet continued', () => {
@@ -581,22 +751,60 @@ describe('deriveNow', () => {
   })
 
   it('check_failed', () => {
-    const failing: EventSpec[] = [[0, 'verify_game', 'running', 'Attempt 1; revision 5c1a734e71c3312a8d9174f50951e27fcd26d0b7'],
-      [67, 'verify_game', 'failed', 'unit: no passing test evidence or failed tests; integration: no passing test evidence or failed tests']]
-    const at = (mode: 'automatic' | 'manual') => synthetic({
-      status: mode === 'automatic' ? 'running' : 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'failed' }, events: failing,
-      results: { [`${SKELETON_RUN}/results/game/1`]: skeletonGame1 },
-      inputs: inputs => { if (mode === 'manual') { inputs.mode = 'manual'; inputs.automatic = null } },
-    })
-    const automatic = checked(at('automatic'))
+    // skeleton-001 as served: the verify task keeps its graph error until the retry ends, so the run reads failed throughout.
+    const automatic = checked(skeletonFailedOnce())
     assert.equal(automatic.situation, 'check_failed')
     assert.equal(automatic.reasonSource, 2)
-    assert.match(textToString(automatic.headline, T0), /^✗ Verify game failed attempt 1 of 3: unit, integration — no passing test evidence or failed tests/)
+    assert.equal(textToString(automatic.headline, T0), '✗ Verify game failed attempt 1 of 3: unit, integration — no passing test evidence or failed tests')
     assert.equal(automatic.next.action, 'none')
+    assert.match(automatic.next.label, /the supervisor retries by itself/)
     assert.deepEqual(commands(automatic), [], 'the supervisor retries by itself')
-    const manual = checked(at('manual'))
+    assert.deepEqual(automatic.missing, [])
+    const manual = checked(synthetic({
+      status: 'failed', nodes: { ...BEFORE_VERIFY, verify_game: 'failed' },
+      events: [[0, 'verify_game', 'running', 'Attempt 1; revision 5c1a734e71c3312a8d9174f50951e27fcd26d0b7'], [67, 'verify_game', 'failed', eventAt(skeleton, 14).message]],
+      results: { [GAME_1]: skeletonGame1 }, inputs: inputs => { inputs.mode = 'manual'; inputs.automatic = null },
+    }))
     assert.equal(manual.situation, 'check_failed')
     assert.deepEqual(commands(manual), ['"$PY" -m workflow retry "$RUN" --phase worker --node game'])
+  })
+
+  it('check_failed: while the retry runs, the headline reads the failed attempt and never asks for the running one', () => {
+    const retrying = skeletonRetrying()
+    const now = checked(retrying)
+    assert.equal(now.situation, 'check_failed')
+    assert.equal(textToString(now.headline, T0), '✗ Verify game failed attempt 1 of 3: unit, integration — no passing test evidence or failed tests · attempt 2 running since 09:20')
+    assert.equal(now.since, eventAt(skeleton, 14).occurred_at)
+    assert.deepEqual(commands(now), [])
+    assert.deepEqual(now.missing, [], 'results/game/2 does not exist until attempt 2 ends')
+    assert.deepEqual(nowResultUris(retrying.detail, retrying.events), [GAME_1])
+    assert.deepEqual(nowResultUris(skeletonFailedOnce().detail, skeletonFailedOnce().events), [GAME_1])
+  })
+
+  it('check_failed: a candidate lane retry (guardrails #28 to #31)', () => {
+    const lane = (worker: string, attempt: number) => ({ worker, attempt, result_uri: `${GUARDRAILS_RUN}/results/candidate_${worker}/${attempt}` })
+    const run = servedAt(guardrails, 30, 'failed',
+      { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'succeeded', verify_controller: ['succeeded', 2], verify_ui: 'succeeded', candidate: 'failed' },
+      { laneResults: [lane('controller', 1), lane('ui', 1)],
+        results: { [lane('controller', 1).result_uri]: guardrails.results.get(lane('controller', 1).result_uri)!, [lane('ui', 1).result_uri]: guardrailsCandidateUi1 } })
+    const now = checked(run)
+    assert.equal(now.situation, 'check_failed')
+    assert.equal(now.lane, 'ui')
+    assert.match(textToString(now.headline, T0), /^✗ Verify combined candidate failed attempt 1 of 3 \(lane ui\): project-workflows-browser — /)
+    assert.deepEqual(commands(now), [])
+    assert.deepEqual(now.missing, [])
+  })
+
+  it('check_failed: a controller block after the failure means the supervisor stopped, and rule 13 quotes it', () => {
+    const now = checked(synthetic({
+      status: 'failed', nodes: { ...BEFORE_VERIFY, verify_game: 'failed' },
+      events: [[0, 'verify_game', 'running', 'Attempt 1; revision 5c1a734e71c3312a8d9174f50951e27fcd26d0b7'], [67, 'verify_game', 'failed', eventAt(skeleton, 14).message],
+        [70, null, null, `${OUTAGE} The verify_game step ended on it in a state no resume continues; inspect retained evidence`]],
+      results: { [GAME_1]: skeletonGame1 },
+    }))
+    assert.equal(now.situation, 'no_rule_matched')
+    assert.equal(now.reasonSource, 0)
+    assert.match(textToString(now.reason, T0), /no resume continues/)
   })
 
   it('running', () => {
@@ -633,6 +841,19 @@ describe('deriveNow', () => {
     assert.equal(now.situation, 'no_rule_matched')
     assert.match(textToString(now.headline, T0), /^‖ Paused at Verify game · Packet hash mismatch; evidence retained/)
     assert.doesNotMatch(prose(now), /Failed/)
+  })
+
+  it('no_rule_matched: a controller block aliased onto a lane named controller (C6) is still the reason, as source 4', () => {
+    // Before and with B1, `Worker ui deadline exhausted` matches no controller-process pattern, so it stays on launch_controller.
+    const now = checked(synthetic({
+      base: guardrails, status: 'failed', nodes: { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'failed' },
+      events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [0, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
+        [5, 'launch_controller', 'running', 'Automatic checkpoint controller PID 5151'], [3600, 'launch_controller', 'failed', 'Worker ui deadline exhausted; no automatic relaunch'],
+        [3601, 'handoff', null, 'Native workers stopped before snapshot capture: controller, ui']],
+    }))
+    assert.equal(now.situation, 'no_rule_matched')
+    assert.equal(now.reasonSource, 4)
+    assert.equal(textToString(now.headline, T0), '✗ Failed at Freeze worker handoffs · Worker ui deadline exhausted; no automatic relaunch. The workflow did not complete.')
   })
 
   it('scope: a stale [Errno 2] row before the focus attempt is ignored', () => {
@@ -755,5 +976,12 @@ describe('deriveFocus, humanizeEvent, attemptResultUris, laneLines', () => {
       ['ui', ['worker ✓', 'verify ✓', 'candidate ✗ attempt 2 of 3: project-workflows-browser — no passing test evidence or failed tests; missing/unknown browser scenarios; Expected one screenshot attachment for inert-markdown']],
     ])
     assert.deepEqual(laneLines(runData(skeleton)), [])
+    // guardrails as served at #25: verify_controller's attempt 2 runs while its node still reads failed.
+    const retrying = servedAt(guardrails, 25, 'failed',
+      { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'succeeded', verify_controller: ['failed', 2], verify_ui: 'succeeded' })
+    assert.deepEqual(laneLines(retrying).map(line => [line.lane, line.steps.map(step => step.text)]), [
+      ['controller', ['worker ✓', 'verify ● attempt 2 (1 failed)', 'candidate ○']],
+      ['ui', ['worker ✓', 'verify ✓', 'candidate ○']],
+    ])
   })
 })
