@@ -20,7 +20,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.pregel.main import Pregel
 from langgraph.types import Command
 
-from . import checks, pipeline, repair
+from . import automatic, checks, pipeline, repair
 from .automatic import advance_failed_checks, automatic_settings, drive
 from .pipeline import ExportRuntime, Pipeline, build_pipeline, export_run, graph_config
 from .sessions import git, prepare, read_json, run_lock, save_json
@@ -651,6 +651,43 @@ class InterruptedCheckOnAnAutomaticRun(RepairFixture):
         self.assertFalse((directory / "retry-requests.json").exists())
         self.assertIn(("controller", "running", "Rerunning worker:ui at the attempt retry raised"),
                       [(event["node"], event["status"], event["message"]) for event in self.events()])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
+
+
+class ReviewFailedBeforeALaunch(RepairFixture):
+    """A review node that failed before it launched any reviewer (Git could not create the review worktree) is re-entered
+    by the supervisor once; plain retry on the automatic run points there and runs nothing."""
+
+    def test_the_supervisor_reenters_a_review_that_launched_nothing(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        real, failures = automatic.git_worktree, []
+        def locked(repository, *arguments):
+            if arguments[-2].endswith("/review-worktree") and len(failures) < 2:
+                failures.append(arguments[-2])
+                raise WorktreeError(128, ["git", "worktree", *arguments], "", "fatal: cannot lock ref 'HEAD': File exists")
+            return real(repository, *arguments)
+        # Twice in a row: re-entered once by this controller, then the same failure stops it.
+        with patch("workflow.automatic.git_worktree", side_effect=locked), patch("workflow.automatic.wait_handoffs"), \
+                self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(self.runtime)
+        self.assertEqual(len(failures), 2)
+        self.assertFalse((directory / "review-worktree").exists())
+        reentries = [e["message"] for e in self.events() if e["node"] == "review" and e["message"].startswith("Re-entering the review")]
+        self.assertEqual(len(reentries), 1)
+        self.assertIn("cannot lock ref 'HEAD': File exists", reentries[0])
+        self.assertNotIn("review", self.sessions.starts)
+        # Plain retry runs nothing on an automatic run: it names automatic --live, which now continues it.
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, _, err = self.pipeline_cli("retry", str(directory))
+        self.assertNotEqual(code, 0)
+        self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live", err)
+        self.assertNotIn("review", self.sessions.starts)
+        # A new controller (automatic --live) re-enters it once more, launches each reviewer once and reaches the branch.
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
         self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
 

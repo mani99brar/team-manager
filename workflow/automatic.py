@@ -1139,6 +1139,21 @@ def resume_interrupted_review(runtime, state) -> bool:
     return True
 
 
+def restart_review(runtime, state) -> bool:
+    """The review node failed before it launched any reviewer: no reviewer status and no review worktree exist.
+
+    Re-entering it launches each reviewer at most once (each status is saved before its launch), so the supervisor
+    does it once per controller; a partial review worktree still needs the operator (review_candidate refuses it).
+    """
+    if [task.name for task in state.tasks if task.error and task.name in state.next] != ["review"]:
+        return False
+    if combined_status_path(runtime).exists() or (runtime.directory / "review-worktree").exists():
+        return False
+    error = next(str(task.error) for task in state.tasks if task.error and task.name == "review")
+    runtime.event("review", "running", f"Re-entering the review, which failed before any reviewer was launched: {error}")
+    return True
+
+
 FREEZE_INTERRUPTED = "freeze-interrupted.json"
 FREEZE_RESUME_NOTE = ("The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches "
                       "nothing. Once `claude` works, resume with: python -m workflow automatic {directory} --live")
@@ -1192,6 +1207,7 @@ def drive(runtime, *, single_step=False) -> str | None:
         raise RuntimeError("Source feature branch changed; no automatic continuation")
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
+    review_restarted = False
     while True:
         with SqliteSaver.from_conn_string(str(runtime.directory / "pipeline.sqlite")) as saver:
             graph = build_pipeline(saver, runtime)
@@ -1244,7 +1260,9 @@ def drive(runtime, *, single_step=False) -> str | None:
                 raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
-                raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
+                if review_restarted or not restart_review(runtime, state):
+                    raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
+                review_restarted = True  # Once per controller: the same failure again stops it.
             try:
                 graph.invoke(value, config)
             except Exception as error:
