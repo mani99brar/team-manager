@@ -340,7 +340,8 @@ export function ReviewPanel({ scope, node, definitionNodes, snapshotNodes, input
     : node.status === 'pending' ? null : paths.review(scope, Math.max(node.attempt, 1))
   const unscoped = node.result_uri !== null && reviewPath === null
   const load = useCallback((signal: AbortSignal) => fetchReviewResult(scope, reviewPath!, signal), [scope, reviewPath])
-  const { state, reload } = useResource(reviewPath, load, refreshToken)
+  // The fallback path before a review is recorded equals the linked one after, so the key also names what the node shows.
+  const { state, reload } = useResource(reviewPath === null ? null : `${reviewPath}|${node.result_uri ?? node.status}`, load, refreshToken)
   const none = (
     <p className="projects-muted" data-testid="review-none">
       No review recorded for this run: either the review has not happened or the run's export predates review results (re-export it with the workflow CLI).

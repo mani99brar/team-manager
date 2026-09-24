@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
 import { fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunView } from './RunView.tsx'
 import { formatTime, shortRevision } from './status.ts'
+import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
 
@@ -32,14 +33,24 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   const { state: workflows, reload: reloadWorkflows } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken)
   const loadRuns = useCallback((signal: AbortSignal) => fetchRuns(projectId!, workflowId!, {}, signal), [projectId, workflowId])
   const runsKey = workflowId === null ? null : `runs:${projectId}/${workflowId}`
-  const { state: firstPage, reload: reloadRuns } = useResource(runsKey, loadRuns, refreshToken)
+  // Run lists and run details re-read themselves while shown (a finished run no longer changes). A list stops polling
+  // while it loads or shows appended pages, since a new first page would drop them.
+  const [morePages, setMorePages] = useState<{ base: RunPage | null; pages: RunPage[]; loading: boolean; error: unknown }>({ base: null, pages: [], loading: false, error: null })
+  const [finished, setFinished] = useState(false)
+  // Appended pages belong to one list generation (this workflow, this Refresh); a new one starts without them.
+  const listGeneration = `${runsKey}\u0000${refreshToken}`
+  useEffect(() => { setMorePages({ base: null, pages: [], loading: false, error: null }) }, [listGeneration])
+  const listPoll = usePoll(route?.level === 'workflow' && !morePages.loading && morePages.pages.length === 0)
+  const runPoll = usePoll(route?.level === 'run' && !finished)
+  const { state: firstPage, reload: reloadRuns } = useResource(runsKey, loadRuns, refreshToken, listPoll)
   const scope = useMemo(() => (projectId === null || workflowId === null || runId === null ? null : { projectId, workflowId, runId }), [projectId, workflowId, runId])
   const loadDetail = useCallback((signal: AbortSignal) => fetchRunDetail({ projectId: projectId!, workflowId: workflowId!, runId: runId! }, signal), [projectId, workflowId, runId])
-  const { state: detail, reload: reloadDetail } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken)
+  const { state: detail, reload: reloadDetail } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
+  const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
+  useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
 
   // Additional run pages are appended on demand; they belong to exactly one loaded first page and are dropped with it.
   const firstPageData = firstPage.status === 'ready' ? firstPage.data : null
-  const [morePages, setMorePages] = useState<{ base: RunPage | null; pages: RunPage[]; loading: boolean; error: unknown }>({ base: null, pages: [], loading: false, error: null })
   const extra = morePages.base !== null && morePages.base === firstPageData ? morePages : { base: firstPageData, pages: [], loading: false, error: null }
   const pages: RunPage[] = firstPageData ? [firstPageData, ...extra.pages] : []
   const runs: RunSummary[] = pages.flatMap(page => page.runs)
@@ -59,13 +70,20 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   const currentWorkflow = workflows.status === 'ready' && workflowId !== null ? workflows.data.find(workflow => workflow.workflow_id === workflowId) ?? null : null
   const workflowName = currentWorkflow?.name ?? workflowId
 
+  // A background poll re-announces only what changed; a load the reader started (navigation, Refresh) always announces.
+  const announced = useRef<string | null>(null)
   useEffect(() => {
-    if (route === null) onAnnounce('This Projects link is invalid.')
-    else if (route.level === 'projects' && projects.status === 'ready') onAnnounce(`Loaded ${projects.data.length} ${projects.data.length === 1 ? 'project' : 'projects'}.`)
-    else if (route.level === 'project' && workflows.status === 'ready') onAnnounce(`Loaded ${workflows.data.length} ${workflows.data.length === 1 ? 'workflow' : 'workflows'} for ${projectName ?? route.projectId}.`)
-    else if (route.level === 'workflow' && firstPage.status === 'ready') onAnnounce(`Loaded ${firstPage.data.runs.length} ${firstPage.data.runs.length === 1 ? 'run' : 'runs'} for ${workflowName ?? route.workflowId}.`)
-    else if (route.level === 'run' && detail.status === 'ready') onAnnounce(`Loaded run ${route.runId}: ${detail.data.summary.status.replace('_', ' ')}.`)
-    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') onAnnounce('Loading failed.')
+    let message: string | null = null
+    if (route === null) message = 'This Projects link is invalid.'
+    else if (route.level === 'projects' && projects.status === 'ready') message = `Loaded ${projects.data.length} ${projects.data.length === 1 ? 'project' : 'projects'}.`
+    else if (route.level === 'project' && workflows.status === 'ready') message = `Loaded ${workflows.data.length} ${workflows.data.length === 1 ? 'workflow' : 'workflows'} for ${projectName ?? route.projectId}.`
+    else if (route.level === 'workflow' && firstPage.status === 'ready') message = `Loaded ${firstPage.data.runs.length} ${firstPage.data.runs.length === 1 ? 'run' : 'runs'} for ${workflowName ?? route.workflowId}.`
+    else if (route.level === 'run' && detail.status === 'ready') message = `Loaded run ${route.runId}: ${detail.data.summary.status.replace('_', ' ')}.`
+    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') message = 'Loading failed.'
+    if (message === null) { announced.current = null; return }
+    if (message === announced.current) return
+    announced.current = message
+    onAnnounce(message)
   }, [route, projects, workflows, firstPage, detail, projectName, workflowName, onAnnounce])
 
   const crumbs: PathCrumb[] = [{ id: 'home', label: 'Home', pathname: '/' }, { id: 'projects', label: 'Projects', pathname: projectsPathname() }]
@@ -224,7 +242,7 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
         </div>
       )
     } else if (detail.status === 'error') content = <ErrorPanel error={detail.error} what={`Run ${route.runId}`} onRetry={reloadDetail} />
-    else content = <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} onNavigate={onNavigate} />
+    else content = <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} onNavigate={onNavigate} />
   }
 
   return (

@@ -179,7 +179,7 @@ export function CreatedFiles({ scope, result, reviewNode, refreshToken, focusPat
     (signal: AbortSignal) => orNotRecorded(fetchReviewResult(scope, reviewPath!, signal), NOT_RECORDED.review).then(review => review?.findings ?? null),
     [scope, reviewPath],
   )
-  const { state: findings } = useResource(reviewPath, loadReview, refreshToken)
+  const { state: findings } = useResource(reviewPath === null ? null : `${reviewPath}|${reviewNode?.result_uri ?? reviewNode?.status}`, loadReview, refreshToken)
 
   // A file link is applied once: the target panel scrolls into view when it mounts, and the run view forgets the hand-over.
   const [focus] = useState(() => focusPath)

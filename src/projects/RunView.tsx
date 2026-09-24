@@ -15,6 +15,8 @@ type Props = {
   current: WorkflowDefinition | null
   selectedNodeId: string | null
   refreshToken: number
+  /** Ticks while the run page polls live state; the run's events and inputs re-read in the background with it. */
+  pollToken?: number
   onNavigate: (pathname: string) => void
 }
 
@@ -28,7 +30,7 @@ const TABS: { id: Tab; label: string; testId: string }[] = [
 ]
 
 /** One run: its summary and pinned inputs, its definition graph coloured by actual node statuses, the selected node, and the assignment. */
-export function RunView({ scope, detail, current, selectedNodeId, refreshToken, onNavigate }: Props) {
+export function RunView({ scope, detail, current, selectedNodeId, refreshToken, pollToken = 0, onNavigate }: Props) {
   const { summary, definition, snapshot } = detail
   const snapshotById = new Map(snapshot.nodes.map(node => [node.node_id, node]))
   const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
@@ -40,10 +42,10 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
 
   const runKey = `${scope.projectId}/${scope.workflowId}/${scope.runId}`
   const loadEvents = useCallback((signal: AbortSignal) => fetchEvents(scope, signal), [scope])
-  const { state: events, reload: reloadEvents } = useResource(`events:${runKey}`, loadEvents, refreshToken)
+  const { state: events, reload: reloadEvents } = useResource(`events:${runKey}`, loadEvents, refreshToken, pollToken)
   // The inputs are one resource per run; a 404 INPUTS_NOT_FOUND means "not recorded", which loads as null.
   const loadInputs = useCallback((signal: AbortSignal) => orNotRecorded(fetchRunInputs(scope, signal), NOT_RECORDED.inputs), [scope])
-  const { state: inputs, reload: reloadInputs } = useResource(`inputs:${runKey}`, loadInputs, refreshToken)
+  const { state: inputs, reload: reloadInputs } = useResource(`inputs:${runKey}`, loadInputs, refreshToken, pollToken)
 
   const [tab, setTab] = useState<Tab>('run')
   // A requirement quote handed from a review finding to a worker's task; it applies to one node and is dropped once applied or when leaving it.

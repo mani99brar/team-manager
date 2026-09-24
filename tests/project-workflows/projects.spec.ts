@@ -432,3 +432,44 @@ test(`[scenario:deferred-checks] A lane verified in isolation shows its deferred
   await attach(page, testInfo, 'deferred-checks')
   await expectNoExecutionControls(page)
 })
+
+test(`[scenario:live-refresh] A shown run re-reads its state in the background without a Refresh (${phase})`, async ({ page }, testInfo) => {
+  // The controller moves the run on while the page is open: the run and a node change status on the server.
+  const before = runDetails[RUN_AWAITING]
+  const moved = structuredClone(before)
+  moved.summary.status = 'running'
+  moved.snapshot.status = 'running'
+  const changed = moved.snapshot.nodes.find(node => node.status === 'awaiting_approval')!
+  changed.status = 'running'
+  let current = before
+  let reads = 0
+  const detailRequest = (url: URL) => url.pathname === apiRun(RUN_AWAITING)
+  await page.route(detailRequest, async route => {
+    reads += 1
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(current) })
+  })
+  await page.goto(runUrl(RUN_AWAITING))
+  const view = page.getByTestId('run-view')
+  await expect(view).toHaveAttribute('data-run-status', 'awaiting_approval')
+  await expect(graphNode(page, changed.node_id)).toHaveClass(/is-awaiting_approval/)
+  // The reader's place survives a poll: the page is updated in place, not reloaded behind a loading panel.
+  await page.getByTestId('tab-assignment').click()
+  current = moved
+  await expect(view).toHaveAttribute('data-run-status', 'running', { timeout: 15_000 })
+  await expect(page.getByTestId('tab-assignment')).toHaveAttribute('aria-selected', 'true')
+  await page.getByTestId('tab-run').click()
+  await expect(graphNode(page, changed.node_id)).toHaveClass(/is-running/)
+  await attach(page, testInfo, 'live-refresh')
+
+  // A failed poll keeps the last loaded state instead of replacing the page with an error. The second failed read
+  // proves the page already handled the first one.
+  const readsBeforeOutage = reads
+  await page.unroute(detailRequest)
+  await page.route(detailRequest, async route => {
+    reads += 1
+    await route.abort('connectionrefused')
+  })
+  await expect.poll(() => reads, { timeout: 20_000 }).toBeGreaterThan(readsBeforeOutage + 1)
+  await expect(view).toHaveAttribute('data-run-status', 'running')
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
+})
