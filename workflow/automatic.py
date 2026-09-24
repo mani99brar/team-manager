@@ -500,7 +500,19 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
 
     def accept(reviewer_id: str, accepted: str | None) -> dict:
+        from .pipeline import digest_file
         status = state.statuses[reviewer_id]
+        path = runtime.directory / f"{review_node(reviewer_id)}.completion.json"
+        if accepted and "accepted_decision" in status:
+            # Accepted before a restart, the decision saved with `accepted_at` stands. The session runs until the reviewers
+            # are stopped: a follow-up in its pane may have it rewrite its file, still bound to its launch, or be writing it
+            # now. A controller that never stopped would not have read it again, so it is not read; a change is only said.
+            decision = status["accepted_decision"]
+            if (digest_file(path) if path.is_file() and not path.is_symlink() else None) != status.get("completion_sha256"):
+                runtime.event("review", "running", f"Reviewer {reviewer_id}'s completion file changed after its {decision['verdict']} verdict was accepted "
+                              f"at {accepted}; that verdict stands, as for a controller that never stopped, and the file is not read again")
+            decisions[reviewer_id] = decision
+            return decision
         try:
             decision = read_review_completion(runtime, reviewer_id)
         except RuntimeError as error:
@@ -508,7 +520,9 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
             state.save()
             raise
         decisions[reviewer_id] = decision
-        status.update(status="accepted", accepted_at=accepted or now())
+        # What was accepted is saved with its time (a status without it, from an older controller, is read again); `decision`
+        # stays the one the combined decision records.
+        status.update(status="accepted", accepted_at=accepted or now(), accepted_decision=decision, completion_sha256=digest_file(path))
         state.save()
         return decision
 

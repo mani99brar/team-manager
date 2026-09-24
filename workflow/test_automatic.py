@@ -415,9 +415,9 @@ class ReviewCompletionTests(unittest.TestCase):
         save_json(self.root / f"{self.node(reviewer_id)}.completion.json", self.completion(reviewer_id, **updates))
 
     def never_accepted(self, reviewer_id):
-        """Its status as before its first acceptance: a verdict accepted once is read again whatever its session does."""
+        """Its status as before its first acceptance: a verdict accepted once stands whatever its session or file does."""
         path = self.root / f"automatic-{self.node(reviewer_id)}.json"
-        save_json(path, {key: value for key, value in read_json(path).items() if key != "accepted_at"})
+        save_json(path, {key: value for key, value in read_json(path).items() if key not in {"accepted_at", "accepted_decision", "completion_sha256"}})
 
     def test_completion_prompt_spells_out_every_enum_the_schema_enforces(self):
         # Seen live: a reviewer given only an example invented severity "P3" and its whole file was
@@ -525,6 +525,7 @@ class ReviewCompletionTests(unittest.TestCase):
         self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), self.ids)
         if len(self.ids) > 1:
             # A reviewer's file with another reviewer's node id is a foreign signal; nothing is relaunched.
+            self.never_accepted(last)
             self.write(last, node_id=self.node(first))
             with self.assertRaisesRegex(RuntimeError, f"Stale or foreign review completion signal \\({last}\\)"):
                 wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
@@ -737,8 +738,8 @@ class ReviewCompletionTests(unittest.TestCase):
     def test_a_verdict_accepted_before_a_restart_stays_accepted_while_its_session_works_again(self):
         # The first reviewer's verdict is accepted at t=100 while the others work; then the controller goes away (exit 75,
         # Ctrl-C) and a follow-up typed in that reviewer's pane has it working or blocked when the controller resumes, past
-        # every deadline. Without the restart it was never looked at again: its file is read again whatever its session
-        # does, keeping its accepted_at. A reviewer still without its file past its deadline blocks as before.
+        # every deadline. Without the restart it was never looked at again: the decision accepted then is taken whatever
+        # its session does, keeping its accepted_at. A reviewer still without its file past its deadline blocks as before.
         from .automatic import ReviewStatus, wait_reviews
         from .sessions import TransientInfraError
         timeout = DEFAULTS["review_timeout_seconds"]
@@ -768,11 +769,53 @@ class ReviewCompletionTests(unittest.TestCase):
                 self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, dict.fromkeys(self.ids, "approved"))
                 self.assertEqual(ReviewStatus.load(self.runtime).statuses[first]["accepted_at"], accepted_at)
                 self.assertEqual(self.events, [])  # Nothing waits on it: no attention event.
-        # Read again, its file is validated again: a rejected one blocks as on its first read.
+        # Accepted by a controller that did not record the decision, its file is read and validated again: a rejected
+        # one blocks as on its first read.
+        path = self.root / f"automatic-{self.node(first)}.json"
+        save_json(path, {key: value for key, value in read_json(path).items() if key not in {"accepted_decision", "completion_sha256"}})
         self.write(first, bundle_sha256="0" * 64)
         with self.assertRaisesRegex(RuntimeError, f"Stale or foreign review completion signal \\({first}\\)"):
             wait_reviews(self.runtime, ReviewStatus.load(self.runtime), **resumed)
-        self.assertEqual(read_json(self.root / f"automatic-{self.node(first)}.json")["error"], f"Stale or foreign review completion signal ({first})")
+        self.assertEqual(read_json(path)["error"], f"Stale or foreign review completion signal ({first})")
+
+    def test_a_verdict_accepted_before_a_restart_stands_when_its_file_changes_after_acceptance(self):
+        # The first reviewer's blocked verdict is accepted at t=100; then Claude Code is unavailable before the verdict is
+        # decided (exit 75). Its session runs until the reviewers are stopped, and a follow-up typed in its pane has it
+        # rewrite its file, still bound to this launch: approved, half written while it works, or removed. The resumed
+        # controller decides on the verdict it accepted, as one that never stopped would have, and says the file changed.
+        from .automatic import ReviewStatus, combined_review, wait_reviews
+        first, others = self.ids[0], self.ids[1:]
+        self.write(first, verdict="blocked")
+        for reviewer_id in others:
+            self.rows[reviewer_id]["state"] = "working"
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
+        accepted = decisions[first]
+        self.assertEqual(accepted["verdict"], "blocked")
+        accepted_at = ReviewStatus.load(self.runtime).statuses[first]["accepted_at"]
+        for reviewer_id in others:
+            self.write(reviewer_id)
+            self.rows[reviewer_id]["state"] = "idle"
+        completion = self.root / f"{self.node(first)}.completion.json"
+        rewrites = {"approved": lambda: self.write(first, verdict="approved", findings=[]), "half written": lambda: completion.write_text('{"version": "1.2'),
+                    "removed": completion.unlink}
+        for name, rewrite in rewrites.items():
+            with self.subTest(file=name):
+                rewrite()
+                self.rows[first]["state"] = "working"
+                self.events.clear()
+                state = ReviewStatus.load(self.runtime)
+                decisions = wait_reviews(self.runtime, state, clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))
+                self.assertEqual(decisions[first], accepted)
+                self.assertEqual(combined_review(self.runtime, self.bundle, self.digest, state, decisions)["verdict"], "blocked")
+                status = ReviewStatus.load(self.runtime).statuses[first]
+                self.assertEqual((status["accepted_at"], status["accepted_decision"], "error" in status), (accepted_at, accepted, False))
+                self.assertEqual(self.events, [("review", "running", f"Reviewer {first}'s completion file changed after its blocked verdict was accepted "
+                                                f"at {accepted_at}; that verdict stands, as for a controller that never stopped, and the file is not read again")])
+        # Its file unchanged since, the verdict it accepted is decided without a word.
+        self.write(first, verdict="blocked")
+        self.events.clear()
+        self.assertEqual(wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))[first], accepted)
+        self.assertEqual(self.events, [])
 
 
 class TwoReviewerCompletionTests(ReviewCompletionTests):
