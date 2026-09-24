@@ -374,6 +374,23 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(reviewer[-3:], ["--permission-mode", "dontAsk", "Review this candidate."])
         self.assertEqual(automatic[-3:-1], ["bypassPermissions", "--dangerously-skip-permissions"])
 
+    def test_only_workers_take_the_worker_effort(self):
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        ids = {row["name"]: row["id"] for row in (self.row(), self.reviewer_row())}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": "medium"}), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]):
+                self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
+        worker, reviewer = (call.args[0] for call in launch.call_args_list)
+        self.assertEqual(worker[worker.index("--effort") + 1], "medium")
+        self.assertLess(worker.index("--effort"), worker.index("--permission-mode"))
+        self.assertNotIn("--effort", reviewer)
+
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
         candidate = self.plan["base_commit"]

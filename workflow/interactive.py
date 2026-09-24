@@ -20,7 +20,7 @@ from pathlib import Path
 from .guardrails import decisions_block
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
-                       review_nodes, run_claude, save_json)
+                       review_nodes, run_claude, save_json, worker_effort)
 
 REVIEW = "review"
 
@@ -216,7 +216,7 @@ class InteractiveSessions(ClaudeSessions):
         prompt = worker_prompt(self.directory, self.plan, node)
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *background_settings(),
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *background_settings(), *worker_effort(),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", tools, "--permission-mode", "bypassPermissions" if automatic else "manual"]
         if automatic:

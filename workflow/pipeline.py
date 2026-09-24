@@ -30,7 +30,7 @@ from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
-                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id)
+                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import git_worktree
 
@@ -904,6 +904,8 @@ def main():
                 # Workers: --dangerously-skip-permissions. Native reviewer: --add-dir and --allowedTools.
                 # Print-mode reviewer (--reviewer-transport print): --json-schema, --print, --permission-prompts.
                 required_flags += ["--dangerously-skip-permissions", "--add-dir", "--allowedTools", "--json-schema", "--print", "--permission-prompts"]
+            if worker_effort():
+                required_flags.append("--effort")
             if not all(flag in help_text for flag in required_flags):
                 raise ValueError("Installed Claude CLI lacks required flags")
             auth = json.loads(run_claude(["claude", "auth", "status"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout)
