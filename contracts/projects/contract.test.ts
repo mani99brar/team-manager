@@ -4,7 +4,7 @@ import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
 import { validateWorkerResult } from '../workflow/v1.js'
-import { isBlockingFinding, schemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs } from './v1.js'
+import { ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs } from './v1.js'
 
 test('project examples and generated schemas agree', () => {
   for (const [name, schema] of Object.entries(schemas)) {
@@ -49,6 +49,66 @@ test('rejects inconsistent snapshot identity, status, graph and timestamps', () 
     mutate(detail)
     assert.throws(() => validateRunDetail(detail))
   }
+})
+
+test('run lists and details 1.5.0: activity with every attention kind and controller value, and run_dir, validate; 1.0.0 carries neither', () => {
+  const detail = validateRunDetail(examples.runDetail)
+  assert.equal(detail.summary.contract_version, '1.5.0')
+  assert.equal(schemas.runList.parse(examples.runList).runs[0].activity?.attention?.kind, 'question')
+  // A server before 1.5.0, and the viewer's worker-phase mocks, serve a 1.0.0 summary without either field.
+  validateRunDetail(examples.legacyRunDetail)
+  schemas.runList.parse({ runs: [examples.legacyRunDetail.summary], next_cursor: null })
+  for (const kind of ATTENTION_KINDS) {
+    const value = structuredClone(examples.runDetail)
+    value.summary.activity!.attention = { kind, node_id: kind === 'approval' ? 'review' : 'adapter', since: null }
+    value.summary.activity!.waiting_questions = kind === 'question' ? 1 : 0
+    assert.equal(validateRunDetail(value).summary.activity!.attention!.kind, kind)
+  }
+  for (const controller of [...CONTROLLER_STATES, null]) {
+    const value = structuredClone(examples.runDetail)
+    value.summary.activity!.controller = controller
+    validateRunDetail(value)
+  }
+  // Nothing needs the operator, the run is finished (it has a finish time, no focus and no controller), the directory is not served.
+  const finished = structuredClone(examples.runDetail)
+  finished.summary.status = finished.snapshot.status = 'succeeded'
+  Object.assign(finished.summary.activity!, { focus: null, attention: null, waiting_questions: 0, headline: null, controller: null, finished_at: '2026-01-01T12:01:00Z' })
+  finished.run_dir = null
+  validateRunDetail(finished)
+  const cases: [string, (value: typeof examples.runDetail) => void][] = [
+    ['activity on a 1.0.0 summary', value => { value.summary.contract_version = '1.0.0'; delete value.run_dir }],
+    ['a 1.5.0 summary without activity', value => { delete value.summary.activity }],
+    ['a 1.5.0 detail without run_dir', value => { delete value.run_dir }],
+    ['run_dir beside a 1.0.0 summary', value => { value.summary = structuredClone(examples.legacyRunDetail.summary) }],
+    ['an unknown summary version', value => { (value.summary as Record<string, unknown>).contract_version = '1.4.0' }],
+    ['an unknown activity key', value => { (value.summary.activity as Record<string, unknown>).eta = null }],
+    ['an unknown focus key', value => { (value.summary.activity!.focus as Record<string, unknown>).kind = 'worker' }],
+    ['an unknown attention kind', value => { (value.summary.activity!.attention as Record<string, unknown>).kind = 'blocked' }],
+    ['an unknown controller value', value => { (value.summary.activity as Record<string, unknown>).controller = 'alive' }],
+    ['a negative question count', value => { value.summary.activity!.waiting_questions = -1 }],
+    ['a headline over 160 characters', value => { value.summary.activity!.headline = 'x'.repeat(161) }],
+    ['an empty headline', value => { value.summary.activity!.headline = '' }],
+    ['a zoned timestamp', value => { value.summary.activity!.last_activity_at = '2026-01-01T12:00:50+00:00' }],
+    ['an absolute run_dir', value => { value.run_dir = '/home/you/.local/state/run-001' }],
+    ['a run_dir that leaves the home', value => { value.run_dir = '~/../other/run-001' }],
+    ['a run_dir the shell would split', value => { value.run_dir = '~/runs with space/run-001' }],
+    ['a focus the definition lacks', value => { value.summary.activity!.focus!.node_id = 'docs' }],
+    ['a focus status the snapshot does not show', value => { value.summary.activity!.focus!.status = 'failed' }],
+    ['attention on a node the definition lacks', value => { value.summary.activity!.attention!.node_id = 'docs' }],
+    ['a finish time on a running run', value => { value.summary.activity!.finished_at = '2026-01-01T12:01:00Z' }],
+    ['a controller reading on a finished run', value => { value.summary.status = value.snapshot.status = 'failed' }],
+    ['a waiting question without question attention', value => { value.summary.activity!.attention = null }],
+    ['question attention without a waiting question', value => { value.summary.activity!.waiting_questions = 0 }],
+  ]
+  for (const [label, mutate] of cases) {
+    const value = structuredClone(examples.runDetail)
+    mutate(value)
+    assert.throws(() => validateRunDetail(value), label)
+  }
+  // The run list reads each summary with the same rules.
+  const list = structuredClone(examples.runList)
+  delete list.runs[0].activity
+  assert.throws(() => schemas.runList.parse(list), 'a 1.5.0 list row without activity')
 })
 
 test('project identifiers are opaque keys, never filesystem paths', () => {

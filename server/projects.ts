@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto'
 import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
+import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
-  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, validateReviewResult, validateRunDetail, validateRunInputs,
-  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition,
+  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN, validateReviewResult, validateRunDetail, validateRunInputs,
+  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
@@ -32,6 +35,10 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * The lane list comes from `inputs.workers` (policy order). Exports without an `inputs` section, which only
  * 1.0.0 and 1.1.0 produce, fall back to the fixed `ui`/`adapter` pair those versions always had. The node map
  * follows the `launch_<lane>`, `verify_<lane>` and `candidate_<lane>` naming the controller guarantees.
+ *
+ * Contract 1.5.0 (docs/PRD_VIEWER_UX.md 9.2): every summary carries the run's `activity`, derived with the viewer's own
+ * triage rules (`contracts/projects/triage.ts`) from the files above plus each live lane's `<lane>.questions.json`, and
+ * every detail its `run_dir`, served only for projects the registry lists under `viewer.expose_run_dir`.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -369,6 +376,24 @@ function nodeEvidence(record: Record<string, unknown>, nodeId: string, map: Lane
   return key ? record[key] : undefined
 }
 
+/** automatic.py:1244: each `automatic-step` child logs its PID as a `controller` row when it starts. */
+const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
+/**
+ * The controller process's own rows. `controller` is not a reserved lane ID (C6), so on a lane of that name the raw
+ * `controller` node would alias these onto the lane's launch node; they concern the run, so they stay node-less (B1).
+ */
+const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/]
+const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
+/** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
+const QUESTIONS_BYTE_LIMIT = 256 * 1024
+/** `/proc` files are read up to this size; a controller's argv is far shorter. */
+const PROC_FILE_LIMIT = 64 * 1024
+/** Linux USER_HZ: `/proc/<pid>/stat` counts a process's start in clock ticks since boot at this rate. */
+const CLOCK_TICKS_PER_SECOND = 100
+/** A controller may start this much after the time its PID row records (tick and clock rounding). */
+const START_TOLERANCE_MS = 1000
+const HEADLINE_LIMIT = 160
+
 const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
   running: 'running', interactive: 'running', blocked: 'failed', succeeded: 'succeeded', passed: 'succeeded', approved: 'succeeded',
   /** The design challenge found a P0/P1 and no worker was launched: the operator resumes or accepts it. */
@@ -702,6 +727,10 @@ export type RunStoreOptions = {
    * viewer runs, so every Projects request syncs first; a failed read keeps the last loaded registry.
    */
   refresh?: () => Promise<ProjectsConfig | null>
+  /** The `/proc` tree the controller liveness check reads; tests pass a fake one. */
+  procRoot?: string
+  /** The home directory a served `run_dir` is relative to; defaults to the server's `$HOME`. */
+  home?: string
 }
 
 export class RunStore {
@@ -717,6 +746,8 @@ export class RunStore {
       exportByteLimit: options.exportByteLimit ?? DEFAULT_EXPORT_BYTE_LIMIT,
       packetByteLimit: options.packetByteLimit ?? DEFAULT_PACKET_BYTE_LIMIT,
       artifactByteLimit: options.artifactByteLimit ?? DEFAULT_ARTIFACT_BYTE_LIMIT,
+      procRoot: options.procRoot ?? '/proc',
+      home: options.home ?? homedir(),
       warn: options.warn,
       refresh: options.refresh,
     }
@@ -939,6 +970,7 @@ export class RunStore {
       definition_revision: definition.definition_revision, run_id: state.run_id, status: snapshot.status, created_at, updated_at,
     }
     const contractFailure = (what: string, error: unknown) => invalidRun(runId, `${what} violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})`)
+    // The graph projection is validated on its own first, so a contradictory graph is reported before anything derived from it.
     let detail: RunDetail
     try {
       detail = validateRunDetail({ summary, definition, snapshot })
@@ -969,7 +1001,86 @@ export class RunStore {
       }
     }
     const reviewDiff = state.review?.diff ? { artifact_id: reviewArtifactId(state.review.diff.sha256), sha256: state.review.diff.sha256, bytes: state.review.diff.bytes } : null
+    const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
+    const run_dir = await this.runDirectory(scope, directory)
+    try {
+      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition, snapshot, run_dir })
+    } catch (error) {
+      throw contractFailure('run activity', error)
+    }
     return { detail, events, packets, review, inputs, reviewDiff }
+  }
+
+  /**
+   * What a list row says about a run (contract 1.5.0, docs/PRD_VIEWER_UX.md B2), from what `projectRun` already read and
+   * nothing else except each live lane's question record: no review file, lane result or packet is opened, so list polls
+   * stay cheap. The focus, attention, headline and times follow the run page's triage rules, so the two agree.
+   */
+  private async runActivity(directory: FileHandle, run: RunData, rawEvents: readonly RawEvent[]): Promise<RunActivity> {
+    const status = run.detail.snapshot.status
+    // A finished run waits on nobody: only a run that can still move reads its lanes' live question records.
+    const current = !FINISHED_STATUSES.has(status) && run.inputs ? { ...run, inputs: await this.liveQuestions(directory, run.inputs) } : run
+    const timeline = buildTimeline(current)
+    const attention = deriveAttention(current)
+    const now = deriveNow(current)
+    const focus = deriveFocus(current.detail, current.events)
+    return {
+      feature: run.inputs?.feature ?? null,
+      last_activity_at: timeline.lastActivity?.at ?? null,
+      finished_at: timeline.runEnd?.at ?? null,
+      focus: focus && { node_id: focus.node_id, label: focus.label, status: focus.status, since: focus.since },
+      attention: activityAttention(status, attention, now, focus),
+      waiting_questions: [...attention.nodes.values()].filter(item => item.kind === 'question').length,
+      headline: activityHeadline(current, focus, now),
+      controller: status === 'running' || status === 'paused' ? await this.controllerState(directory, rawEvents) : null,
+    }
+  }
+
+  /**
+   * The run inputs with each running lane's questions as the controller records them now: `run-state.json` is not
+   * re-exported while the handoff waits (C5), so only `<lane>.questions.json` knows a question asked or answered since.
+   * Its entries replace the export's by number; a file that is missing, oversized, malformed or inconsistent is ignored.
+   */
+  private async liveQuestions(directory: FileHandle, inputs: RunInputs): Promise<RunInputs> {
+    const workers = await Promise.all(inputs.workers.map(async worker => {
+      if (worker.stop?.stopped) return worker
+      const recorded = await readQuestions(directory, worker.node_id)
+      if (recorded === null) return worker
+      const byNumber = new Map(worker.questions.map(question => [question.n, question]))
+      for (const question of recorded) byNumber.set(question.n, question)
+      const questions = [...byNumber.values()].sort((a, b) => a.n - b.n)
+      if (!consistentQuestions(questions)) return worker
+      // The controller moves a `question` completion aside once it records the question; a stale export still shows it.
+      const moved = worker.completion?.status === 'question' && questions.length > worker.questions.length
+      return { ...worker, questions, completion: moved ? null : worker.completion }
+    }))
+    return { ...inputs, workers }
+  }
+
+  /**
+   * Whether the run's controller is alive, read-only from `/proc` (B2): only for a run that logged
+   * `Automatic checkpoint controller PID <n>`, whose `automatic-step` child runs on this host as this user
+   * (automatic.py:1103, :1244). Never a signal: `process.kill(pid, 0)` would trust a PID that may have been reused.
+   */
+  private async controllerState(directory: FileHandle, rawEvents: readonly RawEvent[]): Promise<RunActivity['controller']> {
+    const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
+    if (!logged) return null
+    const runDir = await realpathOrNull(at(directory))
+    return runDir === null ? 'unknown' : controllerLiveness(this.options.procRoot, Number(PID_ROW.exec(logged.message)![1]), logged.time, runDir)
+  }
+
+  /**
+   * The run directory, `~`-relative (B3), for a project the registry lists under `viewer.expose_run_dir`; null for any other
+   * project, a directory outside the home, and a path that would not paste unquoted as `RUN=<path>`.
+   */
+  private async runDirectory(scope: Scope, directory: FileHandle): Promise<string | null> {
+    if (!this.config.viewer?.expose_run_dir.includes(scope.project.project_id)) return null
+    const [runDir, home] = await Promise.all([realpathOrNull(at(directory)), realpathOrNull(this.options.home)])
+    if (runDir === null || home === null) return null
+    const inside = relative(home, runDir)
+    if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return null
+    const served = `~/${inside.split(sep).join('/')}`
+    return RUN_DIR_PATTERN.test(served) ? served : null
   }
 
   private async loadPackets(runId: string, directory: FileHandle, registrations: PacketRegistration[]): Promise<LoadedPacket[]> {
@@ -1055,6 +1166,12 @@ function eventNode(definition: WorkflowDefinition, node: string, map: LaneMap): 
   return alias && known.has(alias) ? alias : null
 }
 
+/** The graph node a raw event concerns. The controller process's own rows concern the run, even beside a lane named `controller`. */
+function eventGraphNode(definition: WorkflowDefinition, event: RawEvent, map: LaneMap): string | null {
+  if (event.node === 'controller' && map.lanes.includes('controller') && CONTROLLER_PROCESS_ROWS.some(pattern => pattern.test(event.message))) return null
+  return eventNode(definition, event.node, map)
+}
+
 function present(value: unknown): boolean {
   return value !== undefined && value !== null
 }
@@ -1064,8 +1181,16 @@ function hasEvidence(state: RunExport, nodeId: string, map: LaneMap): boolean {
   return state.tasks.some(task => task.result !== null && present(nodeEvidence(task.result, nodeId, map)))
 }
 
+/**
+ * The attempt a row states of its own node, only at the start of the controller's phrases: "Attempt 2; revision …"
+ * (pipeline.py), and "Design challenge attempt 2 …" and "Feature files re-pinned for design challenge attempt 2 …"
+ * (guardrails.py), in lower case. Elsewhere in a message an attempt is quoted: a repair note answers other packets
+ * ("Answers candidate/ui attempt 3") after the operator's free-text reason, and neither is its node's attempt.
+ */
+const OWN_ATTEMPT = /^(?:Attempt|Design challenge attempt|Feature files re-pinned for design challenge attempt) (\d+)\b/
+
 function attemptFromMessage(message: string): number | null {
-  const match = /\bAttempt (\d+)\b/.exec(message)
+  const match = OWN_ATTEMPT.exec(message)
   return match ? Number(match[1]) : null
 }
 
@@ -1073,18 +1198,21 @@ function attemptFromMessage(message: string): number | null {
 export function normalizeEvents(runId: string, definition: WorkflowDefinition, raw: readonly RawEvent[], map: LaneMap = laneMap(LEGACY_LANES)): WorkflowEvent[] {
   const attempts = new Map<string, number>()
   return raw.map(event => {
-    const node_id = eventNode(definition, event.node, map)
+    const node_id = eventGraphNode(definition, event, map)
     let attempt = 0
     if (node_id) {
       const parsed = attemptFromMessage(event.message)
       if (parsed !== null) attempts.set(node_id, parsed)
       attempt = attempts.get(node_id) ?? 1
     }
-    // A status only means something for a node in the pinned graph; unattributed records are plain log lines.
-    const status = node_id ? EVENT_STATUS[event.status] ?? null : null
+    // A status only means something for a node in the pinned graph; unattributed records are plain log lines. The
+    // controller's own rows keep theirs (blocked is failed, interrupted is paused) as logs, so the viewer can say why it stopped.
+    const status = node_id || event.node === 'controller' ? EVENT_STATUS[event.status] ?? null : null
+    // The combined check reports per lane; its rows are aliased onto `candidate`, so the message keeps the lane.
+    const lane = node_id === 'candidate' && event.node !== node_id ? event.node.slice('candidate_'.length) : null
     return eventSchema.parse({
       contract_version: '1.0.0', run_id: runId, event_id: `${runId}:${event.sequence}`, sequence: event.sequence, occurred_at: event.time,
-      node_id, attempt, type: status ? 'status_changed' : 'log', status, message: redactPaths(event.message),
+      node_id, attempt, type: node_id && status ? 'status_changed' : 'log', status, message: redactPaths(lane ? `[${lane}] ${event.message}` : event.message),
       artifact: null, result_uri: null, reused_from_attempt: null,
     })
   })
@@ -1114,11 +1242,12 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   let lastFreezeRecord = 0
   for (const event of rawEvents) {
     if (event.node === 'controller' && EVENT_STATUS[event.status] !== undefined) lastController = event
-    const node = eventNode(definition, event.node, map)
+    const node = eventGraphNode(definition, event, map)
     if (node === 'handoff') lastFreezeRecord = event.sequence
     if (!node) continue
-    // Only a status-bearing event moves a node; a plain record (`stopped`, a note) never hides the last status.
-    if (EVENT_STATUS[event.status] !== undefined) lastEvent.set(node, event)
+    // Only a status-bearing event moves a node; a plain record (`stopped`, a note) never hides the last status, and a
+    // controller starting (its PID row) says nothing about any node.
+    if (EVENT_STATUS[event.status] !== undefined && !PID_ROW.test(event.message)) lastEvent.set(node, event)
     const attempt = attemptFromMessage(event.message)
     if (attempt !== null) eventAttempt.set(node, Math.max(attempt, eventAttempt.get(node) ?? 0))
   }
@@ -1210,6 +1339,147 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   else if (statuses.size === 1 && statuses.has('pending')) status = 'pending'
   else status = 'paused'
   return { contract_version: '1.0.0', run_id: state.run_id, status, last_sequence: rawEvents.at(-1)?.sequence ?? 0, nodes }
+}
+
+// ---- Run activity (contract 1.5.0) -----------------------------------------------------------------------------
+
+/**
+ * What the run waits on, by precedence: a question, a pane or an approval (triage's attention), else an interruption the
+ * run page would name (6.2 rule 5), else the paused or failed run itself at its focus.
+ */
+function activityAttention(status: RunSnapshot['status'], attention: RunAttention, now: Now, focus: Focus | null): RunActivity['attention'] {
+  const { top } = attention
+  if (top) return { kind: top.kind, node_id: top.node_id, since: top.since }
+  if (now.situation === 'interrupted') return { kind: 'interrupted', node_id: focus?.node_id ?? null, since: now.since }
+  if (status === 'paused' || status === 'failed') return { kind: status, node_id: focus?.node_id ?? null, since: focus?.since ?? null }
+  return null
+}
+
+/**
+ * One line for a list row: the focus step's label and its last status message (a combined-check row names its lane), or,
+ * when a controller row in scope stopped the run (6.2 reason source 0), that row. Without a focus (a finished run) the
+ * step that recorded the last status speaks. Redacted, on one line, at most 160 characters.
+ */
+function activityHeadline(run: RunData, focus: Focus | null, now: Now): string | null {
+  const controllerRow = now.reasonSource === 0 ? (now.reason ?? []).filter(part => typeof part === 'string').join('').trim() : ''
+  const nodeId = focus?.node_id ?? run.events.findLast(event => event.node_id !== null && event.status !== null)?.node_id ?? null
+  let message = controllerRow
+  if (!message && nodeId !== null) {
+    const own = run.events.filter(event => event.node_id === nodeId)
+    const row = own.findLast(event => event.status !== null) ?? own.at(-1)
+    const lane = row ? /^\[([a-z][a-z0-9-]*)\] /.exec(row.message)?.[1] : undefined
+    if (row) message = `${humanizeEvent(row)}${lane ? ` (${lane})` : ''}`
+  }
+  const label = nodeId === null ? null : run.detail.definition.nodes.find(node => node.node_id === nodeId)?.label ?? nodeId
+  const text = redactPaths([label, message].filter(Boolean).join(' · ')).replace(/\s+/g, ' ').trim()
+  if (!text) return null
+  if (text.length <= HEADLINE_LIMIT) return text
+  let cut = HEADLINE_LIMIT - 1
+  const last = text.charCodeAt(cut - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1
+  return `${text.slice(0, cut).trimEnd()}…`
+}
+
+/** `<lane>.questions.json` (guardrails.py save_questions) as the export's inputs section would serve it. */
+const questionsFileSchema = z.object({
+  questions: z.array(z.object({ n: z.number().int().positive(), question: z.string().min(1), asked_at: zonedTimestamp, answer: z.string().nullable(), answered_at: zonedTimestamp.nullable() })),
+})
+
+/** A lane's live question record, redacted like the export's; null when it is absent, oversized or malformed. */
+async function readQuestions(directory: FileHandle, lane: string): Promise<WorkerQuestion[] | null> {
+  let bytes: Buffer | null
+  try {
+    bytes = await readBounded(directory, [`${lane}.questions.json`], QUESTIONS_BYTE_LIMIT)
+  } catch (error) {
+    if (error instanceof ProjectApiError) return null
+    throw error
+  }
+  if (bytes === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'))
+  } catch {
+    return null
+  }
+  const file = questionsFileSchema.safeParse(parsed)
+  if (!file.success) return null
+  return file.data.questions.map(question => ({
+    n: question.n, question: redactPaths(question.question), asked_at: utcTimestamp(question.asked_at),
+    answer: optionalText(question.answer), answered_at: question.answered_at === null ? null : utcTimestamp(question.answered_at),
+  }))
+}
+
+/** The run-inputs rules for questions: numbered from 1, at most three, an answer with its time, and only the latest waiting. */
+function consistentQuestions(questions: readonly WorkerQuestion[]): boolean {
+  return questions.length <= 3 && questions.every((question, index) => question.n === index + 1
+    && (question.answer === null) === (question.answered_at === null) && (question.answer !== null || index === questions.length - 1))
+}
+
+async function realpathOrNull(path: string): Promise<string | null> {
+  try {
+    return await fs.realpath(path)
+  } catch {
+    return null
+  }
+}
+
+/** A `/proc` file's text (their sizes read as 0, so it is read to its end, bounded); null when it cannot be read. */
+async function readProcFile(path: string): Promise<string | null> {
+  let handle: FileHandle
+  try {
+    handle = await fs.open(path, constants.O_RDONLY)
+  } catch {
+    return null
+  }
+  try {
+    const buffer = Buffer.alloc(PROC_FILE_LIMIT)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    return buffer.subarray(0, offset).toString('utf8')
+  } catch {
+    return null
+  } finally {
+    await handle.close()
+  }
+}
+
+/** When a process started, in epoch milliseconds: `stat` field 22 (clock ticks since boot) plus `btime` from `/proc/stat`. */
+async function processStart(procRoot: string, pid: number): Promise<number | null> {
+  const [stat, system] = await Promise.all([readProcFile(join(procRoot, String(pid), 'stat')), readProcFile(join(procRoot, 'stat'))])
+  // The command name (field 2) may hold spaces and parentheses, so fields are counted from its last closing parenthesis:
+  // the first one after it is field 3.
+  const ticks = stat?.slice(stat.lastIndexOf(')') + 2).split(' ')[22 - 3]
+  const boot = system === null ? undefined : /^btime (\d+)$/m.exec(system)?.[1]
+  if (!ticks || !/^\d+$/.test(ticks) || !boot) return null
+  return (Number(boot) + Number(ticks) / CLOCK_TICKS_PER_SECOND) * 1000
+}
+
+/**
+ * The controller that logged its PID at `loggedAt`: `running` only while `/proc/<pid>` is an `automatic-step` whose
+ * argument after it resolves to this run's directory and which started no later than it logged (so a reused PID never
+ * reads running); `not_running` when the process is gone or runs something else; `unknown` without a readable `/proc`
+ * or when the start time contradicts the row.
+ */
+async function controllerLiveness(procRoot: string, pid: number, loggedAt: string, runDir: string): Promise<'running' | 'not_running' | 'unknown'> {
+  if (await readProcFile(join(procRoot, 'self', 'stat')) === null) return 'unknown'
+  try {
+    await fs.stat(join(procRoot, String(pid)))
+  } catch (error) {
+    return isMissing(error) ? 'not_running' : 'unknown'
+  }
+  const cmdline = await readProcFile(join(procRoot, String(pid), 'cmdline'))
+  if (cmdline === null) return 'unknown'
+  const argv = cmdline.split('\0')
+  const step = argv.indexOf('automatic-step')
+  const targets = step < 0 ? [] : await Promise.all(argv.slice(step + 1).filter(arg => isAbsolute(arg)).map(realpathOrNull))
+  if (!targets.includes(runDir)) return 'not_running'
+  const started = await processStart(procRoot, pid)
+  if (started === null) return 'unknown'
+  return started <= Date.parse(loggedAt) + START_TOLERANCE_MS ? 'running' : 'unknown'
 }
 
 /** Publishes a verified packet's result: scoped artifact links, no worktree paths, and a failed status when the gate did not pass. */

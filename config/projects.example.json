@@ -26,5 +26,8 @@
         }
       ]
     }
-  ]
+  ],
+  "viewer": {
+    "expose_run_dir": []
+  }
 }
