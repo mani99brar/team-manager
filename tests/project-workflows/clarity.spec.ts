@@ -141,7 +141,10 @@ test(`[scenario:created-file-rendered] The launch node renders a captured Markdo
   await expect(page.getByTestId('files-not-captured')).toHaveCount(0)
 
   // The Markdown file is rendered inline: its headings, not its source.
+  // Rows start closed and fetch nothing (PRD_VIEWER_UX 4.5): the Markdown row opens on Rendered.
   const audit = capturedFile(page, AUDIT_PATH)
+  await expect(audit.getByTestId('file-rendered')).toHaveCount(0)
+  await audit.locator('summary').click()
   await expect(audit.getByTestId('file-rendered').getByRole('heading', { level: 1, name: 'Workflow audit' })).toBeVisible()
   await expect(audit.getByTestId('file-rendered').getByRole('heading', { level: 2, name: 'Recheck' })).toBeVisible()
   await expect(audit.getByTestId('file-source')).toHaveCount(0)
@@ -151,10 +154,10 @@ test(`[scenario:created-file-rendered] The launch node renders a captured Markdo
   const source = capturedFile(page, CAPTURE_TS_PATH)
   await expect(source.getByTestId('file-source')).toHaveCount(0)
   await expect(source.getByTestId('file-rendered')).toHaveCount(0)
-  await source.getByRole('button', { name: 'Show source' }).click()
+  await source.locator('summary').click()
   await expect(source.getByTestId('file-source')).toBeVisible()
   expect(await source.getByTestId('file-source').textContent()).toBe(CAPTURE_TS)
-  await source.getByRole('button', { name: 'Hide source' }).click()
+  await source.locator('summary').click()
   await expect(source.getByTestId('file-source')).toHaveCount(0)
 
   // Files that were not captured say why.
@@ -183,11 +186,12 @@ test(`[scenario:output-first-task-collapsed] The launch node's result and files 
   const task = taskDetails(page)
   await expect(task).toBeVisible()
 
-  // Output first: the result, then the files, the completion signal and the launch receipt, then the task.
+  // Output first (PRD_VIEWER_UX 4.5): the worker's report and the result, then the files, then the task, then the closed
+  // Session disclosure that holds the launch receipt.
+  expect(await precedes(page.getByTestId('worker-completion'), result)).toBe(true)
   expect(await precedes(result, createdFiles(page))).toBe(true)
-  expect(await precedes(createdFiles(page), page.getByTestId('worker-completion'))).toBe(true)
-  expect(await precedes(page.getByTestId('worker-completion'), page.getByTestId('launch-receipt'))).toBe(true)
-  expect(await precedes(page.getByTestId('launch-receipt'), task)).toBe(true)
+  expect(await precedes(createdFiles(page), task)).toBe(true)
+  expect(await precedes(task, page.getByTestId('launch-receipt'))).toBe(true)
 
   // The task is collapsed by default and appears once on the page.
   await expect(task).not.toHaveAttribute('open', '')
@@ -250,7 +254,9 @@ test(`[scenario:verify-shows-checks-not-files] The verify node shows checks, gat
 
 test(`[scenario:findings-on-files] A captured file lists exactly the findings whose messages name its path verbatim; a path:N-M finding marks those source lines; review findings naming a captured file link to it (${phase})`, async ({ page }, testInfo) => {
   await page.goto(clarityRunUrl(RUN_FILES, 'launch_ui'))
+  // A row shows the findings on its file once opened (PRD_VIEWER_UX 4.5).
   const audit = capturedFile(page, AUDIT_PATH)
+  await audit.locator('summary').click()
   const listed = audit.getByTestId('file-findings').getByTestId('file-finding')
 
   // Exactly the findings naming the path verbatim, in review order, with severity and reviewer; the similar path is not one.
@@ -266,6 +272,7 @@ test(`[scenario:findings-on-files] A captured file lists exactly the findings wh
   await expect(listed.filter({ hasText: FILE_FINDING_LINE }).getByTestId('show-lines')).toHaveText('Show line 3')
 
   // The captured TypeScript file is named by no finding.
+  await capturedFile(page, CAPTURE_TS_PATH).locator('summary').click()
   await expect(capturedFile(page, CAPTURE_TS_PATH).getByTestId('file-findings-none')).toHaveText('No review finding names this file.')
 
   // "Show lines" leaves the rendered Markdown for the source and marks lines 12 to 14, the first in view.
@@ -295,7 +302,9 @@ test(`[scenario:findings-on-files] A captured file lists exactly the findings wh
   await findingRow(page, FILE_FINDING_RANGE).getByTestId('finding-file-link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
   await expect(capturedFile(page, AUDIT_PATH)).toBeVisible()
-  await expect.poll(() => inViewport(capturedFile(page, AUDIT_PATH).getByRole('heading', { level: 5 }))).toBe(true)
+  // The linked row opens and its summary (no longer an h5 heading) is scrolled into view.
+  await expect(capturedFile(page, AUDIT_PATH)).toHaveAttribute('open', '')
+  await expect.poll(() => inViewport(capturedFile(page, AUDIT_PATH).locator('summary'))).toBe(true)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
   await expectNoExecutionControls(page)
 })

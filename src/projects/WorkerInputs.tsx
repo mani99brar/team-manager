@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
+import type { NextStep } from '../../contracts/projects/triage.ts'
 import type { RunInputWorker, WorkerResult } from './api.ts'
+import { CommandBlock } from './CommandBlock.tsx'
+import { reportDelta } from './node/launch.ts'
 import { OwnedPaths, RequiredChecks, type CheckTarget } from './node/Requirements.tsx'
 import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
@@ -85,7 +88,11 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied, check
   )
 }
 
-export function LaunchReceipt({ launch }: { launch: RunInputWorker['launch'] }) {
+/**
+ * The launch receipt, in the closed Session disclosure (docs/PRD_VIEWER_UX.md 4.5, 8). The launcher's observed state is the
+ * state at launch; once the stop is confirmed it and the launcher status say nothing current, so they are left out.
+ */
+export function LaunchReceipt({ launch, stopped }: { launch: RunInputWorker['launch']; stopped: boolean }) {
   return (
     <section className="evidence-section" aria-labelledby="launch-receipt-title" data-testid="launch-receipt">
       <h4 id="launch-receipt-title">Launch receipt</h4>
@@ -96,12 +103,61 @@ export function LaunchReceipt({ launch }: { launch: RunInputWorker['launch'] }) 
           <div><dt>Session</dt><dd>{launch.session_id === null ? 'Not yet reported by the launcher' : <code>{launch.session_id}</code>}</dd></div>
           <div><dt>Launch requested</dt><dd><Time iso={launch.launch_requested_at} seconds /></dd></div>
           <div><dt>Native start</dt><dd>{launch.native_started_at === null ? 'Not reported' : <Time iso={launch.native_started_at} seconds />}</dd></div>
-          <div><dt>Observed state</dt><dd>{launch.observed_state ?? 'Not observed'}</dd></div>
-          <div><dt>Launcher status</dt><dd><code>{launch.status}</code></dd></div>
+          {!stopped && <div><dt>State at launch</dt><dd>{launch.observed_state ?? 'Not observed'}</dd></div>}
+          {!stopped && <div><dt>Launcher status</dt><dd><code>{launch.status}</code></dd></div>}
           <div><dt>Launcher invocations</dt><dd>{launch.launcher_invocations}</dd></div>
         </dl>
       )}
     </section>
+  )
+}
+
+/** A long text clamped to three lines, with a More control only when it overflows them (docs/PRD_VIEWER_UX.md 7). */
+function Clamped({ text, testId }: { text: string; testId: string }) {
+  const id = useId()
+  const ref = useRef<HTMLParagraphElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element || expanded) return
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight + 1)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [text, expanded])
+  return (
+    <div className="worker-summary-block">
+      <p ref={ref} id={id} className={`worker-summary${expanded ? '' : ' is-clamped'}`} data-testid={testId}>{text}</p>
+      {(overflows || expanded) && (
+        <button type="button" className="button button-small" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(previous => !previous)}>
+          {expanded ? 'Less' : 'More'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** The open assumptions behind their count; absent when there are none. */
+export function AssumptionsDisclosure({ items }: { items: string[] }) {
+  if (items.length === 0) return null
+  return (
+    <details className="report-disclosure" data-testid="assumptions-details">
+      <summary id="evidence-assumptions">Open assumptions ({items.length})</summary>
+      <ul className="evidence-list" data-testid="assumptions">{items.map((item, index) => <li key={index}>{item}</li>)}</ul>
+    </details>
+  )
+}
+
+/** The worker's report as the result records it, for a run whose inputs (and so the completion signal) were not exported. */
+export function ResultReport({ result }: { result: WorkerResult }) {
+  return (
+    <div className="worker-report">
+      <Clamped text={result.summary} testId="worker-summary" />
+      <div className="report-evidence"><AssumptionsDisclosure items={result.open_assumptions} /></div>
+    </div>
   )
 }
 
@@ -149,10 +205,11 @@ function FalsifyingCheck({ value, worker, result, checksNode, onNavigate }: {
 }
 
 /**
- * The evidence a 1.1.0 completion carries (PRD_PORTABLE_WORKFLOW 4.6): what no executed check covers, the check that would
- * fail if the implementation were wrong, and one assumption to verify independently. A 1.0.0 completion serves all three
- * as null, which is stated rather than shown as empty; so is a 1.1.0 `blocked` one that recorded none. A question the
- * controller has not recorded is shown with its text: still pending, or a fourth one the controller treated as blocked.
+ * The evidence a 1.1.0 completion carries (PRD_PORTABLE_WORKFLOW 4.6), behind counts on one row (docs/PRD_VIEWER_UX.md 4.5):
+ * what no executed check covers, the check that would fail if the implementation were wrong (inline, it links), and one
+ * assumption to verify independently. A 1.0.0 completion serves all three as null, which is stated rather than shown as
+ * empty; so is a 1.1.0 `blocked` one that recorded none. A question the controller has not recorded is shown with its
+ * text: still pending, or a fourth one the controller treated as blocked.
  */
 function CompletionEvidence({ completion, worker, result, checksNode, onNavigate }: {
   completion: Completion
@@ -190,36 +247,41 @@ function CompletionEvidence({ completion, worker, result, checksNode, onNavigate
     )
   }
   return (
-    <dl className="projects-facts completion-evidence" data-testid="completion-evidence">
-      <div data-testid="evidence-untested">
-        <dt>Untested</dt>
-        <dd>
-          {untested === null ? <span className="projects-muted">Not recorded</span>
-            : untested.length === 0 ? <span className="projects-muted">Nothing: the worker names no behaviour outside its executed checks.</span>
-              : <ul className="evidence-list">{untested.map((item, index) => <li key={index}>{item}</li>)}</ul>}
-        </dd>
-      </div>
-      <div data-testid="evidence-falsifying-check">
-        <dt>Falsifying check</dt>
-        <dd>
-          {falsifying === null || falsifying === ''
-            ? <span className="projects-muted">Not recorded</span>
-            : <FalsifyingCheck value={falsifying} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />}
-        </dd>
-      </div>
-      <div data-testid="evidence-verify-yourself">
-        <dt>Verify yourself</dt>
-        <dd>{verify === null || verify === '' ? <span className="projects-muted">Not recorded</span> : verify}</dd>
-      </div>
-    </dl>
+    <div className="completion-evidence" data-testid="completion-evidence">
+      {untested !== null && untested.length > 0 ? (
+        <details className="report-disclosure" data-testid="evidence-untested">
+          <summary>Untested ({untested.length})</summary>
+          <ul className="evidence-list">{untested.map((item, index) => <li key={index}>{item}</li>)}</ul>
+        </details>
+      ) : (
+        <span data-testid="evidence-untested">Untested: <span className="projects-muted">{untested === null ? 'not recorded' : 'nothing named outside the executed checks'}</span></span>
+      )}
+      <span data-testid="evidence-falsifying-check">
+        Falsifying check:{' '}
+        {falsifying === null || falsifying === ''
+          ? <span className="projects-muted">not recorded</span>
+          : <FalsifyingCheck value={falsifying} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />}
+      </span>
+      {verify === null || verify === '' ? (
+        <span data-testid="evidence-verify-yourself">Verify yourself: <span className="projects-muted">not recorded</span></span>
+      ) : (
+        <details className="report-disclosure" data-testid="evidence-verify-yourself">
+          <summary>Verify yourself</summary>
+          <p className="evidence-value">{verify}</p>
+        </details>
+      )}
+    </div>
   )
 }
 
-/** The questions the worker asked mid-run, with the operator's answers and times; an unanswered one is waiting on the operator. */
-export function WorkerQuestions({ questions }: { questions: RunInputWorker['questions'] }) {
+/**
+ * The questions the worker asked mid-run, with the operator's answers and times. While one waits this is the launch node's
+ * first section, with both ways to answer it (`answer`, docs/PRD_VIEWER_UX.md 4.5); otherwise it sits in Session.
+ */
+export function WorkerQuestions({ questions, answer = null }: { questions: RunInputWorker['questions']; answer?: NextStep | null }) {
   const waiting = questions.filter(question => question.answer === null).length
   return (
-    <section className="evidence-section" aria-labelledby="worker-questions-title" data-testid="worker-questions">
+    <section className={`evidence-section${waiting > 0 ? ' worker-questions-open' : ''}`} aria-labelledby="worker-questions-title" data-testid="worker-questions">
       <h4 id="worker-questions-title">Questions to the operator</h4>
       {questions.length === 0 ? (
         <p className="projects-muted" data-testid="worker-questions-none">No questions were recorded for this worker.</p>
@@ -227,7 +289,7 @@ export function WorkerQuestions({ questions }: { questions: RunInputWorker['ques
         <>
           {waiting > 0 && (
             <p className="projects-notice" role="status" data-testid="worker-questions-waiting">
-              {waiting === 1 ? 'One question is' : `${waiting} questions are`} waiting on the operator. Answers are given through the workflow CLI (<code>workflow answer</code>), not this viewer; the worker's deadline is paused meanwhile.
+              {waiting === 1 ? 'One question is' : `${waiting} questions are`} waiting on the operator; the worker's deadline is paused meanwhile. Answers are given through the workflow CLI (<code>workflow answer</code>), not this viewer.
             </p>
           )}
           <ol className="evidence-list worker-questions" data-testid="worker-question-list">
@@ -249,6 +311,7 @@ export function WorkerQuestions({ questions }: { questions: RunInputWorker['ques
               )
             })}
           </ol>
+          {waiting > 0 && answer !== null && <CommandBlock next={answer} />}
         </>
       )}
     </section>
@@ -256,10 +319,12 @@ export function WorkerQuestions({ questions }: { questions: RunInputWorker['ques
 }
 
 /**
- * The worker's own completion signal with its evidence, and the accepted handoff only when it differs from it. `worker`,
- * `result` and `checksNode` let the falsifying check link to the executed check.
+ * The worker's report, said once (docs/PRD_VIEWER_UX.md 4.5, 8): its completion signal as signalled by the session and not
+ * verified, the summary clamped to three lines, the verifier's note when the result's summary extends it, the evidence and
+ * open assumptions behind counts, and the accepted handoff only when it differs. `worker`, `result` and `checksNode` let
+ * the falsifying check link to the executed check.
  */
-export function WorkerSignals({ completion, handoff, worker, result, checksNode, onNavigate }: {
+export function WorkerReport({ completion, handoff, worker, result, checksNode, onNavigate }: {
   completion: RunInputWorker['completion']
   handoff: RunInputWorker['handoff']
   worker: RunInputWorker
@@ -270,21 +335,30 @@ export function WorkerSignals({ completion, handoff, worker, result, checksNode,
   const handoffDiffers = handoff !== null && (
     completion === null || handoff.summary !== completion.summary || JSON.stringify(handoff.open_assumptions) !== JSON.stringify(completion.open_assumptions)
   )
+  const delta = completion === null || result.status !== 'ready' ? null : reportDelta(completion.summary, result.data.summary)
   return (
     <>
-      <section className="evidence-section" aria-labelledby="worker-completion-title" data-testid="worker-completion">
-        <h4 id="worker-completion-title">Reported by the worker</h4>
+      <section className="evidence-section worker-report" aria-labelledby="worker-completion-title" data-testid="worker-completion">
+        <div className="worker-report-head">
+          <h4 id="worker-completion-title">Worker's report</h4>
+          {completion !== null && (
+            <span className="worker-report-status">
+              <span className={`status-badge ${COMPLETION_BADGE[completion.status]}`} data-status={completion.status}><span>{completion.status}</span></span>
+              {' '}<span className="projects-muted">as signalled by the session, not verified</span>
+            </span>
+          )}
+        </div>
         {completion === null ? (
           <p className="projects-muted">No completion signal recorded.</p>
         ) : (
           <>
-            <p>
-              <span className={`status-badge ${COMPLETION_BADGE[completion.status]}`} data-status={completion.status}><span>{completion.status}</span></span>
-              {' '}<span className="projects-muted">as signalled by the session itself, not a verified result.</span>
-            </p>
-            <p className="worker-summary">{completion.summary}</p>
-            <Assumptions items={completion.open_assumptions} />
-            <CompletionEvidence completion={completion} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />
+            <Clamped text={completion.summary} testId="worker-summary" />
+            {delta?.kind === 'extends' && <p className="worker-verifier-note" data-testid="worker-verifier-note">Verifier note: {delta.note}</p>}
+            {delta?.kind === 'differs' && <p className="projects-muted worker-result-summary" data-testid="worker-result-summary">The result records its own summary: {delta.summary}</p>}
+            <div className="report-evidence">
+              <CompletionEvidence completion={completion} worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />
+              <AssumptionsDisclosure items={completion.open_assumptions} />
+            </div>
           </>
         )}
       </section>
@@ -300,12 +374,13 @@ export function WorkerSignals({ completion, handoff, worker, result, checksNode,
   )
 }
 
+/** The stop receipt in one line: "Stopped 10:20 · stop confirmed", or why the stop is not confirmed. */
 export function StopLine({ stop }: { stop: RunInputWorker['stop'] }) {
   const confirmedAt = stop !== null && stop.stopped ? stop.confirmed_at : null
   return (
     <p className="worker-stop" data-testid="worker-stop">
       {confirmedAt !== null
-        ? <>Stop confirmed at <Time iso={confirmedAt} />.</>
+        ? <>Stopped <Time iso={confirmedAt} /> · stop confirmed</>
         : stop === null ? 'Stop not confirmed: no stop receipt was recorded.' : 'Stop not confirmed: the stop receipt records no confirmation.'}
     </p>
   )

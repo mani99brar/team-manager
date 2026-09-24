@@ -152,7 +152,8 @@ test(`[scenario:completion-evidence-shown] The launch node shows untested, the f
   const evidence = completion.getByTestId('completion-evidence')
   await expect(evidence).toBeVisible()
   await expect(evidence.getByTestId('evidence-untested').locator('li')).toHaveText(GUARDED_UNTESTED)
-  await expect(evidence.getByTestId('evidence-verify-yourself').locator('dd')).toHaveText(GUARDED_VERIFY_YOURSELF)
+  // Verify-yourself sits behind its own disclosure on the report's evidence row (PRD_VIEWER_UX 4.5).
+  await expect(evidence.getByTestId('evidence-verify-yourself').locator('.evidence-value')).toHaveText(GUARDED_VERIFY_YOURSELF)
 
   // The falsifying check is a declared check id: it links to the verify node, naming the executed check it matched.
   const link = evidence.getByTestId('falsifying-check-link')
@@ -283,6 +284,8 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
   // The captured Markdown file on the launch node.
   await page.goto(guardedRunUrl('launch_ui'))
   const file = page.locator(`[data-testid="captured-file"][data-path="${GUARDED_NOTES_PATH}"]`)
+  // File rows start closed and fetch nothing until opened (PRD_VIEWER_UX 4.5).
+  await file.locator('summary').click()
   const fileRendered = file.getByTestId('file-rendered')
   await expect(fileRendered.getByRole('heading', { level: 1, name: 'Guardrail notes' })).toBeVisible()
   await fileRendered.scrollIntoViewIfNeeded()
@@ -316,6 +319,7 @@ test(`On a guarded graph the captured files show the independent review's findin
 
   await page.goto(guardedRunUrl('launch_ui'))
   const file = page.locator(`[data-testid="captured-file"][data-path="${GUARDED_NOTES_PATH}"]`)
+  await file.locator('summary').click()
   const listed = file.getByTestId('file-findings').getByTestId('file-finding')
   await expect(listed).toHaveCount(1)
   await expect(listed).toContainText(GUARDED_FILE_FINDING)

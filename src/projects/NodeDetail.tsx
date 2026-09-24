@@ -3,7 +3,8 @@ import { attemptResultUris, type Now, type Timeline } from '../../contracts/proj
 import { scopedResultPath, type RunDetail, type RunInputs, type ReviewResult, type RunScope, type WorkerResult, type WorkflowEvent } from './api.ts'
 import { ChallengeSections } from './node/ChallengeSections.tsx'
 import { AwaitingNotice, ControllerSections } from './node/ControllerSections.tsx'
-import { attemptStrip, causeOf, nodeTiming, resultRole, revisionAttempt, verifiedSections, workerSectionEntries, type SectionEntry } from './node/model.ts'
+import { launchSectionEntries } from './node/launch.ts'
+import { attemptStrip, causeOf, nodeTiming, resultRole, revisionAttempt, verifiedSections, type SectionEntry } from './node/model.ts'
 import { ReviewSections } from './node/ReviewSections.tsx'
 import { CandidateLanes, VerifiedEvidence, WorkerReportLink, type LaneEntry } from './node/VerifySections.tsx'
 import { WorkerSections } from './node/WorkerSections.tsx'
@@ -121,11 +122,13 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   // What the worker handed over: the verification's first attempt ran on the snapshot frozen at handoff (a repair makes a new one).
   const frozenUri = verifyId === null ? null : attemptResultUris(detail, verifyId).find(item => item.attempt === 1)?.uri ?? null
   const { results: frozenResults } = useRunResults(scope, useMemo(() => (frozenUri === null ? [] : [frozenUri]), [frozenUri]), stamp)
-  const frozenCommit = frozenUri === null ? null : frozenResults.get(frozenUri)?.output_commit ?? null
+  const frozen = frozenUri === null ? null : frozenResults.get(frozenUri) ?? null
+  const frozenCommit = frozen?.output_commit ?? null
   const role = resultRole(detail, node.node_id)
   const reportNode = isVerify && !role.narrative && role.partner !== null ? nodeLink(role.partner) : null
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && verifyNode !== null && marker.node_id === verifyNode.node_id)
-  const repairNote = repairs.length ? `after operator ${repairs.map(marker => `repair ${marker.repair?.n ?? ''}`.trim()).join(', ')}` : ''
+  const repairLabel = repairs.length ? `repair ${repairs.map(marker => marker.repair?.n ?? '').filter(n => n !== '').join(', ')}`.trim() : ''
+  const repairNote = repairLabel ? `after operator ${repairLabel}` : ''
 
   const timing = timeline && recorded ? nodeTiming(timeline, node.node_id, isLatest ? null : attempt, isVerify ? resultData : null) : null
   const headerStatus = isLatest ? node.status : viewedChip?.status ?? resultData?.status ?? 'pending'
@@ -138,7 +141,9 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const revision = (isVerify || isCandidate) && recorded && timeline !== null && cap !== null && (headerStatus === 'running' || headerStatus === 'failed')
     ? { attempt: revisionAttempt(timeline, node.node_id, shownAttempt), of: cap }
     : null
-  const next = isLatest && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required') ? now.next : null
+  // A launch node's waiting question carries its answer commands in its own first section; the header does not repeat them.
+  const answered = isWorker && now?.situation === 'question' && now.lane === lane && (worker?.questions.some(question => question.answer === null) ?? false)
+  const next = isLatest && !answered && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required') ? now.next : null
   const attemptHref = (value: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id, value)
   const nodeHref = runPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id)
 
@@ -158,7 +163,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
   // The section index: what the kind lists, only when it lists something, then reuse (only with reuse events) and History.
   const sections: SectionEntry[] = [
-    ...(isWorker ? workerSectionEntries(worker, resultData) : []),
+    ...(isWorker ? launchSectionEntries(worker, resultData) : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
     ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
@@ -215,8 +220,10 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             result={result}
             role={role}
             checksNode={verifyNode}
+            frozen={frozen}
             frozenCommit={frozenCommit}
             repairNote={repairNote}
+            repairLabel={repairLabel}
             inputs={inputs}
             onRetryInputs={onRetryInputs}
             worker={worker}

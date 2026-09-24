@@ -136,24 +136,28 @@ test(`[scenario:worker-inputs] A worker node shows its task, ownership, required
   await prompt.locator('summary').click()
   await expect(prompt).toContainText('You are a workflow worker in your own worktree')
 
-  // Launch receipt, completion signal, no separate handoff (identical), and the stop confirmation on the timeline.
+  // Launch receipt, completion signal, no separate handoff (identical), and the stop confirmation on the timeline. The
+  // receipt sits in the closed Session disclosure (PRD_VIEWER_UX 4.5): open it first.
+  await page.getByTestId('worker-session').locator('summary').first().click()
   const launch = page.getByTestId('launch-receipt')
+  await expect(launch).toBeVisible()
   await expect(launch).toContainText(UI_SESSION)
-  await expect(launch).toContainText('attached_session_available')
   // Receipt times are <time> elements: the ISO value in `datetime`, the full UTC time as tooltip (PRD_VIEWER_UX 5.3).
   await expect(launch.locator('time[datetime="2026-03-01T10:00:00Z"]')).toHaveAttribute('title', '2026-03-01 10:00:00 UTC')
   await expect(launch.locator('time[title="2026-03-01 10:00:02 UTC"]')).toHaveText('10:00:02')
   const receiptRow = (label: string) => launch.locator('.projects-facts > div').filter({ has: page.locator('dt', { hasText: label }) }).locator('dd')
-  await expect(receiptRow('Observed state')).toHaveText('done')
+  // The worker is stopped, so the state at launch and the launcher status say nothing current and are left out (PRD_VIEWER_UX 8).
+  await expect(receiptRow('Observed state')).toHaveCount(0)
+  await expect(receiptRow('State at launch')).toHaveCount(0)
   await expect(receiptRow('Launcher invocations')).toHaveText('1')
-  await expect(receiptRow('Launcher status')).toHaveText('attached_session_available')
+  await expect(receiptRow('Launcher status')).toHaveCount(0)
   await expect(nodeDetail(page)).not.toContainText('No session recorded')
   const completion = page.getByTestId('worker-completion')
   await expect(completion).toContainText('completed')
   await expect(completion).toContainText(uiCompletionSummary(PATH_TOKEN))
   await expect(completion).toContainText(UI_ASSUMPTION)
   await expect(page.getByTestId('worker-handoff')).toHaveCount(0)
-  await expect(page.getByTestId('worker-stop')).toContainText('Stop confirmed at 10:20.')
+  await expect(page.getByTestId('worker-stop')).toHaveText('Stopped 10:20 · stop confirmed')
   await expect(page.getByTestId('worker-stop').locator('time')).toHaveAttribute('title', '2026-03-01 10:20:00 UTC')
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'worker-inputs')
