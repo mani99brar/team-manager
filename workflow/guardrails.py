@@ -697,6 +697,19 @@ def deadline_extension(directory: Path, node: str) -> float | None:
     return None if deadline["paused_at"] else float(deadline["paused_seconds"])
 
 
+def deadline_met(directory: Path, node: str) -> bool:
+    """Whether the controller accepted the lane's completion signal once its turn ended (`met_at`): its deadline is met for good."""
+    return bool(load_deadline(directory, node).get("met_at"))
+
+
+def mark_deadline_met(directory: Path, node: str, at: float) -> None:
+    """Record, once, that the lane's completion signal met its deadline while other lanes still work."""
+    with question_lock(directory):
+        deadline = load_deadline(directory, node)
+        if not deadline.get("met_at"):
+            save_json(directory / f"{node}.deadline.json", {**deadline, "met_at": iso(at)})
+
+
 def resume_deadline(directory: Path, node: str, at: float) -> None:
     deadline = load_deadline(directory, node)
     if deadline["paused_at"]:

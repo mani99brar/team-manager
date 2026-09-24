@@ -381,7 +381,7 @@ cd "$RUN/review-worktree" && claude --resume <uuid>   # reread or continue a rev
 | `<node>.interactive.json` | launch | session receipt with UUID, launch token, status (one per lane and per reviewer) |
 | `<node>.prompt.txt`, `<node>.launch.log` | launch | exact prompt and launch output |
 | `<lane>.completion.json`, `<lane>.handoff.json` | the worker, `freeze` or the controller | automatic completion signal (1.0.0, or 1.1.0 with evidence for 2.2.0 runs), accepted handoff |
-| `<lane>.question-<n>.json`, `<lane>.questions.json`, `<lane>.deadline.json`, `questions.lock` | controller, `answer` | a worker's question files, their answers and times (and whether `answer` delivered them), the persisted deadline pause |
+| `<lane>.question-<n>.json`, `<lane>.questions.json`, `<lane>.deadline.json`, `questions.lock` | controller, `answer` | a worker's question files, their answers and times (and whether `answer` delivered them), the persisted deadline pause and `met_at`: the lane's completion signal was accepted with its turn ended while other lanes still worked, so its deadline stays met if its session works again |
 | `challenge.json`, `challenge-<n>.json` | `start`, `resume` | the latest design challenge decision and the earlier attempts |
 | `challenge-<n>.prompt.txt`, `challenge-<n>.stdout.json`, `challenge-<n>.stderr.log`, `challenge.running.json` | `start`, `resume` | a challenge job's prompt, output and in-flight marker |
 | `challenge-worktree/`, `challenge-inputs/` | `start`, `prepare` | the read-only base-commit checkout the challenge reads, the pinned PRD copy |

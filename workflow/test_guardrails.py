@@ -1163,6 +1163,42 @@ class WorkerQuestion(unittest.TestCase):
             self.assertEqual(read_json(self.root / f"{lane}.handoff.json"), {"summary": "Work", "open_assumptions": []})
         self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
 
+    def test_a_finished_lane_that_works_again_keeps_its_deadline_met_across_a_controller_restart(self):
+        # adapter finished at t=100. After its own deadline, while ui's question waits, the operator prompts adapter's pane:
+        # it works, then blocks on the operator. Its completion signal met its deadline, so nothing expires, in this
+        # controller and in a restarted one that never saw adapter idle.
+        self.runtime.stop_workers = lambda: self.fail("No worker is stopped")
+        self.states.update(ui="working", adapter="idle")
+        self.now = 100.0
+        self.completion("adapter")
+        steps = iter([lambda: (self.states.update(ui="idle"), self.ask("Option A or B?")),
+                      lambda: self.states.update(adapter="working"),  # T+1, after adapter's original deadline.
+                      lambda: self.states.update(adapter="blocked"),
+                      lambda: (_ for _ in ()).throw(KeyboardInterrupt)])  # The controller is interrupted here.
+        times = iter([self.TIMEOUT - 600, self.TIMEOUT + 1, self.TIMEOUT + 30, self.TIMEOUT + 40])
+
+        def poll():
+            self.now = next(times)
+            next(steps)()
+        with self.assertRaises(KeyboardInterrupt):
+            self.wait(on_sleep=poll)
+        # Accepted at t=100 with its turn ended, while ui still worked: kept for the next controller.
+        self.assertEqual(read_json(self.root / "adapter.deadline.json")["met_at"], "1970-01-01T00:01:40Z")
+        # A new controller: adapter is still working in its pane, ui's question is answered, then both turns end.
+        self.states.update(adapter="working")
+        steps = iter([lambda: (self.assertEqual(self.answer("ui", "Use option B")[2], 0), self.states.update(ui="working")),
+                      lambda: (self.states.update(ui="idle", adapter="idle"), self.completion("ui"))])
+        times = iter([self.TIMEOUT + 60, self.TIMEOUT + 600])
+
+        def resumed():
+            self.now = next(times)
+            next(steps)()
+        self.now = self.TIMEOUT + 50
+        self.wait(on_sleep=resumed)
+        for lane in ("ui", "adapter"):
+            self.assertEqual(read_json(self.root / f"{lane}.handoff.json"), {"summary": "Work", "open_assumptions": []})
+        self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
+
     def test_a_question_is_recorded_in_every_state_a_turn_ends_in(self):
         # A session whose turn ended on a question reports idle or done, or blocked: real sessions whose last message
         # waits on the operator report blocked. In each the file is final; the pause and `answer` work the same.

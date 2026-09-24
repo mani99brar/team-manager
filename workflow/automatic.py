@@ -163,7 +163,8 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     others work. A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`)
     until the operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
     """
-    from .guardrails import PANE_ANSWER, deadline_extension, load_questions, record_pane_answer, record_question, waiting_question
+    from .guardrails import (PANE_ANSWER, deadline_extension, deadline_met, load_questions, mark_deadline_met, record_pane_answer,
+                             record_question, waiting_question)
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
     if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
@@ -173,6 +174,9 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
                 raise RuntimeError("Handoff changed after stop intent")
         return
     attention: set[str] = set()
+    # Lanes whose completion signal was accepted once their turn ended: their deadline is met, whatever their session
+    # does afterwards (an operator prompt in its pane, a command of its own). Kept across controller restarts.
+    met = {node for node in workers if deadline_met(runtime.directory, node)}
     # Answers recorded before this controller started need no second event.
     answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
     while True:
@@ -214,7 +218,7 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             receipt = read_json(runtime.directory / f"{node}.interactive.json")
             started = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
             extension = deadline_extension(runtime.directory, node)  # None while a question waits: that lane has no running deadline.
-            if extension is not None and clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"] + extension:
+            if node not in met and extension is not None and clock() >= started + runtime.plan["automatic"]["worker_timeout_seconds"] + extension:
                 raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
             if item and item["status"] == "question":
                 record_question(runtime, node, item, clock)
@@ -234,6 +238,9 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             for node, value in handoffs.items():
                 save_json(runtime.directory / f"{node}.handoff.json", value)
             return
+        for node in set(handoffs) - met:
+            mark_deadline_met(runtime.directory, node, clock())
+            met.add(node)
         sleep(2)
 
 
