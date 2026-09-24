@@ -17,7 +17,9 @@ import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
-import { formatTime, reviewSummary, shortRevision } from './status.ts'
+import { reviewSummary, shortRevision } from './status.ts'
+import { Time } from './Time.tsx'
+import { formatSpan, spanBetween } from './time.ts'
 import { useResource, type Resource } from './useResource.ts'
 
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
@@ -140,26 +142,33 @@ function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
   )
 }
 
-/** One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason), finding counts by severity and its times. */
+/**
+ * One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason), finding
+ * counts by severity, its times and how long it took from launch to its accepted file (only when both were recorded).
+ */
 function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
   return (
     <section className="evidence-section reviewer-strip" aria-labelledby="review-reviewers-title" data-testid="reviewer-strip" data-count={reviewers.length}>
       <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
       <ul className="evidence-list reviewer-list">
-        {reviewers.map(reviewer => (
-          <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
-            <p>
-              <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
-              <ReviewerVerdict verdict={reviewer.verdict} />{' '}
-              <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
-            </p>
-            <p className="projects-muted">
-              <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
-              {reviewer.launched_at !== null && <> · launched {formatTime(reviewer.launched_at)}</>}
-              {reviewer.accepted_at !== null && <> · file accepted {formatTime(reviewer.accepted_at)}</>}
-            </p>
-          </li>
-        ))}
+        {reviewers.map(reviewer => {
+          const took = spanBetween(reviewer.launched_at, reviewer.accepted_at)
+          return (
+            <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+              <p>
+                <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+                <ReviewerVerdict verdict={reviewer.verdict} />{' '}
+                <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
+              </p>
+              <p className="projects-muted">
+                <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
+                {reviewer.launched_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
+                {reviewer.accepted_at !== null && <> · file accepted <Time iso={reviewer.accepted_at} seconds /></>}
+                {took !== null && <> · <span className="reviewer-duration">took {formatSpan(took)}</span></>}
+              </p>
+            </li>
+          )
+        })}
       </ul>
     </section>
   )
@@ -241,7 +250,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
             {several ? '; independent of every worker lane and of one another' : ', independent of every worker lane'}
           </dd>
         </div>
-        <div><dt>Reviewed at</dt><dd>{formatTime(review.reviewed_at)}</dd></div>
+        <div><dt>Reviewed at</dt><dd><Time iso={review.reviewed_at} seconds /></dd></div>
         <div>
           <dt>Bundle reviewed</dt>
           <dd data-testid="review-bundle">

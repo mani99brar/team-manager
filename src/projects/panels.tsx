@@ -1,10 +1,10 @@
 import type { AnchorHTMLAttributes, ReactNode } from 'react'
 import { describeApiError, ProjectsApiError } from './api.ts'
-import { RUN_STATUS_MEANING, STATUS_LABEL, type RunStatus } from './status.ts'
+import { RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
 
 export function StatusBadge({ status, explain = false }: { status: RunStatus; explain?: boolean }) {
   return (
-    <span className={`status-badge status-${status}`} data-status={status}>
+    <span className={`status-badge status-${status}`} data-status={status} title={STATUS_TITLE[status]}>
       <span>{STATUS_LABEL[status]}</span>
       {explain && <span className="visually-hidden">. {RUN_STATUS_MEANING[status]}</span>}
     </span>

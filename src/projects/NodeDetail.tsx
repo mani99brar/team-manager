@@ -16,7 +16,9 @@ import { CreatedFiles } from './CreatedFiles.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { ReviewPanel } from './ReviewDetail.tsx'
 import { runPathname } from './routes.ts'
-import { executorCategory, executorOf, formatTime, isChallengeNode, KIND_LABEL, nodeStatusMeaning, STATUS_LABEL } from './status.ts'
+import { executorCategory, executorOf, isChallengeNode, KIND_LABEL, nodeStatusMeaning } from './status.ts'
+import { Time } from './Time.tsx'
+import { formatSpan, spanBetween } from './time.ts'
 import { useResource, type Resource } from './useResource.ts'
 import { LaunchReceipt, StopLine, TaskPanel, WorkerQuestions, WorkerSignals } from './WorkerInputs.tsx'
 
@@ -187,6 +189,7 @@ function VerifiedEvidence({ scope, result, node, phase, testId = 'worker-result'
               const log = artifactsById.get(check.log_artifact_id)
               const isDeferred = deferred.has(index)
               const exitText = check.exit_code === 0 ? 'exit 0' : `exit ${check.exit_code}`
+              const took = spanBetween(check.started_at, check.finished_at)
               return (
                 <li key={`${check.log_artifact_id}-${index}`} id={`check-${index}`} tabIndex={-1} className={isDeferred ? 'check check-deferred' : check.exit_code === 0 ? 'check check-passed' : 'check check-failed'} data-exit-code={check.exit_code} data-deferred={isDeferred ? 'true' : undefined}>
                   <div className="check-head">
@@ -194,7 +197,8 @@ function VerifiedEvidence({ scope, result, node, phase, testId = 'worker-result'
                     <span className="check-exit">{isDeferred ? `${exitText} · recorded, gated at the combined candidate` : check.exit_code === 0 ? exitText : `${exitText} (failed)`}</span>
                   </div>
                   <p className="projects-muted check-meta">
-                    {formatTime(check.started_at)} → {formatTime(check.finished_at)} · cwd <code>{check.cwd}</code>
+                    <Time iso={check.started_at} seconds /> → <Time iso={check.finished_at} seconds />
+                    {took !== null && <> · <span className="check-duration">{formatSpan(took)}</span></>} · cwd <code>{check.cwd}</code>
                   </p>
                   <div className="check-log">
                     <span>Log artifact <code>{check.log_artifact_id}</code>{log ? '' : ' (not listed among the result artifacts)'}</span>
@@ -348,7 +352,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
         <ul className="evidence-list" data-testid="reuse-list">
           {reuse.map(event => (
             <li key={event.event_id}>
-              Attempt {event.attempt} reused the result of attempt {event.reused_from_attempt ?? 'unknown'} (event {event.sequence}, {formatTime(event.occurred_at)}): {event.message}
+              Attempt {event.attempt} reused the result of attempt {event.reused_from_attempt ?? 'unknown'} (event {event.sequence}, <Time iso={event.occurred_at} seconds />): {event.message}
             </li>
           ))}
         </ul>
@@ -382,7 +386,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
           <p><strong>Awaiting approval.</strong> This node is stopped at a decision that has not been recorded. Viewing does not approve it; decisions are made through the workflow CLI.</p>
           {approvals.length > 0 && (
             <ul className="evidence-list">
-              {approvals.map(event => <li key={event.event_id}>Requested at {formatTime(event.occurred_at)}: {event.message}</li>)}
+              {approvals.map(event => <li key={event.event_id}>Requested at <Time iso={event.occurred_at} />: {event.message}</li>)}
             </ul>
           )}
         </div>
@@ -473,7 +477,7 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
           <ol className="event-list" data-testid="node-events">
             {nodeEvents.map(event => (
               <li key={event.event_id}>
-                <span className="event-seq">#{event.sequence}</span> <span className="projects-muted">{formatTime(event.occurred_at)}</span>{' '}
+                <span className="event-seq">#{event.sequence}</span> <span className="projects-muted"><Time iso={event.occurred_at} seconds /></span>{' '}
                 <span className="event-type">{event.type.replace(/_/g, ' ')}</span>
                 {event.status && <> · <StatusBadge status={event.status} /></>}
                 {event.attempt > 0 && <> · attempt {event.attempt}</>}
@@ -485,7 +489,6 @@ export function NodeDetail({ scope, definition, definitionNodes, snapshotNodes, 
         ))}
         {worker !== null && <StopLine stop={worker.stop} />}
       </section>
-      <p className="projects-muted node-detail-footnote">Status labels here are historical observations; “{STATUS_LABEL.succeeded}” on a worker node is not workflow completion.</p>
     </section>
   )
 }

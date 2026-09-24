@@ -342,6 +342,18 @@
 
 /* Run view */
 .run-status-line { margin: 4px 0 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* The run status with the live chip and the Local/UTC toggle beside it (PRD_VIEWER_UX 5.3, 6.3). */
+.run-status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 16px; margin: 4px 0 8px; }
+.run-status-row .run-status-line { margin: 0; }
+.run-freshness { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.live-status { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 0.8rem; border: 1px solid var(--border); background: var(--surface-alt); color: var(--text-muted); }
+.live-status-live > [aria-hidden] { color: var(--node-location-stroke); }
+.live-status-watching > [aria-hidden] { color: var(--accent); }
+.live-status-stale { border-color: var(--node-directory-stroke); background: var(--node-directory-fill); color: var(--text); font-weight: 600; }
+.time-zone-toggle { display: inline-flex; gap: 2px; }
+/* The chosen zone stays readable under the pointer (the generic button hover would otherwise replace its background). */
+.time-zone-toggle .button[aria-pressed='true']:hover { background: var(--accent); color: var(--accent-contrast); }
+.check-duration, .reviewer-duration { font-variant-numeric: tabular-nums; }
 .run-columns { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr); gap: 16px; margin-top: 8px; }
 .run-node-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .run-node-link { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; text-decoration: none; color: var(--text); min-height: 44px; }
@@ -350,14 +362,14 @@
 .run-node-label { font-weight: 600; }
 .run-node-meta { font-size: 0.85rem; color: var(--text-muted); display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .run-detail-panel { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
+.node-detail { min-width: 0; overflow-wrap: anywhere; }
 .node-detail h3 { margin-top: 0; }
 .node-detail-id { font-weight: 400; font-size: 0.9rem; }
-.node-detail-footnote, .run-footnote { margin-top: 12px; }
 .evidence-section { margin-top: 8px; }
 .evidence-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 .evidence-list p { margin: 0; }
 .evidence-files { font-size: 0.9rem; }
-.worker-summary { margin: 8px 0; }
+.worker-summary { margin: 8px 0; overflow-wrap: anywhere; }
 .check { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; list-style: none; margin-left: -20px; }
 .check-passed { border-left: 4px solid var(--node-location-stroke); }
 .check-failed { border-left: 4px solid var(--danger-text); }

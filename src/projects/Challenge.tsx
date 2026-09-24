@@ -1,6 +1,6 @@
 import type { RunInputs } from './api.ts'
 import { ErrorPanel, LoadingPanel } from './panels.tsx'
-import { formatTime } from './status.ts'
+import { Time } from './Time.tsx'
 import type { Resource } from './useResource.ts'
 
 type Challenge = NonNullable<RunInputs['challenge']>
@@ -46,7 +46,7 @@ export function ChallengePanel({ inputs, onRetry }: { inputs: Resource<RunInputs
           </dd>
         </div>
         <div><dt>Session</dt><dd>{challenge.session_id ? <code>{challenge.session_id}</code> : 'No session recorded'}</dd></div>
-        <div><dt>Decided</dt><dd>{challenge.decided_at ? formatTime(challenge.decided_at) : 'Not recorded'}</dd></div>
+        <div><dt>Decided</dt><dd>{challenge.decided_at ? <Time iso={challenge.decided_at} seconds /> : 'Not recorded'}</dd></div>
       </dl>
 
       {challenge.accepted_reason !== null && (

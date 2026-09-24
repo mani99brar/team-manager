@@ -90,6 +90,9 @@ export default defineConfig({
     baseURL,
     browserName: 'chromium',
     reducedMotion: 'reduce',
+    // The viewer shows times in the local zone (docs/PRD_VIEWER_UX.md 5.3): pin it so every clock the specs read is UTC.
+    timezoneId: 'UTC',
+    locale: 'en-GB',
   },
   webServer: [
     {

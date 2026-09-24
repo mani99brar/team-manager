@@ -4,7 +4,9 @@ import { fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiEr
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunView } from './RunView.tsx'
-import { formatTime, shortRevision } from './status.ts'
+import { shortRevision } from './status.ts'
+import { Time } from './Time.tsx'
+import { TimeReferenceContext } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
@@ -13,6 +15,8 @@ type Props = {
   /** Null when the pathname is under /projects but malformed. */
   route: ProjectsRoute | null
   refreshToken: number
+  /** Whether a header Refresh is still loading in the background, for the button's busy state. */
+  onRefreshingChange: (refreshing: boolean) => void
   onNavigate: (pathname: string) => void
   onAnnounce: (message: string) => void
 }
@@ -22,7 +26,7 @@ type Props = {
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Props) {
+export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
   const projectId = route && route.level !== 'projects' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
@@ -30,9 +34,9 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
 
   // The registry itself changes while the viewer runs (a launch registers its workflow); both lists are cheap to re-read.
   const registryPoll = usePoll(route?.level === 'projects' || route?.level === 'project')
-  const { state: projects, reload: reloadProjects } = useResource('projects', fetchProjects, refreshToken, registryPoll)
+  const { state: projects, reload: reloadProjects, meta: projectsMeta } = useResource('projects', fetchProjects, refreshToken, registryPoll)
   const loadWorkflows = useCallback((signal: AbortSignal) => fetchWorkflows(projectId!, signal), [projectId])
-  const { state: workflows, reload: reloadWorkflows } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken, registryPoll)
+  const { state: workflows, reload: reloadWorkflows, meta: workflowsMeta } = useResource(projectId === null ? null : `workflows:${projectId}`, loadWorkflows, refreshToken, registryPoll)
   const loadRuns = useCallback((signal: AbortSignal) => fetchRuns(projectId!, workflowId!, {}, signal), [projectId, workflowId])
   const runsKey = workflowId === null ? null : `runs:${projectId}/${workflowId}`
   // Run lists and run details re-read themselves while shown (a finished run no longer changes). A list stops polling
@@ -44,12 +48,17 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
   useEffect(() => { setMorePages({ base: null, pages: [], loading: false, error: null }) }, [listGeneration])
   const listPoll = usePoll(route?.level === 'workflow' && !morePages.loading && morePages.pages.length === 0)
   const runPoll = usePoll(route?.level === 'run' && !finished)
-  const { state: firstPage, reload: reloadRuns } = useResource(runsKey, loadRuns, refreshToken, listPoll)
+  const { state: firstPage, reload: reloadRuns, meta: runsMeta } = useResource(runsKey, loadRuns, refreshToken, listPoll)
   const scope = useMemo(() => (projectId === null || workflowId === null || runId === null ? null : { projectId, workflowId, runId }), [projectId, workflowId, runId])
   const loadDetail = useCallback((signal: AbortSignal) => fetchRunDetail({ projectId: projectId!, workflowId: workflowId!, runId: runId! }, signal), [projectId, workflowId, runId])
-  const { state: detail, reload: reloadDetail } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
+  const { state: detail, reload: reloadDetail, meta: detailMeta } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
   const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
   useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
+
+  // A Refresh re-reads every shown level in the background; the header button stays busy until they have all settled.
+  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing
+  useEffect(() => { onRefreshingChange(refreshing) }, [refreshing, onRefreshingChange])
+  useEffect(() => () => onRefreshingChange(false), [onRefreshingChange])
 
   // Additional run pages are appended on demand; they belong to exactly one loaded first page and are dropped with it.
   const firstPageData = firstPage.status === 'ready' ? firstPage.data : null
@@ -200,7 +209,7 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
                   <li key={run.run_id} data-run-id={run.run_id} data-status={run.status}>
                     <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate} className="projects-card">
                       <span className="projects-card-title">{run.run_id} <StatusBadge status={run.status} explain /></span>
-                      <span className="projects-muted">updated {formatTime(run.updated_at)} · created {formatTime(run.created_at)} · pinned revision {shortRevision(run.definition_revision)}</span>
+                      <span className="projects-muted">updated <Time iso={run.updated_at} /> · created <Time iso={run.created_at} /> · pinned revision {shortRevision(run.definition_revision)}</span>
                     </AppLink>
                   </li>
                 ))}
@@ -244,7 +253,14 @@ export function ProjectsView({ route, refreshToken, onNavigate, onAnnounce }: Pr
         </div>
       )
     } else if (detail.status === 'error') content = <ErrorPanel error={detail.error} what={`Run ${route.runId}`} onRetry={reloadDetail} />
-    else content = <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} onNavigate={onNavigate} />
+    else {
+      // Every time on the run page reads against the run's start day: only a time on another day shows its date.
+      content = (
+        <TimeReferenceContext value={detail.data.summary.created_at}>
+          <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} freshness={detailMeta} onNavigate={onNavigate} />
+        </TimeReferenceContext>
+      )
+    }
   }
 
   return (

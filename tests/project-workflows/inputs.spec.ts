@@ -140,8 +140,9 @@ test(`[scenario:worker-inputs] A worker node shows its task, ownership, required
   const launch = page.getByTestId('launch-receipt')
   await expect(launch).toContainText(UI_SESSION)
   await expect(launch).toContainText('attached_session_available')
-  await expect(launch).toContainText('2026-03-01 10:00:00 UTC')
-  await expect(launch).toContainText('2026-03-01 10:00:02 UTC')
+  // Receipt times are <time> elements: the ISO value in `datetime`, the full UTC time as tooltip (PRD_VIEWER_UX 5.3).
+  await expect(launch.locator('time[datetime="2026-03-01T10:00:00Z"]')).toHaveAttribute('title', '2026-03-01 10:00:00 UTC')
+  await expect(launch.locator('time[title="2026-03-01 10:00:02 UTC"]')).toHaveText('10:00:02')
   const receiptRow = (label: string) => launch.locator('.projects-facts > div').filter({ has: page.locator('dt', { hasText: label }) }).locator('dd')
   await expect(receiptRow('Observed state')).toHaveText('done')
   await expect(receiptRow('Launcher invocations')).toHaveText('1')
@@ -152,7 +153,8 @@ test(`[scenario:worker-inputs] A worker node shows its task, ownership, required
   await expect(completion).toContainText(uiCompletionSummary(PATH_TOKEN))
   await expect(completion).toContainText(UI_ASSUMPTION)
   await expect(page.getByTestId('worker-handoff')).toHaveCount(0)
-  await expect(page.getByTestId('worker-stop')).toContainText('Stop confirmed at 2026-03-01 10:20:00 UTC')
+  await expect(page.getByTestId('worker-stop')).toContainText('Stop confirmed at 10:20.')
+  await expect(page.getByTestId('worker-stop').locator('time')).toHaveAttribute('title', '2026-03-01 10:20:00 UTC')
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'worker-inputs')
 

@@ -3,7 +3,8 @@ import { Markdown } from '../document/Markdown.tsx'
 import type { RunInputWorker, WorkerResult } from './api.ts'
 import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
-import { formatDuration, formatTime } from './status.ts'
+import { formatDuration } from './status.ts'
+import { Time } from './Time.tsx'
 import type { Resource } from './useResource.ts'
 
 type TaskProps = {
@@ -136,8 +137,8 @@ export function LaunchReceipt({ launch }: { launch: RunInputWorker['launch'] }) 
       ) : (
         <dl className="projects-facts">
           <div><dt>Session</dt><dd>{launch.session_id === null ? 'Not yet reported by the launcher' : <code>{launch.session_id}</code>}</dd></div>
-          <div><dt>Launch requested</dt><dd>{formatTime(launch.launch_requested_at)}</dd></div>
-          <div><dt>Native start</dt><dd>{launch.native_started_at === null ? 'Not reported' : formatTime(launch.native_started_at)}</dd></div>
+          <div><dt>Launch requested</dt><dd><Time iso={launch.launch_requested_at} seconds /></dd></div>
+          <div><dt>Native start</dt><dd>{launch.native_started_at === null ? 'Not reported' : <Time iso={launch.native_started_at} seconds />}</dd></div>
           <div><dt>Observed state</dt><dd>{launch.observed_state ?? 'Not observed'}</dd></div>
           <div><dt>Launcher status</dt><dd><code>{launch.status}</code></dd></div>
           <div><dt>Launcher invocations</dt><dd>{launch.launcher_invocations}</dd></div>
@@ -279,13 +280,13 @@ export function WorkerQuestions({ questions }: { questions: RunInputWorker['ques
               return (
                 <li key={question.n} data-testid="worker-question" data-question={question.n} data-answered={answered ? 'true' : 'false'}>
                   <p>
-                    <strong>Question {question.n}</strong> <span className="projects-muted">asked at {formatTime(question.asked_at)}</span>
+                    <strong>Question {question.n}</strong> <span className="projects-muted">asked at <Time iso={question.asked_at} /></span>
                     {!answered && <> · <span className="status-badge status-awaiting_approval" data-testid="question-waiting"><span>Waiting on the operator</span></span></>}
                   </p>
                   <p className="worker-question-text">{question.question}</p>
                   {answered && (
                     <p className="worker-question-answer" data-testid="question-answer">
-                      <strong>Answer</strong> <span className="projects-muted">at {question.answered_at === null ? 'an unrecorded time' : formatTime(question.answered_at)}</span>: {question.answer}
+                      <strong>Answer</strong> <span className="projects-muted">at {question.answered_at === null ? 'an unrecorded time' : <Time iso={question.answered_at} />}</span>: {question.answer}
                     </p>
                   )}
                 </li>
@@ -344,11 +345,11 @@ export function WorkerSignals({ completion, handoff, worker, result, checksNode,
 }
 
 export function StopLine({ stop }: { stop: RunInputWorker['stop'] }) {
-  const confirmed = stop !== null && stop.stopped && stop.confirmed_at !== null
+  const confirmedAt = stop !== null && stop.stopped ? stop.confirmed_at : null
   return (
     <p className="worker-stop" data-testid="worker-stop">
-      {confirmed
-        ? `Stop confirmed at ${formatTime(stop.confirmed_at!)}.`
+      {confirmedAt !== null
+        ? <>Stop confirmed at <Time iso={confirmedAt} />.</>
         : stop === null ? 'Stop not confirmed: no stop receipt was recorded.' : 'Stop not confirmed: the stop receipt records no confirmation.'}
     </p>
   )
