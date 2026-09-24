@@ -465,14 +465,72 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         self.assertFalse((self.directory / "ui.stop.json").exists())
         events = [json.loads(line) for line in (self.directory / "events.jsonl").read_text().splitlines()]
         self.assertEqual([event["status"] for event in events if event["node"] == "review"], ["stopped", "stopped"])
-        # A reviewer whose identity changed after the stop intent is never signalled.
+        # A reviewer whose identity changed after the stop intent (another background id for its session UUID) is never signalled.
         (self.directory / "review.stop.json").unlink()
         live["review"] = self.native_rows()["review"]
-        save_json(self.directory / "review.stop.json", {"background_id": "id-review", "session_id": "session-review", "pid": 1, "stopped": False})
+        save_json(self.directory / "review.stop.json", {"background_id": "id-other", "session_id": "session-review", "pid": live["review"]["pid"], "stopped": False})
         with patch("workflow.pipeline.subprocess.run") as command:
             with self.assertRaisesRegex(RuntimeError, "identity changed"):
                 Pipeline.stop_reviewer(self.runtime)
             command.assert_not_called()
+
+    def test_a_stop_follows_a_session_an_update_respawned_under_a_new_pid(self):
+        # The first `claude stop` failed while an update restarted the background service, which then respawned the idle session
+        # onto the new binary: same background id and session UUID, a new PID. The retry stops that process, once, instead of
+        # refusing the recorded stop forever as a changed identity.
+        live = self.native_rows()
+        self.set_native(live)
+        respawned = live["ui"]["pid"] + 7
+        save_json(self.directory / "ui.stop.json", {"background_id": "id-ui", "session_id": "session-ui", "pid": live["ui"]["pid"], "stopped": False})
+        live["ui"] = {**live["ui"], "pid": respawned}
+        def stop(argv, **_kwargs):
+            live.pop(argv[-1].removeprefix("id-"))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch("workflow.pipeline.subprocess.run", side_effect=stop) as command, patch("workflow.pipeline.pid_alive", return_value=False) as alive:
+            self.runtime.stop_session("ui")
+        self.assertEqual([item.args[0] for item in command.call_args_list], [["claude", "stop", "id-ui"]])
+        alive.assert_called_once_with(respawned)  # Termination is established for the process that was stopped.
+        self.assertEqual(read_json(self.directory / "ui.stop.json"),
+                         {"background_id": "id-ui", "session_id": "session-ui", "pid": respawned, "stopped": True})
+
+    def test_a_stop_waits_out_an_update_respawn_gap_of_a_bound_session(self):
+        # Every lane is idle at the freeze, which is what an update respawns: the listing omits the session, then lists its
+        # ended PID, then the new one. The stop waits that out as the controller's waits do, records its intent from the live
+        # row and stops that process; a recorded stop resumed in such a gap follows the new PID the same way. A gap that
+        # outlasts the grace is Claude Code unavailable (resumable): nothing is recorded and nothing is stopped.
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        from .sessions import TransientInfraError
+        ended = subprocess.Popen(["sleep", "60"])
+        ended.kill()
+        ended.wait()
+        save_json(self.directory / "ui.interactive.json", {"background_id": "id-ui", "session_id": "session-ui"})
+        row = {**self.native_rows()["ui"], "pid": os.getpid()}
+        clock = SimpleNamespace(now=0.0, listings=iter(()))
+        self.runtime.sessions = SimpleNamespace(executable="claude", inventory=lambda: next(clock.listings),
+                                               locate=lambda node, rows: next((item for item in rows if item["id"] == f"id-{node}"), None))
+        def stop(listings, intent=None):
+            clock.listings = iter(listings)
+            if intent:
+                save_json(self.directory / "ui.stop.json", intent)
+            with patch("workflow.pipeline.time") as fake_time, patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as command, \
+                    patch("workflow.pipeline.pid_alive", return_value=False):
+                fake_time.monotonic.side_effect = lambda: clock.now
+                fake_time.sleep.side_effect = lambda seconds: setattr(clock, "now", clock.now + seconds)
+                try:
+                    self.runtime.stop_session("ui")
+                finally:
+                    self.commands, self.sleeps = [item.args[0] for item in command.call_args_list], fake_time.sleep.call_count
+        stop([[], [{**row, "pid": ended.pid}], [row], [row], []])
+        self.assertEqual((self.commands, self.sleeps), ([["claude", "stop", "id-ui"]], 2))
+        self.assertEqual(read_json(self.directory / "ui.stop.json"), {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": True})
+        stop([[{**row, "pid": ended.pid}], [row], []], intent={"background_id": "id-ui", "session_id": "session-ui", "pid": ended.pid, "stopped": False})
+        self.assertEqual((self.commands, self.sleeps), ([["claude", "stop", "id-ui"]], 1))
+        self.assertEqual(read_json(self.directory / "ui.stop.json")["pid"], os.getpid())
+        (self.directory / "ui.stop.json").unlink()
+        with self.assertRaisesRegex(TransientInfraError, f"Claude Code has not listed a live ui session \\(id-ui\\) for {DEAD_PID_GRACE_SECONDS}s"):
+            stop([[]] * 20)
+        self.assertEqual((self.commands, self.sleeps), ([], DEAD_PID_GRACE_SECONDS // 2))
+        self.assertFalse((self.directory / "ui.stop.json").exists())
 
     def test_launch_reviewer_pane_is_best_effort_and_launch_failure_is_recorded(self):
         receipt = {"session_id": "33333333-3333-4333-8333-333333333333", "background_id": "33333333", "status": "attached_session_available"}

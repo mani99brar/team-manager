@@ -1016,7 +1016,8 @@ class WorkerQuestion(unittest.TestCase):
                      "workers": ["ui", "adapter"], "nodes": {lane: {"session_id": f"{lane}-token"} for lane in ("ui", "adapter")}}
         save_json(self.root / "plan.json", self.plan)
         self.states = {"ui": "idle", "adapter": "working"}
-        sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": self.states[node]})
+        # A bound receipt's row is judged like a real one (UpdateGaps): it lists a live PID, this process's.
+        sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": self.states[node], "pid": os.getpid()})
         self.events = []
         self.runtime = SimpleNamespace(directory=self.root, plan=self.plan, sessions=sessions, workers=["ui", "adapter"],
                                        event=lambda node, status, message: self.events.append((node, status, message)))

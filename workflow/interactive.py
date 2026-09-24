@@ -396,7 +396,7 @@ def attach_reviewer_panel(sessions: InteractiveSessions) -> dict:
 REATTACH_LIMIT = 30          # attempts in a row without a working attach before attach-one gives up
 REATTACH_MAX_DELAY = 10      # seconds; the delay doubles from 2 up to this cap
 ATTACH_STABLE_SECONDS = 60   # an attach that held this long was connected: its loss starts a new count
-DEAD_PID_GRACE_SECONDS = 30  # an ended process with no new one listed: how long a respawn's new PID is awaited
+DEAD_PID_GRACE_SECONDS = 30  # an ended process with no new one listed (the controller: any gap): how long a respawn's new PID is awaited
 # What a restarting service lists for a moment: a row still registering its PID, or in a state between two processes
 # (starting, resuming). A failed listing is waited out whatever its error; a terminal state never is.
 TRANSIENT_REFUSALS = ("No live native PID", "Session is not attachable")
@@ -405,7 +405,7 @@ PROCESS_ENDED = "Native process is unavailable; refusing implicit restart"
 
 
 class SessionGap(RuntimeError):
-    """What a restarting background service shows for a while after an attach; waited out within REATTACH_LIMIT."""
+    """What a restarting background service shows for a while after an attach; waited out within REATTACH_LIMIT (the controller: UpdateGaps)."""
 
 
 class ProcessEnded(SessionGap):
@@ -496,11 +496,7 @@ def observe(sessions: InteractiveSessions, node: str, attached: dict | None) -> 
     Only a background id verified live and attached before (`attached`, its row then) earns that wait,
     whatever became of its PID, since an update respawns the session under a new one. How the listing
     itself fails (a missing CLI, a timeout, a non-zero exit, output it cannot parse) is Claude Code's
-    business and every such failure is a gap, as are a row still registering its PID or in a state
-    between two processes, a listing without the id while the attached process lives, and (ProcessEnded)
-    a row still listing a PID whose process ended or a listing without the id once it ended. A first
-    attach, a terminal state and every identity refusal fail at once: nothing is attached without a
-    verified live row.
+    business and every such failure is a gap; what the listing says is judged by verified_row.
     """
     try:
         rows = sessions.inventory()
@@ -508,6 +504,18 @@ def observe(sessions: InteractiveSessions, node: str, attached: dict | None) -> 
         if attached is None:
             raise
         raise SessionGap(str(error)) from error
+    return verified_row(sessions, node, rows, attached)
+
+
+def verified_row(sessions: InteractiveSessions, node: str, rows: list[dict], attached: dict | None) -> dict:
+    """The session's verified live row in one listing; SessionGap while an update's respawn hides it.
+
+    For a background id verified live before (`attached`, a row with its id and last live PID) a row still
+    registering its PID or in a state between two processes is a gap, as are a listing without the id while
+    that process lives and (ProcessEnded) a row still listing a PID whose process ended or a listing without
+    the id once it ended. A first attach, a terminal state and every identity refusal fail at once: nothing
+    is attached without a verified live row. attach-one and the controller's waits (UpdateGaps) judge alike.
+    """
     try:
         row = sessions.locate(node, rows)
     except RuntimeError as error:
@@ -530,6 +538,39 @@ def observe(sessions: InteractiveSessions, node: str, attached: dict | None) -> 
     if not process_alive(row["pid"]):  # A zombie passes locate's kill(pid, 0).
         raise ProcessEnded(PROCESS_ENDED) if attached is not None else RuntimeError(PROCESS_ENDED)
     return row
+
+
+class UpdateGaps:
+    """The controller's waits and stops under attach-one's rules: an update's respawn gap is never a verdict on a session.
+
+    A node whose receipt is bound (its background id verified live at launch) that the listing shows in a gap
+    (verified_row) raises SessionGap, and the caller looks at it again (a wait at its next poll, a stop after
+    2 seconds) for DEAD_PID_GRACE_SECONDS from when that gap was first seen; a gap that lasts longer is
+    TransientInfraError, so the run stops nothing and resumes. A receipt not bound yet keeps locate's plain answer.
+    """
+
+    def __init__(self, sessions: InteractiveSessions, directory: Path, clock):
+        self.sessions, self.directory, self.clock = sessions, directory, clock
+        self.since: dict[str, float] = {}  # When each node's current gap was first seen.
+        self.pids: dict[str, int] = {}     # Each node's last live PID.
+
+    def row(self, node: str, rows: list[dict]) -> dict | None:
+        """The node's verified live row, or locate's answer while its receipt is not bound; SessionGap while a gap lasts."""
+        path = self.directory / f"{node}.interactive.json"
+        bound = read_json(path).get("background_id") if path.exists() else None
+        if not bound:
+            return self.sessions.locate(node, rows)
+        try:
+            row = verified_row(self.sessions, node, rows, {"id": bound, "pid": self.pids.get(node)})
+        except SessionGap as gap:
+            now = self.clock()
+            if now - self.since.setdefault(node, now) >= DEAD_PID_GRACE_SECONDS:
+                raise TransientInfraError(f"Claude Code has not listed a live {node} session ({bound}) for {DEAD_PID_GRACE_SECONDS}s "
+                                          f"({gap}); an update may still be respawning it") from gap
+            raise
+        self.since.pop(node, None)
+        self.pids[node] = row["pid"]
+        return row
 
 
 def attach_one(sessions: InteractiveSessions, node: str, *, clock=time.monotonic, sleep=time.sleep) -> None:

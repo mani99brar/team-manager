@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,37 @@ class CompletionTests(unittest.TestCase):
         save_json(self.root / "ui.stop.json", {"stopped": True})
         self.runtime.sessions.inventory = lambda: self.fail("Must not locate a stopped worker")
         wait_handoffs(self.runtime)
+
+    def test_an_update_respawn_gap_is_waited_out_not_a_missing_worker(self):
+        # Seen in workflow-guardrails-001: an update restarts Claude Code's background service, which about 15 seconds later
+        # respawns each idle session (a finished lane, a lane paused on a question) under a new PID. In between the listing
+        # omits the session or still lists its ended PID. The lane is looked at again at the next poll, for a bounded grace;
+        # a gap that outlasts it is Claude Code unavailable (the run exits 75 and stops nothing), never a missing worker.
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        from .sessions import TransientInfraError
+        ended = subprocess.Popen(["sleep", "60"])
+        ended.kill()
+        ended.wait()
+        for node in self.plan["nodes"]:
+            save_json(self.root / f"{node}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00", "background_id": f"{node}-bg"})
+            save_json(self.root / f"{node}.completion.json", self.completion(node))
+        ui, adapter = {"id": "ui-bg", "state": "working", "pid": os.getpid()}, {"id": "adapter-bg", "state": "idle", "pid": os.getpid()}
+        self.runtime.sessions.locate = lambda node, rows: next((row for row in rows if row["id"] == f"{node}-bg"), None)
+        listings = iter([[ui, adapter], [ui], [ui, {**adapter, "pid": ended.pid}], [{**ui, "state": "idle"}, {**adapter, "pid": os.getppid()}]])
+        self.runtime.sessions.inventory = lambda: next(listings)
+        wait_handoffs(self.runtime, clock=lambda: 1, sleep=lambda _: None)
+        self.assertEqual({node: read_json(self.root / f"{node}.handoff.json")["summary"] for node in self.plan["nodes"]},
+                         {"ui": "Synthetic work", "adapter": "Synthetic work"})
+        self.assertEqual(self.events, [])
+        for node in self.plan["nodes"]:
+            (self.root / f"{node}.handoff.json").unlink()
+        # The finished lane stays missing: after the grace the wait ends as Claude Code unavailable.
+        now = [1.0]
+        listings = iter([[ui, adapter], *[[ui]] * 10])
+        with self.assertRaisesRegex(TransientInfraError, rf"^Claude Code has not listed a live adapter session \(adapter-bg\) for {DEAD_PID_GRACE_SECONDS}s"):
+            wait_handoffs(self.runtime, clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + 10))
+        self.assertEqual(now[0], 1 + 10 + DEAD_PID_GRACE_SECONDS)
+        self.assertFalse((self.root / "adapter.handoff.json").exists())
 
     def test_supervisor_restarts_only_for_checkpoint_continuation(self):
         save_json(self.root / "plan.json", self.plan)
@@ -501,6 +533,30 @@ class ReviewCompletionTests(unittest.TestCase):
         del self.rows[last]
         with self.assertRaisesRegex(RuntimeError, f"Native reviewer {last} missing; reconciliation"):
             wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
+
+    def test_an_update_respawn_gap_is_waited_out_not_a_missing_reviewer(self):
+        # A reviewer that wrote its file and went idle is what an update respawns under a new PID. While the listing omits it,
+        # the wait looks at it again at the next poll, for a bounded grace; after that Claude Code is unavailable, not a verdict.
+        from .automatic import wait_reviews
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        from .sessions import TransientInfraError
+        for reviewer_id in self.ids:
+            path = self.root / f"{self.node(reviewer_id)}.interactive.json"
+            save_json(path, {**read_json(path), "background_id": self.uuid(reviewer_id)[:8]})
+            self.rows[reviewer_id]["pid"] = os.getpid()
+            self.write(reviewer_id)
+        last = self.ids[-1]
+        respawned = {**self.rows.pop(last), "pid": os.getppid()}
+        decisions = wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.rows.update({last: respawned}))
+        self.assertEqual(list(decisions), self.ids)
+        self.assertEqual(self.events, [])
+        del self.rows[last]
+        now = [1.0]
+        with self.assertRaisesRegex(TransientInfraError, rf"^Claude Code has not listed a live {self.node(last)} session "
+                                                         rf"\({self.uuid(last)[:8]}\) for {DEAD_PID_GRACE_SECONDS}s"):
+            wait_reviews(self.runtime, clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + 10))
+        self.assertEqual(now[0], 1 + DEAD_PID_GRACE_SECONDS)
+        self.assertNotIn("error", read_json(self.root / f"automatic-{self.node(last)}.json"))
 
     def test_claude_code_unavailable_during_the_wait_stops_no_reviewer_and_is_resumed_once(self):
         from unittest.mock import Mock

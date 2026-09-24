@@ -991,5 +991,95 @@ class AttachOneTests(unittest.TestCase):
         self.assertEqual(attach.call_count, 1)
 
 
+class UpdateGapTests(unittest.TestCase):
+    """The controller's waits see an update's respawn gap under attach-one's rules: a bound session is waited for, never judged."""
+
+    def setUp(self):
+        from .sessions import plan_digest
+        InteractiveTests.setUp(self)
+        save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row()["id"],
+                                                           "session_id": self.row()["sessionId"], "node_id": "ui"})
+        self.now = 0.0
+
+    row = InteractiveTests.row
+    process = AttachOneTests.process
+
+    def gaps(self):
+        from .interactive import UpdateGaps
+        return UpdateGaps(self.sessions, self.directory, lambda: self.now)
+
+    def zombie(self):
+        """A process that ended and is not collected yet: it still answers kill(pid, 0)."""
+        native = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(native.wait)
+        native.kill()
+        for _ in range(500):
+            if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            time.sleep(0.01)
+        return native
+
+    def test_each_gap_of_a_bound_session_is_waited_out_and_its_new_pid_followed(self):
+        # Between the two processes of a respawn `claude agents` omits the finished session, still lists its ended PID (reaped,
+        # or a zombie), lists it without a PID, or in a state between two processes. None of these is a verdict on the session.
+        from .interactive import DEAD_PID_GRACE_SECONDS, SessionGap
+        old, new = self.process(), self.process()
+        old.kill()
+        old.wait()
+        between = {"omitted": [], "ended PID": [self.row(pid=old.pid, state="done")], "zombie PID": [self.row(pid=self.zombie().pid, state="done")],
+                   "no PID": [self.row(pid=None)], "starting": [self.row(state="starting", pid=None)],
+                   "upgrading": [self.row(state="upgrading", pid=new.pid)]}
+        for case, rows in between.items():
+            with self.subTest(case=case):
+                gaps = self.gaps()
+                self.assertEqual(gaps.row("ui", [self.row()])["pid"], os.getpid())
+                with self.assertRaises(SessionGap):
+                    gaps.row("ui", rows)
+                self.now += DEAD_PID_GRACE_SECONDS - 1
+                with self.assertRaises(SessionGap):
+                    gaps.row("ui", rows)
+                self.assertEqual(gaps.row("ui", [self.row(pid=new.pid)])["pid"], new.pid)
+                # That gap ended: the next one gets the whole grace again.
+                self.now += DEAD_PID_GRACE_SECONDS - 1
+                with self.assertRaises(SessionGap):
+                    gaps.row("ui", rows)
+
+    def test_a_gap_that_outlasts_the_grace_is_claude_code_unavailable_not_a_verdict(self):
+        from .interactive import DEAD_PID_GRACE_SECONDS, SessionGap
+        from .sessions import TransientInfraError
+        gaps = self.gaps()
+        self.now = 100.0
+        with self.assertRaises(SessionGap):
+            gaps.row("ui", [])
+        self.now += DEAD_PID_GRACE_SECONDS
+        with self.assertRaisesRegex(TransientInfraError, rf"^Claude Code has not listed a live ui session \({self.row()['id']}\) for "
+                                                         rf"{DEAD_PID_GRACE_SECONDS}s \(Session unavailable; refusing implicit restart\)"):
+            gaps.row("ui", [])
+
+    def test_a_terminal_state_or_a_changed_identity_is_a_verdict_at_once(self):
+        # Not gaps: a row the service reports stopped or failed, and every identity refusal, even on the first poll.
+        gaps = self.gaps()
+        for rows, refusal in (([self.row(state="stopped", pid=None)], "Session is not attachable: 'stopped'"),
+                              ([self.row(state="failed")], "Session is not attachable: 'failed'"),
+                              ([self.row(cwd=str(self.root))], "identity/worktree mismatch"),
+                              ([self.row(sessionId="44444444-4444-4444-8444-444444444444")], "Native Claude UUID changed")):
+            with self.subTest(refusal=refusal):
+                with self.assertRaisesRegex(RuntimeError, refusal) as raised:
+                    gaps.row("ui", rows)
+                self.assertIs(type(raised.exception), RuntimeError)
+
+    def test_a_receipt_not_bound_yet_keeps_the_plain_answer_of_locate(self):
+        # Nothing verified this session live yet (no background id in its receipt): the caller judges locate's answer as before.
+        from .sessions import plan_digest
+        save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "session_id": None, "node_id": "ui"})
+        (self.directory / "ui.launch.log").write_text(f"claude attach {self.row()['id']}    open in this terminal\n")
+        gaps = self.gaps()
+        self.assertIsNone(gaps.row("ui", []))
+        self.assertIsNone(gaps.row("adapter", [self.row("adapter")]))  # No receipt at all.
+        with self.assertRaisesRegex(RuntimeError, "No live native PID") as raised:
+            gaps.row("ui", [self.row(pid=None)])
+        self.assertIs(type(raised.exception), RuntimeError)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -27,7 +28,7 @@ from langgraph.types import Command, interrupt
 
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
-from .interactive import REVIEW, InteractiveSessions, attach_panels, attach_reviewer_panel
+from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
                        run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id)
 from .verification import owns, policy_digest, safe_path, validate_policy
@@ -327,13 +328,24 @@ class Pipeline:
         self.event(REVIEW, "interactive", f"Reviewer {reviewer_id} session {receipt['session_id']} reconciled; awaiting {node}.completion.json")
         return receipt
 
+    def stop_row(self, node: str, rows: list[dict]) -> dict | None:
+        """locate for a stop, under the controller's rule for an update's respawn gap (UpdateGaps): a bound session the
+        listing does not show live yet is listed again every 2 seconds for the grace, then TransientInfraError."""
+        gaps = UpdateGaps(self.sessions, self.directory, time.monotonic)
+        while True:
+            try:
+                return gaps.row(node, rows)
+            except SessionGap:
+                time.sleep(2)
+                rows = self.sessions.inventory()
+
     def stop_session(self, node: str) -> None:
         """Persist native identity before stopping. Never signal guessed/reused PIDs."""
         marker = self.directory / f"{node}.stop.json"
         if marker.exists():
             intent = read_json(marker)
         else:
-            row = self.sessions.locate(node, self.sessions.inventory())
+            row = self.stop_row(node, self.sessions.inventory())
             if row is None:
                 raise RuntimeError(f"{node} session missing before stop; reconcile before continuing")
             intent = {"background_id": row["id"], "session_id": row["sessionId"], "pid": row["pid"], "stopped": False}
@@ -342,9 +354,14 @@ class Pipeline:
             rows = self.sessions.inventory()
             matching = [row for row in rows if row.get("sessionId") == intent["session_id"] and row.get("pid")]
             if matching:
-                row = self.sessions.locate(node, rows)
-                if row is None or row["id"] != intent["background_id"] or row["pid"] != intent["pid"]:
+                # Its session UUID listed under another background id is a changed identity, never a gap.
+                row = self.stop_row(node, rows) if any(item.get("id") == intent["background_id"] for item in matching) else None
+                if row is None or row["id"] != intent["background_id"] or row["sessionId"] != intent["session_id"]:
                     raise RuntimeError(f"Native {node} session identity changed after stop intent; reconcile manually")
+                if row["pid"] != intent["pid"]:
+                    # An update respawned the session (same background id and UUID) under a new live PID: stop that process.
+                    intent["pid"] = row["pid"]
+                    save_json(marker, intent)
                 result = run_claude([self.sessions.executable, "stop", intent["background_id"]], capture_output=True, text=True, timeout=20)
                 if result.returncode != 0:
                     raise RuntimeError(f"Stop failed for {node}; inspect native session before retrying")

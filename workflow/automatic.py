@@ -20,6 +20,7 @@ from langgraph.types import Command
 
 from .checks import now
 from .guardrails import decisions_block
+from .interactive import SessionGap, UpdateGaps
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
                        run_lock, save_json, terminate)
 from .verification import CONTRACTS
@@ -179,11 +180,15 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     met = {node for node in workers if deadline_met(runtime.directory, node)}
     # Answers recorded before this controller started need no second event.
     answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
+    gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
     while True:
         rows = runtime.sessions.inventory()
         handoffs = {}
         for node in workers:
-            row = runtime.sessions.locate(node, rows)
+            try:
+                row = gaps.row(node, rows)
+            except SessionGap:
+                continue  # An update is respawning this lane's session (an idle one: finished, or paused on a question); no verdict.
             if row is None:
                 raise RuntimeError("Native worker missing; reconciliation required")
             path = runtime.directory / f"{node}.completion.json"
@@ -448,6 +453,7 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         started[reviewer_id] = datetime.fromisoformat(receipt["launch_requested_at"]).timestamp()
     decisions = state.decisions
     attention = set()
+    gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
     while True:
         rows = runtime.sessions.inventory()
         for reviewer_id in state.ids:
@@ -459,7 +465,10 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 status.update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
                 state.save()
                 raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
-            row = runtime.sessions.locate(node, rows)
+            try:
+                row = gaps.row(node, rows)
+            except SessionGap:
+                continue  # An update is respawning this reviewer's session; no verdict.
             if row is None:
                 raise RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required")
             if row["state"] == "blocked" and reviewer_id not in attention:
