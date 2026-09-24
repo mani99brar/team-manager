@@ -395,12 +395,30 @@ class ChallengeCheckoutFails(FailingChallenge):
         self.assertIn("worktree", event[2])
         self.assertFalse((directory / "challenge.json").exists() or (directory / "challenge.running.json").exists())
         self.assertEqual(self.launches(directory), [])
+        # The refusal says what runs once the checkout is fixed: `launch` refuses the run directory it already prepared.
+        self.assertIn(f"no job ran; fix it, then run the challenge and launch the workers with: {PY} -m workflow resume {directory}\n", output)
         # No job ran, so nothing is left undecided: once the path is free, start runs attempt 1.
         (directory / "challenge-worktree").unlink()
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 1))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+    def test_after_a_launch_whose_challenge_checkout_failed_resume_runs_attempt_1_and_supervises_the_automatic_run(self):
+        directory = self.prepare("checkout-auto-001", automatic=True)
+        (directory / "challenge-worktree").symlink_to(self.root / "nowhere")
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])  # The start a `launch --automatic` runs.
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"then run the challenge and launch the workers with: {PY} -m workflow resume {directory}\n", output)
+        (directory / "challenge-worktree").unlink()
+        supervised = []
+        with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 1))
+        # Supervised once, after the workers launched: `start` alone would have left them unsupervised.
+        self.assertEqual(supervised, [(directory, ["challenge", "adapter", "ui"])])
+        self.assertIn("Automatic run reached a verified feature branch", output)
 
 
 class LaneNamedLikeARunFile(GuardedFeature):

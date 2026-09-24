@@ -292,13 +292,23 @@ def challenge_timeout(plan: dict) -> int:
 
 
 def challenge_worktree(runtime) -> Path:
-    """A detached checkout at the base commit; the job gets only Read, Glob and Grep, and a change to it refuses the result."""
+    """A detached checkout at the base commit; the job gets only Read, Glob and Grep, and a change to it refuses the result.
+
+    One that cannot be created, or is not the clean base, is refused before any job with the command that goes on
+    once it is fixed: `resume`, which runs attempt 1, launches the workers and supervises an automatic run. `launch`
+    refuses the run directory it already prepared, and `start` would leave an automatic run's workers unsupervised.
+    """
     cwd = runtime.directory / "challenge-worktree"
     base = runtime.plan["base_commit"]
-    if not cwd.exists():
-        git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), base)
-    if git(cwd, "rev-parse", "HEAD") != base or git(cwd, "status", "--porcelain"):
-        raise RuntimeError("Challenge worktree is not the clean base commit; reconcile before rerunning the challenge")
+    then = f"no job ran; fix it, then run the challenge and launch the workers with: {resume_command(runtime.directory)}"
+    try:
+        if not cwd.exists():
+            git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), base)
+        clean = git(cwd, "rev-parse", "HEAD") == base and not git(cwd, "status", "--porcelain")
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"Challenge worktree {cwd} could not be created or read: {error}\n{then}") from None
+    if not clean:
+        raise RuntimeError(f"Challenge worktree is not the clean base commit; {then}")
     return cwd
 
 
