@@ -1,7 +1,7 @@
 /**
  * Clock hooks for the Projects viewer (docs/PRD_VIEWER_UX.md 5.3 and 6.3): the ticking current time, the page's
- * visibility, the remembered Local/UTC preference shared by every shown time, and the instant a run page reads its times
- * against.
+ * visibility, which day is today, the remembered Local/UTC preference shared by every shown time, and the instant a run
+ * page reads its times against.
  */
 import { createContext, useContext, useEffect, useState, useSyncExternalStore } from 'react'
 import type { Zone } from './time.ts'
@@ -31,6 +31,46 @@ export function usePageVisibility(): { visible: boolean; since: number } {
     return () => document.removeEventListener('visibilitychange', update)
   }, [])
   return state
+}
+
+// Today, for every time read against it (lists, a run's start): one value for the whole page that changes only when the
+// local or the UTC date does. It is re-checked every minute and when the tab becomes visible again, so a page left open
+// past midnight relabels its days without re-rendering every second.
+const DAY_CHECK_MS = 60_000
+let today = Date.now()
+const todayListeners = new Set<() => void>()
+let dayTimer: number | undefined
+
+const dayOf = (time: number) => {
+  const date = new Date(time)
+  return `${date.toDateString()}|${date.toISOString().slice(0, 10)}`
+}
+
+function checkDay() {
+  const now = Date.now()
+  if (dayOf(now) === dayOf(today)) return
+  today = now
+  todayListeners.forEach(listener => listener())
+}
+
+function subscribeToday(listener: () => void): () => void {
+  todayListeners.add(listener)
+  if (todayListeners.size === 1) {
+    checkDay()
+    dayTimer = window.setInterval(checkDay, DAY_CHECK_MS)
+    document.addEventListener('visibilitychange', checkDay)
+  }
+  return () => {
+    todayListeners.delete(listener)
+    if (todayListeners.size > 0) return
+    window.clearInterval(dayTimer)
+    document.removeEventListener('visibilitychange', checkDay)
+  }
+}
+
+/** An instant of today (epoch milliseconds), for reading which day a time falls on; it changes once the date does. */
+export function useToday(): number {
+  return useSyncExternalStore(subscribeToday, () => today, () => today)
 }
 
 /** Where the Local/UTC choice is remembered in this browser. */

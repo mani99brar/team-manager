@@ -636,7 +636,8 @@ function App() {
           <p>Pi and Claude skill locations as a containment graph. Edits are saved only when you press Save. Projects shows workflow runs, read-only.</p>
         </div>
         {inProjects ? (
-          <button type="button" className="button" onClick={() => setProjectsRefresh(previous => previous + 1)} disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
+          // Busy but still focusable (aria-disabled, not disabled), so a keyboard user's focus stays on it while it reloads.
+          <button type="button" className="button" onClick={() => { if (!projectsRefreshing) setProjectsRefresh(previous => previous + 1) }} aria-disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
             {projectsRefreshing ? 'Refreshing…' : 'Refresh'}
           </button>
         ) : (

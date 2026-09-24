@@ -42,8 +42,9 @@
   min-height: 36px;
   cursor: pointer;
 }
-.button:hover:not(:disabled) { background: var(--surface-alt); }
-.button:disabled { opacity: 0.5; cursor: default; }
+.button:hover:not(:disabled):not([aria-disabled='true']) { background: var(--surface-alt); }
+/* A busy button that keeps the keyboard focus is aria-disabled instead of disabled; both look the same. */
+.button:disabled, .button[aria-disabled='true'] { opacity: 0.5; cursor: default; }
 .button[aria-pressed='true'] { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
 .button:focus-visible, .breadcrumbs a:focus-visible, .breadcrumb-ellipsis:focus-visible, .missing a:focus-visible,
 .outline button:focus-visible {
@@ -428,6 +429,8 @@
 
 @media (max-width: 760px) {
   .run-columns { grid-template-columns: 1fr; }
+  /* Tap targets are at least 44 px on phones (PRD_VIEWER_UX section 10). */
+  .time-zone-toggle .button { min-height: 44px; min-width: 44px; }
   .workspace-projects { padding: 10px; }
   .projects-facts { grid-template-columns: 1fr; }
   .status-badge { white-space: normal; }

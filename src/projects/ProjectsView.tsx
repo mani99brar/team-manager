@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
-import { fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
+import { describeApiError, fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunView } from './RunView.tsx'
@@ -10,6 +10,8 @@ import { TimeReferenceContext } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
+
+const LOADING_FAILED = 'Loading failed.'
 
 type Props = {
   /** Null when the pathname is under /projects but malformed. */
@@ -59,6 +61,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing
   useEffect(() => { onRefreshingChange(refreshing) }, [refreshing, onRefreshingChange])
   useEffect(() => () => onRefreshingChange(false), [onRefreshingChange])
+  // A failed Refresh keeps the page as it was, so it says so until a later load of that level succeeds.
+  const refreshFailure = [detailMeta, runsMeta, workflowsMeta, projectsMeta].find(meta => meta.refreshError !== null) ?? null
+  const refreshFailed = refreshFailure !== null
 
   // Additional run pages are appended on demand; they belong to exactly one loaded first page and are dropped with it.
   const firstPageData = firstPage.status === 'ready' ? firstPage.data : null
@@ -82,20 +87,35 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const workflowName = currentWorkflow?.name ?? workflowId
 
   // A background poll re-announces only what changed; a load the reader started (navigation, Refresh) always announces.
+  // A Refresh announces that it started and then its outcome, even when the page did not change.
   const announced = useRef<string | null>(null)
+  const refreshAnnounced = useRef(false)
   useEffect(() => {
+    if (refreshing) {
+      if (!refreshAnnounced.current) onAnnounce('Refreshing.')
+      refreshAnnounced.current = true
+      return
+    }
     let message: string | null = null
     if (route === null) message = 'This Projects link is invalid.'
     else if (route.level === 'projects' && projects.status === 'ready') message = `Loaded ${projects.data.length} ${projects.data.length === 1 ? 'project' : 'projects'}.`
     else if (route.level === 'project' && workflows.status === 'ready') message = `Loaded ${workflows.data.length} ${workflows.data.length === 1 ? 'workflow' : 'workflows'} for ${projectName ?? route.projectId}.`
     else if (route.level === 'workflow' && firstPage.status === 'ready') message = `Loaded ${firstPage.data.runs.length} ${firstPage.data.runs.length === 1 ? 'run' : 'runs'} for ${workflowName ?? route.workflowId}.`
     else if (route.level === 'run' && detail.status === 'ready') message = `Loaded run ${route.runId}: ${detail.data.summary.status.replace('_', ' ')}.`
-    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') message = 'Loading failed.'
+    else if ((projects.status === 'error') || workflows.status === 'error' || firstPage.status === 'error' || detail.status === 'error') message = LOADING_FAILED
+    if (refreshAnnounced.current) {
+      refreshAnnounced.current = false
+      announced.current = message
+      if (refreshFailed) onAnnounce('Refresh failed. The page still shows the data loaded before, which may be outdated.')
+      else if (message === LOADING_FAILED) onAnnounce('Refresh failed.')
+      else onAnnounce(message === null ? 'Refreshed.' : `Refreshed. ${message}`)
+      return
+    }
     if (message === null) { announced.current = null; return }
     if (message === announced.current) return
     announced.current = message
     onAnnounce(message)
-  }, [route, projects, workflows, firstPage, detail, projectName, workflowName, onAnnounce])
+  }, [route, projects, workflows, firstPage, detail, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
 
   const crumbs: PathCrumb[] = [{ id: 'home', label: 'Home', pathname: '/' }, { id: 'projects', label: 'Projects', pathname: projectsPathname() }]
   if (projectId !== null) crumbs.push({ id: `project:${projectId}`, label: projectName ?? projectId, pathname: projectPathname(projectId) })
@@ -254,7 +274,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       )
     } else if (detail.status === 'error') content = <ErrorPanel error={detail.error} what={`Run ${route.runId}`} onRetry={reloadDetail} />
     else {
-      // Every time on the run page reads against the run's start day: only a time on another day shows its date.
+      // Every time on the run page reads against the run's start day: only a time on another day shows its date. The start
+      // itself (the Created fact) is read against today, so the page names the day its run started.
       content = (
         <TimeReferenceContext value={detail.data.summary.created_at}>
           <RunView scope={scope!} detail={detail.data} current={currentWorkflow} selectedNodeId={nodeId} refreshToken={refreshToken} pollToken={runPoll} freshness={detailMeta} onNavigate={onNavigate} />
@@ -270,6 +291,14 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
         <p className="folder-info" data-testid="projects-info">{info}</p>
       </div>
       <main className="workspace workspace-projects" aria-busy={busy} data-testid="projects-workspace">
+        {refreshFailure !== null && (
+          <div className="projects-notice" role="alert" data-testid="refresh-failed">
+            <p>
+              <strong>Refresh failed.</strong> {describeApiError(refreshFailure.refreshError)} The page still shows the data loaded
+              {refreshFailure.settledAt === null ? ' before' : <> at <Time iso={new Date(refreshFailure.settledAt).toISOString()} seconds /></>}, which may be outdated.
+            </p>
+          </div>
+        )}
         {content}
       </main>
     </>

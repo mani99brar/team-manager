@@ -112,7 +112,7 @@ export function RunView({ scope, detail, current, selectedNodeId, refreshToken, 
           </div>
         </div>
         <dl className="projects-facts">
-          <div><dt>Created</dt><dd><Time iso={summary.created_at} /></dd></div>
+          <div><dt>Created</dt><dd><Time iso={summary.created_at} anchor /></dd></div>
           <div><dt>Updated</dt><dd><Time iso={summary.updated_at} /></dd></div>
           <div><dt>Last event</dt><dd>{snapshot.last_sequence === 0 ? 'none' : `sequence ${snapshot.last_sequence}`}</dd></div>
           <div>
