@@ -1,13 +1,13 @@
 /**
  * The run page's Steps model (docs/PRD_VIEWER_UX.md 4.2, 5.3): one row per step of the pinned definition, in definition
  * order, read from the triage timeline. A row says when the step first started, how long it took from there to its last
- * verdict (to now while it runs), its attempt, the marks of its attempts in time order (✗ failed, ? ended without a record,
- * ⚑ the controller's diagnosis, ⚒ an operator repair, ✓ passed), its outcome and whether it waits on the operator. Also
+ * verdict (to now while it runs), its attempt, one mark per attempt in time order (✗ failed, ? ended without a record,
+ * ✓ passed; the candidate's lanes share one) with ⚑ the controller's diagnosis and ⚒ an operator repair, its outcome and whether it waits on the operator. Also
  * the time axis of the Steps bars, which turns silences over 30 minutes into short breaks, and the step strip's labels.
  * Pure, so the Steps table, the step strip and the unit tests read the same rows.
  */
 import type { RunDetail } from './api.ts'
-import type { AttentionKind, Instant, NodeStatus, RunAttention, Span, SpanStatus, Text, Timeline } from '../../contracts/projects/triage.ts'
+import type { AttentionKind, Gap, Instant, NodeStatus, RunAttention, Span, SpanStatus, Text, Timeline } from '../../contracts/projects/triage.ts'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 
@@ -44,6 +44,24 @@ const MARKER_MARK = { diagnosis: '⚑', repair: '⚒' } as const
 
 const ms = (instant: Instant) => Date.parse(instant.at)
 
+/** Which lane's verdict an attempt shows when its lanes disagree: the one that needs a look first. */
+const MARK_RANK: SpanStatus[] = ['failed', 'no_record', 'awaiting_approval', 'paused', 'cancelled', 'running', 'pending', 'succeeded']
+
+/**
+ * One mark per attempt. The candidate runs one span per lane in the same attempt; the attempt reads running while a lane
+ * runs, else the worst lane verdict, so a two-lane attempt that passed on one lane and failed on the other is one ✗.
+ */
+function attemptMarks(spans: readonly Span[]): { at: string; mark: string }[] {
+  const byAttempt = new Map<number, Span[]>()
+  for (const span of spans) byAttempt.set(span.attempt, [...(byAttempt.get(span.attempt) ?? []), span])
+  return [...byAttempt.values()].map(group => {
+    const at = group.map(span => span.end?.at ?? span.start?.at ?? '').sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? ''
+    if (group.some(span => span.live)) return { at, mark: STATUS_GLYPH.running }
+    const status = MARK_RANK.find(rank => group.some(span => span.status === rank)) ?? group[0].status
+    return { at, mark: SPAN_MARK[status] }
+  })
+}
+
 export function stepRows(detail: RunDetail, timeline: Timeline, { now, attention }: { now: number; attention?: RunAttention }): StepRow[] {
   const snapshot = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
   return detail.definition.nodes.map(node => {
@@ -57,9 +75,10 @@ export function stepRows(detail: RunDetail, timeline: Timeline, { now, attention
     const end = live ? null : ends.reduce<Instant | null>((latest, instant) => latest === null || ms(instant) >= ms(latest) ? instant : latest, null)
     const finish = end ? ms(end) : live ? now : null
     const markers = timeline.markers.filter(marker => (marker.kind === 'diagnosis' || marker.kind === 'repair') && marker.node_id === node.node_id)
-    const marks = spans.length > 1 || markers.length > 0
+    const attempts = attemptMarks(spans)
+    const marks = attempts.length > 1 || markers.length > 0
       ? [
-        ...spans.map(span => ({ at: span.end?.at ?? span.start?.at ?? '', mark: span.live ? STATUS_GLYPH.running : SPAN_MARK[span.status] })),
+        ...attempts,
         ...markers.map(marker => ({ at: marker.at, mark: MARKER_MARK[marker.kind as keyof typeof MARKER_MARK] })),
       ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).map(item => item.mark).join('')
       : ''
@@ -77,6 +96,25 @@ export function stepRows(detail: RunDetail, timeline: Timeline, { now, attention
       inferred: spans.some(span => span.start?.source === 'inferred' || span.end?.source === 'inferred'),
       marks, outcome, attention: attention?.nodes.get(node.node_id)?.kind ?? null,
     }
+  })
+}
+
+/**
+ * The controller outages a worker's bar spans (5.2 rule 6): each `controller_down` gap clipped to the row's attempts, in
+ * epoch milliseconds, drawn as hatched bands on the bar. Only worker rows: they keep running while the controller is down.
+ */
+export function outageBands(row: Pick<StepRow, 'kind' | 'spans'>, gaps: readonly Gap[], now: number): { start: number; end: number }[] {
+  if (row.kind !== 'worker') return []
+  const outages = gaps.filter(gap => gap.kind === 'controller_down').map(gap => ({ start: Date.parse(gap.from), end: Date.parse(gap.to) }))
+  return row.spans.flatMap(span => {
+    const start = span.start ?? span.end
+    if (!start) return []
+    const from = Date.parse(start.at)
+    const to = span.end ? Date.parse(span.end.at) : span.live ? now : from
+    return outages.flatMap(outage => {
+      const band = { start: Math.max(from, outage.start), end: Math.min(to, outage.end) }
+      return band.end > band.start ? [band] : []
+    })
   })
 }
 

@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { validateReviewResult, validateRunDetail, validateRunInputs } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.ts'
 import { buildTimeline, deriveAttention, type RunData } from '../../contracts/projects/triage.ts'
-import { formatShortSpan, shortStepLabel, stepRows, timeAxis, type StepRow } from '../../src/projects/steps.ts'
+import { formatShortSpan, outageBands, shortStepLabel, stepRows, timeAxis, type StepRow } from '../../src/projects/steps.ts'
 import { formatSpan } from '../../src/projects/time.ts'
 
 const MINUTE = 60_000
@@ -141,6 +141,30 @@ describe('stepRows on workflow-guardrails-001', () => {
     const row = byId(rows, 'candidate')
     assert.equal(row.status, 'failed')
     assert.match(row.outcome, /^ui: /)
+  })
+
+  test('the candidate marks one mark per attempt, not per lane: two attempts, both failed on the ui lane', () => {
+    // Attempt 1 passed on controller and failed on ui; attempt 2 ran ui alone and failed again.
+    const row = byId(rows, 'candidate')
+    assert.equal(row.attempt, 2)
+    assert.equal(row.marks, '✗✗')
+  })
+})
+
+describe('outageBands on workflow-guardrails-001', () => {
+  const timeline = buildTimeline(guardrails)
+  const rows = stepRows(guardrails.detail, timeline, { now: Date.parse('2026-09-24T12:00:00Z') })
+  const bands = (id: string) => outageBands(byId(rows, id), timeline.gaps, Date.parse('2026-09-24T12:00:00Z'))
+
+  test('both controller outages fall inside each worker\'s bar: 4m56s and 6m35s', () => {
+    for (const id of ['launch_controller', 'launch_ui']) {
+      assert.deepEqual(bands(id).map(band => formatSpan(band.end - band.start)), ['4m56s', '6m35s'])
+      assert.equal(new Date(bands(id)[0].start).toISOString(), '2026-09-23T19:42:47.499Z')
+    }
+  })
+
+  test('steps that are not workers, or ran after the outages, get none', () => {
+    for (const id of ['handoff', 'verify_controller', 'candidate']) assert.deepEqual(bands(id), [])
   })
 })
 

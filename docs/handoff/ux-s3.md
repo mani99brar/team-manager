@@ -12,6 +12,7 @@ Implements row S3 of `docs/PRD_VIEWER_UX.md` section 11 on branch `ux/s3` (workt
    - Line 1: the feature as title (else the workflow title) and the run id, then `run-status` (the badge plus `run-status-meaning` in a few words, `RUN_STATUS_SHORT`), then the span (`start → end · 52m51s` once finished, `started … · running …` while running, else `started … · last activity …`). The live chip and the Local/UTC toggle move here from S1's `.run-status-row`, with their testids unchanged. A long title is ellipsized, so the status, span, chip and toggle keep one row.
    - Line 2: `run-inputs-facts`, the visible facts line (`branch @ base · mode · deadlines`), the definition chip (`definition-current` / `definition-changed`), and `Details ▸` (`run-details`). The disclosure holds the feature, the full base commit, permission mode, finish, the pinned definition, Created and "Export updated".
    - A run without inputs shows `inputs-none` in place of the facts, with the same chip and Details.
+   - At ≤760 px the facts line and the `definition-current` chip go behind Details, but `definition-changed` stays visible: it is a warning.
 4. **`NowBanner`** (`NowBanner.tsx`, `run-now[data-situation]`): the headline, the reason and the next step, rendered from `deriveNow`. Rich text parts go through S1's `<Time>`, `formatAgo` and `formatSpan`, against the page's one ticking clock. The status glyph is shown apart and hidden from screen readers.
    - The reason is clamped to two lines, with `More` once it overflows. An "Open <focus step> ›" link sits outside the clamp.
    - The banner waits (`aria-busy`, no `data-situation`) until it has what its rules read: events, inputs, the review, and the `nowResultUris(detail, events)` lane results.
@@ -24,7 +25,7 @@ Implements row S3 of `docs/PRD_VIEWER_UX.md` section 11 on branch `ux/s3` (workt
 6. **The lanes line** (`LanesLine`, `run-lanes`), for runs with 2+ lanes: one line per lane from `laneLines`, coloured by status. From the fourth lane on, lanes move behind `+n more`.
 7. **Tabs `[Run] [Assignment]` above the graph.** They are routed: `routes.ts` parses and builds `/runs/<r>/assignment` (`assignmentPathname`, `ProjectsRoute.tab`). Selecting a tab, arrow keys, Home and End each navigate. The tabs keep role, `aria-selected`, roving tabindex and `aria-controls`. The graph lives in the Run tabpanel.
 8. **The fitted graph** (`WorkflowGraph.tsx`, `dag.ts` 136/28):
-   - The SVG has `width="100%"`, a `max-width` of its layout width and a `min-width` of 83 %; below that it scrolls inside its box. It is hidden at ≤760 px.
+   - The SVG has `width="100%"`, a `max-width` of its layout width and a `min-width` of 83 %; below that it scrolls inside its box, and the Now banner's focus step is scrolled into view in the box (only the box scrolls, never the page). It is hidden at ≤760 px.
    - A status glyph (`aria-hidden`) sits in a badge on each node's corner.
    - A node waiting on the operator carries `data-attention`, an amber ring and `?`.
    - Selection is a text-coloured outline plus an offset ring.
@@ -32,13 +33,14 @@ Implements row S3 of `docs/PRD_VIEWER_UX.md` section 11 on branch `ux/s3` (workt
    - The legend is three `li[data-executor]` items ("Agent session", "Trusted verifier", "Controller"), with the full sentence in `title` and in visually hidden text.
    - The per-kind stroke colours and the pending and awaiting dash overrides are removed. The DAG rules moved from `App.css` to `run.css`.
 9. **`StepsTimeline`** (`StepsTimeline.tsx`):
-   - **Steps** (`StepsTable`, a `<table data-testid="run-node-list">`): one row per step, `tr[data-node-id][data-status][data-attention]`. Its cells are the step link, Started, Took (`≈` when inferred, with the source in the tooltip), Attempts (`attempt k · ✗✗⚑⚒✓`, `—` for a step not started), Outcome (ellipsized, full text in `title`), and an `aria-hidden` bar on the run's time axis.
-   - The axis runs from the run's start to its end. A running or awaiting run's axis ends now; any other unfinished run's ends at its last activity. Silences over 30 min become short breaks, marked in the bar track.
+   - **Steps** (`StepsTable`, a `<table data-testid="run-node-list">`): one row per step, `tr[data-node-id][data-status][data-attention]`. Its cells are the step link, Started, Took (`≈` when inferred, with the source in the tooltip), Attempts (`attempt k · ✗✗⚑⚒✓`, one mark per attempt, so a candidate attempt that passed on one lane and failed on another is one `✗`; `—` for a step not started), Outcome (ellipsized, full text in `title`), and an `aria-hidden` bar on the run's time axis.
+   - The axis runs from the run's start to its end. A running or awaiting run's axis ends now; any other unfinished run's ends at its last activity. Silences over 30 min become short breaks, marked in the bar track. A controller outage (`controller_down` gap) inside a worker's attempt is hatched over that worker's bar (`outageBands`).
    - `node-hint` is the table's caption, shown below it. On a phone each row wraps to two lines, and explicit ARIA roles keep the table semantics.
    - **Activity** (`Activity`, `run-timeline`): an `<ol>` of `timeline.activity`, oldest first. `activity-order` ("Newest first") is remembered in `localStorage` key `mdm.projects.activityOrder`, with every read and write in try/catch.
    - `activity-controller-log` ("Controller log (n)") shows PID rows, hidden by default. Node-less diagnosis and repair rows are ordinary rows (⚑ Controller, ⚒ Operator).
+   - A row that rewords its served message carries an `#n` button (`activity-more`, `aria-expanded`) that opens the event number's full message under the row (`activity-raw`); keyboard and touch reach it.
    - Gap rows are text (`┆ operator time 5m37s`). A failed attempt, or any attempt of a step with more than one, links to `/nodes/<n>` with `open ›`.
-   - The model behind both is the new pure `src/projects/steps.ts`: `stepRows`, `timeAxis`, `shortStepLabel`, `formatShortSpan` and `withoutGlyph`.
+   - The model behind both is the new pure `src/projects/steps.ts`: `stepRows`, `timeAxis`, `outageBands`, `shortStepLabel`, `formatShortSpan` and `withoutGlyph`.
 10. **Node pages**:
     - **Run bar** (`RunBar`): the run id linking to the run page, `run-status` with its meaning, the Now headline (ellipsized, a link to the run page), then the chip and the toggle.
     - **Tabs**, as on the run page.
@@ -166,8 +168,8 @@ These stay unchanged, as 12.3 says:
 
 **Steps and Activity**
 
-11. **Activity details are in a tooltip.** The full message and the sequence number sit in the row's tooltip, not an expander.
-12. **Controller outages are not drawn on the bars.** They show only as gap rows, not as hatched bands on the worker bars.
+11. *(Resolved in the review round, section 7: Activity has an expander.)*
+12. *(Resolved in the review round, section 7: outages are hatched on worker bars.)*
 13. **Steps "Took"** is the first attempt's start to the last verdict, as in the 4.2 wireframe (`11m07s` for three challenge attempts).
 14. **Steps "Outcome"** is the step's latest status row when that is newer than its last verdict. A repaired step waiting for its continuation shows the repair, not the failure before it.
 15. **The Steps caption** reads "Select a step to open its evidence. ≈ marks a time no event recorded: it is inferred (hover for the source)."
@@ -189,11 +191,36 @@ These stay unchanged, as 12.3 says:
   - `node-next` can reuse `CommandBlock`.
 - **The candidate row's outcome** reads "ui: combined revision …". A failed lane could show its gate summary from the lane result, which is already fetched for the banner.
 - **Not done yet:**
-  - the hatched controller-down bands on worker bars (5.2 rule 6);
-  - an Activity expander for the raw message;
   - the S1 follow-up that passes the events and inputs `meta` up for the refresh-failed notice.
 - **PRD corrections proposed:**
   - add `lanes.spec.ts:250-251` to 12.3's S3 migrations;
   - say whether tabs show on node pages;
   - allow the warning tokens outside `index.css`.
+- **Between 760 and ~1,000 px** the Steps table's Outcome column is squeezed to a few characters beside the bar column (seen at 780 px; the full text is in its tooltip). A later layout pass could drop the bar column in that band.
+- **No browser fixture has a controller outage inside a worker span**, so the hatched bands are pinned by unit tests on the captured guardrails payload only.
 - **S6.** Apply the title rule 1 (`activity.feature`) in `workflowTitle`'s callers once B2 serves it.
+
+## 7. Review round
+
+An independent review listed 3 findings and 10 gaps. Each was checked first.
+
+| Item | Outcome |
+|---|---|
+| Candidate attempt marks, one per lane span (`✓✗✗` on guardrails) | **Fixed.** `steps.ts` groups spans per attempt: live → `●`, else the worst lane verdict. Guardrails' candidate now reads `attempt 2 · ✗✗`. |
+| `definition-changed` hidden at ≤760 px | **Fixed.** Only `definition-current` goes behind Details; the changed chip stays (`narrow-run` asserts it on `run-succeeded` at 390 px). |
+| `buildTimeline` not memoized in `RunView` | **Fixed**, though smaller than reported: `buildTimeline` already caches per run on (last_sequence, statuses, inputs, review, results), so `deriveNow` and `laneLines` never rebuilt it; each tick paid only the key check. It is now `useMemo` on `run`. |
+| Graph focus not scrolled into view at 760-1,100 px | **Fixed.** `WorkflowGraph` takes `focusId` (the Now focus) and centres it in its box when it starts outside. |
+| Hatched outage bands (deviation 12) | **Fixed.** `outageBands` plus `.step-bar-outage`. |
+| Activity tooltip, not an expander (deviation 11) | **Fixed.** `#n` button with `aria-expanded`. |
+| graph-fits x-order not exercised on two lanes | **Fixed** (test only): `run-succeeded`'s stacked launches and verifications share an x, and the seven columns stay in order. |
+| question-attention checks only the first answer form | **Fixed** (test only): both forms are asserted there too. |
+| No `policy.json`, no crumb glyph, run bar without "Next step ›", tokens in `run.css`, tab title suffix | Not defects: deviations 4, 6, 8, 3 and 16 stand, for the reasons given there. The step strip right below the run bar has `Next ›`. |
+
+**Red first** (against the tree before this round):
+- `npx tsx --test tests/unit/steps.test.ts`: `actual: '✓✗✗'  expected: '✗✗'` (candidate marks); with a skeleton `outageBands` returning `[]`: `actual: []  expected: [ '4m56s', '6m35s' ]`.
+- `ux-run.spec.ts -g narrow-run`: `expect(getByTestId('definition-changed')).toBeVisible()` failed with `unexpected value "hidden"`.
+- `ux-run.spec.ts -g graph-fits` at 780 px on `run-awaiting-approval`: `the focus step is scrolled into the graph box  Expected: true  Received: false`. (At 900 px, and with `run-reviewer-blocked`'s review focus at 780 px, the step already sat in the box; the assertion was moved to a focus that did not. That was a test-authoring correction, not a product red.)
+- `ux-run.spec.ts -g run-steps-timeline`: `getByTestId('activity-more')` not found.
+- The two test-only gaps passed immediately: the product already did what they assert.
+
+**Green**: the 4 unit files, 106 passed; `npx tsc -b` clean; `npx eslint` on every touched file clean; the whole project-workflows suite, **43 passed** in the worker phase and **43 passed** with `WORKFLOW_VERIFICATION_PHASE=candidate`. `App.tsx` was not touched in this round. Screenshots: `scratchpad/ux/after/s3-fix-*.png`.

@@ -158,6 +158,14 @@ test(`[scenario:run-steps-timeline] Steps give each step's start, duration and a
   const activity = page.getByTestId('run-timeline')
   await expect(activity.locator('li[data-marker="diagnosis"]')).toBeVisible()
   await expect(activity.locator('li[data-marker="diagnosis"]')).toContainText('ui failed identically on attempts 1 and 2')
+  // Its event number and the full served message open by keyboard or touch, not in a hover tooltip.
+  const more = activity.locator('li[data-marker="diagnosis"]').getByTestId('activity-more')
+  await expect(more).toHaveText(/^#\d+$/)
+  await expect(more).toHaveAttribute('aria-expanded', 'false')
+  await more.focus()
+  await page.keyboard.press('Enter')
+  await expect(more).toHaveAttribute('aria-expanded', 'true')
+  await expect(activity.locator('li[data-marker="diagnosis"]').getByTestId('activity-raw')).toContainText('identical')
   await expect(activity.locator('li[data-marker="repair"]')).toBeVisible()
   await expect(activity.locator('li[data-marker="repair"]')).toContainText('Repair 1 applied')
   await expect(activity.locator('li[data-kind="gap"]').filter({ hasText: 'operator time' })).toContainText('5m37s')
@@ -200,7 +208,7 @@ test(`[scenario:run-steps-timeline] Steps give each step's start, duration and a
   await expectNoExecutionControls(page)
 })
 
-test(`[scenario:graph-fits] The graph fits the page width at 1280 and 1440 px, with its last step in view and the columns in order (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:graph-fits] The graph fits the page width at 1280 and 1440 px, with its last step in view and the columns in order; narrower, the focus step is scrolled into view (${phase})`, async ({ page }, testInfo) => {
   const order = ['challenge', 'launch_ui', 'handoff', 'verify_ui', 'candidate', 'review', 'approval', 'integrate']
   for (const width of [1280, 1440]) {
     await page.setViewportSize({ width, height: 900 })
@@ -217,7 +225,27 @@ test(`[scenario:graph-fits] The graph fits the page width at 1280 and 1440 px, w
     expect(new Set(xs).size).toBe(xs.length)
     expect(await pageWidth(page)).toBeLessThanOrEqual(width)
   }
+  // Two lanes stack in their columns: the launches share one x and so do the verifications, and the columns stay in order.
+  await page.goto(runUrl(RUN_SUCCEEDED))
+  const x = async (id: string) => (await graphNode(page, id).boundingBox())!.x
+  expect(await x('launch_ui')).toBe(await x('launch_adapter'))
+  expect(await x('verify_ui')).toBe(await x('verify_adapter'))
+  const columns = [await x('launch_ui'), await x('handoff'), await x('verify_ui'), await x('candidate'), await x('review'), await x('approval'), await x('integrate')]
+  expect(columns, 'the two-lane columns keep their order').toEqual([...columns].sort((a, b) => a - b))
+  expect(new Set(columns).size).toBe(columns.length)
+  // Between 760 and 1,100 px the graph scrolls inside its box with the focus step in view.
+  await page.setViewportSize({ width: 780, height: 900 })
+  await openRun(page, uxRunUrl(RUN_AWAITING_APPROVAL), 'awaiting_approval')
+  const scrollBox = page.getByTestId('workflow-graph').locator('xpath=..')
+  const inBox = async (id: string) => {
+    const node = (await graphNode(page, id).boundingBox())!
+    const frame = (await scrollBox.boundingBox())!
+    return node.x >= frame.x && node.x + node.width <= frame.x + frame.width
+  }
+  await expect.poll(() => inBox('approval'), 'the focus step is scrolled into the graph box').toBe(true)
+  expect(await pageWidth(page)).toBeLessThanOrEqual(780)
   // The legend is three short items, on one line.
+  await page.setViewportSize({ width: 1440, height: 900 })
   const legend = page.getByTestId('graph-legend').locator('li')
   await expect(legend).toHaveCount(3)
   await expect(legend).toContainText(['Agent session', 'Trusted verifier', 'Controller'])
@@ -297,16 +325,22 @@ test(`[scenario:narrow-run] At 390×844 the run page fits the width, starts with
   await expect(page.getByTestId('checks-list')).toBeVisible()
   expect(await pageWidth(page)).toBeLessThanOrEqual(390)
   await expectNoExecutionControls(page)
+
+  // A definition that changed since the run started stays said on a phone; only the "current" chip goes behind Details.
+  await page.goto(runUrl(RUN_SUCCEEDED))
+  await expect(page.getByTestId('definition-changed')).toBeVisible()
+  expect(await pageWidth(page)).toBeLessThanOrEqual(390)
 })
 
 test(`[scenario:question-attention] A waiting question or a pane that needs attention is marked on the banner, the graph, the Steps, the step strip and the tab title (${phase})`, async ({ page }, testInfo) => {
   const cases = [
-    { url: guardedRunUrl(RUN_GUARDED_ASKING), situation: 'question', kind: 'question', node: 'launch_adapter', command: /answer "\$RUN" adapter "<your answer>"/ },
-    { url: uxRunUrl(RUN_PANE), situation: 'pane_attention', kind: 'pane', node: 'launch_ui', command: /^"\$PY" -m workflow\.interactive attach-one "\$RUN" --node ui$/ },
+    // A question: both answer forms, naming the lane.
+    { url: guardedRunUrl(RUN_GUARDED_ASKING), situation: 'question', kind: 'question', node: 'launch_adapter', command: [/^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>"$/, /^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>" --no-herdr$/] },
+    { url: uxRunUrl(RUN_PANE), situation: 'pane_attention', kind: 'pane', node: 'launch_ui', command: [/^"\$PY" -m workflow\.interactive attach-one "\$RUN" --node ui$/] },
   ]
   for (const { url, situation, kind, node, command } of cases) {
     await openRun(page, url, situation)
-    await expect(commands(page).first()).toHaveText(command)
+    for (const [index, form] of command.entries()) await expect(commands(page).nth(index)).toHaveText(form)
     await expect(graphNode(page, node)).toHaveAttribute('data-attention', kind)
     await expect(nodeListItem(page, node)).toHaveAttribute('data-attention', kind)
     await expect(page).toHaveTitle(/^\? /)

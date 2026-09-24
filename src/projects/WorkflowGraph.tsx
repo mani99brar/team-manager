@@ -1,4 +1,4 @@
-import { useId, useMemo, type KeyboardEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, type KeyboardEvent } from 'react'
 import type { AttentionKind } from '../../contracts/projects/triage.ts'
 import { DAG_NODE_HEIGHT, DAG_NODE_WIDTH, layoutDag } from './dag.ts'
 import { executorCategory, executorOf, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from './status.ts'
@@ -23,6 +23,8 @@ type Props = {
   title: string
   nodes: GraphNodeView[]
   selectedId: string | null
+  /** The step the run is at (the Now banner's focus): when the graph scrolls inside its box, this step is scrolled into view. */
+  focusId?: string | null
   /** When omitted, the graph is a static picture of a definition. */
   onSelect?: (nodeId: string) => void
 }
@@ -43,14 +45,28 @@ const MIN_SCALE = 0.83
 
 /**
  * Layered SVG rendering of a workflow definition, optionally coloured by a run's node statuses. It is fitted to the width
- * of its box (down to 83 %, then it scrolls inside the box). Every node is a keyboard-focusable control describing its
+ * of its box (down to 83 %, then it scrolls inside the box, with the run's focus step in view). Every node is a keyboard-focusable control describing its
  * label, kind, status, attempt and executor; a status glyph repeats the status so colour never carries it alone, and a
  * step that waits on the operator gets an amber ring and a `?`. The outline says who executes it, as the legend explains.
  */
-export function WorkflowGraph({ title, nodes, selectedId, onSelect }: Props) {
+export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSelect }: Props) {
   const layout = useMemo(() => layoutDag(nodes), [nodes])
   const interactive = onSelect !== undefined
   const hintId = useId()
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Between 760 and 1,100 px the graph scrolls inside its box: centre the focus step when it starts outside the box. Only
+  // the box scrolls, never the page, and a box the reader already scrolled is left alone until the focus moves.
+  useEffect(() => {
+    const box = scrollRef.current
+    if (!box || focusId === null || box.scrollWidth <= box.clientWidth) return
+    const node = box.querySelector(`[data-graph-node="${CSS.escape(focusId)}"]`)
+    if (!node) return
+    const frame = box.getBoundingClientRect()
+    const shape = node.getBoundingClientRect()
+    if (shape.left >= frame.left && shape.right <= frame.right) return
+    box.scrollLeft += shape.left - frame.left - (frame.width - shape.width) / 2
+  }, [focusId, layout])
 
   const keyHandler = (nodeId: string, index: number) => (event: KeyboardEvent<SVGGElement>) => {
     if (!interactive) return
@@ -69,7 +85,7 @@ export function WorkflowGraph({ title, nodes, selectedId, onSelect }: Props) {
 
   return (
     <>
-      <div className="workflow-graph-scroll">
+      <div className="workflow-graph-scroll" ref={scrollRef}>
         <svg
           className="workflow-graph"
           role="group"

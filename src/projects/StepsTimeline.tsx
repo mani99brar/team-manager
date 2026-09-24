@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import type { ActivityRow, MarkerKind, Timeline } from '../../contracts/projects/triage.ts'
 import { AppLink } from './panels.tsx'
 import { STATUS_LABEL } from './status.ts'
-import { STATUS_GLYPH, timeAxis, type StepRow, type TimeAxis } from './steps.ts'
+import { outageBands, STATUS_GLYPH, timeAxis, type StepRow, type TimeAxis } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
 import { useTimeZone } from './useNow.ts'
@@ -29,8 +29,11 @@ function rememberNewestFirst(newest: boolean) {
 const sourceNote = (row: StepRow) => [row.start?.note ?? (row.start ? `start from ${row.start.source}` : null), row.end?.note ?? (row.end ? `end from ${row.end.source}` : null)]
   .filter(Boolean).join('; ')
 
-/** The Steps bar of one row: each attempt from its start to its end (to now while it runs) on the run's time axis. */
-function Bar({ row, axis, now }: { row: StepRow; axis: TimeAxis; now: number }) {
+/**
+ * The Steps bar of one row: each attempt from its start to its end (to now while it runs) on the run's time axis, with the
+ * controller's outages hatched over a worker's bar (Activity says them in words).
+ */
+function Bar({ row, axis, gaps, now }: { row: StepRow; axis: TimeAxis; gaps: Timeline['gaps']; now: number }) {
   return (
     <span className="step-bar-track">
       {row.spans.flatMap((span, index) => {
@@ -41,6 +44,10 @@ function Bar({ row, axis, now }: { row: StepRow; axis: TimeAxis; now: number }) 
         const right = axis.position(Date.parse(end.at))
         const status = span.live ? 'running' : span.status
         return [<span key={index} className={`step-bar-segment status-fill-${status}`} style={{ left: `${left * 100}%`, width: `${Math.max(0, right - left) * 100}%` }} />]
+      })}
+      {outageBands(row, gaps, now).map(band => {
+        const left = axis.position(band.start)
+        return <span key={band.start} className="step-bar-outage" data-outage="controller_down" style={{ left: `${left * 100}%`, width: `${Math.max(0, axis.position(band.end) - left) * 100}%` }} />
       })}
       {axis.breaks.map(item => <span key={item.at} className="step-bar-break" style={{ left: `${item.at * 100}%` }} />)}
     </span>
@@ -117,7 +124,7 @@ export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: 
                 <td role="cell" className="step-took" title={note || undefined}>{row.ms === null ? '—' : `${row.inferred ? '≈' : ''}${formatSpan(row.ms)}`}</td>
                 <td role="cell" className="step-attempts">{row.attempt === 0 ? '—' : `attempt ${row.attempt}`}{row.marks && <> · <span className="step-marks">{row.marks}</span></>}</td>
                 <td role="cell" className="step-outcome" title={row.outcome}>{row.outcome}</td>
-                <td role="cell" className="step-bar" aria-hidden="true">{axis && <Bar row={row} axis={axis} now={now} />}</td>
+                <td role="cell" className="step-bar" aria-hidden="true">{axis && timeline && <Bar row={row} axis={axis} gaps={timeline.gaps} now={now} />}</td>
               </tr>
             )
           })}
@@ -140,12 +147,20 @@ type ActivityProps = {
 /**
  * Activity (docs/PRD_VIEWER_UX.md 4.2, `run-timeline`): the run's history as rows, oldest first unless the reader chose
  * newest first (remembered). Node-less controller rows, the diagnosis and the repair included, are shown like any other; only
- * the controller's PID checkpoints sit behind "Controller log (n)". Silences are rows of text. An attempt row opens its node.
+ * the controller's PID checkpoints sit behind "Controller log (n)". Silences are rows of text. An attempt row opens its node;
+ * a reworded row's `#n` button shows the event number's full served message under it.
  */
 export function Activity({ timeline, labels, nodeHref, onNavigate }: ActivityProps) {
   const [zone] = useTimeZone()
   const [newestFirst, setNewestFirst] = useState(readNewestFirst)
   const [showLog, setShowLog] = useState(false)
+  // The rows whose event number and served message are expanded, by row key.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const toggle = (key: string) => setExpanded(previous => {
+    const next = new Set(previous)
+    if (!next.delete(key)) next.add(key)
+    return next
+  })
   const logCount = timeline.activity.filter(row => row.controller_log).length
   const rows = useMemo(() => {
     const shown = timeline.activity.filter(row => showLog || !row.controller_log)
@@ -198,9 +213,14 @@ export function Activity({ timeline, labels, nodeHref, onNavigate }: ActivityPro
           }
           const status = row.kind === 'end' ? row.status : null
           const link = row.kind === 'end' && row.node_id !== null && labels.has(row.node_id) && (row.status === 'failed' || attempts(row.node_id) > 1)
+          const key = `${row.sequence ?? row.at}-${row.kind}-${row.node_id ?? ''}-${row.lane ?? ''}`
+          // The served message, when the row reworded it, opens under the row with its event number.
+          const detail = row.raw !== null && row.raw !== row.text
+          const open = detail && expanded.has(key)
+          const rawId = `activity-raw-${key}`.replace(/[^\w-]/g, '_')
           return (
             <li
-              key={`${row.sequence ?? row.at}-${row.kind}-${index}`}
+              key={`${key}-${index}`}
               className={`activity-row${row.controller_log ? ' activity-log' : ''}`}
               data-kind={row.kind}
               data-marker={row.marker ?? undefined}
@@ -209,9 +229,23 @@ export function Activity({ timeline, labels, nodeHref, onNavigate }: ActivityPro
             >
               <span className="activity-time">{row.inferred ? '≈' : ''}<Time iso={row.at} seconds /></span>
               <span className="activity-who">{who(row)}</span>
-              <span className="activity-text" title={row.raw && row.raw !== row.text ? `#${row.sequence ?? '—'}: ${row.raw}` : undefined}>
+              <span className="activity-text">
                 {status && <span className={`activity-glyph status-text-${status === 'no_record' ? 'pending' : status}`} aria-hidden="true">{status === 'no_record' ? '?' : STATUS_GLYPH[status]} </span>}
                 {text(row)}
+                {detail && (
+                  <button
+                    type="button"
+                    className="activity-more"
+                    aria-expanded={open}
+                    aria-controls={open ? rawId : undefined}
+                    aria-label={`${open ? 'Hide' : 'Show'} the recorded message${row.sequence === null ? '' : ` of event ${row.sequence}`}`}
+                    data-testid="activity-more"
+                    onClick={() => toggle(key)}
+                  >
+                    {row.sequence === null ? 'message' : `#${row.sequence}`}
+                  </button>
+                )}
+                {open && <span id={rawId} className="activity-raw" data-testid="activity-raw">{row.raw}</span>}
               </span>
               {link && (
                 <AppLink href={nodeHref(row.node_id!)} onNavigate={onNavigate} className="activity-open" aria-label={`Open ${labels.get(row.node_id!)}, attempt ${row.attempt ?? ''}`.trim()}>open ›</AppLink>

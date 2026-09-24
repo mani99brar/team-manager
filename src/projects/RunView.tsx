@@ -152,7 +152,9 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
   const now = useMemo(() => (settled && run ? deriveNow(run) : null), [settled, run])
   const attention = useMemo(() => (run ? deriveAttention(run) : null), [run])
   const lanes = useMemo(() => (run ? laneLines(run) : []), [run])
-  const timeline = run ? buildTimeline(run) : null
+  // buildTimeline keeps its own cache (PRD 5.1), which deriveNow and laneLines share; the memo only spares the clock ticks
+  // its key check. The Steps rows are read on every tick, since a running step's duration grows with the clock.
+  const timeline = useMemo(() => (run ? buildTimeline(run) : null), [run])
   const rows = stepRows(detail, timeline ?? emptyTimeline(detail), { now: clock, attention: attention ?? undefined })
   const labels = useMemo(() => new Map(definition.nodes.map(node => [node.node_id, node.label])), [definition.nodes])
   const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
@@ -277,7 +279,7 @@ export function RunView({ scope, detail, current, selectedNodeId, tab, refreshTo
           {selectedNodeId === null ? (
             <>
               <section className="run-graph" aria-label="Pinned graph">
-                <WorkflowGraph title={`Pinned definition graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} />
+                <WorkflowGraph title={`Pinned definition graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} />
               </section>
               <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
               {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
