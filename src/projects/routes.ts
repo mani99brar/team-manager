@@ -1,7 +1,7 @@
 /**
- * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/assignment | /nodes/<node>]]]]`. A run's views
- * live in the path (docs/PRD_VIEWER_UX.md 3.1): the Run view (with its node pages) and the Assignment view, so each can be
- * linked and survives a reload.
+ * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/assignment | /nodes/<node>[/attempts/<k>]]]]]`.
+ * A run's views live in the path (docs/PRD_VIEWER_UX.md 3.1): the Run view (with its node pages, the latest attempt or an
+ * earlier one) and the Assignment view, so each can be linked and survives a reload.
  *
  * Every ID is an opaque contract identifier: it must match the shared ID pattern and is percent-encoded
  * as one path segment. Anything else is malformed rather than looked up. This domain is read-only and
@@ -17,7 +17,8 @@ export type ProjectsRoute =
   | { level: 'projects' }
   | { level: 'project'; projectId: string }
   | { level: 'workflow'; projectId: string; workflowId: string }
-  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null; tab: 'run' | 'assignment' }
+  /** `attempt` is present only on an attempt's own page, `/nodes/<node>/attempts/<k>`; a node page shows its latest attempt. */
+  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null; tab: 'run' | 'assignment'; attempt?: number }
 
 export function isContractId(value: string): boolean {
   return PROJECT_ID_PATTERN.test(value)
@@ -52,12 +53,25 @@ export function assignmentPathname(projectId: string, workflowId: string, runId:
   return encode([PROJECTS_ROUTE, projectId, 'workflows', workflowId, 'runs', runId, ASSIGNMENT_SEGMENT])
 }
 
+/** The literal after a node id that selects one of its attempts. */
+export const ATTEMPTS_SEGMENT = 'attempts'
+
+/** An attempt number in a path: a positive whole number without leading zeros. */
+const ATTEMPT_PATTERN = /^[1-9][0-9]{0,5}$/
+
+export function attemptPathname(projectId: string, workflowId: string, runId: string, nodeId: string, attempt: number): string {
+  return `${runPathname(projectId, workflowId, runId, nodeId)}/${ATTEMPTS_SEGMENT}/${attempt}`
+}
+
 export function routeToPathname(route: ProjectsRoute): string {
   switch (route.level) {
     case 'projects': return projectsPathname()
     case 'project': return projectPathname(route.projectId)
     case 'workflow': return workflowPathname(route.projectId, route.workflowId)
-    case 'run': return route.tab === 'assignment' ? assignmentPathname(route.projectId, route.workflowId, route.runId) : runPathname(route.projectId, route.workflowId, route.runId, route.nodeId)
+    case 'run':
+      if (route.tab === 'assignment') return assignmentPathname(route.projectId, route.workflowId, route.runId)
+      if (route.nodeId !== null && route.attempt !== undefined) return attemptPathname(route.projectId, route.workflowId, route.runId, route.nodeId, route.attempt)
+      return runPathname(route.projectId, route.workflowId, route.runId, route.nodeId)
   }
 }
 
@@ -81,7 +95,7 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
     return null
   }
   if (segments.length === 0) return { level: 'projects' }
-  const [projectId, workflowsLiteral, workflowId, runsLiteral, runId, nodesLiteral, nodeId, ...rest] = segments
+  const [projectId, workflowsLiteral, workflowId, runsLiteral, runId, nodesLiteral, nodeId, attemptsLiteral, attempt, ...rest] = segments
   if (!isContractId(projectId)) return null
   if (workflowsLiteral === undefined) return { level: 'project', projectId }
   if (workflowsLiteral !== 'workflows' || workflowId === undefined || !isContractId(workflowId)) return null
@@ -89,6 +103,8 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
   if (runsLiteral !== 'runs' || runId === undefined || !isContractId(runId)) return null
   if (nodesLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'run' }
   if (nodesLiteral === ASSIGNMENT_SEGMENT && nodeId === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'assignment' }
-  if (nodesLiteral !== 'nodes' || nodeId === undefined || !isContractId(nodeId) || rest.length > 0) return null
-  return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run' }
+  if (nodesLiteral !== 'nodes' || nodeId === undefined || !isContractId(nodeId)) return null
+  if (attemptsLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run' }
+  if (attemptsLiteral !== ATTEMPTS_SEGMENT || attempt === undefined || !ATTEMPT_PATTERN.test(attempt) || rest.length > 0) return null
+  return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run', attempt: Number(attempt) }
 }

@@ -188,11 +188,11 @@ test(`[scenario:run-steps-timeline] Steps give each step's start, duration and a
   await page.getByTestId('activity-order').click()
   await attach(page, testInfo, 'run-steps-timeline')
 
-  // An attempt row opens its node.
+  // An attempt row opens that attempt's page (S4-core retargets it from the node page).
   const attempt = activity.locator('li[data-kind="end"][data-node-id="verify_ui"]').first().getByRole('link')
-  await expect(attempt).toHaveAttribute('href', uxRunUrl(RUN_REPAIRED, 'verify_ui'))
+  await expect(attempt).toHaveAttribute('href', `${uxRunUrl(RUN_REPAIRED, 'verify_ui')}/attempts/1`)
   await attempt.click()
-  await expect(page).toHaveURL(new RegExp(`${escape(uxRunUrl(RUN_REPAIRED, 'verify_ui'))}$`))
+  await expect(page).toHaveURL(new RegExp(`${escape(uxRunUrl(RUN_REPAIRED, 'verify_ui'))}/attempts/1$`))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_ui')
 
   // The focus row is inside the first screen: two lanes, nine steps, focus on the review (row 7) and on the candidate (row 6).

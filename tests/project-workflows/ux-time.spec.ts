@@ -155,8 +155,8 @@ test(`[scenario:live-freshness] A live chip says whether the run is polled and h
   await page.goto(runUrl(RUN_FAILED, 'verify_adapter'))
   await expect(page.getByTestId('checks-list')).toBeVisible()
   await expect(page.getByTestId('node-events')).toBeVisible()
-  await page.evaluate('window.scrollTo(0, 400)')
-  await expect.poll(() => scrollY(page)).toBe(400)
+  await page.evaluate('window.scrollTo(0, 200)')
+  await expect.poll(() => scrollY(page)).toBe(200)
   const scrolled = await scrollY(page)
   let release = () => {}
   const held = new Promise<void>(resolve => { release = resolve })

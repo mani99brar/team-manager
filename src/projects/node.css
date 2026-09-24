@@ -1,0 +1,39 @@
+/* ---- Node view shell (docs/PRD_VIEWER_UX.md 4.4, 7, 10): header, attempt strip, section index, sections ---- */
+
+.node-header { display: flex; flex-direction: column; gap: 4px; }
+.node-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.workspace-projects .node-title-row h3 { margin: 0; }
+.node-executor-line { font-size: 0.85rem; color: var(--text-muted); }
+.node-timing, .node-status-meaning { margin: 0; font-size: 0.9rem; }
+.node-timing { font-variant-numeric: tabular-nums; }
+.node-timing-source { font-size: 0.85rem; }
+
+/* The attempt strip: one chip per attempt, the diagnosis and repairs between them. */
+.node-attempts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 0.85rem; }
+.node-attempts-label { color: var(--text-muted); }
+.node-attempts-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; }
+.node-attempt-chip, .node-attempt-marker { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); white-space: nowrap; font-variant-numeric: tabular-nums; }
+a.node-attempt-chip { color: var(--text); text-decoration: none; }
+a.node-attempt-chip:hover { background: var(--surface-alt); }
+a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.node-attempt-marker { border-style: dashed; color: var(--text-muted); }
+.node-next { margin-top: 4px; }
+.attempt-banner { margin: 8px 0 0; }
+
+/* The section index sticks under the step strip once the page scrolls; its top is measured from the strip. */
+.section-index { position: sticky; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin: 8px 0 0; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+.section-index-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
+.section-index-list li, .node-attempts-list li { flex: none; }
+.section-index > nav { min-width: 0; max-width: 100%; }
+.section-index-link { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; overflow-wrap: normal; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; text-decoration: none; }
+.section-index-link:hover { background: var(--surface-alt); }
+.section-index-count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.node-section { margin-top: 12px; }
+.workspace-projects .node-section-title { margin: 0 0 6px; }
+.node-section h4:focus, .node-section h5:focus, .node-section summary:focus { outline: none; }
+
+@media (max-width: 760px) {
+  /* The strip and the index scroll sideways inside themselves; the page never does. */
+  .section-index-list, .node-attempts-list { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+  .section-index-link, .node-attempt-chip { min-height: 44px; }
+}

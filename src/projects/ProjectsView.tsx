@@ -33,6 +33,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
   const nodeId = route && route.level === 'run' ? route.nodeId : null
+  const attempt = route && route.level === 'run' ? route.attempt ?? null : null
 
   // The registry itself changes while the viewer runs (a launch registers its workflow); both lists are cheap to re-read.
   const registryPoll = usePoll(route?.level === 'projects' || route?.level === 'project')
@@ -286,6 +287,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             detail={detail.data}
             current={currentWorkflow}
             selectedNodeId={nodeId}
+            selectedAttempt={attempt}
             tab={route.tab}
             refreshToken={refreshToken}
             pollToken={runPoll}

@@ -141,16 +141,18 @@ type ActivityProps = {
   timeline: Timeline
   labels: ReadonlyMap<string, string>
   nodeHref: (nodeId: string) => string
+  /** An attempt's own page, `/nodes/<n>/attempts/<k>`. */
+  attemptHref: (nodeId: string, attempt: number) => string
   onNavigate: (pathname: string) => void
 }
 
 /**
  * Activity (docs/PRD_VIEWER_UX.md 4.2, `run-timeline`): the run's history as rows, oldest first unless the reader chose
  * newest first (remembered). Node-less controller rows, the diagnosis and the repair included, are shown like any other; only
- * the controller's PID checkpoints sit behind "Controller log (n)". Silences are rows of text. An attempt row opens its node;
+ * the controller's PID checkpoints sit behind "Controller log (n)". Silences are rows of text. An attempt row opens that attempt;
  * a reworded row's `#n` button shows the event number's full served message under it.
  */
-export function Activity({ timeline, labels, nodeHref, onNavigate }: ActivityProps) {
+export function Activity({ timeline, labels, nodeHref, attemptHref, onNavigate }: ActivityProps) {
   const [zone] = useTimeZone()
   const [newestFirst, setNewestFirst] = useState(readNewestFirst)
   const [showLog, setShowLog] = useState(false)
@@ -248,7 +250,7 @@ export function Activity({ timeline, labels, nodeHref, onNavigate }: ActivityPro
                 {open && <span id={rawId} className="activity-raw" data-testid="activity-raw">{row.raw}</span>}
               </span>
               {link && (
-                <AppLink href={nodeHref(row.node_id!)} onNavigate={onNavigate} className="activity-open" aria-label={`Open ${labels.get(row.node_id!)}, attempt ${row.attempt ?? ''}`.trim()}>open ›</AppLink>
+                <AppLink href={row.attempt !== null && row.attempt > 0 ? attemptHref(row.node_id!, row.attempt) : nodeHref(row.node_id!)} onNavigate={onNavigate} className="activity-open" aria-label={`Open ${labels.get(row.node_id!)}, attempt ${row.attempt ?? ''}`.trim()}>open ›</AppLink>
               )}
             </li>
           )

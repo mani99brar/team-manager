@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
 import type { RunInputWorker, WorkerResult } from './api.ts'
+import { OwnedPaths, RequiredChecks, type CheckTarget } from './node/Requirements.tsx'
 import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
-import { formatDuration } from './status.ts'
 import { Time } from './Time.tsx'
 import type { Resource } from './useResource.ts'
 
@@ -39,7 +39,6 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied, check
 
   const text = worker.task.text
   const index = activeQuote === null ? -1 : text.indexOf(activeQuote)
-  const executed = result.status === 'ready' ? result.data.checks : null
 
   return (
     <section className="evidence-section task-panel" aria-labelledby="task-title" data-testid="task-panel">
@@ -71,50 +70,8 @@ export function TaskPanel({ worker, result, highlight, onHighlightApplied, check
         </pre>
       )}
 
-      <h5 id="task-owned-title">Owned paths</h5>
-      {worker.owned_paths.length === 0 ? (
-        <p className="projects-muted">No owned paths were pinned.</p>
-      ) : (
-        <ul className="evidence-list evidence-files" data-testid="task-owned-paths" aria-labelledby="task-owned-title">
-          {worker.owned_paths.map(path => <li key={path}><code>{path}</code></li>)}
-        </ul>
-      )}
-
-      <h5 id="task-checks-title">Required checks</h5>
-      <p className="projects-muted" data-testid="task-required-kinds">
-        Required check kinds for this lane: {worker.required_check_kinds.length === 0 ? 'none pinned' : worker.required_check_kinds.join(', ')}
-      </p>
-      {worker.checks.length === 0 ? (
-        <p className="projects-muted">No checks were required.</p>
-      ) : (
-        <ul className="evidence-list task-checks" data-testid="task-checks" aria-labelledby="task-checks-title">
-          {worker.checks.map(check => {
-            const executedIndex = executed === null ? -1 : executed.findIndex(candidate => candidate.command === check.command)
-            return (
-              <li key={check.id} data-check-id={check.id}>
-                <code>{check.command}</code>
-                <span className="projects-muted"> · {check.id} · {check.kind} · timeout {formatDuration(check.timeout_seconds)}</span>
-                {check.scenarios.length > 0 && (
-                  <span className="projects-muted"> · {check.scenarios.length} {check.scenarios.length === 1 ? 'scenario' : 'scenarios'}: {check.scenarios.map(scenario => scenario.id).join(', ')}</span>
-                )}
-                <div className="task-check-status">
-                  {executed === null ? (
-                    <span className="projects-muted">{result.status === 'loading' ? 'Loading the published result to compare…' : 'No published result to compare against.'}</span>
-                  ) : executedIndex === -1 ? (
-                    <span className="projects-muted">not executed in this result</span>
-                  ) : checksNode === null ? (
-                    <span>executed as check {executedIndex + 1}: exit {executed[executedIndex].exit_code}</span>
-                  ) : (
-                    <AppLink href={checksNode.href} onNavigate={onNavigate} data-check-index={executedIndex} title={`The check and its log are shown on ${checksNode.label}`}>
-                      executed as check {executedIndex + 1}: exit {executed[executedIndex].exit_code} (on {checksNode.label})
-                    </AppLink>
-                  )}
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-      )}
+      <OwnedPaths paths={worker.owned_paths} />
+      <RequiredChecks worker={worker} result={result} checksNode={checksNode} onNavigate={onNavigate} />
 
       {worker.prompt === null ? (
         <p className="projects-muted" data-testid="task-prompt-none">The exact prompt was not recorded for this run (it predates prompt capture).</p>
@@ -154,8 +111,7 @@ function Assumptions({ items }: { items: string[] }) {
 }
 
 type Completion = NonNullable<RunInputWorker['completion']>
-/** Where a check id named by the worker is shown: the verify node, and the executed check it matched by command when known. */
-export type CheckTarget = { href: string; label: string }
+export type { CheckTarget }
 
 const COMPLETION_BADGE: Record<Completion['status'], string> = { completed: 'status-succeeded', blocked: 'status-failed', question: 'status-awaiting_approval' }
 
