@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { GateReason } from '../../contracts/projects/triage.ts'
 import { fetchArtifactText, type RunScope, type WorkerResult } from './api.ts'
 import type { CheckGate } from './node/gate.ts'
@@ -56,7 +56,7 @@ const GLYPH: Record<State, string> = { passed: '✓', failed: '✗', rejected: '
  * and its log on demand. A check the gate rejected is red even at exit 0; its log tail is open, as a failed check's is. The row's tooltip names
  * the command, cwd, log artifact and absolute times; the times are also read out to screen readers.
  */
-export function Checks({ scope, result, gate, deferred, attemptStart, idPrefix = 'check' }: {
+export function Checks({ scope, result, gate, deferred, attemptStart, idPrefix = 'check', extras }: {
   scope: RunScope
   result: WorkerResult
   gate: CheckGate
@@ -66,6 +66,8 @@ export function Checks({ scope, result, gate, deferred, attemptStart, idPrefix =
   attemptStart: string | null
   /** Row ids are `<prefix>-<index>`; the verify node's are `check-<index>`, which the task links target. */
   idPrefix?: string
+  /** Evidence shown inside a row, by check index: a candidate lane's screenshots in its browser check's row. */
+  extras?: ReadonlyMap<number, ReactNode>
 }) {
   const logs = new Set(result.artifacts.map(artifact => artifact.artifact_id))
   const started = attemptStart === null ? Number.NaN : Date.parse(attemptStart)
@@ -115,6 +117,7 @@ export function Checks({ scope, result, gate, deferred, attemptStart, idPrefix =
             )}
             {/* Keyed by its mode: the declared checks may arrive after the result and turn a row rejected, which opens its tail. */}
             {hasLog && <TextArtifact key={tail ? 'tail' : 'log'} scope={scope} artifactId={check.log_artifact_id} tail={tail} />}
+            {extras?.get(index)}
           </li>
         )
       })}

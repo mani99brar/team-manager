@@ -10,8 +10,10 @@
  * - `verify_adapter` attempt 1 failed with an unkeyed reason, as workflow-guardrails-001 `results/controller/1` did:
  *   `Executed check failed: <path> -m workflow.run_tests` (the check's own command is served unredacted), followed by
  *   the keyed reasons of that same check, which exited 1; attempt 2 passed.
+ * - `verify_ui` attempt 2 passed and recorded its build and browser checks for the candidate gate (`deferred_checks`).
  * - The combined candidate's attempt 1 passed lane ui and failed lane adapter, whose `backend-contract` check exited 0
- *   and was rejected, so the run failed. The adapter lane also published a setup log that belongs to no check.
+ *   and was rejected, so the run failed. Its first reason carries no check id and its `<path>` tail ends no check's
+ *   command, so it stays a gate-level reason only. The adapter lane also published a setup log that belongs to no check.
  * Lane adapter comes second in the lanes' order, so a table sorted by failure puts it first.
  */
 import type { RunDetail, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
@@ -39,12 +41,16 @@ const ADAPTER_FAILURE_RAW = `Executed check failed: ${RUN_TESTS_COMMAND}; backen
 export const UNKEYED_REASON = `Executed check failed: ${PATH_TOKEN} -m workflow.run_tests`
 /** The candidate's adapter lane: its contract check exited 0 and was rejected. */
 export const CANDIDATE_REJECTED = 'backend-contract: no passing test evidence or failed tests'
+/** The candidate adapter lane's reason without a check id whose command tail matches no check (redacted as served). */
+export const NO_MATCH_REASON = `Executed check failed: ${PATH_TOKEN} -m workflow.lint_contract`
+const CANDIDATE_FAILURE_RAW = `Executed check failed: ${PYTHON} -m workflow.lint_contract; ${CANDIDATE_REJECTED}`
 /** A log the adapter lane published that belongs to no check. */
 export const SETUP_LOG_ID = 'log-9-adapter-setup'
 
 type Lane = 'ui' | 'adapter'
 type Row = [clock: string, node: string, status: string, message: string]
-type Packet = { phase: 'worker' | 'candidate'; lane: Lane; attempt: number; from: string; to: string; failure?: string }
+/** `deferred`: the lane's build and browser checks were recorded for the candidate gate (checks 0 and 2 of lane ui). */
+type Packet = { phase: 'worker' | 'candidate'; lane: Lane; attempt: number; from: string; to: string; failure?: string; deferred?: boolean }
 
 const LANES: readonly Lane[] = ['ui', 'adapter']
 const DAY = '2026-03-04'
@@ -62,6 +68,8 @@ const ADAPTER_ARTIFACTS: ArtifactFile[] = [
   logArtifact('log-1-adapter-contract', CONTRACT_COMMAND, 0),
   logArtifact(SETUP_LOG_ID, 'npm ci', 0),
 ]
+/** Lane ui's checks recorded for the candidate gate, by executed index: the build and the browser suite. */
+const DEFERRED: [id: string, index: number][] = [['frontend-build', 0], ['project-workflows-browser', 2]]
 const ARTIFACTS: Record<Lane, ArtifactFile[]> = { ui: UI_ARTIFACTS, adapter: ADAPTER_ARTIFACTS }
 const COMMANDS: Record<Lane, string[]> = {
   ui: ['npm run build', 'npm run test:unit', 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts'],
@@ -96,10 +104,10 @@ const ROWS: Row[] = [
 const PACKETS: Packet[] = [
   { phase: 'worker', lane: 'ui', attempt: 1, from: '09:20:05', to: '09:21:26', failure: UI_REJECTED },
   { phase: 'worker', lane: 'adapter', attempt: 1, from: '09:20:05', to: '09:21:05', failure: ADAPTER_FAILURE_RAW },
-  { phase: 'worker', lane: 'ui', attempt: 2, from: '09:21:35', to: '09:23:35' },
+  { phase: 'worker', lane: 'ui', attempt: 2, from: '09:21:35', to: '09:23:35', deferred: true },
   { phase: 'worker', lane: 'adapter', attempt: 2, from: '09:21:35', to: '09:22:35' },
   { phase: 'candidate', lane: 'ui', attempt: 1, from: '09:23:45', to: '09:25:55' },
-  { phase: 'candidate', lane: 'adapter', attempt: 1, from: '09:26:05', to: '09:27:25', failure: CANDIDATE_REJECTED },
+  { phase: 'candidate', lane: 'adapter', attempt: 1, from: '09:26:05', to: '09:27:25', failure: CANDIDATE_FAILURE_RAW },
 ]
 
 const NODES = laneGraphNodes(LANES)
@@ -124,6 +132,7 @@ function packetResult(packet: Packet): WorkerResult {
     artifacts: artifactRefs(ARTIFACTS[packet.lane]),
     summary: 'Trusted check capture of the lane; not integration approval.',
     error: packet.failure ? { code: 'VERIFICATION_BLOCKED', message: packet.failure.replaceAll(PYTHON, PATH_TOKEN), retryable: true } : null,
+    ...(packet.deferred ? { deferred_checks: DEFERRED.map(([id, check_index]) => ({ id, check_index })) } : {}),
   })
 }
 
@@ -235,7 +244,9 @@ function seed({ repository, runsRoot, writeRun, writePacket, receipt, leakFor }:
     tasks: [{ node_id: 'candidate', error: 'Combined candidate lane adapter failed its gate', interrupts: [], result: null }],
     events: records,
     packets: directory => PACKETS.map(packet => writePacket(directory, packet.phase, packet.lane, packet.attempt, packetResult(packet), ARTIFACTS[packet.lane],
-      packet.failure ? { status: 'blocked', reasons: packet.failure.split('; ') } : { status: 'passed', reasons: [] })),
+      // Seeded evidence receipts are `check-<index>`, so a deferred check is named by its executed index.
+      packet.failure ? { status: 'blocked', reasons: packet.failure.split('; ') }
+        : { status: 'passed', reasons: [], ...(packet.deferred ? { deferred_checks: DEFERRED.map(([, index]) => `check-${index}`) } : {}) })),
     review: null,
     inputs: inputsSection(leakFor(root, RUN_REJECTED_CHECKS)),
   })

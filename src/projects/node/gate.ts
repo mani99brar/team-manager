@@ -6,7 +6,7 @@ import { gateReasonsByCheck, type GateReasons } from '../../../contracts/project
 import type { WorkerResult } from '../api.ts'
 
 /** A check the lane declared (`inputs.workers[].checks`): executed checks are matched to it by exact command. */
-export type DeclaredCheck = { id: string; command: string }
+export type DeclaredCheck = { id: string; command: string; kind?: string }
 
 /** What the gate said about one result: its reasons, the declared id of each executed check, and how many checks it rejected. */
 export type CheckGate = { reasons: GateReasons; ids: (string | null)[]; rejected: number }

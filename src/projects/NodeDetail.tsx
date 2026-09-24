@@ -165,10 +165,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const sections: SectionEntry[] = [
     ...(isWorker ? workerSectionEntries(worker, resultData) : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
-    // A verify node whose lane the inputs name lists its Requirements before the Result.
-    ...((isVerify || isCandidate) && resultData !== null
-      ? verifiedSections(resultData).flatMap(entry => (entry.key === 'result' && verifiedWorker !== null ? [{ key: 'requirements', label: 'Requirements' }, entry] : [entry]))
-      : []),
+    ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData, { requirements: verifiedWorker !== null }) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
     ...(isReview && reviewTransport !== undefined ? [{ key: 'review', label: 'Review' }] : []),
     ...(isChallenge && recordedInputs?.challenge ? [{ key: 'challenge', label: 'Challenge' }] : []),
@@ -255,7 +252,13 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           <ControllerSections scope={scope} renderResult={renderResult} />
         ) : (
           <>
-            {lanes.length > 0 && <CandidateLanes scope={scope} lanes={lanes} launchNodeOf={launchNodeOf} declaredOf={declaredOf} attemptStart={timing?.start?.at ?? null} stamp={stamp} onNavigate={onNavigate} />}
+            {lanes.length > 0 && (
+              <CandidateLanes
+                scope={scope} lanes={lanes} launchNodeOf={launchNodeOf} declaredOf={declaredOf} timeline={timeline} cap={cap}
+                repairLanes={isLatest && now?.situation === 'blocked_identical' && now.lane ? now.lane.split(',') : []}
+                stamp={stamp} onNavigate={onNavigate}
+              />
+            )}
             {renderResult(data => (
               <VerifiedEvidence
                 scope={scope} result={data} phase="worker" anchored

@@ -1,4 +1,5 @@
 import { useMemo, type ReactNode } from 'react'
+import type { Timeline } from '../../../contracts/projects/triage.ts'
 import { scopedResultPath, type RunInputWorker, type RunScope, type WorkerResult } from '../api.ts'
 import { Checks, TextArtifact } from '../Checks.tsx'
 import { AppLink, ErrorPanel, LoadingPanel } from '../panels.tsx'
@@ -7,7 +8,7 @@ import { Screenshots } from '../Screenshots.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
 import { useRunResult, useRunResults } from '../useRunData.ts'
 import { checkGate, type CheckGate, type DeclaredCheck } from './gate.ts'
-import { evidenceOf, sectionId } from './model.ts'
+import { evidenceOf, nodeTiming, revisionAttempt, sectionId } from './model.ts'
 import { OwnedPaths, RequiredChecks } from './Requirements.tsx'
 import { ResultFacts } from './ResultFacts.tsx'
 import './verify.css'
@@ -20,13 +21,14 @@ export type LaneRequirements = { worker: RunInputWorker; cap: number | null }
 /**
  * A failed gate (docs/PRD_VIEWER_UX.md 4.6, 8): how many checks it rejected, its error code, and one bullet per reason in the
  * order it recorded them. A keyed reason names its check; a reason without a check id stays a gate-level reason (no
- * `data-check-id`), and the check its command tail names, if exactly one, lists it too.
+ * `data-check-id`), and the check its command tail names, if exactly one, lists it too. When no reason could be tied to a
+ * check (the run's inputs, which name the checks, may be unknown) the headline counts the reasons and claims no rejection.
  */
 function GateFailure({ result, gate, tag }: { result: WorkerResult; gate: CheckGate; tag: ReactNode }) {
   const { reasons } = gate.reasons
   const headline = gate.rejected > 0
     ? `Failed: ${gate.rejected} ${gate.rejected === 1 ? 'check' : 'checks'} rejected`
-    : reasons.length > 0 ? `Failed: no check was rejected; the gate recorded ${reasons.length === 1 ? 'this reason' : 'these reasons'}` : 'Failed: the gate recorded no reason'
+    : reasons.length > 0 ? `Failed: the gate recorded ${reasons.length} ${reasons.length === 1 ? 'reason' : 'reasons'}` : 'Failed: the gate recorded no reason'
   return (
     <div className="projects-error gate-failure" role="alert" data-testid="worker-error">
       <p className="gate-line">
@@ -52,18 +54,26 @@ function GateFailure({ result, gate, tag }: { result: WorkerResult; gate: CheckG
   )
 }
 
-/** Requirements (4.6): the lane's checks with their scenarios and timeouts, the attempt cap and the owned paths, closed. */
+/**
+ * Requirements (4.6): the lane's checks with their scenarios and timeouts, the attempt cap and the owned paths, closed. The
+ * summary marks the checks this result recorded for the candidate gate (`deferred_checks`, matched by command) and names a
+ * browser check's scenarios.
+ */
 function Requirements({ result, requirements }: { result: WorkerResult; requirements: LaneRequirements }) {
   const { worker, cap } = requirements
   const titleId = `${sectionId('requirements')}-title`
-  const paths = worker.owned_paths.length
+  const atCandidate = new Set((result.deferred_checks ?? []).map(entry => result.checks[entry.check_index]?.command))
+  const checks = worker.checks.map(check => {
+    const marks = [...(atCandidate.has(check.command) ? ['candidate'] : []), ...(check.scenarios.length > 0 ? [check.scenarios.map(scenario => scenario.id).join(', ')] : [])]
+    return marks.length === 0 ? check.id : `${check.id} (${marks.join(': ')})`
+  })
   return (
     <NodeSection sectionKey="requirements" labelledBy={titleId}>
       <details className="evidence-section closed-section" data-testid="requirements">
         <summary>
           <h4 id={titleId} className="node-section-title">Requirements</h4>{' '}
           <span className="projects-muted">
-            lane {worker.node_id}: {worker.checks.map(check => check.id).join(' · ') || 'no checks'}{cap !== null ? ` · attempt cap ${cap}` : ''} · {paths} owned {paths === 1 ? 'path' : 'paths'}
+            lane {worker.node_id}: {[...(checks.length > 0 ? [...checks, 'timeouts'] : ['no checks']), ...(cap !== null ? [`attempt cap ${cap} per revision`] : []), `owned paths (${worker.owned_paths.length})`].join(' · ')}
           </span>
         </summary>
         {cap !== null && <p data-testid="requirements-cap">Attempt cap: {cap} per revision</p>}
@@ -95,6 +105,11 @@ export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result
 }) {
   const { screenshots, others, deferred, passed } = evidenceOf(result)
   const gate = useMemo(() => checkGate(result, declared ?? []), [result, declared])
+  // On a candidate lane the screenshots sit in the row of its browser check (7), when exactly one declared browser check ran.
+  const browserRows = phase === 'candidate' && screenshots.length > 0
+    ? gate.ids.flatMap((id, index) => (id !== null && declared?.some(check => check.id === id && check.kind === 'browser') ? [index] : []))
+    : []
+  const extras = browserRows.length === 1 ? new Map([[browserRows[0], <Screenshots key="screenshots" scope={scope} screenshots={screenshots} />]]) : undefined
   const block = (key: string, title: string, children: ReactNode) => anchored ? (
     <NodeSection key={key} sectionKey={key} title={title} className="evidence-section">
       {children}
@@ -121,9 +136,14 @@ export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result
       ))}
     </ul>
   )
+  // The closed summary names the kinds it holds: "test_report · log (not a check log) ×2".
+  const kinds = [...others.reduce((count, artifact) => {
+    const label = artifact.kind === 'log' ? 'log (not a check log)' : artifact.kind
+    return count.set(label, (count.get(label) ?? 0) + 1)
+  }, new Map<string, number>())].map(([label, count]) => (count > 1 ? `${label} ×${count}` : label)).join(' · ')
   const artifactsSummary = (heading: ReactNode) => (
     <details className="evidence-section closed-section">
-      <summary>{heading} <span className="projects-muted">{others.length}</span></summary>
+      <summary data-testid="artifacts-summary">{heading} <span className="projects-muted">{kinds}</span></summary>
       {otherArtifacts}
     </details>
   )
@@ -155,10 +175,10 @@ export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result
       </div>
 
       {result.checks.length > 0 && block('checks', 'Checks', (
-        <Checks scope={scope} result={result} gate={gate} deferred={deferred} attemptStart={attemptStart} idPrefix={anchored ? 'check' : `${testId}-check`} />
+        <Checks scope={scope} result={result} gate={gate} deferred={deferred} attemptStart={attemptStart} idPrefix={anchored ? 'check' : `${testId}-check`} extras={extras} />
       ))}
 
-      {(screenshots.length > 0 || deferred.size > 0) && block('screenshots', 'Screenshots', screenshots.length === 0 ? (
+      {extras === undefined && (screenshots.length > 0 || deferred.size > 0) && block('screenshots', 'Screenshots', screenshots.length === 0 ? (
         <p className="projects-muted" data-testid="screenshots-deferred">No screenshot artifacts were published for this isolated lane run; browser evidence is gated and shown at the combined candidate.</p>
       ) : <Screenshots scope={scope} screenshots={screenshots} />)}
 
@@ -192,27 +212,41 @@ type LaneContext = {
   launchNodeOf: (lane: string) => { node_id: string; label: string } | null
   /** The lane's declared checks; null when the inputs are unknown. */
   declaredOf: (lane: string) => readonly DeclaredCheck[] | null
-  attemptStart: string | null
+  /** The run's timeline: each lane's checks count from the start of its own candidate attempt, which the cap counts. */
+  timeline: Timeline | null
+  cap: number | null
+  /** The lanes the run's situation sends to a lane repair, having failed identically (6.2). */
+  repairLanes: readonly string[]
   stamp: string
   onNavigate: (pathname: string) => void
 }
 
+/** Which attempts a lane failed identically on: the controller's diagnosis names them, else the last two (as deriveNow reads them). */
+function identicalAttempts(timeline: Timeline | null, lane: LaneEntry): [number, number] {
+  const diagnosis = (timeline?.markers ?? []).filter(marker => marker.kind === 'diagnosis' && marker.node_id === 'candidate' && marker.lane === lane.worker).at(-1)
+  const named = diagnosis ? /failed identically on attempts (\d+) and (\d+)/.exec(diagnosis.raw) : null
+  return named ? [Number(named[1]), Number(named[2])] : [lane.attempt - 1, lane.attempt]
+}
+
 /**
  * One lane of the combined candidate, read through the run's cache of immutable results: a row of the lane table (lane,
- * gate, checks, reason, screenshots, and a link to the lane's files and report) that expands to the lane's Gate, Checks
- * and Screenshots. A failing lane starts open, a passing one closed.
+ * gate, checks, reason, screenshots, and a link to the lane's files) that expands to the worker's report link and the
+ * lane's Gate, Checks and Screenshots. A failing lane starts open, a passing one closed; a failing lane's row also says
+ * which attempt of the cap it is and, when it failed identically, that a repair is next.
  */
 function LaneResult({ lane, context }: { lane: LaneEntry; context: LaneContext }) {
-  const { scope, launchNodeOf, declaredOf, attemptStart, stamp, onNavigate } = context
+  const { scope, launchNodeOf, declaredOf, timeline, cap, repairLanes, stamp, onNavigate } = context
   const resultPath = scopedResultPath(scope, lane.result_uri)
   const { state, reload } = useRunResult(scope, resultPath, stamp)
   const declared = declaredOf(lane.worker)
   const launchNode = launchNodeOf(lane.worker)
-  const name = <span className="lane-name">Lane {lane.worker} <span className="projects-muted">· attempt {lane.attempt}</span></span>
+  const launchHref = launchNode === null ? null : runPathname(scope.projectId, scope.workflowId, scope.runId, launchNode.node_id)
+  const attemptStart = timeline === null ? null : nodeTiming(timeline, 'candidate', lane.attempt)?.start?.at ?? null
+  const name = (withAttempt: boolean) => <span className="lane-name">Lane {lane.worker}{withAttempt && <span className="projects-muted"> · attempt {lane.attempt}</span>}</span>
   if (resultPath === null || state.status !== 'ready') {
     return (
       <div className="lane-result lane-result-pending" data-testid={`lane-result:${lane.worker}`}>
-        {name}
+        {name(true)}
         {resultPath === null && <p className="projects-error-inline" role="alert">The result link <code>{lane.result_uri}</code> is outside this run's results route and was not fetched.</p>}
         {resultPath !== null && (state.status === 'loading' || state.status === 'idle') && <LoadingPanel>Loading the {lane.worker} lane result…</LoadingPanel>}
         {resultPath !== null && state.status === 'error' && <ErrorPanel error={state.error} what={`The ${lane.worker} lane result`} onRetry={reload} />}
@@ -223,29 +257,37 @@ function LaneResult({ lane, context }: { lane: LaneEntry; context: LaneContext }
   const { screenshots, passed } = evidenceOf(result)
   const gate = checkGate(result, declared ?? [])
   const exitZero = result.checks.filter(check => check.exit_code === 0).length
+  const revision = timeline === null ? lane.attempt : revisionAttempt(timeline, 'candidate', lane.attempt)
+  const identical = repairLanes.includes(lane.worker) ? identicalAttempts(timeline, lane) : null
+  const note = passed ? null : [
+    cap === null ? `attempt ${revision}` : `attempt ${revision} of ${cap}`,
+    ...(identical ? [`failed identically on attempts ${identical[0]} and ${identical[1]} → repair (see Now)`] : []),
+  ].join(' · ')
   return (
     <details className="lane-result" data-testid={`lane-result:${lane.worker}`} data-lane={lane.worker} data-passed={passed ? 'true' : 'false'} open={!passed}>
       <summary className="lane-summary">
         <span className="lane-toggle" aria-hidden="true">▸</span>
-        {name}
+        {name(note === null)}
         <span className="lane-gate" data-passed={passed ? 'true' : 'false'}>{passed ? '✓ passed' : '✗ failed'}</span>
         <span className="lane-checks">{exitZero} of {result.checks.length} exit 0{gate.rejected > 0 ? `, ${gate.rejected} rejected` : ''}</span>
         <span className="lane-reason" title={passed ? undefined : result.error?.message}>
           {passed ? '' : gate.reasons.reasons.map(reason => reason.text).join('; ') || result.error?.message}
         </span>
         <span className="lane-screenshots">{screenshots.length === 0 ? 'no screenshots' : `${screenshots.length} ${screenshots.length === 1 ? 'screenshot' : 'screenshots'}`}</span>
-        {launchNode !== null && (
+        {launchNode !== null && launchHref !== null && (
           <span className="lane-links" data-testid="lane-files-link">
             <AppLink
-              href={runPathname(scope.projectId, scope.workflowId, scope.runId, launchNode.node_id)}
+              href={launchHref}
               onNavigate={onNavigate}
-              title={`Files are captured on the lane's worker snapshot only: the files the ${lane.worker} lane created or changed, and its worker's report, are on ${launchNode.label}`}
+              title={`Files are captured on the lane's worker snapshot only: the files the ${lane.worker} lane created or changed are on ${launchNode.label}`}
             >
-              Files and report ›
+              Files ›
             </AppLink>
           </span>
         )}
+        {note !== null && <span className="lane-note" data-testid="lane-note">{note}</span>}
       </summary>
+      {launchNode !== null && launchHref !== null && <WorkerReportLink href={launchHref} label={launchNode.label} onNavigate={onNavigate} />}
       <VerifiedEvidence scope={scope} result={result} phase="candidate" testId={`lane-result-evidence:${lane.worker}`} declared={declared} attemptStart={attemptStart} />
     </details>
   )
@@ -255,12 +297,14 @@ function LaneResult({ lane, context }: { lane: LaneEntry; context: LaneContext }
  * The combined candidate's lanes (docs/PRD_VIEWER_UX.md 4.6): a table of every lane verified on one revision, failing lanes
  * first and open, passing lanes closed, each expanding to its own checks and screenshots.
  */
-export function CandidateLanes({ scope, lanes, launchNodeOf, declaredOf, attemptStart, stamp, onNavigate }: {
+export function CandidateLanes({ scope, lanes, launchNodeOf, declaredOf, timeline, cap, repairLanes, stamp, onNavigate }: {
   scope: RunScope
   lanes: LaneEntry[]
   launchNodeOf: LaneContext['launchNodeOf']
   declaredOf: LaneContext['declaredOf']
-  attemptStart: string | null
+  timeline: Timeline | null
+  cap: number | null
+  repairLanes: readonly string[]
   stamp: string
   onNavigate: (pathname: string) => void
 }) {
@@ -271,7 +315,7 @@ export function CandidateLanes({ scope, lanes, launchNodeOf, declaredOf, attempt
     return result === undefined ? 1 : evidenceOf(result).passed ? 2 : 0
   }
   const sorted = lanes.map((entry, index) => ({ entry, index })).sort((a, b) => rank(a.entry) - rank(b.entry) || a.index - b.index).map(item => item.entry)
-  const context: LaneContext = { scope, launchNodeOf, declaredOf, attemptStart, stamp, onNavigate }
+  const context: LaneContext = { scope, launchNodeOf, declaredOf, timeline, cap, repairLanes, stamp, onNavigate }
   return (
     <NodeSection sectionKey="lanes" title="Lanes">
       <div className="lane-results" data-testid="lane-results">

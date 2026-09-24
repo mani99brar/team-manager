@@ -21,6 +21,7 @@
 .check-offset, .check-list .check-duration { flex: none; color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .check-list .check-exit { flex: none; }
 .check-list .artifact-text { margin-top: 4px; }
+.check-list .screenshot-grid { margin-top: 6px; }
 /* Rejected by the gate: red even at exit 0. */
 .check-rejected { border-left: 4px solid var(--danger-text); background: var(--danger-bg); }
 .check-rejected .check-exit { color: var(--danger-text); }
@@ -48,7 +49,7 @@
 
 /* The candidate's lane table: one summary row per lane, failing lanes first and open. */
 .lane-results { display: flex; flex-direction: column; }
-.lane-results-head, .lane-summary { display: grid; grid-template-columns: 1.2em minmax(9rem, 13rem) 5.5rem minmax(9rem, 12rem) minmax(0, 1fr) 8rem auto; gap: 8px; align-items: baseline; }
+.lane-results-head, .lane-summary { display: grid; grid-template-columns: 1.2em minmax(7rem, 13rem) 5rem minmax(8rem, 12rem) minmax(0, 1fr) 7rem auto; gap: 8px; align-items: baseline; }
 .lane-results-head { padding: 0 8px 4px; border-bottom: 1px solid var(--border); font-size: 0.8rem; color: var(--text-muted); }
 .lane-result { margin: 0; padding: 0; border-bottom: 1px solid var(--border); }
 .lane-result-pending { padding: 6px 8px; }
@@ -57,13 +58,16 @@
 .lane-summary:hover { background: var(--surface-alt); }
 .lane-toggle { color: var(--text-muted); }
 .lane-result[open] > .lane-summary .lane-toggle { display: inline-block; transform: rotate(90deg); }
-.lane-name { font-weight: 600; white-space: nowrap; }
+.lane-name { font-weight: 600; }
+/* Under a failing lane's row: which attempt of the cap it is, and a repair when it failed identically. */
+.lane-note { grid-column: 2 / -1; font-size: 0.85rem; color: var(--danger-text); }
 .lane-gate[data-passed='false'], .lane-result[data-passed='false'] .lane-reason { color: var(--danger-text); }
 .lane-gate[data-passed='true'] { color: var(--node-location-stroke); }
 .lane-reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lane-checks, .lane-screenshots { font-variant-numeric: tabular-nums; }
 .lane-links { white-space: nowrap; }
 .lane-result > .worker-evidence { padding: 0 8px 12px 28px; }
+.lane-result > .worker-report-link { padding: 4px 8px 0 28px; }
 
 @media (max-width: 760px) {
   /* Rows wrap instead of scrolling the page: the command takes a line of its own, the lane table becomes cards. */
@@ -71,7 +75,7 @@
   .check-list .check-command { flex-basis: 100%; order: 3; }
   .lane-results-head { display: none; }
   .lane-summary { display: flex; flex-wrap: wrap; gap: 4px 12px; min-height: 44px; }
-  .lane-reason { flex-basis: 100%; white-space: normal; }
-  .lane-result > .worker-evidence { padding-left: 8px; }
+  .lane-reason, .lane-note { flex-basis: 100%; white-space: normal; }
+  .lane-result > .worker-evidence, .lane-result > .worker-report-link { padding-left: 8px; }
   .screenshot-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
 }

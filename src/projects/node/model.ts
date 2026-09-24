@@ -224,14 +224,18 @@ export function evidenceOf(result: WorkerResult) {
   return { artifactsById, screenshots, others, deferred, passed }
 }
 
-/** The index entries of a verified result's sections: only those with something in them. */
-export function verifiedSections(result: WorkerResult): SectionEntry[] {
+/**
+ * The index entries of a verified result's sections: only those with something in them. A verify node whose lane the run's
+ * inputs name lists its Requirements before the Result.
+ */
+export function verifiedSections(result: WorkerResult, options: { requirements?: boolean } = {}): SectionEntry[] {
   const { screenshots, others, deferred } = evidenceOf(result)
   return [
     { key: 'gate', label: 'Gate' },
     ...(result.checks.length > 0 ? [{ key: 'checks', label: 'Checks', count: result.checks.length }] : []),
     ...(screenshots.length > 0 || deferred.size > 0 ? [{ key: 'screenshots', label: 'Screenshots', count: screenshots.length }] : []),
     ...(others.length > 0 ? [{ key: 'artifacts', label: 'Artifacts', count: others.length }] : []),
+    ...(options.requirements ? [{ key: 'requirements', label: 'Requirements' }] : []),
     { key: 'result', label: 'Result' },
   ]
 }
