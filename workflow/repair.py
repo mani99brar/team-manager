@@ -114,11 +114,12 @@ def continuation(runtime, executable: str = sys.executable) -> str:
     return f"{executable} -m workflow retry {directory}"
 
 
-def check_retry(runtime, phase: str, node: str, executable: str = sys.executable) -> str:
-    """Rerunning one check at its next attempt: `retry` runs it on a manual plan; on an automatic plan `retry` only raises
-    the attempt, and the supervisor's controller runs it."""
-    command = f"{executable} -m workflow retry {shlex.quote(str(runtime.directory))} --phase {phase} --node {node}"
-    return f"{command}, then {continuation(runtime, executable)}" if runtime.plan.get("automatic") else command
+def check_retry(runtime, phase: str, nodes: list[str], executable: str = sys.executable) -> str:
+    """Rerunning checks at their next attempts: `retry` runs each on a manual plan; on an automatic plan `retry` only raises
+    the attempts, and the supervisor's controller runs them."""
+    directory = shlex.quote(str(runtime.directory))
+    commands = ", ".join(f"{executable} -m workflow retry {directory} --phase {phase} --node {node}" for node in nodes)
+    return f"{commands}, then {continuation(runtime, executable)}" if runtime.plan.get("automatic") else commands
 
 
 # ---- State refusals (S0) -----------------------------------------------------------------------------------------
@@ -168,7 +169,7 @@ def blocked_step(runtime, state) -> dict:
         for node in runtime.workers:
             folder = directory / "verification" / phase / node / str(raw_attempt(directory, phase, node))
             if folder.is_dir() and not (folder / "packet.json").exists():
-                raise ValueError(f"Interrupted check at {folder}; rerun it at its next attempt with: {check_retry(runtime, phase, node)}")
+                raise ValueError(f"Interrupted check at {folder}; rerun it at its next attempt with: {check_retry(runtime, phase, [node])}")
     failed = [task.name for task in state.tasks if task.error and task.name in state.next]
     verifies = {f"verify_{node}" for node in runtime.workers}
     if failed == ["candidate"] and tuple(state.next) == ("candidate",):
@@ -176,8 +177,11 @@ def blocked_step(runtime, state) -> dict:
     elif failed and set(state.next) <= verifies:
         phase, nodes = "worker", [name.removeprefix("verify_") for name in failed]
     else:
-        raise ValueError("The run did not stop at a check verdict of the candidate or a verify_<lane> step; inspect, then retry")
-    packets = []
+        # A failed handoff was refused as before freeze, review onwards by check_before_review: nothing failed here, a controller
+        # stopped between steps.
+        raise ValueError("The run did not stop at a check verdict of the candidate or a verify_<lane> step; inspect, then continue it "
+                         f"with: {continuation(runtime)}")
+    packets, unverified = [], []
     for node in nodes:
         attempt = raw_attempt(directory, phase, node)
         path = directory / "verification" / phase / node / str(attempt) / "packet.json"
@@ -185,9 +189,15 @@ def blocked_step(runtime, state) -> dict:
         if packet and packet["gate"]["status"] == "blocked":
             packets.append({"phase": phase, "node_id": node, "path": str(path.relative_to(directory)), "sha256": digest_file(path),
                             "attempt": attempt, "output_commit": packet["expected"]["output_commit"], "reasons": packet["gate"]["reasons"]})
+        elif packet is None:
+            unverified.append(node)
     if not packets:
+        # Plain retry reruns the step on a manual plan. The supervisor reruns only a raised attempt: every failed verify_<lane>
+        # needs one, the candidate step one lane's (it reuses every passing packet), best a lane without one.
+        rerun = continuation(runtime) if not runtime.plan.get("automatic") else check_retry(
+            runtime, phase, nodes if phase == "worker" else (unverified or nodes)[:1])
         raise ValueError("The failed step has no blocked packet at its current attempt, so it is not a check verdict "
-                         "(an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then retry")
+                         f"(an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then rerun it with: {rerun}")
     return {"step": "candidate" if phase == "candidate" else ", ".join(failed), "packets": packets}
 
 

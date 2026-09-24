@@ -1084,6 +1084,11 @@ def main():
                     # No new agent launch is ever permitted during retry.
                     if any(step.startswith("launch_") for step in state.next):
                         parser.error("Launch failure requires explicit session reconciliation; do not blindly retry")
+                    if runtime.plan.get("automatic") and not (directory / "review.json").exists():
+                        # Review is still ahead: invoked here, the graph would launch the reviewers in this process, without --live.
+                        from .repair import continuation
+                        parser.error(f"An automatic run continues under its supervisor until its review is recorded: {continuation(runtime)} "
+                                     "(a check or candidate step that left no verdict first needs retry --phase <phase> --node <lane>)")
                 if args.action != "status":
                     try:
                         graph.invoke(value, config)

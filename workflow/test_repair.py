@@ -569,7 +569,10 @@ class RefusedStates(RepairFixture):
             self.refused("Interrupted check", *arguments)
             (self.directory / "verification/candidate/ui/2").rmdir()
         with self.subTest("no blocked packet"):
-            self.refused("not a check verdict", *arguments)
+            # The candidate step reuses adapter's passing packet: raising ui's attempt, which has none, reruns the step.
+            self.refused(f"not a check verdict (an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then rerun it "
+                         f"with: {sys.executable} -m workflow retry {self.directory} --phase candidate --node ui, then "
+                         f"{sys.executable} -m workflow automatic {self.directory} --live\n", *arguments)
             (self.directory / "attempts.json").unlink()
         self.assertEqual(self.untouched(), before)
         with self.subTest("MAX_REPAIRS"):
@@ -633,6 +636,10 @@ class InterruptedCheckOnAnAutomaticRun(RepairFixture):
             drive(self.runtime)
         self.assertFalse((directory / "retry-requests.json").exists())
         self.assertFalse((directory / "verification/worker/ui/2").exists())
+        # No attempt directory at all is no verdict either: repair names the same rerun.
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertIn(f"not a check verdict (an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then rerun it "
+                      f"with: {retry}, then {automatic}\n", err)
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
             code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
         self.assertEqual((code, read_json(directory / "retry-requests.json")), (0, {"worker:ui": 3}), err)
@@ -669,6 +676,109 @@ class InterruptedCheckOnAManualRun(RepairFixture):
         with self.graph() as (graph, config):
             state = graph.get_state(config)
         self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
+
+
+def candidate_worktree_fails_once():
+    """Git cannot create the combined candidate's worktree the first time: the candidate step fails before any of its checks."""
+    real, failed = pipeline.git_worktree, []
+    def locked(repository, *arguments):
+        if Path(arguments[-2]).name == "candidate" and not failed:
+            failed.append(arguments)
+            raise WorktreeError(128, ["git", "worktree", *arguments], "", "fatal: cannot lock ref 'HEAD': File exists")
+        return real(repository, *arguments)
+    return patch("workflow.pipeline.git_worktree", side_effect=locked)
+
+
+class CandidateStepWithoutAVerdictOnAnAutomaticRun(RepairFixture):
+    """A candidate step that failed before its checks (its worktree, a cherry-pick) left no verdict: repair refuses it and names
+    a rerun that keeps the automatic run under its supervisor, which plain retry would not."""
+
+    def test_retry_raises_one_lanes_attempt_and_the_supervisor_reruns_the_step(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        with candidate_worktree_fails_once(), patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(self.runtime)
+        self.assertFalse((directory / "verification/candidate").exists())
+        retry = f"{sys.executable} -m workflow retry {directory} --phase candidate --node adapter"
+        automatic = f"{sys.executable} -m workflow automatic {directory} --live"
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 1)
+        self.assertIn("The failed step has no blocked packet at its current attempt, so it is not a check verdict (an infrastructure error, "
+                      f"a cherry-pick conflict, a partial candidate); inspect, then rerun it with: {retry}, then {automatic}\n", err)
+        # Plain retry would run the review node, reviewer launches included, in the CLI process: refused before the review.
+        launches = (directory / "fake-launches.log").read_text()
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, _, err = self.pipeline_cli("retry", str(directory))
+        self.assertEqual(code, 2)
+        self.assertIn(f"An automatic run continues under its supervisor until its review is recorded: {automatic}", err)
+        self.assertFalse((directory / "verification/candidate").exists())
+        self.assertFalse((directory / "attempts.json").exists())
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "candidate", "--node", "adapter")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"candidate/adapter will run attempt 2; nothing ran. An automatic run continues under its supervisor: {automatic}", out)
+        self.assertEqual((directory / "fake-launches.log").read_text(), launches)
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(read_json(directory / "verification/candidate/adapter/2/packet.json")["gate"]["status"], "passed")
+        self.assertEqual(read_json(directory / "verification/candidate/ui/1/packet.json")["gate"]["status"], "passed")
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
+
+
+class CandidateStepWithoutAVerdictOnAManualRun(RepairFixture):
+    automatic = False
+
+    def test_retry_reruns_the_step_at_its_attempts_up_to_the_review_gate(self):
+        directory = self.directory
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        with candidate_worktree_fails_once(), self.graph() as (graph, config), self.assertRaises(WorktreeError):
+            graph.invoke(Command(resume={"freeze": True}), config)
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 1)
+        self.assertIn(f"a partial candidate); inspect, then rerun it with: {sys.executable} -m workflow retry {directory}\n", err)
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, _, err = self.pipeline_cli("retry", str(directory))
+        self.assertEqual(code, 0, err)
+        self.assertFalse((directory / "attempts.json").exists())
+        for node in ("adapter", "ui"):
+            self.assertEqual(read_json(directory / f"verification/candidate/{node}/1/packet.json")["gate"]["status"], "passed")
+        with self.graph() as (graph, config):
+            state = graph.get_state(config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
+
+
+class StoppedBetweenSteps(RepairFixture):
+    """A controller that stopped between two steps left no failure to repair: the refusal names the run's own continuation."""
+
+    def test_the_refusal_names_the_continuation_of_the_mode(self):
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.start()
+        with self.graph() as (graph, config):
+            graph.invoke(Command(resume={"freeze": True}), config, interrupt_before=["candidate"])
+            state = graph.get_state(config)
+        self.assertEqual((state.next, [task.name for task in state.tasks if task.error or task.interrupts]), (("candidate",), []))
+        continuation = f"automatic {self.directory} --live" if self.automatic else f"retry {self.directory}"
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 1)
+        self.assertIn("The run did not stop at a check verdict of the candidate or a verify_<lane> step; inspect, then continue it with: "
+                      f"{sys.executable} -m workflow {continuation}\n", err)
+        if self.automatic:
+            with patch("workflow.automatic.wait_handoffs"):
+                self.assertEqual(drive(self.runtime), git(self.repo, "rev-parse", "HEAD"))
+            return
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            code, _, err = self.pipeline_cli("retry", str(self.directory))
+        self.assertEqual(code, 0, err)
+        with self.graph() as (graph, config):
+            state = graph.get_state(config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
+
+
+class StoppedBetweenStepsOnAManualRun(StoppedBetweenSteps):
+    automatic = False
 
 
 class CrashRecovery(RepairFixture):
