@@ -23,6 +23,8 @@
         "browser"
       ],
       "owned_paths": [
+        "src/projects/node/model.ts",
+        "src/projects/NodeDetail.tsx",
         "src/projects/node/ReviewSections.tsx",
         "src/projects/node/ChallengeSections.tsx",
         "src/projects/node/ControllerSections.tsx",
@@ -34,7 +36,8 @@
         "tests/project-workflows/fixtures/ux-review.ts",
         "tests/project-workflows/ux-review.spec.ts",
         "tests/unit/panels.test.ts",
-        "docs/handoff/ux-s4c.md"
+        "docs/handoff/ux-s4c.md",
+        "tests/unit/model.test.ts"
       ],
       "checks": [
         {
