@@ -87,7 +87,7 @@
           "scenarios": [
             {
               "id": "review-blocking-first",
-              "description": "On a review node the blocking finding card comes before the findings table; reviewer rows show durations, a running native reviewer shows elapsed time and a \u2248 deadline from launched_at plus the review timeout, a print reviewer says 'launch time not recorded'; at 390 px the findings are cards with no horizontal overflow"
+              "description": "On a review node a blocking-finding card, outside review-findings and without the finding test id, comes before the findings table; decided reviewers show their duration from launched_at to accepted_at, a print reviewer says 'launch time not recorded', and a pending or superseded reviewer shows 'no verdict' with its launch time and no ticking clock; at 390 px the same findings DOM is restyled as cards with no horizontal overflow and every existing finding count is unchanged"
             },
             {
               "id": "challenge-headline",
@@ -177,7 +177,7 @@
             },
             {
               "id": "served-activity",
-              "description": "The lists and run page read the served activity: a live <lane>.questions.json answered state in the candidate phase, the RUN= line in copied commands when run_dir is served (worker-phase mocks; the candidate phase asserts it absent), and the live chip's controller suffix: 'controller running', and 'controller not running' only after not_running holds for 15 s (clock mocked)"
+              "description": "The lists and run page read the served activity: a live <lane>.questions.json answered state in the candidate phase; the RUN= line in copied commands when run_dir is served (worker-phase mocks; the candidate phase asserts it absent); the live chip shows 'controller running' from worker-phase mocks, and in both phases 'controller not running' appears only after not_running has held for 15 s (page.clock.install and fastForward)"
             }
           ]
         }
