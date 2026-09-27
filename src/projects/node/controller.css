@@ -1,3 +1,7 @@
 /* ---- The controller's steps: handoff, approval, integrate (docs/PRD_VIEWER_UX.md 4.9): one panel, no index ---- */
 
 .controller-panel { margin-top: 8px; }
+/* What the step did, in one line, with where its times come from under it. */
+.controller-summary { margin: 0 0 8px; }
+.controller-line { margin: 0; font-weight: 600; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.controller-source { margin: 2px 0 0; overflow-wrap: anywhere; }

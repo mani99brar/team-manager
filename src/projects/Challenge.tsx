@@ -1,7 +1,8 @@
+import type { Span } from '../../contracts/projects/triage.ts'
 import type { RunInputs } from './api.ts'
-import { ErrorPanel, LoadingPanel } from './panels.tsx'
+import { challengeHeadline } from './node/panels.ts'
 import { Time } from './Time.tsx'
-import type { Resource } from './useResource.ts'
+import { formatSpan } from './time.ts'
 
 type Challenge = NonNullable<RunInputs['challenge']>
 type Concern = Challenge['concerns'][number]
@@ -23,19 +24,30 @@ const KIND_WORDING: Record<Concern['kind'], string> = {
 }
 
 /**
- * The design challenge node's page (PRD_PORTABLE_WORKFLOW 4.5 and 4.8): the outcome, the concerns grouped by severity with
- * their consequences, the strongest simpler alternative, the cheap experiment, the attempts and the operator's accepted
- * reason. It is read from the run inputs, which pin the latest `challenge.json`.
+ * The challenge's one headline (docs/PRD_VIEWER_UX.md 4.8): its outcome on its attempt, the P2 notes, when it was decided
+ * and how long it took over every attempt ("Passed on attempt 3 · 8 P2 notes · decided 08:50:49 · 11m07s over 3 attempts").
  */
-export function ChallengePanel({ inputs, onRetry }: { inputs: Resource<RunInputs | null>; onRetry: () => void }) {
-  if (inputs.status === 'loading' || inputs.status === 'idle') return <LoadingPanel>Loading the design challenge…</LoadingPanel>
-  if (inputs.status === 'error') return <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetry} />
-  const challenge = inputs.data?.challenge ?? null
-  if (challenge === null) {
-    return <p className="projects-muted" data-testid="challenge-none">No design challenge was recorded for this run.</p>
-  }
+export function ChallengeHeadline({ challenge, spans }: { challenge: Challenge; spans: readonly Span[] }) {
+  const { lead, notes, decidedAt, totalMs, attempts } = challengeHeadline(challenge, spans)
   return (
-    <div className="challenge" data-testid="challenge" data-challenge-status={challenge.status}>
+    <p className={`challenge-headline challenge-headline-${challenge.status}`} data-testid="challenge-headline" data-challenge-status={challenge.status}>
+      {challenge.status === 'paused' && <span aria-hidden="true">‖ </span>}
+      {lead}
+      {notes && <> · {notes}</>}
+      {decidedAt && <> · decided <Time iso={decidedAt} seconds /></>}
+      {totalMs !== null && <> · {formatSpan(totalMs)} over {attempts} {attempts === 1 ? 'attempt' : 'attempts'}</>}
+    </p>
+  )
+}
+
+/**
+ * The record behind the headline, folded: the outcome in words, the attempts, the session and the decision time. Earlier
+ * attempts' records stay in the run directory (their concern lists are not served).
+ */
+export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
+  return (
+    <details className="challenge-facts">
+      <summary>Outcome, attempts and session</summary>
       <dl className="projects-facts">
         <div><dt>Outcome</dt><dd data-testid="challenge-status"><strong>{challenge.status}</strong> — {STATUS_WORDING[challenge.status]}</dd></div>
         <div>
@@ -48,44 +60,65 @@ export function ChallengePanel({ inputs, onRetry }: { inputs: Resource<RunInputs
         <div><dt>Session</dt><dd>{challenge.session_id ? <code>{challenge.session_id}</code> : 'No session recorded'}</dd></div>
         <div><dt>Decided</dt><dd>{challenge.decided_at ? <Time iso={challenge.decided_at} seconds /> : 'Not recorded'}</dd></div>
       </dl>
+    </details>
+  )
+}
 
-      {challenge.accepted_reason !== null && (
-        <section className="evidence-section" aria-labelledby="challenge-accepted-title" data-testid="challenge-accepted">
-          <h4 id="challenge-accepted-title">Accepted by the operator</h4>
-          <p className="worker-summary">{challenge.accepted_reason}</p>
-        </section>
-      )}
+/** The operator's reason for accepting the challenge over its concerns, when recorded. */
+export function ChallengeAccepted({ challenge }: { challenge: Challenge }) {
+  if (challenge.accepted_reason === null) return null
+  return (
+    <section className="evidence-section" aria-labelledby="challenge-accepted-title" data-testid="challenge-accepted">
+      <h4 id="challenge-accepted-title">Accepted by the operator</h4>
+      <p className="worker-summary">{challenge.accepted_reason}</p>
+    </section>
+  )
+}
 
-      <section className="evidence-section" aria-labelledby="challenge-concerns-title" data-testid="challenge-concerns">
-        <h4 id="challenge-concerns-title">Concerns</h4>
-        {challenge.concerns.length === 0 ? (
-          <p className="projects-muted">The challenge raised no concerns.</p>
-        ) : SEVERITIES.filter(severity => challenge.concerns.some(concern => concern.severity === severity)).map(severity => {
-          const concerns = challenge.concerns.filter(concern => concern.severity === severity)
-          return (
-            <div key={severity} className="challenge-severity" data-testid="challenge-severity" data-severity={severity}>
-              <h5>{severity}{severity === 'P2' ? '' : ' (pauses the run unless accepted)'} · {concerns.length} {concerns.length === 1 ? 'concern' : 'concerns'}</h5>
-              <ul className="evidence-list">
-                {concerns.map((concern, index) => (
-                  <li key={index} data-testid="challenge-concern" data-severity={concern.severity} data-kind={concern.kind}>
-                    <p><span className="finding-severity">{concern.severity}</span> <span className="projects-muted">{KIND_WORDING[concern.kind]}</span> — {concern.message}</p>
+/**
+ * The concerns by severity, the most severe first: a P0 or P1 opens in full (it pauses the run unless accepted); a P2 note is
+ * one line, expandable to its message and consequence.
+ */
+export function ChallengeConcerns({ challenge }: { challenge: Challenge }) {
+  return (
+    <>
+      {SEVERITIES.filter(severity => challenge.concerns.some(concern => concern.severity === severity)).map(severity => {
+        const concerns = challenge.concerns.filter(concern => concern.severity === severity)
+        const note = severity === 'P2'
+        return (
+          <div key={severity} className="challenge-severity" data-testid="challenge-severity" data-severity={severity}>
+            <h5>{severity}{note ? ' notes' : ' (pauses the run unless accepted)'} · {concerns.length} {concerns.length === 1 ? 'concern' : 'concerns'}</h5>
+            <ul className="challenge-concern-list">
+              {concerns.map((concern, index) => (
+                <li key={index}>
+                  <details className={`challenge-concern${note ? ' challenge-note' : ''}`} data-testid="challenge-concern" data-severity={concern.severity} data-kind={concern.kind} open={!note}>
+                    <summary>
+                      <span className="finding-severity">{concern.severity}</span> <span className="projects-muted">{KIND_WORDING[concern.kind]}</span> — <span className="challenge-concern-message">{concern.message}</span>
+                    </summary>
                     <p data-testid="challenge-consequence"><strong>Consequence:</strong> {concern.consequence}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )
-        })}
-      </section>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      })}
+    </>
+  )
+}
 
+/** The strongest simpler alternative and the cheap experiment that could change the choice. */
+export function ChallengeAlternative({ challenge }: { challenge: Challenge }) {
+  return (
+    <>
       <section className="evidence-section" aria-labelledby="challenge-alternative-title" data-testid="challenge-alternative">
-        <h4 id="challenge-alternative-title">Strongest simpler alternative</h4>
+        <h5 id="challenge-alternative-title">Strongest simpler alternative</h5>
         <p>{challenge.simpler_alternative}</p>
       </section>
       <section className="evidence-section" aria-labelledby="challenge-experiment-title" data-testid="challenge-experiment">
-        <h4 id="challenge-experiment-title">Cheap experiment that could change the choice</h4>
+        <h5 id="challenge-experiment-title">Cheap experiment that could change the choice</h5>
         <p>{challenge.cheap_experiment}</p>
       </section>
-    </div>
+    </>
   )
 }

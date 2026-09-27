@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
-  fetchReviewResult,
   isBlockingFinding,
   isNotRecorded,
   NOT_RECORDED,
   paths,
-  scopedReviewPath,
   type ReviewFinding,
   type ReviewResult,
   type RunDetail,
@@ -17,10 +15,11 @@ import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
+import { blockingFindings, reviewerTime } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
-import { formatSpan, spanBetween } from './time.ts'
-import { useResource, type Resource } from './useResource.ts'
+import { formatSpan } from './time.ts'
+import type { Resource } from './useResource.ts'
 
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
 type DefinitionNode = RunDetail['definition']['nodes'][number]
@@ -32,7 +31,11 @@ type ReviewerFilter = string | null
 
 type Props = {
   scope: RunScope
-  node: SnapshotNode
+  /** The recorded review as the node page holds it (docs/PRD_VIEWER_UX.md 4.7); idle when nothing is asked for yet. */
+  review: Resource<ReviewResult>
+  onRetry: () => void
+  /** The node's review link when it points outside this run's reviews route (so it was not fetched); null otherwise. */
+  unscopedUri: string | null
   definitionNodes: DefinitionNode[]
   /** Every node's state in the run: the launch nodes' results name the captured files a finding can link to. */
   snapshotNodes: SnapshotNode[]
@@ -44,8 +47,6 @@ type Props = {
   onOpenRequirement: (nodeId: string, quote: string) => void
   /** Opens a captured file's panel on the launch node that shows it (the run view navigates and hands the path over). */
   onOpenFile: (nodeId: string, path: string) => void
-  /** Reports the served review's transport, so the node can say whether its reviewers ran as sessions or print jobs. */
-  onTransport?: (transport: ReviewResult['reviewer']['transport']) => void
 }
 
 const TRANSPORT_WORDING: Record<Reviewer['transport'], string> = {
@@ -83,8 +84,8 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
       data-reviewer={finding.reviewer}
       className={blocking ? 'finding-blocking' : undefined}
     >
-      <td><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
-      <td>
+      <td data-label="Severity"><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
+      <td data-label="Message">
         {finding.message}
         {files.map(([path, nodeId]) => (
           <AppLink
@@ -100,9 +101,9 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
           </AppLink>
         ))}
       </td>
-      <td>{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
-      <td data-testid="finding-reviewer">{finding.reviewer}</td>
-      <td>
+      <td data-label="Worker">{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
+      <td data-label="Reviewer" data-testid="finding-reviewer">{finding.reviewer}</td>
+      <td data-label="Requirement">
         {finding.requirement === null ? '—' : (
           <>
             <q data-testid="finding-requirement">{finding.requirement}</q>
@@ -143,32 +144,49 @@ function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
 }
 
 /**
- * One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason), finding
- * counts by severity, its times and how long it took from launch to its accepted file (only when both were recorded).
+ * How long a reviewer took, from served fields only (docs/PRD_VIEWER_UX.md 4.7): its launch to its accepted file; "launch
+ * time not recorded" when the transport records none; or, launched without a verdict, its launch time. Nothing ticks: a
+ * review serves its reviewers only once decided, so no elapsed time or deadline is shown.
+ */
+function ReviewerTime({ reviewer }: { reviewer: Reviewer }) {
+  const time = reviewerTime(reviewer)
+  if (time === null) return null
+  return (
+    <>
+      {' · '}
+      <span className="reviewer-time" data-testid="reviewer-time" data-kind={time.kind}>
+        {time.kind === 'took' ? <span className="reviewer-duration">took {formatSpan(time.ms)}</span>
+          : time.kind === 'no_launch' ? <>launch time not recorded{time.print ? ' (print)' : ''}{reviewer.accepted_at !== null && <> · verdict <Time iso={reviewer.accepted_at} seconds /></>}</>
+            : <>no verdict · launched <Time iso={time.launchedAt} seconds /></>}
+      </span>
+    </>
+  )
+}
+
+/**
+ * One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason) and how
+ * long it took, then its finding counts by severity and its recorded times.
  */
 function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
   return (
     <section className="evidence-section reviewer-strip" aria-labelledby="review-reviewers-title" data-testid="reviewer-strip" data-count={reviewers.length}>
       <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
       <ul className="evidence-list reviewer-list">
-        {reviewers.map(reviewer => {
-          const took = spanBetween(reviewer.launched_at, reviewer.accepted_at)
-          return (
-            <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
-              <p>
-                <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
-                <ReviewerVerdict verdict={reviewer.verdict} />{' '}
-                <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
-              </p>
-              <p className="projects-muted">
-                <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
-                {reviewer.launched_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
-                {reviewer.accepted_at !== null && <> · file accepted <Time iso={reviewer.accepted_at} seconds /></>}
-                {took !== null && <> · <span className="reviewer-duration">took {formatSpan(took)}</span></>}
-              </p>
-            </li>
-          )
-        })}
+        {reviewers.map(reviewer => (
+          <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+            <p>
+              <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+              <ReviewerVerdict verdict={reviewer.verdict} />{' '}
+              <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
+              <ReviewerTime reviewer={reviewer} />
+            </p>
+            <p className="projects-muted">
+              <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
+              {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
+              {reviewer.accepted_at !== null && <> · file accepted <Time iso={reviewer.accepted_at} seconds /></>}
+            </p>
+          </li>
+        ))}
       </ul>
     </section>
   )
@@ -199,7 +217,7 @@ function reviewerGroups(reviewers: readonly Reviewer[], visible: readonly Review
   ]
 }
 
-function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile, onTransport }: { review: ReviewResult } & Omit<Props, 'node'>) {
+function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: { review: ReviewResult } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri'>) {
   const approved = review.verdict === 'approved'
   const reviewers = review.reviewers
   const several = reviewers.length > 1
@@ -214,8 +232,6 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   const [reviewerFilter, setReviewerFilter] = useState<ReviewerFilter>(null)
   const lanes = runLanes(definitionNodes, inputs)
   const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
-  const transport = review.reviewer.transport
-  useEffect(() => { onTransport?.(transport) }, [onTransport, transport])
   // The filter narrows the union to one reviewer's findings; grouping then applies to what is left.
   const visible = reviewerFilter === null ? review.findings : review.findings.filter(finding => finding.reviewer === reviewerFilter)
   const countFor = (reviewerId: string) => review.findings.filter(finding => finding.reviewer === reviewerId).length
@@ -337,41 +353,73 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   )
 }
 
+/** Where a finding's worker points, said on a blocking card: the lane, several lanes, none, or not recorded. */
+function laneWording(worker: ReviewFinding['worker']): string {
+  if (worker === null) return 'worker not recorded'
+  const words = workerWording(worker)
+  return words === worker ? `lane ${worker}` : words === 'none' ? 'no worker' : words
+}
+
+/**
+ * The findings that block integration, one card each, before the findings table (docs/PRD_VIEWER_UX.md 4.7): severity,
+ * disposition, reviewer and lane, the full message, and the task lines the quoted requirement was found in. The table below
+ * keeps listing them too; a card is not a `finding` row.
+ */
+export function BlockingFindings({ review, scope, definitionNodes, inputs, onOpenRequirement }: { review: ReviewResult } & Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement'>) {
+  return (
+    <ul className="blocking-cards">
+      {blockingFindings(review).map((finding, index) => (
+        <li key={index} className="blocking-card" data-testid="blocking-finding" data-severity={finding.severity} data-reviewer={finding.reviewer}>
+          <p className="blocking-card-head">
+            <span className="finding-severity">{finding.severity}</span> · {finding.disposition} · {finding.reviewer} · {laneWording(finding.worker)}
+          </p>
+          <p className="blocking-card-message">{finding.message}</p>
+          {finding.requirement !== null && finding.requirement_found_in.length > 0 && (
+            <p className="blocking-card-links">
+              {finding.requirement_found_in.map(lane => {
+                const nodeId = launchNodeFor(lane, definitionNodes, inputs)
+                const quote = finding.requirement!
+                return (
+                  <AppLink key={lane} href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)} onNavigate={() => onOpenRequirement(nodeId, quote)} className="blocking-card-link">
+                    Requirement in the {lane} task ›
+                  </AppLink>
+                )
+              })}
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /**
  * The Result section of a review node: the persisted combined verdict, every reviewer's identity and outcome, the bundle,
- * the unioned findings and the diff. A run whose export predates review results (404 REVIEW_NOT_FOUND) is a "not recorded"
- * state, not an error.
+ * the unioned findings and the diff. The node page holds the review (it also counts its findings for the index); this only
+ * renders it. A run whose export predates review results (404 REVIEW_NOT_FOUND) is a "not recorded" state, not an error.
  */
-export function ReviewPanel({ scope, node, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile, onTransport }: Props) {
-  // The snapshot links the recorded review; an older export has no link, so the first attempt is asked for once the node ran.
-  const reviewPath = node.result_uri !== null
-    ? scopedReviewPath(scope, node.result_uri)
-    : node.status === 'pending' ? null : paths.review(scope, Math.max(node.attempt, 1))
-  const unscoped = node.result_uri !== null && reviewPath === null
-  const load = useCallback((signal: AbortSignal) => fetchReviewResult(scope, reviewPath!, signal), [scope, reviewPath])
-  // The fallback path before a review is recorded equals the linked one after, so the key also names what the node shows.
-  const { state, reload } = useResource(reviewPath === null ? null : `${reviewPath}|${node.result_uri ?? node.status}`, load, refreshToken)
+export function ReviewPanel({ scope, review, onRetry, unscopedUri, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: Props) {
   const none = (
     <p className="projects-muted" data-testid="review-none">
       No review recorded for this run: either the review has not happened or the run's export predates review results (re-export it with the workflow CLI).
     </p>
   )
-  if (unscoped) {
+  if (unscopedUri !== null) {
     return (
       <p className="projects-error-inline" role="alert" data-testid="result-unscoped">
-        The review link <code>{node.result_uri}</code> is outside this run's reviews route and was not fetched.
+        The review link <code>{unscopedUri}</code> is outside this run's reviews route and was not fetched.
       </p>
     )
   }
-  if (reviewPath === null) return none
-  if (state.status === 'loading' || state.status === 'idle') return <LoadingPanel>Loading the recorded review…</LoadingPanel>
-  if (state.status === 'error') {
-    if (isNotRecorded(state.error, NOT_RECORDED.review)) return none
-    return <ErrorPanel error={state.error} what="The recorded review" onRetry={reload} />
+  if (review.status === 'idle') return none
+  if (review.status === 'loading') return <LoadingPanel>Loading the recorded review…</LoadingPanel>
+  if (review.status === 'error') {
+    if (isNotRecorded(review.error, NOT_RECORDED.review)) return none
+    return <ErrorPanel error={review.error} what="The recorded review" onRetry={onRetry} />
   }
   return (
     <ReviewResultView
-      review={state.data}
+      review={review.data}
       scope={scope}
       definitionNodes={definitionNodes}
       snapshotNodes={snapshotNodes}
@@ -380,7 +428,6 @@ export function ReviewPanel({ scope, node, definitionNodes, snapshotNodes, input
       onNavigate={onNavigate}
       onOpenRequirement={onOpenRequirement}
       onOpenFile={onOpenFile}
-      onTransport={onTransport}
     />
   )
 }
