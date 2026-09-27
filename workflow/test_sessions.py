@@ -195,6 +195,14 @@ class RunClaudeTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].kwargs["cwd"], "/work")
         self.assertEqual(env, {"TMPDIR": "/tmp/lane"})  # The caller's own mapping is not modified.
 
+    def test_worker_effort_comes_from_the_environment_and_refuses_unknown_levels(self):
+        from .sessions import worker_effort
+        self.assertEqual(worker_effort({}), [])
+        self.assertEqual(worker_effort({"WORKFLOW_WORKER_EFFORT": " "}), [])
+        self.assertEqual(worker_effort({"WORKFLOW_WORKER_EFFORT": "medium"}), ["--effort", "medium"])
+        with self.assertRaisesRegex(ValueError, "not one of low, medium, high, xhigh, max"):
+            worker_effort({"WORKFLOW_WORKER_EFFORT": "med"})
+
     def test_a_background_session_gets_the_same_setting_in_its_arguments(self):
         # `claude --bg` only hands its session to the background service, which starts it with the service's own
         # environment: the helper's DISABLE_AUTOUPDATER never reaches it. The helper's arguments do, as --settings.

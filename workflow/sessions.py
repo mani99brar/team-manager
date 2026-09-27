@@ -249,6 +249,25 @@ def background_settings() -> list[str]:
     return ["--settings", json.dumps({"env": AUTOUPDATER_OFF})]
 
 
+WORKER_EFFORT_ENV = "WORKFLOW_WORKER_EFFORT"
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def worker_effort(env=None) -> list[str]:
+    """`--effort <level>` for worker sessions only, from WORKFLOW_WORKER_EFFORT in the controller's environment.
+
+    Unset or empty leaves the effort to Claude Code's settings. The challenge and the reviewers never take it: the
+    operator chooses a cheaper effort for implementation without weakening the checks on it. An unknown level is
+    refused (preflight calls this too, so a typo fails before any agent starts).
+    """
+    level = (os.environ if env is None else env).get(WORKER_EFFORT_ENV, "").strip()
+    if not level:
+        return []
+    if level not in EFFORT_LEVELS:
+        raise ValueError(f"{WORKER_EFFORT_ENV}={level!r} is not one of {', '.join(EFFORT_LEVELS)}")
+    return ["--effort", level]
+
+
 def wait_out_update(start, grace: float, sleep=None, retry_output=None):
     """`start()` (it runs or starts one `claude` command), repeated while a Claude Code update is in progress.
 
