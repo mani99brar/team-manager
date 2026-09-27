@@ -1,6 +1,8 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { LaneLine, Now, Text, TextPart } from '../../contracts/projects/triage.ts'
 import { CommandBlock } from './CommandBlock.tsx'
+import { servedNow } from './lists.ts'
+import { useServedRun } from './LiveStatus.tsx'
 import { AppLink } from './panels.tsx'
 import { withoutGlyph } from './steps.ts'
 import { Time } from './Time.tsx'
@@ -58,10 +60,14 @@ type Props = {
 
 /**
  * The Now banner (docs/PRD_VIEWER_UX.md 4.2, 6.2): where the run is or stopped, why, since when, and what to type next,
- * derived from the run's current state only (`deriveNow`). `data-situation` names the matched rule. It is not a live
- * region: the page announces only a change of situation.
+ * derived from the run's current state only (`deriveNow`). `data-situation` names the matched rule. What the server reads
+ * live wins over the export (6.4, S6): a question the live `<lane>.questions.json` answered or asked since the export, and
+ * a controller read not running for 15 s (rule 5 case c). It is not a live region: the page announces only a change of
+ * situation.
  */
-export function NowBanner({ now, clock, focusHref, onNavigate }: Props) {
+export function NowBanner({ now: exported, clock, focusHref, onNavigate }: Props) {
+  const served = useServedRun()
+  const now = useMemo(() => (exported === null ? null : servedNow(exported, served)), [exported, served])
   if (now === null) {
     return (
       <section className="run-now run-now-loading" data-testid="run-now" aria-busy="true" aria-labelledby="run-now-title">
@@ -70,8 +76,10 @@ export function NowBanner({ now, clock, focusHref, onNavigate }: Props) {
       </section>
     )
   }
-  const open = now.focus && focusHref
-    ? <AppLink href={focusHref} onNavigate={onNavigate} className="run-now-open">Open {now.focus.label} ›</AppLink>
+  // The focus page's link names the node its last segment ends in (`/nodes/<n>`); a served situation can move the focus.
+  const href = now.focus && focusHref ? focusHref.replace(/[^/]+$/, encodeURIComponent(now.focus.node_id)) : null
+  const open = now.focus && href
+    ? <AppLink href={href} onNavigate={onNavigate} className="run-now-open">Open {now.focus.label} ›</AppLink>
     : null
   return (
     <section className={`run-now run-now-${now.tone}`} data-testid="run-now" data-situation={now.situation} aria-labelledby="run-now-title">

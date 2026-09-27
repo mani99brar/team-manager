@@ -146,6 +146,8 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
   await expect(runList.locator(`[data-run-id="${RUN_BLOCKED}"]`)).toHaveAttribute('data-status', 'failed')
   await expect(runList.locator(`[data-run-id="${RUN_LEGACY}"]`)).toHaveAttribute('data-status', 'succeeded')
   await expect(page.getByTestId('current-definition')).toContainText('9 nodes')
+  // The current definition is folded away while the workflow has runs (docs/PRD_VIEWER_UX.md 12.3, S6): open it first.
+  await page.getByTestId('current-definition').locator('summary').click()
   await expect(page.getByRole('group', { name: `Current definition graph of ${WORKFLOW_NAME}` }).locator('[data-graph-node="verify_ui"]')).toHaveAttribute('aria-label', new RegExp(`^${CURRENT_LABEL}, verification`))
 
   // The succeeded run was started under an older definition and is rendered against that pinned graph.

@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
-import { describeApiError, fetchProjects, fetchRunDetail, fetchRuns, fetchWorkflows, ProjectsApiError, type RunPage, type RunSummary } from './api.ts'
-import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
+import type { ControllerReading } from '../../contracts/projects/triage.ts'
+import {
+  describeApiError, fetchProjects, fetchRegistryRuns, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
+  type RunPage, type RunSummary,
+} from './api.ts'
+import { latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, workflowTitle, type ServedRun } from './lists.ts'
+import './lists.css'
+import { ServedRunContext } from './LiveStatus.tsx'
+import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
+import { RunRow } from './RunRow.tsx'
+import { ProjectRunGroups, RunsHome } from './RunsHome.tsx'
 import { RunView } from './RunView.tsx'
-import { shortRevision, workflowTitle } from './status.ts'
+import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
-import { TimeReferenceContext } from './useNow.ts'
+import { TimeReferenceContext, useNow } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
@@ -58,8 +67,42 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
   useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
 
+  // The lists (docs/PRD_VIEWER_UX.md 4.1) read run lists only, never a run detail, and re-read them every 15 s. Runs home
+  // reads every project's workflows and each workflow's run pages back to the Recent cutoff; the project page reads the
+  // first page of each of its workflows.
+  const listClock = useNow(route?.level === 'projects' || route?.level === 'project' || route?.level === 'workflow', LISTS_POLL_MS)
+  const projectsData = projects.status === 'ready' ? projects.data : null
+  const homePoll = usePoll(route?.level === 'projects', LISTS_POLL_MS)
+  const loadHome = useCallback((signal: AbortSignal) => {
+    const cutoff = Date.now() - RECENT_WINDOW_MS
+    return fetchRegistryRuns(projectsData ?? [], (runs, cursor) => readsNextPage(runs, cursor, cutoff), signal)
+  }, [projectsData])
+  const homeKey = route?.level === 'projects' && projectsData !== null ? `home:${projectsData.map(project => project.project_id).join('\u0000')}` : null
+  const { state: homeRuns, meta: homeMeta } = useResource(homeKey, loadHome, refreshToken, homePoll)
+  const workflowsData = workflows.status === 'ready' ? workflows.data : null
+  const projectRunsPoll = usePoll(route?.level === 'project', LISTS_POLL_MS)
+  const loadProjectRuns = useCallback((signal: AbortSignal) => fetchWorkflowRuns(projectId!, workflowsData ?? [], () => false, signal), [projectId, workflowsData])
+  const projectRunsKey = route?.level === 'project' && workflowsData !== null ? `project-runs:${projectId}:${workflowsData.map(workflow => workflow.workflow_id).join('\u0000')}` : null
+  const { state: projectRuns, meta: projectRunsMeta } = useResource(projectRunsKey, loadProjectRuns, refreshToken, projectRunsPoll)
+
+  // What the run page reads beyond its export (B2, B3): the served activity and run directory, and the controller reading of
+  // every poll, so the live chip and the Now banner believe `not_running` only once it has held for 15 s (6.3).
+  const runKey = scope === null ? null : `${scope.projectId}/${scope.workflowId}/${scope.runId}`
+  const detailData = detail.status === 'ready' ? detail.data : null
+  const controllerValue = detailData?.summary.activity?.controller ?? null
+  const [readings, setReadings] = useState<{ key: string | null; list: ControllerReading[] }>({ key: null, list: [] })
+  useEffect(() => {
+    if (runKey === null || detailMeta.settledAt === null) return
+    const reading: ControllerReading = { at: new Date(detailMeta.settledAt).toISOString(), value: controllerValue }
+    setReadings(previous => ({ key: runKey, list: recordReading(previous.key === runKey ? previous.list : [], reading) }))
+  }, [runKey, detailMeta.settledAt, controllerValue])
+  const controllerReadings = readings.key === runKey ? readings.list : null
+  const served: ServedRun | null = useMemo(() => (detailData === null ? null : {
+    detail: detailData, activity: detailData.summary.activity ?? null, runDir: detailData.run_dir ?? null, controller: controllerReadings ?? [],
+  }), [detailData, controllerReadings])
+
   // A Refresh re-reads every shown level in the background; the header button stays busy until they have all settled.
-  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing
+  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing || homeMeta.refreshing || projectRunsMeta.refreshing
   useEffect(() => { onRefreshingChange(refreshing) }, [refreshing, onRefreshingChange])
   useEffect(() => () => onRefreshingChange(false), [onRefreshingChange])
   // A failed Refresh keeps the page as it was, so it says so until a later load of that level succeeds.
@@ -85,8 +128,11 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
 
   const projectName = projects.status === 'ready' && projectId !== null ? projects.data.find(project => project.project_id === projectId)?.name ?? projectId : projectId
   const currentWorkflow = workflows.status === 'ready' && workflowId !== null ? workflows.data.find(workflow => workflow.workflow_id === workflowId) ?? null : null
-  // The workflow title rule (docs/PRD_VIEWER_UX.md 4.1): a workflow under the exporter's generic name is named by its id.
-  const workflowName = currentWorkflow ? workflowTitle(currentWorkflow) : workflowId
+  const labels = useMemo(() => new Map((currentWorkflow?.nodes ?? []).map(node => [node.node_id, node.label])), [currentWorkflow])
+  // The workflow title rule (docs/PRD_VIEWER_UX.md 4.1): a workflow under the exporter's generic name is named by its latest
+  // run's feature, else by its id. A run page names it by its own run's feature, the only run it reads.
+  const titleFeature = route?.level === 'run' ? detailData?.summary.activity?.feature ?? null : latestFeature(runs)
+  const workflowName = currentWorkflow ? workflowTitle(currentWorkflow, titleFeature) : workflowId
 
   // A background poll re-announces only what changed; a load the reader started (navigation, Refresh) always announces.
   // A Refresh announces that it started and then its outcome, even when the page did not change.
@@ -154,23 +200,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else {
-      content = (
-        <section aria-labelledby="projects-title">
-          <h2 id="projects-title">Projects</h2>
-          <ul className="projects-list" data-testid="projects-list">
-            {projects.data.map(project => (
-              <li key={project.project_id}>
-                <AppLink href={projectPathname(project.project_id)} onNavigate={onNavigate} className="projects-card">
-                  <span className="projects-card-title">{project.name}</span>
-                  <span className="projects-muted">{project.project_id}</span>
-                </AppLink>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )
-    }
+    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} onNavigate={onNavigate} />
   } else if (route.level === 'project') {
     if (workflows.status === 'loading' || workflows.status === 'idle') content = <LoadingPanel>Loading workflows of {projectName}…</LoadingPanel>
     else if (workflows.status === 'error' && notFound(workflows.error)) {
@@ -190,17 +220,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     } else {
       content = (
         <section aria-labelledby="workflows-title">
-          <h2 id="workflows-title">{projectName}: workflows</h2>
-          <ul className="projects-list" data-testid="workflows-list">
-            {workflows.data.map(workflow => (
-              <li key={workflow.workflow_id}>
-                <AppLink href={workflowPathname(route.projectId, workflow.workflow_id)} onNavigate={onNavigate} className="projects-card">
-                  <span className="projects-card-title">{workflowTitle(workflow)}</span>
-                  <span className="projects-muted">{workflow.workflow_id} · {workflow.nodes.length} {workflow.nodes.length === 1 ? 'node' : 'nodes'} · current revision {shortRevision(workflow.definition_revision)}</span>
-                </AppLink>
-              </li>
-            ))}
-          </ul>
+          <h2 id="workflows-title">{projectName}: features</h2>
+          <ProjectRunGroups projectId={route.projectId} workflows={workflows.data} runs={projectRuns} now={listClock} onNavigate={onNavigate} />
         </section>
       )
     }
@@ -227,14 +248,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 <p>The workflow definition exists (see its current graph below) but it has never been run, or its runs are stored elsewhere. Runs are started from the workflow CLI.</p>
               </EmptyPanel>
             ) : (
-              <ul className="projects-list run-list" data-testid="run-list">
+              <ul className="run-rows run-list" data-testid="run-list">
                 {runs.map(run => (
-                  <li key={run.run_id} data-run-id={run.run_id} data-status={run.status}>
-                    <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate} className="projects-card">
-                      <span className="projects-card-title">{run.run_id} <StatusBadge status={run.status} explain /></span>
-                      <span className="projects-muted">updated <Time iso={run.updated_at} /> · created <Time iso={run.created_at} /> · pinned revision {shortRevision(run.definition_revision)}</span>
-                    </AppLink>
-                  </li>
+                  <RunRow key={run.run_id} run={run} labels={labels} now={listClock} onNavigate={onNavigate} href={runPathname(route.projectId, route.workflowId, run.run_id)} />
                 ))}
               </ul>
             )}
@@ -247,16 +263,20 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             )}
             {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={() => void loadMore()} />}
           </section>
-          <section aria-labelledby="definition-title" className="workflow-definition">
-            <h3 id="definition-title">Current definition</h3>
+          <section aria-label="Current definition" className="workflow-definition">
             {workflows.status === 'loading' && <LoadingPanel>Loading the current definition…</LoadingPanel>}
             {workflows.status === 'error' && <ErrorPanel error={workflows.error} what="The current definition" onRetry={reloadWorkflows} />}
             {workflows.status === 'ready' && currentWorkflow === null && <p className="projects-error-inline" role="alert">The workflow list does not contain “{route.workflowId}”, so its current definition cannot be shown.</p>}
             {currentWorkflow && (
-              <>
-                <p className="projects-muted" data-testid="current-definition">{currentWorkflow.name} · revision <code>{shortRevision(currentWorkflow.definition_revision)}</code> · {currentWorkflow.nodes.length} nodes. Runs started before a definition change keep their own pinned graph.</p>
+              // Folded away below the runs while there are any (docs/PRD_VIEWER_UX.md 4.1); open when the workflow never ran.
+              <details className="lists-definition" data-testid="current-definition" open={runs.length === 0}>
+                <summary>
+                  <h3 id="definition-title">Current definition</h3>
+                  <span className="projects-muted">{currentWorkflow.name} · revision <code>{shortRevision(currentWorkflow.definition_revision)}</code> · {currentWorkflow.nodes.length} nodes</span>
+                </summary>
+                <p className="projects-muted">Runs started before a definition change keep their own pinned graph.</p>
                 <WorkflowGraph title={`Current definition graph of ${currentWorkflow.name}`} nodes={currentWorkflow.nodes} selectedId={null} />
-              </>
+              </details>
             )}
           </section>
         </div>
@@ -281,6 +301,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       // itself (the Created fact) is read against today, so the page names the day its run started.
       content = (
         <TimeReferenceContext value={detail.data.summary.created_at}>
+          <ServedRunContext value={served}>
           <RunView
             key={`${route.projectId}/${route.workflowId}/${route.runId}`}
             scope={scope!}
@@ -295,6 +316,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             onNavigate={onNavigate}
             onAnnounce={onAnnounce}
           />
+          </ServedRunContext>
         </TimeReferenceContext>
       )
     }

@@ -15,6 +15,7 @@ import {
   type Project,
   type ReviewFinding,
   type ReviewResult,
+  type RunActivity,
   type RunDetail,
   type RunInputs,
   type RunInputWorker,
@@ -23,7 +24,7 @@ import {
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
-export type { Project, ReviewFinding, ReviewResult, RunDetail, RunInputs, RunInputWorker, RunSummary, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, WorkflowDefinition, WorkerResult, WorkflowEvent }
 export { isBlockingFinding }
 
 /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
@@ -140,6 +141,53 @@ export function fetchRuns(projectId: string, workflowId: string, options: { curs
     }
     return { runs: page.runs, nextCursor: page.next_cursor }
   }, signal)
+}
+
+/** One workflow's runs as a list shows them: the pages read, whether more exist, or why they could not be read. */
+export type WorkflowRuns = { workflow: WorkflowDefinition; runs: RunSummary[]; more: boolean; error: unknown }
+/** One project's workflows with their runs, or why its workflows could not be read. */
+export type ProjectRuns = { project: Project; workflows: WorkflowRuns[]; error: unknown }
+
+/** Whether a list reads the next page of a workflow's runs, given the runs read so far and the next cursor. */
+export type ReadsNextPage = (runs: readonly RunSummary[], nextCursor: string | null) => boolean
+
+/**
+ * The runs of each workflow, read from the run lists only (never a run detail): the first page, then further pages while
+ * `more` says so. A workflow whose runs cannot be read keeps its error beside the others' runs; an aborted load rejects.
+ */
+export async function fetchWorkflowRuns(projectId: string, workflows: readonly WorkflowDefinition[], more: ReadsNextPage, signal?: AbortSignal): Promise<WorkflowRuns[]> {
+  return Promise.all(workflows.map(async (workflow): Promise<WorkflowRuns> => {
+    const runs: RunSummary[] = []
+    let next: string | null = null
+    try {
+      do {
+        const page: RunPage = await fetchRuns(projectId, workflow.workflow_id, { cursor: next }, signal)
+        runs.push(...page.runs)
+        next = page.nextCursor
+      } while (next !== null && more(runs, next))
+      return { workflow, runs, more: next !== null, error: null }
+    } catch (error) {
+      if (signal?.aborted) throw error
+      return { workflow, runs, more: next !== null, error }
+    }
+  }))
+}
+
+/**
+ * Runs home's rows across the registry (docs/PRD_VIEWER_UX.md 4.1): each project's workflows, then each workflow's run
+ * pages while `more` says so. Requests: one workflow list per project and at least one run page per workflow, in parallel.
+ */
+export async function fetchRegistryRuns(projects: readonly Project[], more: ReadsNextPage, signal?: AbortSignal): Promise<ProjectRuns[]> {
+  return Promise.all(projects.map(async (project): Promise<ProjectRuns> => {
+    let workflows: WorkflowDefinition[]
+    try {
+      workflows = await fetchWorkflows(project.project_id, signal)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      return { project, workflows: [], error }
+    }
+    return { project, workflows: await fetchWorkflowRuns(project.project_id, workflows, more, signal), error: null }
+  }))
 }
 
 export function fetchRunDetail(scope: RunScope, signal?: AbortSignal): Promise<RunDetail> {

@@ -1,0 +1,51 @@
+/* Run lists (docs/PRD_VIEWER_UX.md 4.1, 6.3, 6.4): Runs home, the project page's feature groups and the feature page's rows. */
+.runs-home { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
+.runs-home-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.runs-home-head h2 { margin: 0; }
+.lists-section { display: flex; flex-direction: column; gap: 6px; }
+.lists-section-title { margin: 0; font-size: 0.85rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+.lists-count, .lists-note { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.lists-empty { margin: 0; }
+.lists-errors { border: 1px solid var(--warn-border, #c99a2e); background: var(--warn-bg, #fff4d6); color: var(--warn-text, #5c4100); border-radius: 8px; padding: 8px 12px; }
+.lists-errors p, .lists-errors ul { margin: 0; }
+
+/* One row: a single link, the whole row its tap target. Wide: the id, its names and status on the left, the time on the right, the summary under them. */
+.run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.run-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: baseline; min-height: 44px; box-sizing: border-box;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); text-decoration: none; overflow-wrap: anywhere;
+}
+.run-row:hover { background: var(--surface-alt); }
+.run-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.run-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
+.run-row-glyph { width: 1.1em; text-align: center; color: var(--text-muted); }
+.run-row-id { font-weight: 600; }
+.run-row-context { color: var(--text-muted); }
+.run-row-when { color: var(--text-muted); font-size: 0.9rem; text-align: right; white-space: nowrap; }
+.run-row-span { font-variant-numeric: tabular-nums; color: var(--text); }
+.run-row-detail { grid-column: 1 / -1; color: var(--text-muted); font-size: 0.9rem; padding-left: calc(1.1em + 8px); }
+.run-row[data-status="failed"] .run-row-glyph { color: var(--node-directory-stroke, #b3261e); }
+.run-row[data-status="succeeded"] .run-row-glyph { color: var(--node-location-stroke, #2f7a4b); }
+/* Waiting on the operator: an amber ring and a `?`; the status stays what it is. */
+.run-row[data-attention] { border-color: var(--attention, #b86e00); box-shadow: inset 3px 0 0 var(--attention, #b86e00); }
+.run-row[data-attention] .run-row-glyph { color: var(--attention, #b86e00); font-weight: 700; }
+.run-row[data-attention] .run-row-detail { color: var(--warn-text, #5c4100); }
+
+/* The project page: one group per feature, its header linking to the feature's runs. */
+.lists-groups { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
+.lists-group { display: flex; flex-direction: column; gap: 6px; }
+.lists-group-head { background: var(--surface-alt); }
+.runs-home-projects .lists-project-card { min-height: 44px; }
+
+/* The feature page: the current definition folded away below its runs. */
+.lists-definition > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lists-definition > summary h3 { display: inline; margin: 0; font-size: 1rem; }
+
+/* The live chip's controller suffix (6.3): amber once the controller has read not running for 15 s. */
+.live-status-controller-down { color: var(--warn-text, #5c4100); font-weight: 600; }
+
+@media (max-width: 760px) {
+  /* Three short lines: id and status, then the time, then the summary. */
+  .run-row { grid-template-columns: minmax(0, 1fr); }
+  .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
+}
