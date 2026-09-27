@@ -44,6 +44,8 @@
 .challenge-headline-paused { color: var(--danger-text); }
 .challenge-facts > summary { cursor: pointer; font-size: 0.9rem; color: var(--text-muted); }
 .challenge-concern-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+/* Grid items default to min-width: auto, so a closed note's nowrap summary would widen the column instead of ellipsizing. */
+.challenge-concern-list > li { min-width: 0; }
 .challenge-concern { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; min-width: 0; }
 .challenge-concern > summary { cursor: pointer; overflow-wrap: anywhere; }
 .challenge-concern > p { margin: 4px 0 0; overflow-wrap: anywhere; }
