@@ -1,0 +1,27 @@
+{
+  "version": "2.2.0",
+  "name": "Viewer UX step 5 (PRD_VIEWER_UX slices S4c and S6): review, challenge and controller panels; Runs home and run lists with served activity",
+  "branch_prefix": "feature/viewer-ux-panels-lists",
+  "policy": "policy.json",
+  "prd": "docs/PRD_VIEWER_UX.md",
+  "workers": [
+    {
+      "node_id": "panels",
+      "task": "panels-task.md"
+    },
+    {
+      "node_id": "lists",
+      "task": "lists-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ]
+}

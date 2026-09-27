@@ -1,0 +1,184 @@
+{
+  "version": "1.2.0",
+  "feature": "Viewer UX step 5: review/challenge/controller panels and run lists",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "panels",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/node/ReviewSections.tsx",
+        "src/projects/node/ChallengeSections.tsx",
+        "src/projects/node/ControllerSections.tsx",
+        "src/projects/node/review.css",
+        "src/projects/node/controller.css",
+        "src/projects/node/panels.ts",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/Challenge.tsx",
+        "tests/project-workflows/fixtures/ux-review.ts",
+        "tests/project-workflows/ux-review.spec.ts",
+        "tests/unit/panels.test.ts",
+        "docs/handoff/ux-s4c.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1200,
+          "scenarios": [
+            {
+              "id": "review-blocking-first",
+              "description": "On a review node the blocking finding card comes before the findings table; reviewer rows show durations, a running native reviewer shows elapsed time and a \u2248 deadline from launched_at plus the review timeout, a print reviewer says 'launch time not recorded'; at 390 px the findings are cards with no horizontal overflow"
+            },
+            {
+              "id": "challenge-headline",
+              "description": "The challenge node opens with one headline (outcome, attempt, notes count, decided time, total span), an attempt strip, P0/P1 concerns open and P2 concerns one line each; a paused challenge shows the P1 in full with the resume and --accept-challenge commands"
+            },
+            {
+              "id": "controller-panels",
+              "description": "Handoff shows the wait from the latest launch start to freeze taken from receipts; an approval with no event shows \u2248 and 'no approval event recorded'; integrate names the fast-forwarded branch and commit and 'no push performed'; a manual run awaiting approval shows the approve command with the bundle hash"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "lists",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/RunsHome.tsx",
+        "src/projects/RunRow.tsx",
+        "src/projects/lists.css",
+        "src/projects/lists.ts",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/api.ts",
+        "src/projects/NowBanner.tsx",
+        "src/projects/CommandBlock.tsx",
+        "src/projects/LiveStatus.tsx",
+        "tests/project-workflows/fixtures/ux-lists.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/unit/lists.test.ts",
+        "docs/handoff/ux-s6.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1200,
+          "scenarios": [
+            {
+              "id": "runs-home",
+              "description": "/projects lists Needs you, Running and Recent across all projects, grouped by activity.attention.kind (question, pane, approval) and status, with compact project cards; titles follow the workflow title rule; each row is one link in an li whose accessible name starts with the run id; the project page groups rows by feature; the feature page keeps run-list li rows and moves Current definition into a closed details"
+            },
+            {
+              "id": "served-activity",
+              "description": "The lists and run page read the served activity: a live <lane>.questions.json answered state in the candidate phase, the RUN= line in copied commands when run_dir is served (worker-phase mocks; the candidate phase asserts it absent), and the live chip's controller suffix: 'controller running', and 'controller not running' only after not_running holds for 15 s (clock mocked)"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "version": "1.2.0",
+  "feature": "Viewer UX step 6: depth",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "depth",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/Assignment.tsx",
+        "src/projects/node/ReviewSections.tsx",
+        "src/projects/node/review.css",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/CreatedFiles.tsx",
+        "src/projects/Checks.tsx",
+        "src/projects/assignment.css",
+        "src/projects/diff.ts",
+        "tests/project-workflows/fixtures/ux-depth.ts",
+        "tests/project-workflows/ux-depth.spec.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/inputs.spec.ts",
+        "tests/project-workflows/reviewers.spec.ts",
+        "tests/unit/diff.test.ts",
+        "tests/unit/assignment.test.ts",
+        "docs/handoff/ux-s7.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1200,
+          "scenarios": [
+            {
+              "id": "assignment-summary-first",
+              "description": "The Assignment tab opens with one summary line (feature, branch, mode, deadlines, reviewer transport, attempt cap), then a lanes table (lane, role, required check kinds, owned-path count, link to the lane's task), decisions.md collapsed with a heading outline, setup commands, and per lane the rendered task with the ownership JSON folded into a details; every existing assignment-* test id and inputs.spec.ts string stays"
+            },
+            {
+              "id": "review-diff-inline",
+              "description": "The review node's Diff section lists files with A/M/D marks and +/- counts from review.diff, each collapsed and showing its hunks inline when opened; changed files on the launch node carry the same marks when a review exists; the raw patch link stays"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

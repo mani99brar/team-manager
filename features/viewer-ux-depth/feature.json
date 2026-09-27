@@ -1,0 +1,23 @@
+{
+  "version": "2.2.0",
+  "name": "Viewer UX step 6 (PRD_VIEWER_UX slice S7): Assignment reorder and the review diff inline",
+  "branch_prefix": "feature/viewer-ux-depth",
+  "policy": "policy.json",
+  "prd": "docs/PRD_VIEWER_UX.md",
+  "workers": [
+    {
+      "node_id": "depth",
+      "task": "depth-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ]
+}
