@@ -1,0 +1,158 @@
+{
+  "version": "1.2.0",
+  "feature": "Review sidecar: controller passes, ledger and message delivery; served ledger and the sidecar node page",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "docs/handoff/sidecar-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts/projects",
+        "src/projects",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/handoff/sidecar-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "sidecar-node",
+              "description": "The sidecar node page shows one headline with the pass, open-finding, message and last-pass counts; Open findings (P0/P1 first) before the closed Resolved list; each open card names lane, file:locator, revision, evidence and remedy; messages carry delivered, undeliverable (with reason) and refused (with reason) chips; the passes table has a failed and a timed_out row; the handoff lists; History last; no execution controls; at 390 px no horizontal overflow"
+            },
+            {
+              "id": "sidecar-live",
+              "description": "Worker phase: when the mocked ledger moves a finding to verified_resolved, the page shows it under Resolved within one poll without a reload (page.clock); candidate phase: a seeded run whose live sidecar.ledger.json is newer than its export shows the live counts and source live"
+            },
+            {
+              "id": "sidecar-run",
+              "description": "The run page graph has the sidecar node in the launch column with the agent outline and the legend keeps its three entries; the Steps table has the sidecar row with its span; with the sidecar and two lanes running the Now banner names a lane, not the sidecar, and the run headline equals the matching no-sidecar fixture's; a run without a sidecar has no such node and its sidecar route shows not recorded"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

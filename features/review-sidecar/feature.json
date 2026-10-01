@@ -1,0 +1,27 @@
+{
+  "version": "2.2.0",
+  "name": "Review sidecar (PRD_REVIEW_SIDECAR): an independent senior-engineering reviewer that observes the lanes during the work phase, with its ledger in the Projects viewer",
+  "branch_prefix": "feature/review-sidecar",
+  "policy": "policy.json",
+  "prd": "docs/PRD_REVIEW_SIDECAR.md",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ]
+}
