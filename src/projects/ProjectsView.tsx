@@ -6,6 +6,7 @@ import {
   type RunPage, type RunSummary,
 } from './api.ts'
 import { latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, workflowTitle, type ServedRun } from './lists.ts'
+import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'

@@ -1,0 +1,75 @@
+/* Projects viewer tokens (docs/PRD_VIEWER_REVAMP.md section 4). Two looks: Calm on :root, Bold on :root[data-look="bold"]; each with a dark variant. Components take every colour from these tokens; state colours (ok, run, warn, fail, pause, idle) and severities (p0, p1, p2) are separate from the accent. */
+:root {
+  --bg: #f4f6f9; --surface: #ffffff; --surface-2: #eceff4; --fg: #1b2130; --muted: #5d6675; --border: #dde2ea; --border-strong: #c4ccd8;
+  --accent: #3454d1; --accent-fg: #ffffff; --accent-soft: #e6ebfb;
+  --ok: #1f7a46; --ok-soft: #dff3e6; --run: #2458d6; --run-soft: #e2eafc; --warn: #b65c0c; --warn-soft: #fdebd6; --fail: #b4232c; --fail-soft: #fbe1e3; --pause: #8a5a00; --pause-soft: #fff1cc; --idle: #6b7280; --idle-soft: #e9ebef;
+  --p0: #b4232c; --p1: #c2410c; --p2: #5d6675;
+  --font-display: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --radius: 6px; --shadow: 0 1px 2px rgba(20, 30, 50, 0.06); --band: transparent; --band-fg: var(--fg);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
+    --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
+    --ok: #4fc47f; --ok-soft: #173424; --run: #6d9bff; --run-soft: #1a2746; --warn: #f0a04b; --warn-soft: #3d2a12; --fail: #ff7b84; --fail-soft: #45191d; --pause: #e4b93d; --pause-soft: #3b3113; --idle: #9aa4b5; --idle-soft: #2a3140;
+    --p0: #ff7b84; --p1: #f0a04b; --p2: #9aa4b5; --shadow: none; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
+  --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
+  --ok: #4fc47f; --ok-soft: #173424; --run: #6d9bff; --run-soft: #1a2746; --warn: #f0a04b; --warn-soft: #3d2a12; --fail: #ff7b84; --fail-soft: #45191d; --pause: #e4b93d; --pause-soft: #3b3113; --idle: #9aa4b5; --idle-soft: #2a3140;
+  --p0: #ff7b84; --p1: #f0a04b; --p2: #9aa4b5; --shadow: none; color-scheme: dark;
+}
+
+/* Bold: warm paper, a navy band for section headers, coral accent, tinted cards, a display face. */
+:root[data-look="bold"] {
+  --bg: #f7f3ec; --surface: #fffdf9; --surface-2: #efe9df; --fg: #171c2e; --muted: #5a5f70; --border: #e2dacc; --border-strong: #c9bfa9;
+  --accent: #e8582b; --accent-fg: #ffffff; --accent-soft: #fde3d8;
+  --ok: #138a5a; --ok-soft: #d4f2e4; --run: #1d6fe8; --run-soft: #d9e7fd; --warn: #d9780f; --warn-soft: #fde7c6; --fail: #d22f3d; --fail-soft: #fcdada; --pause: #a86b00; --pause-soft: #fff0b8; --idle: #6e7384; --idle-soft: #e9e4d9;
+  --font-display: "Sora", "Manrope", system-ui, sans-serif; --font-body: "Manrope", "Segoe UI", system-ui, sans-serif; --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --radius: 12px; --shadow: 0 6px 20px rgba(60, 40, 10, 0.08); --band: #14213d; --band-fg: #f7f3ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-look="bold"]:not([data-theme="light"]) {
+    --bg: #15131a; --surface: #1f1c26; --surface-2: #2a2634; --fg: #f1ecf4; --muted: #a79fb3; --border: #342f40; --border-strong: #4a4458;
+    --accent: #ff7a4d; --accent-fg: #1a0d08; --accent-soft: #46261b;
+    --ok: #4fd38f; --ok-soft: #173b2a; --run: #74a7ff; --run-soft: #1f2d4f; --warn: #ffb152; --warn-soft: #432d10; --fail: #ff7d88; --fail-soft: #4a1c22; --pause: #ffd166; --pause-soft: #41350f; --idle: #a79fb3; --idle-soft: #2e2938;
+    --band: #0d1630; --band-fg: #f1ecf4; --shadow: none;
+  }
+}
+:root[data-look="bold"][data-theme="dark"] {
+  --bg: #15131a; --surface: #1f1c26; --surface-2: #2a2634; --fg: #f1ecf4; --muted: #a79fb3; --border: #342f40; --border-strong: #4a4458;
+  --accent: #ff7a4d; --accent-fg: #1a0d08; --accent-soft: #46261b;
+  --ok: #4fd38f; --ok-soft: #173b2a; --run: #74a7ff; --run-soft: #1f2d4f; --warn: #ffb152; --warn-soft: #432d10; --fail: #ff7d88; --fail-soft: #4a1c22; --pause: #ffd166; --pause-soft: #41350f; --idle: #a79fb3; --idle-soft: #2e2938;
+  --band: #0d1630; --band-fg: #f1ecf4; --shadow: none;
+}
+
+/* Shared primitives (src/projects/ui). Tone classes: .tone-ok .tone-run .tone-warn .tone-fail .tone-pause .tone-idle; severities: .sev-p0 .sev-p1 .sev-p2. */
+.ui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }
+.ui-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ui-chip.plain::before { display: none; }
+.ui-chip.tone-ok { background: var(--ok-soft); color: var(--ok); } .ui-chip.tone-run { background: var(--run-soft); color: var(--run); } .ui-chip.tone-warn { background: var(--warn-soft); color: var(--warn); } .ui-chip.tone-fail { background: var(--fail-soft); color: var(--fail); } .ui-chip.tone-pause { background: var(--pause-soft); color: var(--pause); }
+@media (prefers-reduced-motion: no-preference) { .ui-chip.tone-run.live::before { animation: ui-pulse 1.6s infinite; } @keyframes ui-pulse { 50% { opacity: 0.35; } } }
+.ui-sev { display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; color: #fff; background: var(--p2); }
+.ui-sev.sev-p0 { background: var(--p0); } .ui-sev.sev-p1 { background: var(--p1); }
+.ui-card { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ui-card.tone-ok { border-left-color: var(--ok); } .ui-card.tone-run { border-left-color: var(--run); } .ui-card.tone-warn { border-left-color: var(--warn); } .ui-card.tone-fail { border-left-color: var(--fail); } .ui-card.tone-pause { border-left-color: var(--pause); }
+:root[data-look="bold"] .ui-card.tone-warn { background: var(--warn-soft); } :root[data-look="bold"] .ui-card.tone-fail { background: var(--fail-soft); } :root[data-look="bold"] .ui-card.tone-run { background: var(--run-soft); } :root[data-look="bold"] .ui-card.tone-pause { background: var(--pause-soft); }
+.ui-section { display: flex; flex-direction: column; gap: 10px; }
+.ui-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.ui-section-header h2 { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.ui-section-header .ui-sub { color: var(--muted); font-size: 13px; }
+.ui-section-header .ui-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+:root[data-look="bold"] .ui-section-header { background: var(--band); color: var(--band-fg); padding: 8px 14px; border-radius: var(--radius); }
+:root[data-look="bold"] .ui-section-header h2 { color: var(--band-fg); letter-spacing: 0; text-transform: none; font-size: 15px; }
+:root[data-look="bold"] .ui-section-header .ui-sub { color: var(--band-fg); opacity: 0.8; }
+.ui-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.ui-figure { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 2px; box-shadow: var(--shadow); }
+.ui-figure .ui-figure-value { font-family: var(--font-display); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.ui-figure .ui-figure-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.ui-figure.tone-fail .ui-figure-value { color: var(--fail); } .ui-figure.tone-warn .ui-figure-value { color: var(--warn); } .ui-figure.tone-ok .ui-figure-value { color: var(--ok); }
+.ui-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.ui-filters button { font: inherit; color: inherit; background: none; border: 1px solid var(--border-strong); border-radius: 999px; padding: 4px 12px; cursor: pointer; }
+.ui-filters button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.ui-filters button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

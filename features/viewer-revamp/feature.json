@@ -1,0 +1,34 @@
+{
+  "version": "2.3.0",
+  "name": "Projects viewer revamp (PRD_VIEWER_REVAMP): operator's desk layout, state colour, two looks, filters and findings cards",
+  "branch_prefix": "feature/viewer-revamp",
+  "policy": "policy.json",
+  "prd": "docs/PRD_VIEWER_REVAMP.md",
+  "workers": [
+    {
+      "node_id": "shell",
+      "task": "shell-task.md"
+    },
+    {
+      "node_id": "pages",
+      "task": "pages-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ],
+  "sidecar": {
+    "prompt": "builtin:senior-review",
+    "cadence_seconds": 900,
+    "pass_timeout_seconds": 600,
+    "max_passes": 12,
+    "max_messages_per_lane": 4
+  }
+}

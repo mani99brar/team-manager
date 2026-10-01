@@ -1,0 +1,191 @@
+{
+  "version": "1.2.0",
+  "feature": "Projects viewer revamp: shell, lists and looks; run and node pages",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "shell",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/theme.css",
+        "src/projects/tone.ts",
+        "src/projects/ui",
+        "src/App.tsx",
+        "src/App.css",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/RunsHome.tsx",
+        "src/projects/RunRow.tsx",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/NowBanner.tsx",
+        "src/projects/CommandBlock.tsx",
+        "src/projects/LiveStatus.tsx",
+        "tests/project-workflows/fixtures/ux-revamp-lists.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/unit/tone.test.ts",
+        "tests/unit/lists.test.ts",
+        "docs/handoff/revamp-shell.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "revamp-home",
+              "description": "Runs home shows the project rail with status dots and the folded project-B group, Needs you cards with the cause and the next command, Running cards with lane chips, Recent grouped by day with the search narrowing to one row, the Failed filter leaving only failed rows and Show older revealing the rest; every existing runs-home assertion holds; at 390 px no horizontal overflow"
+            },
+            {
+              "id": "revamp-look",
+              "description": "The look switch sets data-look=bold on the root, section headers take the band and a tone card takes its soft background, the choice survives a reload; calm is the default without a stored value; in the dark theme both looks keep chip text over its soft background at a contrast ratio of at least 4.5:1 computed in the test"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "pages",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/RunView.tsx",
+        "src/projects/RunHeader.tsx",
+        "src/projects/StepStrip.tsx",
+        "src/projects/StepsTimeline.tsx",
+        "src/projects/WorkflowGraph.tsx",
+        "src/projects/NodeDetail.tsx",
+        "src/projects/NodeHeader.tsx",
+        "src/projects/SectionIndex.tsx",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/Checks.tsx",
+        "src/projects/WorkerInputs.tsx",
+        "src/projects/node",
+        "src/projects/run.css",
+        "src/projects/node.css",
+        "tests/project-workflows/fixtures/ux-revamp-pages.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "tests/unit/panels.test.ts",
+        "tests/unit/steps.test.ts",
+        "docs/handoff/revamp-pages.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "revamp-run",
+              "description": "The run page shows the toned header rule, lane chips, Pipeline and Steps side by side at 1440 px and stacked at 390 px, graph nodes filled by status with the legend still at three entries, Activity grouped by phase with the newest phase open and every existing event row present after Expand all; every existing ux-run assertion holds"
+            },
+            {
+              "id": "revamp-review",
+              "description": "The review node opens on the four figures (blocking, open, per reviewer, per lane), findings as cards in P0/P1/P2 then lane order with their data-severity, data-disposition, data-worker and data-reviewer attributes, one filter row (reviewer, lane, open only) narrowing the cards, the blocking card first on a blocked review, reviewer cards; the finding counts of reviewers.spec.ts and review.spec.ts are unchanged"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

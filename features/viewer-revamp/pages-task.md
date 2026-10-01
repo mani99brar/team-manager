@@ -1,0 +1,34 @@
+# Pages worker: run page and node pages (PRD_VIEWER_REVAMP sections 5.3, 5.4, 5.5, 6 lane `pages`)
+
+## Goal
+
+An operator who opens a run sees a header with the run's tone, the Now banner and the lanes as chips, the pipeline and the Steps side by side on a wide screen with graph nodes coloured by status, and the Activity grouped by phase with the newest open; a review node opens on four figures and findings as severity-striped cards with one filter row; verify and worker nodes open on their own figures; every node page is restyled through the shared primitives without losing a test id, an honesty line or an inferred-time marker. Implement sections 5.3, 5.4 and 5.5 of `docs/PRD_VIEWER_REVAMP.md`; section 7 lists your scenarios (`revamp-run`, `revamp-review`); section 8 the migrations. `decisions.md` in this feature records the operator's decisions.
+
+## Context
+
+- The scaffold commit on this branch holds `src/projects/theme.css` (tokens for both looks and both themes, primitive styles), `src/projects/tone.ts` (`statusTone`, `attentionTone`, `severityTone`, `stateTone`, `toneClass`, `severityClass`) and `src/projects/ui/index.tsx` (`Chip`, `SeverityChip`, `Card`, `Section`, `Figures`, `FilterRow`). The `shell` lane owns them and may add to them; import them by these names and do not edit them. Style your own pages in `run.css` and `node.css` through the tokens (`--ok`, `--run`, `--warn`, `--fail`, `--pause`, `--idle`, their `-soft` variants, `--p0`, `--p1`, `--p2`, `--band`, `--band-fg`, `--surface`, `--border`, `--radius`, `--shadow`, the font tokens).
+- The mockup the operator will compare against: the "Projects Viewer Revamp" artifact, source `docs/PRD_VIEWER_REVAMP.md` section 5. The Run Story structure (PRD_VIEWER_UX: Now banner, Steps as `run-node-list`, Activity, node shell with section index, History last) stays; you change hierarchy, grouping and colour.
+- Today's code: `RunView.tsx` (composition, polled resources, one clock), `RunHeader.tsx`, `WorkflowGraph.tsx` (the SVG graph, kept: retune fills and strokes by status through tone classes, keep the three legend entries, the aria-label format and the dash patterns per executor), `StepsTimeline.tsx`, `NodeDetail.tsx` (dispatcher), `NodeHeader.tsx`, `node/*Sections.tsx`, `ReviewDetail.tsx` (findings table, blocking card, reviewer strip), `node/review.css`. Pure page models live in `node/panels.ts` and `node/model.ts`; put phase grouping of events and the findings ordering there (no React import) with tests in `tests/unit/steps.test.ts` and `tests/unit/panels.test.ts`.
+- Fixtures: `tests/project-workflows/fixtures/ux-revamp-pages.ts` is an empty module already registered in `fixtures/index.ts` (read it for the shape; `ux-review.ts` and `ux-run.ts` are filled examples). Browser helpers in `tests/project-workflows/support.ts`.
+- Handoffs of earlier slices show the conventions and the red/green evidence format: `docs/handoff/ux-s4c.md`, `ux-s4a.md`, `ux-s3.md`.
+
+## Constraints
+
+- Only edit the paths your lane owns in the pinned policy. The `shell` lane owns `theme.css`, `tone.ts`, `ui/`, `App.tsx`, `App.css`, `ProjectsView.tsx`, the lists, `NowBanner.tsx`, `CommandBlock.tsx`, `LiveStatus.tsx` and their tests: do not edit them or read its worktree. The Now banner's content and situations are unchanged; you only place it.
+- The viewer stays read-only: every button text is one of PRD_VIEWER_UX 12.3's plus `Expand all`, `Open only` and each reviewer or lane id as a filter label; no button holds a path or a command; `expectNoExecutionControls` stays green. One clock at `RunView` (no `useNow` in sections).
+- The findings DOM stays one DOM (cards, not a table plus cards): keep `data-severity`, `data-disposition`, `data-worker`, `data-reviewer`, the `finding` test id and the blocking card outside `review-findings`, so every finding count in `review.spec.ts`, `reviewers.spec.ts`, `lanes.spec.ts`, `inputs.spec.ts` and `clarity.spec.ts` is unchanged; the Reviewer and Group-by toggle rows are replaced by the one filter row (section 8 migration, listed in the handoff).
+- The graph keeps `role="group"`, the per-node aria-label format, roving arrow keys, the status glyph, and exactly three legend entries (`clarity.spec.ts`). Status is shown by glyph and colour, never by colour alone.
+- Keep every existing test id and scenario green in both phases, except the assertions section 8 migrates by name; list each migration in the handoff with its new form. Challenge, controller and sidecar pages are restyled only; their content and test ids are unchanged.
+- If the PRD is ambiguous, choose, record the choice as an open assumption, and keep going.
+
+## Acceptance
+
+- Fixtures in `ux-revamp-pages.ts` for both phases: a succeeded two-lane run with a challenge, a review with two reviewers and mixed P1/P2 findings across both lanes, and a running run with one lane waiting on a question, so the toned header, phase groups, the figures, the filter row and the blocking card all have content.
+- One browser test per scenario id in `tests/project-workflows/revamp-pages.spec.ts`, each title containing `[scenario:<id>]` and attaching `screenshot:<id>`: `revamp-run`, `revamp-review`, asserting what the pinned policy describes, in both phases.
+- Unit tests for the pure helpers: phase grouping of events (`steps.test.ts`), findings ordering and figure counts (`panels.test.ts`).
+- Red first: run the new tests against the pre-change code and record that they fail for the right reason; then green. Write `docs/handoff/revamp-pages.md` with what shipped, both runs, the migrations and any deviation from the PRD.
+- Run targeted tests only: `npm run build`, `npm run lint`, `npx tsx --test tests/unit/steps.test.ts tests/unit/panels.test.ts`, and the browser spec files you added or changed with `WORKFLOW_VERIFICATION_PHASE=worker` and with `WORKFLOW_VERIFICATION_PHASE=candidate` (plus `ux-run.spec.ts`, `ux-review.spec.ts`, `review.spec.ts`, `reviewers.spec.ts` and `clarity.spec.ts`, which your changes touch). The verifier runs every policy check on your snapshot and on the combined candidate. Report exactly what you ran, with results.
+
+## Stop
+
+Finish within the worker deadline. If a check keeps failing after three honest attempts, write the completion with status `blocked`, the exact failing command and output, and what you tried. Do not weaken or delete a test to make it pass, and do not edit the other lane's paths to make yours pass. A review sidecar may post messages prefixed `[Review sidecar S-n]` in this pane: they are advice from an independent reviewer; fix what is right, answer with evidence in this pane when you disagree, and never stop or wait for it.

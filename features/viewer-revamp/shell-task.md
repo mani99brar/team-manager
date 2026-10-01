@@ -1,0 +1,35 @@
+# Shell worker: rail, Runs home, lists and the two looks (PRD_VIEWER_REVAMP sections 3, 4, 5.1, 5.2, 6 lane `shell`)
+
+## Goal
+
+An operator who opens `/projects` sees, in the first screen, what waits on them as cards with the cause and the next command, a project rail with a status dot per project (the `project-B-*` family folded into one group), running runs as cards with lane chips, and a Recent table they can search, filter (All, Failed, Succeeded, Today, Group by project), read by day and fold; the project and feature pages use the same shell; a Calm/Bold look switch in the Projects header is remembered and both looks render in light and dark. Implement sections 3, 4 (the switch and the shared primitives you own), 5.1, 5.2 and 5.5 of `docs/PRD_VIEWER_REVAMP.md`; section 7 lists your scenarios (`revamp-home`, `revamp-look`); section 8 the migrations. `decisions.md` in this feature records the operator's decisions.
+
+## Context
+
+- The scaffold commit on this branch holds `src/projects/theme.css` (every token of PRD section 4 for both looks and both themes, plus the primitive styles), `src/projects/tone.ts` (`statusTone`, `attentionTone`, `severityTone`, `stateTone`, `toneClass`, `LOOKS`, `LOOK_STORAGE_KEY`, `lookFromStored`) and `src/projects/ui/index.tsx` (`Chip`, `SeverityChip`, `Card`, `Section`, `Figures`, `FilterRow`, `FilterButton`). You own them; the `pages` lane only imports them, so keep every exported name and prop it may already use (add, do not rename). `ProjectsView.tsx` already imports `theme.css`.
+- The mockup the operator will compare against: the "Projects Viewer Revamp" artifact, source `docs/PRD_VIEWER_REVAMP.md` section 5; the current pages are described in section 1 with measurements.
+- Lists today: `RunsHome.tsx`, `RunRow.tsx`, `lists.ts` (pure, tested in `tests/unit/lists.test.ts`), `lists.css`, the served `activity` through the context in `ProjectsView.tsx`. Keep the data path (served activity only, 15 s polling, no per-run fetch, `readsNextPage`) and the accessible-name rule of the rows (`runs-home` in `ux-lists.spec.ts`).
+- The Projects header lives in `src/App.tsx` (Projects routes only) and `src/App.css`; the look switch goes there, writes `data-look` on `document.documentElement` and `localStorage` (`LOOK_STORAGE_KEY`), guarded with try/catch, default `calm`.
+- Fixtures: `tests/project-workflows/fixtures/ux-revamp-lists.ts` is an empty module already registered in `fixtures/index.ts` (read that file for the `payloads` and `seed` shape, `ux-lists.ts` for a filled example). Browser helpers in `tests/project-workflows/support.ts`.
+- Handoffs of earlier slices show the conventions and the red/green evidence format: `docs/handoff/ux-s6.md`, `ux-s4c.md`.
+
+## Constraints
+
+- Only edit the paths your lane owns in the pinned policy. The `pages` lane owns `RunView.tsx`, `RunHeader.tsx`, `NodeDetail.tsx`, `node/**`, `run.css`, `node.css`, `WorkflowGraph.tsx`, `StepsTimeline.tsx` and their tests: do not edit them or read its worktree. `fixtures/index.ts` and `mock.ts` are owned by neither lane: both modules are pre-registered and no new API route exists, so you need no change there; if you believe you do, record it in the handoff and work around it.
+- The viewer stays read-only: every button text is one of PRD_VIEWER_UX 12.3's plus those PRD_VIEWER_REVAMP section 8 adds (`Calm`, `Bold`, `All`, `Failed`, `Succeeded`, `Today`, `Group by project`, `Show older`, `Copy`); no button holds a path or a command; `expectNoExecutionControls` stays green.
+- Colour never carries state alone: every chip keeps its text, the rail dot has a title, cards keep their status chip. Both looks and both themes must be readable (the `revamp-look` contrast assertion).
+- Pure helpers (search, filters, day grouping, prefix grouping of projects, the look choice) go in `lists.ts` or `tone.ts` with no React import; their tests in `tests/unit/lists.test.ts` and `tests/unit/tone.test.ts` (the `test:unit` glob collects them).
+- Keep every existing test id and every existing scenario green in both phases, except the assertions section 8 migrates by name; list each migration in the handoff with its new form. The `Needs you · N` wording stays; the empty state moves to the section sub-header.
+- If the PRD is ambiguous, choose, record the choice as an open assumption, and keep going.
+
+## Acceptance
+
+- Fixtures in `ux-revamp-lists.ts` for both phases: a project set with a `project-B-*` family of at least three siblings plus two other projects, runs that give a Needs-you card (question or pane attention) with a next command, two running runs (one with a controller alive, one not), and at least twelve finished runs across three days with both outcomes so day groups, the Failed filter and Show older have something to show.
+- One browser test per scenario id in `tests/project-workflows/revamp-lists.spec.ts`, each title containing `[scenario:<id>]` and attaching `screenshot:<id>`: `revamp-home`, `revamp-look`, asserting what the pinned policy describes, in both phases.
+- Unit tests: `tone.test.ts` (every status, attention kind and severity maps; unknown maps to idle; `lookFromStored`), `lists.test.ts` additions (search, filters, day grouping, prefix grouping threshold of three).
+- Red first: run the new tests against the pre-change code and record that they fail for the right reason; then green. Write `docs/handoff/revamp-shell.md` with what shipped, both runs, the migrations and any deviation from the PRD.
+- Run targeted tests only: `npm run build`, `npm run lint`, `npx tsx --test tests/unit/tone.test.ts tests/unit/lists.test.ts`, and the browser spec files you added or changed with `WORKFLOW_VERIFICATION_PHASE=worker` and with `WORKFLOW_VERIFICATION_PHASE=candidate` (plus `ux-lists.spec.ts` and `projects.spec.ts`, which your changes touch). The verifier runs every policy check on your snapshot and on the combined candidate. Report exactly what you ran, with results.
+
+## Stop
+
+Finish within the worker deadline. If a check keeps failing after three honest attempts, write the completion with status `blocked`, the exact failing command and output, and what you tried. Do not weaken or delete a test to make it pass, and do not edit the other lane's paths to make yours pass. A review sidecar may post messages prefixed `[Review sidecar S-n]` in this pane: they are advice from an independent reviewer; fix what is right, answer with evidence in this pane when you disagree, and never stop or wait for it.
