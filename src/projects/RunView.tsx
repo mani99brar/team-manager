@@ -3,13 +3,14 @@ import {
   buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import { fetchEvents, fetchRunInputs, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
+import { fetchEvents, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { LanesLine, NowBanner } from './NowBanner.tsx'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
+import { isSidecarNode } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
 import { Activity, StepsTable } from './StepsTimeline.tsx'
@@ -76,6 +77,11 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   // The inputs are one resource per run; a 404 INPUTS_NOT_FOUND means "not recorded", which loads as null.
   const loadInputs = useCallback((signal: AbortSignal) => orNotRecorded(fetchRunInputs(scope, signal), NOT_RECORDED.inputs), [scope])
   const { state: inputs, reload: reloadInputs } = useResource(`inputs:${runKey}`, loadInputs, refreshToken, pollToken)
+  // The review sidecar's ledger changes while the workers run: polled like the inputs, and only for a run that has the node
+  // (a run without one asks nothing). A 404 SIDECAR_NOT_FOUND means "not recorded" (no pass yet) and loads as null.
+  const hasSidecar = definition.nodes.some(isSidecarNode)
+  const loadSidecar = useCallback((signal: AbortSignal) => orNotRecorded(fetchSidecarLedger(scope, signal), NOT_RECORDED.sidecar), [scope])
+  const { state: sidecar, reload: reloadSidecar } = useResource(hasSidecar ? `sidecar:${runKey}` : null, loadSidecar, refreshToken, pollToken)
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))
@@ -257,6 +263,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                     onRetryEvents={reloadEvents}
                     inputs={inputs}
                     onRetryInputs={reloadInputs}
+                    sidecar={sidecar}
+                    onRetrySidecar={reloadSidecar}
                     refreshToken={refreshToken}
                     onNavigate={onNavigate}
                     highlight={highlight}

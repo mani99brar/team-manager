@@ -12,6 +12,7 @@ import {
   validateReviewResult,
   validateRunDetail,
   validateRunInputs,
+  validateSidecarLedger,
   type Project,
   type ReviewFinding,
   type ReviewResult,
@@ -20,15 +21,19 @@ import {
   type RunInputs,
   type RunInputWorker,
   type RunSummary,
+  type SidecarFinding,
+  type SidecarLedger,
+  type SidecarMessage,
+  type SidecarPass,
   type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
-export type { Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
 export { isBlockingFinding }
 
 /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
-export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND' } as const
+export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND' } as const
 
 export type ApiErrorKind = 'network' | 'http' | 'malformed'
 
@@ -88,6 +93,7 @@ export const paths = {
   artifact: (scope: RunScope, artifactId: string) => `${paths.run(scope)}/artifacts/${encodeSegments(artifactId)}`,
   review: (scope: RunScope, attempt: number) => `${paths.run(scope)}/reviews/${attempt}`,
   inputs: (scope: RunScope) => `${paths.run(scope)}/inputs`,
+  sidecar: (scope: RunScope) => `${paths.run(scope)}/sidecar`,
 }
 
 async function request(path: string, signal: AbortSignal | undefined, accept: string): Promise<Response> {
@@ -262,6 +268,15 @@ export function fetchRunInputs(scope: RunScope, signal?: AbortSignal): Promise<R
     const inputs = validateRunInputs(input)
     if (inputs.run_id !== scope.runId) throw new Error(`the inputs belong to run ${inputs.run_id}.`)
     return inputs
+  }, signal)
+}
+
+/** The review sidecar's ledger (contract 1.6.0), live while the workers run: polled, never cached as immutable. */
+export function fetchSidecarLedger(scope: RunScope, signal?: AbortSignal): Promise<SidecarLedger> {
+  return requestJson(paths.sidecar(scope), input => {
+    const ledger = validateSidecarLedger(input)
+    if (ledger.run_id !== scope.runId) throw new Error(`the sidecar ledger belongs to run ${ledger.run_id}.`)
+    return ledger
   }, signal)
 }
 

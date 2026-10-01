@@ -2,11 +2,11 @@
  * Worker-phase mocks for the not-yet-present projects backend. Only `/api/projects` and its nested routes
  * are intercepted; every other request (Pi/Claude listing, documents, mutations) reaches the real isolated
  * API. Responses are the explicit contract fixtures from `fixtures.ts`, plus contract-shaped 404s. Review
- * results and run inputs answer with the contract's `REVIEW_NOT_FOUND` / `INPUTS_NOT_FOUND` codes when a
- * run has none, exactly like the real adapter for exports that predate those sections.
+ * results, run inputs and the sidecar ledger answer with the contract's `REVIEW_NOT_FOUND` / `INPUTS_NOT_FOUND` /
+ * `SIDECAR_NOT_FOUND` codes when a run has none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, workerResults, workflowLists } from './fixtures.ts'
+import { artifactFiles, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
 
@@ -54,6 +54,10 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (kind === 'inputs' && tail.length === 0) {
     const inputs = runInputs[runId]
     return inputs ? json(inputs) : notFound('No inputs are recorded for this run: its export predates run inputs.', 'INPUTS_NOT_FOUND')
+  }
+  if (kind === 'sidecar' && tail.length === 0) {
+    const ledger = sidecarLedgers[runId]
+    return ledger ? json(ledger) : notFound('No review sidecar ledger is recorded for this run: it has no sidecar, no pass has run yet or its export predates the sidecar.', 'SIDECAR_NOT_FOUND')
   }
   if (kind === 'artifacts' && tail.length === 1) {
     const artifact = artifactFiles[runId].find(file => file.artifact_id === tail[0])

@@ -259,6 +259,12 @@ const FOURTH_QUESTION = /^Worker (\S+) asked question \d+; at most \d+ are answe
 const ATTEMPT = /\battempt (\d+)/i
 const COMMIT = /\b[0-9a-f]{40}\b/
 const CONTROLLER_LANE_NODE = 'launch_controller'
+/**
+ * The review sidecar's node (docs/PRD_REVIEW_SIDECAR.md 4.8): an advisor beside the lanes, never what the run is doing. It
+ * never takes the focus from another running step, is left out of the running headline, of the last activity, of attention,
+ * of the scope's parents and of gap classification, so a run's activity reads the same with and without it.
+ */
+export const SIDECAR_NODE_ID = 'sidecar'
 
 // ---- Small helpers ------------------------------------------------------------------------------------------------
 
@@ -634,7 +640,8 @@ function computeTimeline(run: RunData): Timeline {
 
   // Rule 10: the run spans creation to the last non-controller activity (events, the verdict, stop receipts), never `updated_at`.
   const moments: { at: string; source: InstantSource; controller: boolean; pid: boolean; text: string }[] = [
-    ...rows.map(row => ({ at: row.event.occurred_at, source: 'event' as const, controller: row.node === null || row.marker !== null, pid: row.marker === 'controller_start', text: row.text })),
+    ...rows.filter(row => row.node !== SIDECAR_NODE_ID)
+      .map(row => ({ at: row.event.occurred_at, source: 'event' as const, controller: row.node === null || row.marker !== null, pid: row.marker === 'controller_start', text: row.text })),
     ...(inputs?.workers ?? []).flatMap(worker => worker.stop?.confirmed_at
       ? [{ at: worker.stop.confirmed_at, source: 'receipt' as const, controller: false, pid: false, text: `${worker.node_id} stopped (stop receipt)` }] : []),
     ...(review ? [{ at: review.reviewed_at, source: 'review' as const, controller: false, pid: false, text: `review ${reviewOutcome(review)}` }] : []),
@@ -706,8 +713,9 @@ function buildMarkers(run: RunData, rows: Row[]): Marker[] {
   return markers.sort((a, b) => ms(a.at) - ms(b.at) || (a.sequence ?? Infinity) - (b.sequence ?? Infinity))
 }
 
-/** Rule 6: silences over two minutes, classified by the row before them and the spans they fall inside. */
-function buildGaps(run: RunData, rows: Row[], spans: Span[]): Gap[] {
+/** Rule 6: silences over two minutes, classified by the row before them and the spans they fall inside (never the sidecar's). */
+function buildGaps(run: RunData, rows: Row[], allSpans: Span[]): Gap[] {
+  const spans = allSpans.filter(span => span.node_id !== SIDECAR_NODE_ID)
   const moments = [
     ...rows.map(row => ({ at: row.event.occurred_at, row })),
     ...spans.flatMap(span => [span.start, span.end]
@@ -804,14 +812,16 @@ function depths(detail: RunDetail): Map<string, number> {
 function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
   const depth = depths(detail)
   const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? null
-  const pick = (wanted: readonly NodeStatus[]) => {
-    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status))
+  const pick = (wanted: readonly NodeStatus[], skip: string | null = null) => {
+    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip)
     if (!matches.length) return null
     // Parallel lanes share a column: the tie goes to the latest event.
     const tied = matches.filter(node => depth.get(node.node_id) === depth.get(matches[0].node_id))
     return tied.reduce((best, node) => ms(since(node.node_id) ?? '') > ms(since(best.node_id) ?? '') ? node : best)
   }
-  const node = pick(['failed', 'paused', 'awaiting_approval']) ?? pick(['running'])
+  // The sidecar runs beside the lanes for the whole work phase: it is the running focus only when nothing else runs.
+  const othersRun = detail.snapshot.nodes.some(node => node.status === 'running' && node.node_id !== SIDECAR_NODE_ID)
+  const node = pick(['failed', 'paused', 'awaiting_approval']) ?? pick(['running'], othersRun ? SIDECAR_NODE_ID : null)
   if (!node) return null
   return { node_id: node.node_id, label: labelOf(detail, node.node_id), kind: node.kind, status: node.status, since: since(node.node_id) }
 }
@@ -826,7 +836,7 @@ function scopeStart(detail: RunDetail, rows: readonly Row[], focus: Focus | null
   if (!focus) return 0
   const running = statusRows(rows, focus.node_id).filter(row => row.status === 'running').at(-1)
   if (running) return running.event.sequence
-  const parents = detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []
+  const parents = (detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []).filter(parent => parent !== SIDECAR_NODE_ID)
   return rows.filter(row => row.node !== null && parents.includes(row.node) && row.status !== null && row.marker === null).at(-1)?.event.sequence ?? 0
 }
 
@@ -885,7 +895,8 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
 
 /** Which nodes wait on the operator (6.4): a question, a pane that needs attention, or an approval; `top` by that precedence. */
 export function deriveAttention(run: RunData & { activity?: ServedActivity | null }): RunAttention {
-  const rows = classify(run.detail, run.events)
+  // The sidecar's rows (an escalation included) wait on nobody: no new attention kind (docs/PRD_REVIEW_SIDECAR.md 4.6).
+  const rows = classify(run.detail, run.events.filter(event => event.node_id !== SIDECAR_NODE_ID))
   const found = new Map<string, Attention>()
   for (const item of waitingQuestions(run, rows)) {
     const node = `launch_${item.lane}`
@@ -1401,7 +1412,7 @@ function reviewBlockedNow(context: Context): Draft | null {
 function runningNow(context: Context): Draft | null {
   // Also a step re-entered while it still reads failed (a live span), and the focus a resumed controller re-entered (5 b).
   const resumed = interruptionNote(context)?.resumed ?? null
-  const running = context.run.detail.snapshot.nodes.filter(node => node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live)
+  const running = context.run.detail.snapshot.nodes.filter(node => node.node_id !== SIDECAR_NODE_ID && (node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live))
   if (!running.length && !resumed && context.status !== 'running') return null
   const headline: Text = ['● Running']
   if (resumed && context.focus) headline.push(` · ${context.focus.label} · resumed at `, clock(resumed.at))

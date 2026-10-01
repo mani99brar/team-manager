@@ -1,0 +1,62 @@
+/* ---- Review sidecar (docs/PRD_REVIEW_SIDECAR.md 4.9): one headline, finding cards, messages, passes, the handoff ---- */
+
+.sidecar-headline { margin: 4px 0 8px; font-weight: 600; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.sidecar-source { margin: 0 0 8px; overflow-wrap: anywhere; }
+
+.sidecar-cards, .sidecar-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.sidecar-cards > li, .sidecar-list > li { min-width: 0; }
+.sidecar-card {
+  display: block;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.sidecar-card.sidecar-severity-P0, .sidecar-card.sidecar-severity-P1 { border-left-color: var(--danger-text); }
+.sidecar-card p { margin: 0; overflow-wrap: anywhere; }
+.sidecar-card-head { font-size: 0.85rem; }
+.sidecar-card-head .finding-severity { font-weight: 700; }
+.sidecar-card.sidecar-severity-P0 .finding-severity, .sidecar-card.sidecar-severity-P1 .finding-severity { color: var(--danger-text); }
+.sidecar-card-where { margin-top: 2px !important; font-size: 0.85rem; }
+.sidecar-card-problem { margin-top: 4px !important; font-weight: 600; }
+.sidecar-card-facts { margin: 4px 0 0; display: grid; gap: 2px; }
+.sidecar-card-facts > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 8px; }
+.sidecar-card-facts dt { color: var(--text-muted); font-size: 0.85rem; }
+.sidecar-card-facts dd { margin: 0; overflow-wrap: anywhere; }
+
+.sidecar-chip { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 0.8rem; white-space: normal; overflow-wrap: anywhere; }
+.sidecar-message-undeliverable, .sidecar-message-refused, .sidecar-pass-failed, .sidecar-pass-timed_out, .sidecar-pass-rejected, .sidecar-pass-interrupted,
+.sidecar-escalation-kind { border-color: var(--danger-text); color: var(--danger-text); }
+
+.sidecar-escalation, .sidecar-resolved-line, .sidecar-message { overflow-wrap: anywhere; }
+.sidecar-escalation { border: 1px solid var(--border); border-left: 4px solid var(--danger-text); border-radius: 6px; padding: 6px 10px; }
+.sidecar-message { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.sidecar-message p { margin: 0; }
+.sidecar-message-head { font-size: 0.85rem; }
+.sidecar-message-text { margin-top: 2px !important; }
+.sidecar-resolved > summary { cursor: pointer; }
+.sidecar-resolved > ul { margin-top: 6px; }
+
+.sidecar-passes-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.sidecar-passes-table th, .sidecar-passes-table td { text-align: left; vertical-align: top; padding: 4px 6px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.sidecar-passes-table td[data-label="Pass"], .sidecar-passes-table td[data-label="Took"] { font-variant-numeric: tabular-nums; }
+/* The short cells and their headers stay on one line; the lanes and the summary take the rest of the width. */
+.sidecar-passes-table th, .sidecar-passes-table td:not([data-label="Lanes read"]):not([data-label="Summary"]) { white-space: nowrap; overflow-wrap: normal; }
+.sidecar-passes-table .sidecar-chip { white-space: nowrap; }
+
+.sidecar-handoff { display: grid; gap: 6px; }
+.sidecar-handoff h5 { margin: 4px 0 2px; }
+.sidecar-handoff ul { margin: 0; padding-left: 20px; }
+.sidecar-handoff li { overflow-wrap: anywhere; }
+
+/* At 760 px and below the passes table reads as cards, like the review's findings: one block per pass, each cell labelled. */
+@media (max-width: 760px) {
+  .sidecar-card-facts > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .sidecar-passes-table thead {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .sidecar-passes-table, .sidecar-passes-table tbody, .sidecar-passes-table tr, .sidecar-passes-table td { display: block; width: 100%; box-sizing: border-box; }
+  .sidecar-passes-table tr { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; padding: 6px 8px; }
+  .sidecar-passes-table td { border: 0; padding: 2px 0; white-space: normal !important; overflow-wrap: anywhere !important; }
+  .sidecar-passes-table td[data-label]::before { content: attr(data-label) ': '; font-weight: 600; color: var(--text-muted); }
+}

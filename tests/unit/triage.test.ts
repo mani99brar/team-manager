@@ -27,6 +27,9 @@ import {
   type Span,
   type Step,
 } from '../../contracts/projects/triage.ts'
+import { uxSidecar, RUN_SIDECAR, RUN_SIDECAR_BLOCKED, RUN_SIDECAR_FROZEN, RUN_SIDECAR_ONE_LANE, SIDECAR_TWINS } from '../project-workflows/fixtures/ux-sidecar.ts'
+
+const sidecarPayloads = uxSidecar.payloads!
 
 /**
  * The triage model (PRD_VIEWER_UX 5 and 6) on the captured skeleton-001 (blocked by review), skeleton-fixes-001
@@ -991,5 +994,65 @@ describe('deriveFocus, humanizeEvent, attemptResultUris, laneLines', () => {
       ['controller', ['worker ✓', 'verify ● attempt 2 (1 failed)', 'candidate ○']],
       ['ui', ['worker ✓', 'verify ✓', 'candidate ○']],
     ])
+  })
+})
+
+// ---- The review sidecar (docs/PRD_REVIEW_SIDECAR.md 4.8): never the focus, never the running headline, no gap hider ----
+
+describe('the review sidecar in the triage model', () => {
+  const runOf = (runId: string): RunData => ({
+    detail: sidecarPayloads.runDetails![runId], events: sidecarPayloads.runEvents![runId], inputs: sidecarPayloads.runInputs![runId], review: null, results: new Map(),
+  })
+  const text = (now: Now) => textToString(now.headline, Date.parse('2026-10-01T14:00:00Z'), { clock: at => at.slice(11, 19), ago: () => 'a while ago', span: ms => `${ms}ms` })
+
+  it('never takes the focus from a running lane, while its own events are the latest', () => {
+    const run = runOf(RUN_SIDECAR)
+    assert.equal(run.events.at(-1)!.node_id, 'sidecar')
+    assert.equal(run.detail.snapshot.nodes.find(node => node.node_id === 'sidecar')!.status, 'running')
+    assert.equal(deriveFocus(run.detail, run.events)?.node_id, 'launch_viewer')
+    assert.equal(deriveNow(run).focus?.node_id, 'launch_viewer')
+    assert.equal(deriveFocus(runOf(RUN_SIDECAR_ONE_LANE).detail, runOf(RUN_SIDECAR_ONE_LANE).events)?.node_id, 'launch_engine')
+  })
+
+  it('is left out of the running headline and of its last activity, which read like the run without a sidecar', () => {
+    for (const [withSidecar, without] of SIDECAR_TWINS) {
+      const a = deriveNow(runOf(withSidecar))
+      const b = deriveNow(runOf(without))
+      assert.equal(a.situation, b.situation, withSidecar)
+      assert.equal(text(a), text(b), withSidecar)
+      assert.equal(a.focus?.node_id, b.focus?.node_id)
+      assert.deepEqual(buildTimeline(runOf(withSidecar)).lastActivity, buildTimeline(runOf(without)).lastActivity)
+      assert.deepEqual(buildTimeline(runOf(withSidecar)).runEnd, buildTimeline(runOf(without)).runEnd)
+      assert.deepEqual(deriveAttention(runOf(withSidecar)), deriveAttention(runOf(without)))
+    }
+    const now = deriveNow(runOf(RUN_SIDECAR))
+    assert.equal(now.situation, 'running')
+    assert.match(text(now), /Launch engine worker.*Launch viewer worker/)
+    assert.doesNotMatch(text(now), /Review sidecar|escalation|pass \d/)
+  })
+
+  it('a blocked run whose sidecar closed after the block still names the block: the sidecar is no parent of the scope', () => {
+    const now = deriveNow(runOf(RUN_SIDECAR_BLOCKED))
+    assert.equal(now.situation, 'blocked_before_freeze')
+    assert.equal(now.focus?.node_id, 'handoff')
+    assert.match(text(now), /Worker engine deadline exhausted/)
+    assert.equal(runOf(RUN_SIDECAR_BLOCKED).detail.snapshot.nodes.find(node => node.node_id === 'sidecar')!.status, 'succeeded')
+  })
+
+  it('may be the focus only when nothing else runs', () => {
+    const run = runOf(RUN_SIDECAR_ONE_LANE)
+    const alone = structuredClone(run.detail)
+    alone.snapshot.nodes = alone.snapshot.nodes.map(node => node.node_id === 'launch_engine' ? { ...node, status: 'succeeded' as const } : node)
+    assert.equal(deriveFocus(alone, run.events)?.node_id, 'sidecar')
+  })
+
+  it('its span hides no silence: once the lanes stopped, a silence it spans is a gap', () => {
+    const run = runOf(RUN_SIDECAR_FROZEN)
+    // The lanes' stop receipts at 14:00, twenty minutes before the final pass started (its row at 14:20).
+    const stopped: RunData = { ...run, inputs: { ...run.inputs!, workers: run.inputs!.workers.map(worker => ({ ...worker, stop: { stopped: true, confirmed_at: '2026-10-01T14:00:00Z' } })) } }
+    const sidecarSpan = buildTimeline(stopped).byNode.get('sidecar')!.at(-1)!
+    assert.ok(Date.parse(sidecarSpan.start!.at) < Date.parse('2026-10-01T14:00:00Z') && Date.parse(sidecarSpan.end!.at) > Date.parse('2026-10-01T14:20:00Z'))
+    const gaps = buildTimeline(stopped).gaps.filter(gap => gap.from === '2026-10-01T14:00:00Z')
+    assert.deepEqual(gaps.map(gap => [gap.kind, gap.to]), [['idle', '2026-10-01T14:20:00Z']])
   })
 })

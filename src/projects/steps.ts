@@ -163,9 +163,9 @@ export function timeAxis(from: number, to: number, busy: readonly { start: numbe
   return { from, to, position, breaks: silences.map(silence => ({ at: position(silence.start), ms: silence.end - silence.start })) }
 }
 
-const FIXED_LABELS: Record<string, string> = { handoff: 'Freeze', candidate: 'Candidate', review: 'Review', approval: 'Approval', integrate: 'Integrate', challenge: 'Challenge' }
+const FIXED_LABELS: Record<string, string> = { handoff: 'Freeze', candidate: 'Candidate', review: 'Review', approval: 'Approval', integrate: 'Integrate', challenge: 'Challenge', sidecar: 'Sidecar' }
 
-/** The step strip's short name of a step: "Launch game", "Verify game", "Freeze", "Candidate"; anything else keeps its label. */
+/** The step strip's short name of a step: "Launch game", "Verify game", "Freeze", "Candidate", "Sidecar"; anything else keeps its label. */
 export function shortStepLabel(node: { node_id: string; label: string }): string {
   if (node.node_id.startsWith('launch_')) return `Launch ${node.node_id.slice('launch_'.length)}`
   if (node.node_id.startsWith('verify_')) return `Verify ${node.node_id.slice('verify_'.length)}`

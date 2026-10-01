@@ -159,7 +159,7 @@ export type RunOptions = {
   createdAt: string; updatedAt: string; definitionNodes: typeof GRAPH_NODES; values: Record<string, unknown>; next: string[]; tasks: Task[]; events: InternalEvent[]
   packets: (runDir: string) => object[]
   /** Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane selection, 1.4.0 the reviewer set. */
-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0'
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0'
   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
   reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
@@ -170,6 +170,10 @@ export type RunOptions = {
   inputs?: RawInputsSection | null
   /** Content of `<run>/review.diff`, the diff the reviewer saw. */
   diff?: string
+  /** Export 1.6.0: the `sidecar` section (the review sidecar's ledger, null for a run without one). */
+  sidecar?: unknown
+  /** The live `<run>/sidecar.ledger.json` the controller writes while the workers run. */
+  sidecarLedger?: unknown
 }
 
 function writeRun(runsRoot: string, repository: string, runId: string, options: RunOptions) {
@@ -182,7 +186,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   const plan = {
     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
-    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
@@ -190,6 +194,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   writeJson(join(runDir, 'plan.json'), plan)
   writeFileSync(join(runDir, 'events.jsonl'), options.events.map(event => JSON.stringify(event)).join('\n') + '\n')
   if (options.diff !== undefined) writeFileSync(join(runDir, 'review.diff'), options.diff)
+  if (options.sidecarLedger !== undefined) writeJson(join(runDir, 'sidecar.ledger.json'), options.sidecarLedger)
   const packets = options.packets(runDir)
   const state = {
     version, run_id: runId, base_commit: BASE_COMMIT, created_at: options.createdAt,
@@ -197,6 +202,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
     values: { run_id: runId, ...options.values }, next: options.next, tasks: options.tasks, events: options.events,
     verification_packets: packets, updated_at: options.updatedAt,
     ...(version !== '1.0.0' ? { review: options.review ?? null, inputs } : {}),
+    ...(version === '1.6.0' ? { sidecar: options.sidecar ?? null } : {}),
   }
   writeJson(join(runDir, 'run-state.json'), state)
   return runDir

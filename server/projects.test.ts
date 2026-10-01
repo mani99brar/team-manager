@@ -5,12 +5,13 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile 
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
+import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
 import { seedCandidate } from '../tests/project-workflows/seed.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { RunStore, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
+import { RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
 import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
@@ -97,6 +98,10 @@ type RunSpec = {
   inputs?: unknown
   /** Content written to `<run>/review.diff`, the diff the reviewer saw. */
   diffFile?: Buffer | string
+  /** Export 1.6.0: the `sidecar` section as persisted (undefined leaves the key out; null is an explicit null). */
+  sidecar?: unknown
+  /** Content written to the live `<run>/sidecar.ledger.json`. */
+  liveLedger?: string
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -105,6 +110,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
   await mkdir(dir, { recursive: true })
   const runId = spec.exportRunId ?? spec.runId
   if (spec.diffFile !== undefined) await writeFile(join(dir, 'review.diff'), spec.diffFile)
+  if (spec.liveLedger !== undefined) await writeFile(join(dir, 'sidecar.ledger.json'), spec.liveLedger)
   const registrations: Registration[] = []
   for (const packetSpec of spec.packets ?? []) {
     const phase = packetSpec.phase ?? 'worker'
@@ -164,6 +170,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     values: { run_id: runId, ...(spec.values ?? {}) }, next: spec.next ?? [], tasks: spec.tasks ?? [], events,
     verification_packets: spec.registrations ? spec.registrations(registrations) : registrations, updated_at: spec.updated ?? T1,
     ...(spec.review !== undefined ? { review: spec.review } : {}), ...(spec.inputs !== undefined ? { inputs: spec.inputs } : {}),
+    ...(spec.sidecar !== undefined ? { sidecar: spec.sidecar } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
@@ -1442,7 +1449,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.6.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.7.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -1792,6 +1799,17 @@ const SEEDED_SNAPSHOTS: Record<string, string> = {
   'guarded-flow/run-guarded-asking': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:pending:0 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'guarded-flow/run-guarded-blocked': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:failed:1 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'ux-time/run-short-check': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:failed:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  // The review sidecar's node (docs/PRD_REVIEW_SIDECAR.md 4.8): its status from its events only, never a ledger branch.
+  'ux-sidecar/review-sidecar-smoke-001': 'challenge:succeeded:1 sidecar:running:1 launch_engine:running:1 launch_viewer:running:1 handoff:pending:0 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-no-ledger': 'challenge:succeeded:1 sidecar:running:1 launch_engine:running:1 launch_viewer:running:1 handoff:pending:0 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-smoke-plain': 'challenge:succeeded:1 launch_engine:running:1 launch_viewer:running:1 handoff:pending:0 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-smoke-frozen': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:running:1 verify_viewer:running:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-one-lane': 'challenge:succeeded:1 sidecar:running:1 launch_engine:running:1 handoff:pending:0 verify_engine:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-one-lane-plain': 'challenge:succeeded:1 launch_engine:running:1 handoff:pending:0 verify_engine:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-blocked': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:running:1 launch_viewer:running:1 handoff:failed:1 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-blocked-plain': 'challenge:succeeded:1 launch_engine:running:1 launch_viewer:running:1 handoff:failed:1 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
+  'ux-sidecar/review-sidecar-integrated': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'ux-sidecar/review-sidecar-integrated-plain': 'challenge:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
 }
 
 type SeededActivity = { feature: string | null; last: string; finished: string; focus: string; attention: string; waiting: number; headline: string }
@@ -1804,6 +1822,8 @@ const SEEDED_ACTIVITY: Record<string, SeededActivity> = (() => {
   const REVIEWS = 'Review visibility and run inputs in the viewer'
   const INTEGRATED = 'Integrate candidate · Fast-forwarded the feature branch'
   const DRILL = 'Verify adapter · Injected gate failure (failure drill); checks preserved'
+  const SIDECAR_FEATURE = 'Review sidecar'
+  const AWAITING = 'waiting for the worker\'s completion signal (idle is not acceptance)'
   const succeeded = (feature: string | null, at: string): SeededActivity => ({ feature, last: at, finished: at, focus: '-', attention: '-', waiting: 0, headline: INTEGRATED })
   return {
     'feature-flow/run-awaiting': { feature: REVIEWS, last: '10:45', finished: '-', focus: 'review:awaiting_approval@-', attention: 'approval:review@-', waiting: 0,
@@ -1826,6 +1846,19 @@ const SEEDED_ACTIVITY: Record<string, SeededActivity> = (() => {
     'guarded-flow/run-guarded-blocked': { feature: 'Workflow guardrails', last: '10:45', finished: '10:45', focus: 'handoff:failed@-', attention: 'failed:handoff@-', waiting: 0,
       headline: 'Freeze worker handoffs · Worker ui asked question 4; at most 3 are answered, so it is treated as blocked: Should the challenge page also show the concerns of e…' },
     'ux-time/run-short-check': { feature: null, last: '10:20', finished: '10:20', focus: 'verify_adapter:failed@-', attention: 'failed:verify_adapter@-', waiting: 0, headline: DRILL },
+    // A run with a review sidecar reads like its twin without one: the sidecar's later rows, its running span and its
+    // closing `succeeded` change no focus, last activity, finish, attention or headline.
+    ...Object.fromEntries(['review-sidecar-smoke-001', 'review-sidecar-no-ledger', 'review-sidecar-smoke-plain'].map(run => [`ux-sidecar/${run}`, {
+      feature: SIDECAR_FEATURE, last: '2026-10-01T11:58:21Z', finished: '-', focus: 'launch_viewer:running@2026-10-01T11:58:21Z', attention: '-', waiting: 0, headline: `Launch viewer worker · ${AWAITING}` }])),
+    ...Object.fromEntries(['review-sidecar-one-lane', 'review-sidecar-one-lane-plain'].map(run => [`ux-sidecar/${run}`, {
+      feature: SIDECAR_FEATURE, last: '2026-10-01T11:58:20Z', finished: '-', focus: 'launch_engine:running@2026-10-01T11:58:20Z', attention: '-', waiting: 0, headline: `Launch engine worker · ${AWAITING}` }])),
+    ...Object.fromEntries(['review-sidecar-blocked', 'review-sidecar-blocked-plain'].map(run => [`ux-sidecar/${run}`, {
+      feature: SIDECAR_FEATURE, last: '2026-10-01T16:00:00Z', finished: '2026-10-01T11:58:21Z', focus: 'handoff:failed@-', attention: 'failed:handoff@-', waiting: 0,
+      headline: 'Freeze worker handoffs · Worker engine deadline exhausted; no automatic relaunch' }])),
+    ...Object.fromEntries(['review-sidecar-integrated', 'review-sidecar-integrated-plain'].map(run => [`ux-sidecar/${run}`, {
+      ...succeeded(SIDECAR_FEATURE, '2026-10-01T14:55:03Z'), headline: 'Integrate candidate · fast-forwarded to ccccccc · no push performed' }])),
+    'ux-sidecar/review-sidecar-smoke-frozen': { feature: SIDECAR_FEATURE, last: '2026-10-01T14:26:05Z', finished: '-', focus: 'verify_engine:running@2026-10-01T14:26:05Z', attention: '-', waiting: 0,
+      headline: 'Verify engine · attempt 1 started · revision e1e1e1e' },
   }
 })()
 
@@ -2230,4 +2263,217 @@ test('[B3] the registry accepts a top-level viewer key and keeps it across reloa
       if (!root.startsWith(`${homedir()}/`)) assert.equal(detail.run_dir, null)
     } finally { await app.close() }
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+// ---- Review sidecar (docs/PRD_REVIEW_SIDECAR.md 4.7, 4.8 and section 6): export 1.6.0, the live ledger and the node ----
+
+/** The ledger of Appendix B, read from the PRD itself: the bytes both lanes build to. */
+async function appendixB(): Promise<string> {
+  const prd = await readFile(new URL('../docs/PRD_REVIEW_SIDECAR.md', import.meta.url), 'utf8')
+  const block = /```json\n([\s\S]*?)\n```/.exec(prd.slice(prd.indexOf('## Appendix B')))
+  assert.ok(block, 'Appendix B holds a JSON block')
+  return block[1]
+}
+const ledgerOf = async (overrides: Record<string, unknown> = {}) => ({ ...JSON.parse(await appendixB()) as Record<string, unknown>, ...overrides })
+const SIDECAR_RUN = 'review-sidecar-smoke-001'
+/** A guarded graph with the sidecar right after the challenge, before every launch node; the handoff depends on it last. */
+const SIDECAR_NODES = [
+  { node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] },
+  { node_id: 'sidecar', label: 'Review sidecar', kind: 'review', depends_on: ['challenge'] },
+  ...GRAPH_NODES.map(node => node.kind === 'worker' ? { ...node, depends_on: ['challenge'] } : node.node_id === 'handoff' ? { ...node, depends_on: [...node.depends_on, 'sidecar'] } : node),
+] as typeof GRAPH_NODES
+const SIDECAR_DEFINITION = { name: 'Feature implementation', nodes: SIDECAR_NODES }
+const sidecarRow = (sequence: number, status: string, message: string, time = T1): RawEvent => ({ sequence, time, node: 'sidecar', status, message })
+const sidecarRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
+  runId: SIDECAR_RUN, version: '1.6.0', definition: SIDECAR_DEFINITION, values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['handoff'],
+  tasks: [{ node_id: 'handoff', error: null, interrupts: [{ kind: 'worker_handoff' }], result: null }],
+  events: [...launchEvents.slice(0, 2), sidecarRow(3, 'running', 'pass 1 (cadence) started')], ...spec,
+})
+const sidecarRoute = (run = SIDECAR_RUN) => url('alpha', 'main', run, '/sidecar')
+const nodeStatus = (detail: RunDetail, nodeId: string) => detail.snapshot.nodes.find(node => node.node_id === nodeId)?.status
+
+test('[sidecar] a 1.6.0 export loads with a sidecar section, without one, and with a garbage one; the run list keeps every run', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, sidecarRun({ sidecar: await ledgerOf() }))
+    await writeRun(root, { runId: 'sidecar-null', version: '1.6.0', sidecar: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2) })
+    await writeRun(root, { runId: 'sidecar-absent', version: '1.6.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2) })
+    for (const [runId, garbage] of [['sidecar-garbage', { passes: 'many', findings: [{ id: 7 }] }], ['sidecar-string', 'not a ledger'], ['sidecar-array', [1, 2, 3]]] as const) {
+      await writeRun(root, sidecarRun({ runId, sidecar: garbage }))
+    }
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(list.runs.map(run => run.run_id).sort(), [SIDECAR_RUN, 'sidecar-absent', 'sidecar-array', 'sidecar-garbage', 'sidecar-null', 'sidecar-string'].sort())
+    for (const run of list.runs) assert.equal((await get(app, url('alpha', 'main', run.run_id))).status, 200, run.run_id)
+    // The export section is served when no live file exists; a garbage section is "not recorded", never a failed run.
+    const served = validateSidecarLedger((await get(app, sidecarRoute())).json())
+    assert.equal(served.source, 'export')
+    assert.equal(served.passes.length, 3)
+    for (const runId of ['sidecar-null', 'sidecar-absent', 'sidecar-garbage', 'sidecar-string', 'sidecar-array']) assertError(await get(app, sidecarRoute(runId)), 404, 'SIDECAR_NOT_FOUND')
+  })
+})
+
+test('[sidecar] a 1.5.0 export, and a run whose graph has no sidecar node, still load and answer SIDECAR_NOT_FOUND', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, { runId: 'guarded-150', version: '1.5.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2) })
+    // A live ledger beside a run whose pinned graph has no sidecar node is not this run's: never served.
+    await writeRun(root, { runId: 'no-node', version: '1.6.0', sidecar: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      liveLedger: JSON.stringify(await ledgerOf({ run_id: 'no-node' })) })
+    for (const runId of ['guarded-150', 'no-node']) {
+      assert.equal((await get(app, url('alpha', 'main', runId))).status, 200)
+      assertError(await get(app, sidecarRoute(runId)), 404, 'SIDECAR_NOT_FOUND')
+    }
+  })
+})
+
+test('[sidecar] the live ledger wins over the export; a malformed, invalid, oversized or foreign live file falls back to the export, with the reason logged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-sidecar-'))
+  try {
+    const runsRoot = join(root, 'runs')
+    await mkdir(runsRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify({ version: 1, projects: [{ project_id: 'alpha', name: 'Alpha', repository: join(root, 'repo'), workflows: [{ workflow_id: 'main', runs_root: runsRoot, definition: DEFINITION }] }] }), 'test registry')
+    const warnings: string[] = []
+    const store = new RunStore(config, { warn: (message, details) => warnings.push(`${message} ${JSON.stringify(details)}`) })
+    const scope = store.scope('alpha', 'main')
+    const exported = await ledgerOf()
+    const live = await ledgerOf()
+    ;(live.passes as unknown[]).push({ n: 4, trigger: 'cadence', started_at: '2026-10-01T13:15:00Z', finished_at: '2026-10-01T13:16:00Z', status: 'failed', session_id: null,
+      lanes: { engine: { head_commit: 'c0ffee1', pane_captured: false } }, counts: { new: 0, changed: 0, messages: 0 }, summary: 'CalledProcessError: herdr pane read exited 1' })
+    // Model-written text may name a path: the route serves it redacted, like every other run text.
+    ;(live.findings as { evidence: string }[])[0].evidence = `pane: 'fixed in ${join(root, 'worktree-engine', 'workflow', 'sidecar.py')}'`
+    const cases: [string, string | null, 'live' | 'export', number][] = [
+      ['live-newer', JSON.stringify(live), 'live', 4],
+      ['live-malformed', '{"version": "1.0.0", "passes": [', 'export', 3],
+      ['live-invalid', JSON.stringify({ ...live, findings: [{ id: 'S-1' }] }), 'export', 3],
+      ['live-foreign', JSON.stringify({ ...live, run_id: 'another-run' }), 'export', 3],
+      // The live ledger has its own 4 MiB cap (the engine bounds the file at 4 MiB), not the 256 KiB of a question record:
+      // a file of 3 MiB is served live, one over 4 MiB falls back to the export.
+      ['live-large', JSON.stringify({ ...live, padding: 'x'.repeat(3 * 1024 * 1024) }), 'live', 4],
+      ['live-oversized', JSON.stringify({ ...live, padding: 'x'.repeat(4 * 1024 * 1024) }), 'export', 3],
+      ['live-absent', null, 'export', 3],
+    ]
+    assert.equal(SIDECAR_LEDGER_BYTE_LIMIT, 4 * 1024 * 1024)
+    const large = cases.find(([runId]) => runId === 'live-large')![1]!
+    assert.ok(Buffer.byteLength(large) > 256 * 1024 && Buffer.byteLength(large) < SIDECAR_LEDGER_BYTE_LIMIT, 'live-large sits between the questions cap and the ledger cap')
+    for (const [runId, file, source, passes] of cases) {
+      await writeRun(runsRoot, sidecarRun({ runId, sidecar: { ...exported, run_id: runId }, ...(file === null ? {} : { liveLedger: file.replace(/"review-sidecar-smoke-001"/, `"${runId}"`) }) }))
+      warnings.length = 0
+      const ledger = validateSidecarLedger(await store.sidecarLedger(scope, runId))
+      assert.equal(ledger.source, source, runId)
+      assert.equal(ledger.passes.length, passes, runId)
+      assert.equal(ledger.run_id, runId)
+      assert.equal(ledger.node_id, 'sidecar')
+      if (source === 'export' && file !== null) assert.ok(warnings.some(warning => warning.includes(runId) && /sidecar/i.test(warning)), `${runId}: the reason is logged (${warnings.join(' | ')})`)
+    }
+    const redacted = validateSidecarLedger(await store.sidecarLedger(scope, 'live-newer'))
+    assert.equal(redacted.findings[0].evidence, `pane: 'fixed in <path>'`)
+    assert.ok(!JSON.stringify(redacted).includes(root))
+    // Neither readable: not recorded, never an error page or a failed run.
+    await writeRun(runsRoot, sidecarRun({ runId: 'both-invalid', sidecar: { broken: true }, liveLedger: 'not json' }))
+    await assert.rejects(store.sidecarLedger(scope, 'both-invalid'), (error: { status: number; code: string }) => error.status === 404 && error.code === 'SIDECAR_NOT_FOUND')
+    validateRunDetail((await store.loadRun(scope, 'both-invalid')).detail)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[sidecar] the node\'s status comes from its events only: none is pending, running and interactive are running, succeeded is succeeded', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const cases: [string, RawEvent[], string][] = [
+      ['no-event', launchEvents.slice(0, 2), 'pending'],
+      ['running', [...launchEvents.slice(0, 2), sidecarRow(3, 'running', 'pass 1 (cadence) started')], 'running'],
+      ['interactive', [...launchEvents.slice(0, 2), sidecarRow(3, 'running', 'pass 1 (cadence) started'), sidecarRow(4, 'interactive', 'escalation S-1 (security): see the sidecar page')], 'running'],
+      ['succeeded', [...launchEvents.slice(0, 2), sidecarRow(3, 'running', 'pass 1 (cadence) started'), sidecarRow(4, 'succeeded', 'closed at freeze after 1 pass')], 'succeeded'],
+    ]
+    for (const [runId, events, status] of cases) {
+      // A garbage ledger never moves the node: its status is its events'.
+      await writeRun(root, sidecarRun({ runId, events, sidecar: { closed_at: 'never' }, liveLedger: '{}' }))
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
+      assert.equal(nodeStatus(detail, 'sidecar'), status, runId)
+      assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'sidecar')?.kind, 'review')
+      // The sidecar never decides the run: the same run without its events has the same status.
+      assert.equal(detail.summary.status, validateRunDetail((await get(app, url('alpha', 'main', 'no-event'))).json()).summary.status, runId)
+    }
+  })
+})
+
+test('[sidecar] an integrated run whose sidecar succeeded at freeze is succeeded, never paused', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const events: RawEvent[] = [{ sequence: 0, time: T0, node: 'challenge', status: 'succeeded', message: 'Design challenge attempt 1 passed (0 P2 concern(s)); launching workers' }, ...reviewedEvents.map(event => ({ ...event }))]
+    const frozenAt = events.findIndex(event => event.node === 'freeze')
+    events.splice(frozenAt, 0, { sequence: 0, time: T1, node: 'sidecar', status: 'running', message: 'pass 1 (cadence) started' }, { sequence: 0, time: T1, node: 'sidecar', status: 'succeeded', message: 'closed at freeze after 1 pass' })
+    events.push({ sequence: 0, time: T2, node: 'integrate', status: 'succeeded', message: `Fast-forwarded to ${'c'.repeat(40)}; no push performed` })
+    events.forEach((event, index) => { event.sequence = index + 1 })
+    await writeRun(runsRoot('alpha', 'main'), {
+      runId: 'integrated', version: '1.6.0', definition: SIDECAR_DEFINITION, sidecar: { ...(await ledgerOf({ run_id: 'integrated', closed_at: T1 })) },
+      values: reviewedValues({ review: { verdict: 'approved' }, approved_bundle: BUNDLE, integrated_commit: 'c'.repeat(40) }), next: [], events, packets: reviewedPackets,
+      review: reviewSection(), inputs: inputsSection(),
+    })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'integrated'))).json())
+    assert.equal(nodeStatus(detail, 'sidecar'), 'succeeded')
+    assert.equal(detail.summary.status, 'succeeded')
+    assert.equal(detail.summary.activity?.focus, null)
+  })
+})
+
+test('[sidecar] the sidecar route is read-only: other methods are 405, HEAD works, nothing is written', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    await writeRun(runsRoot('alpha', 'main'), sidecarRun({ sidecar: await ledgerOf(), liveLedger: await appendixB() }))
+    const before = await snapshotTree(runsRoot('alpha', 'main'))
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
+      const response = await app.inject({ method, url: sidecarRoute(), payload: method === 'OPTIONS' ? undefined : { relay: 'M-1' } })
+      assert.equal(response.statusCode, 405, method)
+      assert.equal(response.headers.allow, 'GET, HEAD')
+      assert.equal(response.json().error.code, 'METHOD_NOT_ALLOWED')
+    }
+    assert.equal((await app.inject({ method: 'HEAD', url: sidecarRoute() })).statusCode, 200)
+    const response = await get(app, sidecarRoute())
+    assert.equal(response.status, 200)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.deepEqual(await snapshotTree(runsRoot('alpha', 'main')), before)
+  })
+})
+
+test('[sidecar] the Appendix B example validates verbatim: written live, it is served field for field', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const text = await appendixB()
+    await writeRun(runsRoot('alpha', 'main'), sidecarRun({ sidecar: null, liveLedger: text }))
+    const served = validateSidecarLedger((await get(app, sidecarRoute())).json())
+    const { contract_version, node_id, source, ...ledger } = served
+    assert.deepEqual([contract_version, node_id, source], ['1.6.0', 'sidecar', 'live'])
+    assert.deepEqual(ledger, JSON.parse(text))
+  })
+})
+
+test('[sidecar] reserved names: a lane named sidecar or sidecar-<x> makes the export contradictory', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    // `sidecars` is an ordinary lane name, the control case: only the reserved id and prefix are refused.
+    for (const [lane, status] of [['sidecar', 500], ['sidecar-two', 500], ['sidecars', 200]] as const) {
+      const inputs = inputsSection()
+      const renamed = { ...inputs, workers: { ui: inputs.workers.ui, [lane]: inputs.workers.adapter } }
+      await writeRun(runsRoot('alpha', 'main'), { runId: `lane-${lane}`, definition: { name: 'Feature implementation', nodes: graphNodes(['ui', lane]) as typeof GRAPH_NODES },
+        values: { ui: receipt('ui') }, next: [`launch_${lane}`], events: launchEvents.slice(0, 1), inputs: renamed })
+      const response = await get(app, url('alpha', 'main', `lane-${lane}`))
+      if (status === 200) assert.equal(response.status, 200, response.body)
+      else assertError(response, 500, 'RUN_STORAGE_INVALID')
+    }
+  })
+})
+
+test('[sidecar] a seeded run with a sidecar has the activity of its twin without one, with two lanes, one lane and a blocked run', async () => {
+  const activities: Record<string, unknown> = {}
+  const nodes: Record<string, string[]> = {}
+  await eachSeededRun((key, detail) => {
+    activities[key] = detail.summary.activity
+    nodes[key] = detail.definition.nodes.map(node => node.node_id)
+  })
+  for (const [withSidecar, without] of SIDECAR_TWINS) {
+    const key = (run: string) => `ux-sidecar/${run}`
+    assert.ok(activities[key(withSidecar)], withSidecar)
+    assert.deepEqual(activities[key(withSidecar)], activities[key(without)], `${withSidecar} reads like ${without}`)
+    // The sidecar sits right after the challenge, before every launch node; the twin has no such node.
+    const order = nodes[key(withSidecar)]
+    assert.equal(order.indexOf('sidecar'), order.indexOf('challenge') + 1)
+    assert.ok(order.filter(id => id.startsWith('launch_')).every(id => order.indexOf(id) > order.indexOf('sidecar')))
+    assert.equal(nodes[key(without)].includes('sidecar'), false)
+  }
 })

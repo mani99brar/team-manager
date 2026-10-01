@@ -1,0 +1,551 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "cadence_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        },
+        "pass_timeout_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 3600
+        },
+        "max_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "max_messages_per_lane": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "required": [
+        "cadence_seconds",
+        "pass_timeout_seconds",
+        "max_passes",
+        "max_messages_per_lane"
+      ],
+      "additionalProperties": false
+    },
+    "passes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "n": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "trigger": {
+            "type": "string",
+            "enum": [
+              "cadence",
+              "completion",
+              "final",
+              "manual"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finished_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "rejected",
+              "failed",
+              "timed_out",
+              "interrupted"
+            ]
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lanes": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "head_commit": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "pane_captured": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "head_commit",
+                "pane_captured"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "new": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "changed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "messages": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "new",
+              "changed",
+              "messages"
+            ],
+            "additionalProperties": false
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "n",
+          "trigger",
+          "started_at",
+          "finished_at",
+          "status",
+          "session_id",
+          "lanes",
+          "counts",
+          "summary"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "defect",
+              "risk",
+              "structure",
+              "operational",
+              "suggestion"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ]
+          },
+          "lane": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "locator": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "remedy": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "open",
+              "acknowledged",
+              "fix_reported",
+              "verified_resolved",
+              "withdrawn",
+              "accepted_trade_off"
+            ]
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pass": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "disposition": {
+                  "type": "string",
+                  "enum": [
+                    "open",
+                    "acknowledged",
+                    "fix_reported",
+                    "verified_resolved",
+                    "withdrawn",
+                    "accepted_trade_off"
+                  ]
+                },
+                "revision": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "evidence": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "at": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "pass",
+                "disposition",
+                "revision",
+                "evidence",
+                "note",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "category",
+          "severity",
+          "lane",
+          "file",
+          "locator",
+          "revision",
+          "problem",
+          "evidence",
+          "remedy",
+          "disposition",
+          "note",
+          "messages",
+          "history"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pass": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "lane": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finding_ids": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "delivered",
+              "undeliverable",
+              "refused"
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "question_waiting",
+                  "lane_finished",
+                  "lane_not_launched",
+                  "rate_limited",
+                  "after_freeze",
+                  "lane_blocked",
+                  "pane_busy",
+                  "pane_unknown",
+                  "pane_not_attached",
+                  "herdr_unavailable",
+                  "herdr_timeout",
+                  "interrupted"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "at": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "pass",
+          "lane",
+          "finding_ids",
+          "text",
+          "status",
+          "reason",
+          "at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "escalations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "security",
+              "data_loss",
+              "architecture"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "pass": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "at": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "finding_id",
+          "kind",
+          "text"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "handoff": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "unresolved": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            },
+            "structural": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            },
+            "verified_resolved": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            },
+            "withdrawn": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            },
+            "gaps": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 4000
+              }
+            }
+          },
+          "required": [
+            "unresolved",
+            "structural",
+            "verified_resolved",
+            "withdrawn",
+            "gaps"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "closed_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contract_version": {
+      "type": "string",
+      "const": "1.6.0"
+    },
+    "node_id": {
+      "type": "string",
+      "const": "sidecar"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "live",
+        "export"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "run_id",
+    "settings",
+    "passes",
+    "findings",
+    "messages",
+    "escalations",
+    "handoff",
+    "closed_at",
+    "contract_version",
+    "node_id",
+    "source"
+  ],
+  "additionalProperties": false
+}

@@ -12,6 +12,7 @@ import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.t
 import { buildTimeline, deriveAttention, type RunData } from '../../contracts/projects/triage.ts'
 import { formatShortSpan, outageBands, shortStepLabel, stepRows, timeAxis, type StepRow } from '../../src/projects/steps.ts'
 import { formatSpan } from '../../src/projects/time.ts'
+import { RUN_SIDECAR, RUN_SIDECAR_FROZEN, uxSidecar } from '../project-workflows/fixtures/ux-sidecar.ts'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -213,5 +214,32 @@ describe('labels', () => {
     assert.equal(formatShortSpan(46_000), '46s')
     assert.equal(formatShortSpan(28 * MINUTE + 21_000), '28m')
     assert.equal(formatShortSpan(HOUR + 5 * MINUTE + 59_000), '1h05m')
+  })
+})
+
+describe('the review sidecar step (docs/PRD_REVIEW_SIDECAR.md 4.9)', () => {
+  const payloads = uxSidecar.payloads!
+  const runOf = (runId: string): RunData => ({ detail: payloads.runDetails![runId], events: payloads.runEvents![runId], inputs: payloads.runInputs![runId], review: null, results: new Map() })
+
+  test('the step strip calls it Sidecar', () => {
+    assert.equal(shortStepLabel({ node_id: 'sidecar', label: 'Review sidecar' }), 'Sidecar')
+  })
+
+  test('its row follows the challenge, before the launches, with its span from its own events and no new code', () => {
+    const rows = stepRows(runOf(RUN_SIDECAR).detail, buildTimeline(runOf(RUN_SIDECAR)), { now: Date.parse('2026-10-01T14:00:00Z') })
+    assert.deepEqual(rows.slice(0, 3).map(row => row.node_id), ['challenge', 'sidecar', 'launch_engine'])
+    const row = byId(rows, 'sidecar')
+    assert.equal(row.kind, 'review')
+    assert.equal(row.shown, 'running')
+    assert.equal(row.start?.at, '2026-10-01T12:10:00Z')
+    assert.equal(row.live, true)
+    assert.equal(row.ms, Date.parse('2026-10-01T14:00:00Z') - Date.parse('2026-10-01T12:10:00Z'))
+    assert.equal(row.attempt, 1)
+    assert.equal(row.marks, '')
+    // Closed at freeze: from its first pass to its `succeeded`.
+    const frozen = byId(stepRows(runOf(RUN_SIDECAR_FROZEN).detail, buildTimeline(runOf(RUN_SIDECAR_FROZEN)), { now: Date.parse('2026-10-01T15:00:00Z') }), 'sidecar')
+    assert.equal(frozen.status, 'succeeded')
+    assert.equal(frozen.end?.at, '2026-10-01T14:26:00Z')
+    assert.equal(took(frozen), formatSpan(Date.parse('2026-10-01T14:26:00Z') - Date.parse('2026-10-01T12:10:00Z')))
   })
 })

@@ -6,8 +6,10 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
-  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN, validateReviewResult, validateRunDetail, validateRunInputs,
-  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type WorkerQuestion, type WorkflowDefinition,
+  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
+  sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
@@ -28,7 +30,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * section lists `reviewers` and tags every finding with its `reviewer`) and 1.5.0 (the guardrails of feature.json 2.2.0:
  * `inputs.decisions`, `inputs.challenge`, the completion's version, evidence and unrecorded question and `questions`
  * per worker, and a `challenge` graph node before the launches; older exports serve them as null and `[]`, and their
- * completions as 1.0.0). A section is served only when the
+ * completions as 1.0.0) and 1.6.0 (the review sidecar: a top-level `sidecar` section holding its ledger, or null, and a
+ * `sidecar` graph node after the challenge). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -39,6 +42,11 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * Contract 1.5.0 (docs/PRD_VIEWER_UX.md 9.2): every summary carries the run's `activity`, derived with the viewer's own
  * triage rules (`contracts/projects/triage.ts`) from the files above plus each live lane's `<lane>.questions.json`, and
  * every detail its `run_dir`, served only for projects the registry lists under `viewer.expose_run_dir`.
+ *
+ * Contract 1.6.0 (docs/PRD_REVIEW_SIDECAR.md 4.7, 4.8): the review sidecar's ledger is served on its own route, read live from
+ * `<run>/sidecar.ledger.json` (the export is rewritten only at graph steps) and else from the export's `sidecar` section. The
+ * section is never parsed with the export, so no ledger can fail a run or the run list; the sidecar node's status comes from
+ * its events like any node's.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -59,12 +67,15 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
-/** Node IDs a lane can never take: the fixed graph tail, the finding attributions, the per-lane node prefixes and the design challenge's node and files. */
-const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge'])
-const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-', 'challenge-']
+/**
+ * Node IDs a lane can never take: the fixed graph tail, the finding attributions, the per-lane node prefixes, and the nodes
+ * and files of the design challenge and the review sidecar.
+ */
+const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'sidecar'])
+const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-', 'challenge-', 'sidecar-']
 /** Required check kinds the controller derived from the role before policies declared them (verification.py before 1.2.0). */
 const ROLE_REQUIRED_KINDS: Record<string, readonly (typeof CHECK_KINDS)[number][]> = { frontend: ['build', 'browser'], backend: ['unit'] }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -73,6 +84,11 @@ const TEXT_LIMIT = 65536
 /** The diff the reviewer saw, registered by the export relative to the run root. */
 const REVIEW_DIFF_FILE = 'review.diff'
 const REVIEW_ARTIFACT_PREFIX = 'patch-review-'
+/** The review sidecar's node (export 1.6.0) and the ledger the controller rewrites while the workers run. */
+const SIDECAR_NODE = 'sidecar'
+const SIDECAR_LEDGER_FILE = 'sidecar.ledger.json'
+/** The live ledger is read up to the engine's own bound on it (PRD_REVIEW_SIDECAR 4.4), not the questions file's. */
+export const SIDECAR_LEDGER_BYTE_LIMIT = 4 * 1024 * 1024
 
 /**
  * Absolute filesystem paths in persisted messages are never forwarded to clients. A path starts at the string start
@@ -263,6 +279,11 @@ const exportSchema = z.object({
   review: reviewSectionSchema.nullable().optional(),
   /** Absent before 1.2.0; null when the run has no `policy.json`. */
   inputs: inputsSectionSchema.nullable().optional(),
+  /**
+   * Export 1.6.0: the review sidecar's ledger, or null for a run without one; absent before. Kept as unknown data: it is
+   * validated only when the sidecar route serves it, so a ledger can never fail the run.
+   */
+  sidecar: z.unknown().optional(),
 })
 
 const rawEventSchema = z.object({
@@ -312,6 +333,8 @@ export type LoadedRun = {
   /** The projected run inputs, or null when the export carries no inputs section. */
   inputs: RunInputs | null
   reviewDiff: ReviewDiffRegistration | null
+  /** The export's `sidecar` section as written (export 1.6.0), unvalidated; null or undefined when absent. */
+  sidecar: unknown
 }
 
 export type ArtifactContent = {
@@ -890,6 +913,50 @@ export class RunStore {
   }
 
   /**
+   * The review sidecar's ledger (contract 1.6.0): the live `<run>/sidecar.ledger.json` when it is readable and valid, else the
+   * export's `sidecar` section, else 404 `SIDECAR_NOT_FOUND` (a run without the sidecar node, an export before 1.6.0, no pass
+   * recorded yet). A file or section that fails the contract is skipped with its reason logged, never an error page.
+   */
+  async sidecarLedger(scope: Scope, runId: string): Promise<SidecarLedger> {
+    const run = await this.loadRun(scope, runId)
+    const notRecorded = () => new ProjectApiError(404, 'SIDECAR_NOT_FOUND', 'No review sidecar ledger is recorded for this run: it has no sidecar, no pass has run yet or its export predates the sidecar.')
+    if (!run.detail.definition.nodes.some(node => node.node_id === SIDECAR_NODE)) throw notRecorded()
+    const skip = (source: SidecarLedger['source'], reason: string) => this.options.warn?.('Review sidecar ledger skipped', {
+      project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: runId, source, reason,
+    })
+    const live = await this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) return null
+      try {
+        return await readBounded(directory, [SIDECAR_LEDGER_FILE], SIDECAR_LEDGER_BYTE_LIMIT)
+      } catch (error) {
+        if (!(error instanceof ProjectApiError)) throw error
+        skip('live', `${SIDECAR_LEDGER_FILE} exceeds the ${SIDECAR_LEDGER_BYTE_LIMIT} byte read limit`)
+        return null
+      } finally {
+        await directory.close()
+      }
+    })
+    if (live !== null) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(live.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const served = parsed === undefined ? { error: `${SIDECAR_LEDGER_FILE} is not valid JSON` } : projectSidecarLedger(runId, parsed, 'live')
+      if ('ledger' in served) return served.ledger
+      skip('live', served.error)
+    }
+    if (run.sidecar !== null && run.sidecar !== undefined) {
+      const served = projectSidecarLedger(runId, run.sidecar, 'export')
+      if ('ledger' in served) return served.ledger
+      skip('export', served.error)
+    }
+    throw notRecorded()
+  }
+
+  /**
    * Serves one registered artifact: a packet artifact beside its verification packet, or the review diff the
    * export registered at the run root. Both registries are consulted; an ID registered with different hashes,
    * a malformed entry or an untrusted packet is refused, and the content is served only when it still hashes
@@ -1008,7 +1075,7 @@ export class RunStore {
     } catch (error) {
       throw contractFailure('run activity', error)
     }
-    return { detail, events, packets, review, inputs, reviewDiff }
+    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null }
   }
 
   /**
@@ -1341,6 +1408,59 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   return { contract_version: '1.0.0', run_id: state.run_id, status, last_sequence: rawEvents.at(-1)?.sequence ?? 0, nodes }
 }
 
+// ---- The review sidecar's ledger (contract 1.6.0) --------------------------------------------------------------
+
+/** Redacts a model-written text and keeps it within its bound (a redaction may lengthen a very short path). */
+function boundedRedacted(text: string, limit: number): string {
+  const redacted = redactPaths(text)
+  if (redacted.length <= limit) return redacted
+  let cut = limit
+  const last = redacted.charCodeAt(cut - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1
+  return redacted.slice(0, cut)
+}
+
+/** A ledger time with a trailing Z when it reads as one; anything else is served as written (no format check, Appendix B). */
+function ledgerTime(value: string): string {
+  return Number.isNaN(Date.parse(value)) ? value : utcTimestamp(value)
+}
+
+/**
+ * The ledger (`<run>/sidecar.ledger.json` or the export's section) onto the contract: Appendix B's shape and bounds, this
+ * run's id, path-redacted texts, Z times. Unknown keys are dropped. Returns the reason instead when it does not conform.
+ */
+function projectSidecarLedger(runId: string, raw: unknown, source: SidecarLedger['source']): { ledger: SidecarLedger } | { error: string } {
+  const parsed = sidecarLedgerFileSchema.safeParse(raw)
+  if (!parsed.success) return { error: `the ${source} ledger ${issueText(parsed.error)}` }
+  const file: SidecarLedgerFile = parsed.data
+  if (file.run_id !== runId) return { error: `the ${source} ledger names another run` }
+  const note = (value: string | null) => value === null ? null : boundedRedacted(value, 1000)
+  try {
+    const ledger = validateSidecarLedger({
+      contract_version: '1.6.0', node_id: SIDECAR_NODE, source,
+      version: file.version, run_id: file.run_id, settings: { ...file.settings },
+      passes: file.passes.map(pass => ({
+        ...pass, started_at: ledgerTime(pass.started_at), finished_at: ledgerTime(pass.finished_at),
+        lanes: Object.fromEntries(Object.entries(pass.lanes).map(([lane, read]) => [lane, { head_commit: read.head_commit, pane_captured: read.pane_captured }])),
+        counts: { ...pass.counts }, summary: pass.summary === null ? null : boundedRedacted(pass.summary, 4000),
+      })),
+      findings: file.findings.map(finding => ({
+        ...finding, file: boundedRedacted(finding.file, 512), locator: boundedRedacted(finding.locator, 1000),
+        problem: boundedRedacted(finding.problem, 2000), evidence: boundedRedacted(finding.evidence, 2000), remedy: boundedRedacted(finding.remedy, 2000), note: note(finding.note),
+        messages: [...finding.messages],
+        history: finding.history.map(entry => ({ ...entry, evidence: boundedRedacted(entry.evidence, 2000), note: note(entry.note), at: ledgerTime(entry.at) })),
+      })),
+      messages: file.messages.map(message => ({ ...message, finding_ids: [...message.finding_ids], text: boundedRedacted(message.text, 2000), at: ledgerTime(message.at) })),
+      escalations: file.escalations.map(escalation => ({ ...escalation, text: boundedRedacted(escalation.text, 2000), ...(escalation.at !== undefined ? { at: ledgerTime(escalation.at) } : {}) })),
+      handoff: file.handoff === null ? null : Object.fromEntries(Object.entries(file.handoff).map(([list, entries]) => [list, entries.map(entry => boundedRedacted(entry, 4000))])),
+      closed_at: file.closed_at === null ? null : ledgerTime(file.closed_at),
+    })
+    return { ledger }
+  } catch (error) {
+    return { error: `the ${source} ledger violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})` }
+  }
+}
+
 // ---- Run activity (contract 1.5.0) -----------------------------------------------------------------------------
 
 /**
@@ -1362,7 +1482,8 @@ function activityAttention(status: RunSnapshot['status'], attention: RunAttentio
  */
 function activityHeadline(run: RunData, focus: Focus | null, now: Now): string | null {
   const controllerRow = now.reasonSource === 0 ? (now.reason ?? []).filter(part => typeof part === 'string').join('').trim() : ''
-  const nodeId = focus?.node_id ?? run.events.findLast(event => event.node_id !== null && event.status !== null)?.node_id ?? null
+  // The review sidecar's rows never speak for the run (docs/PRD_REVIEW_SIDECAR.md 4.8): a run reads the same without it.
+  const nodeId = focus?.node_id ?? run.events.findLast(event => event.node_id !== null && event.node_id !== SIDECAR_NODE && event.status !== null)?.node_id ?? null
   let message = controllerRow
   if (!message && nodeId !== null) {
     const own = run.events.filter(event => event.node_id === nodeId)

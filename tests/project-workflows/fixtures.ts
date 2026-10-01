@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import {
   validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs,
-  type Project, type ReviewResult, type RunDetail, type RunInputs, type WorkflowDefinition,
+  type Project, type ReviewResult, type RunDetail, type RunInputs, type SidecarLedger, type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
@@ -694,6 +694,9 @@ export const REUSE_MESSAGE = 'Reused the successful UI verification from attempt
 export const APPROVAL_MESSAGE = 'Independent review required before integration; awaiting the recorded review verdict.'
 export const BLOCKED_MESSAGE = 'Independent reviewer blocked the candidate'
 export const REVIEWER_BLOCKED_MESSAGE = 'Reviewer coverage blocked the candidate; reviewer general was stopped and superseded'
+
+/** The review sidecar's ledger per run (`.../sidecar`, contract 1.6.0); only the `ux-sidecar` runs have one. */
+export const sidecarLedgers: Record<string, SidecarLedger> = {}
 
 export const runEvents: Record<string, WorkflowEvent[]> = {
   [RUN_SUCCEEDED]: [

@@ -1,5 +1,5 @@
 import type { WorkerResult } from '../workflow/v1.js'
-import type { ReviewFinding, ReviewResult, RunDetail, RunInputs } from './v1.js'
+import type { ReviewFinding, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
 
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
@@ -181,3 +181,57 @@ export const runInputs: RunInputs = {
     decided_at: '2026-01-01T11:59:00Z',
   },
 }
+
+/**
+ * The review sidecar's ledger exactly as docs/PRD_REVIEW_SIDECAR.md Appendix B pins it (three passes, the second timed out;
+ * S-1 reported fixed with its pass-1 values in `history[0]`; M-2 refused because a question waited).
+ */
+export const sidecarLedgerFile: SidecarLedgerFile = {
+  version: '1.0.0',
+  run_id: 'review-sidecar-smoke-001',
+  settings: { cadence_seconds: 900, pass_timeout_seconds: 600, max_passes: 16, max_messages_per_lane: 6 },
+  passes: [
+    { n: 1, trigger: 'cadence', started_at: '2026-10-01T12:10:00Z', finished_at: '2026-10-01T12:14:20Z', status: 'completed', session_id: '0f2b3c6e-4a4d-4b8e-9d1a-6b2f1c0a9e11', lanes: { engine: { head_commit: 'a1b2c3d', pane_captured: true }, viewer: { head_commit: 'a1b2c3d', pane_captured: true } }, counts: { new: 1, changed: 0, messages: 1 }, summary: 'One P1 in the engine lane\'s merge; the viewer lane has no diff yet.' },
+    { n: 2, trigger: 'completion', started_at: '2026-10-01T12:40:00Z', finished_at: '2026-10-01T12:50:00Z', status: 'timed_out', session_id: null, lanes: { engine: { head_commit: 'b2c3d4e', pane_captured: false }, viewer: { head_commit: 'c3d4e5f', pane_captured: true } }, counts: { new: 0, changed: 0, messages: 0 }, summary: null },
+    { n: 3, trigger: 'cadence', started_at: '2026-10-01T13:00:00Z', finished_at: '2026-10-01T13:05:00Z', status: 'completed', session_id: '7c1d2e3f-5b6a-4c7d-8e9f-0a1b2c3d4e5f', lanes: { engine: { head_commit: 'b2c3d4e', pane_captured: true }, viewer: { head_commit: 'd4e5f6a', pane_captured: true } }, counts: { new: 1, changed: 1, messages: 1 }, summary: 'S-1 reported fixed in the engine pane; one P2 in the viewer\'s fixture seeding.' },
+  ],
+  findings: [
+    {
+      id: 'S-1', category: 'defect', severity: 'P1', lane: 'engine',
+      file: 'workflow/sidecar.py', locator: 'merge_output', revision: 'b2c3d4e',
+      problem: 'A rejected output still appends the pass to the ledger before validation, so a malformed output leaves a half-written pass.',
+      evidence: 'pane: \'fixed S-1, validating before the write\'',
+      remedy: 'Validate first, then write the pass and the findings in one atomic replace.',
+      disposition: 'fix_reported',
+      note: null,
+      messages: ['M-1'],
+      history: [
+        { pass: 1, disposition: 'open', revision: 'a1b2c3d', evidence: 'merge_output writes passes[] at line 88 and validates at line 102; test_sidecar has no case for it.', note: null, at: '2026-10-01T12:14:20Z' },
+        { pass: 3, disposition: 'fix_reported', revision: 'b2c3d4e', evidence: 'pane: \'fixed S-1, validating before the write\'', note: null, at: '2026-10-01T13:05:00Z' },
+      ],
+    },
+    {
+      id: 'S-2', category: 'suggestion', severity: 'P2', lane: 'viewer',
+      file: 'tests/project-workflows/fixtures/ux-sidecar.ts', locator: '', revision: 'working-tree',
+      problem: 'The seeded ledger\'s timestamps are written by hand and drift from the events the same fixture seeds.',
+      evidence: '',
+      remedy: 'Derive the ledger times from the fixture\'s event times.',
+      disposition: 'open',
+      note: null,
+      messages: ['M-2'],
+      history: [
+        { pass: 3, disposition: 'open', revision: 'working-tree', evidence: '', note: null, at: '2026-10-01T13:05:00Z' },
+      ],
+    },
+  ],
+  messages: [
+    { id: 'M-1', pass: 1, lane: 'engine', finding_ids: ['S-1'], text: 'merge_output appends the pass before validating the output; a malformed output leaves a half-written ledger. Validate first and write once.', status: 'delivered', reason: null, at: '2026-10-01T12:14:21Z' },
+    { id: 'M-2', pass: 3, lane: 'viewer', finding_ids: ['S-2'], text: 'The seeded ledger times in ux-sidecar.ts drift from the seeded events; derive one from the other.', status: 'refused', reason: 'question_waiting', at: '2026-10-01T13:05:01Z' },
+  ],
+  escalations: [],
+  handoff: null,
+  closed_at: null,
+}
+
+/** The same ledger as the sidecar route serves it while the run works: read live from `<run>/sidecar.ledger.json`. */
+export const sidecarLedger: SidecarLedger = { contract_version: '1.6.0', node_id: 'sidecar', source: 'live', ...sidecarLedgerFile }

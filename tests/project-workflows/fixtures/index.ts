@@ -10,10 +10,10 @@
  * After S1 no slice edits `fixtures.ts`, `mock.ts` or `seed.ts`: a slice changes only its own module. Modules import the
  * builders `fixtures.ts` exports and only types from here and from `seed.ts`, so no import cycle exists.
  */
-import type { ReviewResult, RunDetail, RunInputs, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import type { ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
-  artifactFiles, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, workerResults, workflowLists,
+  artifactFiles, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
 import type { SeedContext } from '../seed.ts'
@@ -22,6 +22,7 @@ import { uxLists } from './ux-lists.ts'
 import { uxNode } from './ux-node.ts'
 import { uxReview } from './ux-review.ts'
 import { uxRun } from './ux-run.ts'
+import { uxSidecar } from './ux-sidecar.ts'
 import { uxTime } from './ux-time.ts'
 import { uxVerify } from './ux-verify.ts'
 
@@ -36,6 +37,8 @@ export type UxPayloads = {
   reviewResults: Record<string, ReviewResult>
   runInputs: Record<string, RunInputs>
   artifactFiles: Record<string, ArtifactFile[]>
+  /** The review sidecar's served ledger per run (contract 1.6.0). */
+  sidecarLedgers?: Record<string, SidecarLedger>
 }
 
 /** One registry workflow entry, as `seedCandidate` writes them. */
@@ -54,7 +57,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {
@@ -66,6 +69,7 @@ function mergePayloads(modules: readonly UxFixtureModule[]) {
     Object.assign(reviewResults, payloads.reviewResults)
     Object.assign(runInputs, payloads.runInputs)
     Object.assign(artifactFiles, payloads.artifactFiles)
+    Object.assign(sidecarLedgers, payloads.sidecarLedgers)
     // The mocks index these per run: a run without events, results or artifacts serves none rather than failing.
     for (const runId of Object.keys(payloads.runDetails ?? {})) {
       runEvents[runId] ??= []

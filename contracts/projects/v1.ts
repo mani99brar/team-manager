@@ -7,7 +7,8 @@ const version = z.literal('1.0.0')
  * Payloads added by contract 1.1.0 (review results), extended by 1.2.0 (finding links, run inputs), 1.3.0 (configured
  * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
- * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`.
+ * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
+ * sidecar's ledger (`sidecarLedger`).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -325,6 +326,131 @@ export const runInputsSchema = z.strictObject({
   challenge: runChallengeSchema.nullable(),
 })
 
+// ---- Review sidecar ledger (1.6.0) ------------------------------------------------------------------------------
+
+/** The pass triggers, statuses and the finding, message and escalation vocabularies of the ledger (PRD_REVIEW_SIDECAR Appendix B). */
+export const SIDECAR_TRIGGERS = ['cadence', 'completion', 'final', 'manual'] as const
+export const SIDECAR_PASS_STATUSES = ['completed', 'rejected', 'failed', 'timed_out', 'interrupted'] as const
+export const SIDECAR_CATEGORIES = ['defect', 'risk', 'structure', 'operational', 'suggestion'] as const
+export const SIDECAR_SEVERITIES = ['P0', 'P1', 'P2'] as const
+export const SIDECAR_DISPOSITIONS = ['open', 'acknowledged', 'fix_reported', 'verified_resolved', 'withdrawn', 'accepted_trade_off'] as const
+/** A finding with one of these dispositions is still open; the others are closed (`verified_resolved`, `withdrawn`, `accepted_trade_off`). */
+export const SIDECAR_OPEN_DISPOSITIONS = ['open', 'acknowledged', 'fix_reported'] as const
+/** `pending` only between the controller's merge write and its delivery write. */
+export const SIDECAR_MESSAGE_STATUSES = ['pending', 'delivered', 'undeliverable', 'refused'] as const
+export const SIDECAR_MESSAGE_REASONS = [
+  'question_waiting', 'lane_finished', 'lane_not_launched', 'rate_limited', 'after_freeze', 'lane_blocked', 'pane_busy', 'pane_unknown',
+  'pane_not_attached', 'herdr_unavailable', 'herdr_timeout', 'interrupted',
+] as const
+export const SIDECAR_ESCALATION_KINDS = ['security', 'data_loss', 'architecture'] as const
+/** The handoff the final pass writes: five lists of strings. */
+export const SIDECAR_HANDOFF_LISTS = ['unresolved', 'structural', 'verified_resolved', 'withdrawn', 'gaps'] as const
+
+/**
+ * Appendix B's field rules, shared with `contracts/workflow/sidecar.schema.json` 1.0.0: every id, sha, revision, lane and
+ * time is a non-empty string with no format check; `locator` and `evidence` may be empty; `note`, `summary`, a pass's
+ * `session_id`, a message's `reason`, `handoff` and `closed_at` are the only nullable fields; texts are bounded as the engine
+ * bounds them; arrays may be empty; no reference is resolved (a message's finding ids, a history entry's pass). Objects are
+ * not strict: a key the engine adds is dropped, never a reason to refuse the ledger.
+ */
+const sidecarId = z.string().min(1)
+const sidecarTime = z.string().min(1)
+const sidecarCount = z.number().int().nonnegative()
+const sidecarNote = z.string().max(1000).nullable()
+
+export const sidecarPassSchema = z.object({
+  n: z.number().int().positive(),
+  trigger: z.enum(SIDECAR_TRIGGERS),
+  started_at: sidecarTime,
+  finished_at: sidecarTime,
+  status: z.enum(SIDECAR_PASS_STATUSES),
+  session_id: sidecarId.nullable(),
+  /** Per lane read: the head commit as `git rev-parse` printed it and whether its pane text was captured. */
+  lanes: z.record(sidecarId, z.object({ head_commit: sidecarId, pane_captured: z.boolean() })),
+  counts: z.object({ new: sidecarCount, changed: sidecarCount, messages: sidecarCount }),
+  summary: z.string().max(4000).nullable(),
+})
+
+export const sidecarHistoryEntrySchema = z.object({
+  pass: z.number().int().positive(),
+  disposition: z.enum(SIDECAR_DISPOSITIONS),
+  revision: sidecarId,
+  evidence: z.string().max(2000),
+  note: sidecarNote,
+  at: sidecarTime,
+})
+
+/** A finding as it stands: its own fields are its latest values, `history[0]` holds the values it was created with. */
+export const sidecarFindingSchema = z.object({
+  id: sidecarId,
+  category: z.enum(SIDECAR_CATEGORIES),
+  severity: z.enum(SIDECAR_SEVERITIES),
+  lane: sidecarId,
+  file: z.string().min(1).max(512),
+  locator: z.string().max(1000),
+  revision: sidecarId,
+  problem: z.string().min(1).max(2000),
+  evidence: z.string().max(2000),
+  remedy: z.string().min(1).max(2000),
+  disposition: z.enum(SIDECAR_DISPOSITIONS),
+  note: sidecarNote,
+  /** The ids of the messages sent for it. */
+  messages: z.array(sidecarId),
+  history: z.array(sidecarHistoryEntrySchema),
+})
+
+export const sidecarMessageSchema = z.object({
+  id: sidecarId,
+  pass: z.number().int().positive(),
+  lane: sidecarId,
+  finding_ids: z.array(sidecarId).min(1),
+  text: z.string().min(1).max(2000),
+  status: z.enum(SIDECAR_MESSAGE_STATUSES),
+  reason: z.enum(SIDECAR_MESSAGE_REASONS).nullable(),
+  at: sidecarTime,
+})
+
+/** Appendix B pins only the output's escalation (`finding_id`, `kind`, `text`); the stored entry may add the pass and its time. */
+export const sidecarEscalationSchema = z.object({
+  finding_id: sidecarId,
+  kind: z.enum(SIDECAR_ESCALATION_KINDS),
+  text: z.string().min(1).max(2000),
+  pass: z.number().int().positive().optional(),
+  at: sidecarTime.optional(),
+})
+
+const handoffList = z.array(z.string().max(4000))
+
+/** `<run>/sidecar.ledger.json` as the controller writes it (Appendix B, `contracts/workflow/sidecar.schema.json` 1.0.0). */
+export const sidecarLedgerFileSchema = z.object({
+  version: z.literal('1.0.0'),
+  run_id: sidecarId,
+  settings: z.object({
+    cadence_seconds: z.number().int().min(60).max(7200),
+    pass_timeout_seconds: z.number().int().min(60).max(3600),
+    max_passes: z.number().int().min(1).max(64),
+    max_messages_per_lane: z.number().int().min(0).max(20),
+  }),
+  passes: z.array(sidecarPassSchema),
+  findings: z.array(sidecarFindingSchema),
+  messages: z.array(sidecarMessageSchema),
+  escalations: z.array(sidecarEscalationSchema),
+  handoff: z.object({
+    unresolved: handoffList, structural: handoffList, verified_resolved: handoffList, withdrawn: handoffList, gaps: handoffList,
+  }).nullable(),
+  closed_at: sidecarTime.nullable(),
+})
+
+/**
+ * The review sidecar's ledger, served at `.../runs/{run_id}/sidecar` (1.6.0): the ledger's own fields plus where it was read,
+ * `live` (`<run>/sidecar.ledger.json`, written while the workers run) or `export` (the export's `sidecar` section, the fallback).
+ */
+export const sidecarLedgerSchema = sidecarLedgerFileSchema.extend({
+  contract_version: z.literal('1.6.0'),
+  node_id: z.literal('sidecar'),
+  source: z.enum(['live', 'export']),
+})
+
 export const schemas = {
   projectList: z.strictObject({ projects: z.array(projectSchema) }),
   workflowList: z.strictObject({ workflows: z.array(definitionSchema) }),
@@ -332,6 +458,7 @@ export const schemas = {
   runDetail: runDetailSchema,
   reviewResult: reviewResultSchema,
   runInputs: runInputsSchema,
+  sidecarLedger: sidecarLedgerSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>
@@ -346,6 +473,12 @@ export type RunInputWorker = z.infer<typeof runInputWorkerSchema>
 export type WorkerQuestion = z.infer<typeof workerQuestionSchema>
 export type RunChallenge = z.infer<typeof runChallengeSchema>
 export type RunInputs = z.infer<typeof runInputsSchema>
+export type SidecarLedgerFile = z.infer<typeof sidecarLedgerFileSchema>
+export type SidecarLedger = z.infer<typeof sidecarLedgerSchema>
+export type SidecarFinding = z.infer<typeof sidecarFindingSchema>
+export type SidecarMessage = z.infer<typeof sidecarMessageSchema>
+export type SidecarPass = z.infer<typeof sidecarPassSchema>
+export type SidecarEscalation = z.infer<typeof sidecarEscalationSchema>
 
 export function validateDefinition(input: unknown): WorkflowDefinition {
   const definition = definitionSchema.parse(input)
@@ -478,4 +611,20 @@ export function validateRunInputs(input: unknown): RunInputs {
     if (challenge.attempts < challenge.attempt) throw new Error('A challenge cannot decide an attempt it has not run')
   }
   return inputs
+}
+
+/**
+ * The served ledger's cross-field rules. Like the engine's schema it resolves no reference (a message may cite a finding the
+ * ledger does not hold); it only refuses what the viewer could not show unambiguously: two findings, messages or passes
+ * sharing an id or number.
+ */
+export function validateSidecarLedger(input: unknown): SidecarLedger {
+  const ledger = sidecarLedgerSchema.parse(input)
+  const unique = (values: readonly (string | number)[], what: string) => {
+    if (new Set(values).size !== values.length) throw new Error(`Duplicate ${what}`)
+  }
+  unique(ledger.findings.map(finding => finding.id), 'finding ids')
+  unique(ledger.messages.map(message => message.id), 'message ids')
+  unique(ledger.passes.map(pass => pass.n), 'pass numbers')
+  return ledger
 }

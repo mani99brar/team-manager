@@ -11,7 +11,7 @@ import {
   controllerNotRunning, deriveNow, type ControllerReading, type ControllerState, type Now, type Situation,
 } from '../../contracts/projects/triage.ts'
 import type { RunActivity, RunDetail, RunSummary } from './api.ts'
-import { GENERIC_WORKFLOW_NAME, STATUS_LABEL, type RunStatus } from './status.ts'
+import { GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
 
 /** Recent lists every run that finished in the last seven days (decisions.md). */
 export const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -96,6 +96,7 @@ export function readsNextPage(runs: readonly Pick<RunSummary, 'updated_at'>[], n
 /** The lane a launch node belongs to (`launch_<lane>`), else the node id itself (a reviewer's `review`). */
 function who(nodeId: string | null): string {
   if (nodeId === null) return 'a step'
+  if (nodeId === SIDECAR_NODE_ID) return 'review sidecar'
   return nodeId.startsWith('launch_') ? nodeId.slice('launch_'.length) : nodeId
 }
 

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import { attemptResultUris, type Now, type Timeline } from '../../contracts/projects/triage.ts'
-import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type RunDetail, type RunInputs, type RunScope, type WorkerResult, type WorkflowEvent } from './api.ts'
+import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type RunDetail, type RunInputs, type RunScope, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
 import { ChallengeHeadline } from './Challenge.tsx'
 import { ChallengeSections } from './node/ChallengeSections.tsx'
 import { AwaitingNotice, ControllerSections } from './node/ControllerSections.tsx'
@@ -8,13 +8,15 @@ import { launchSectionEntries } from './node/launch.ts'
 import { attemptStrip, causeOf, nodeTiming, resultRole, revisionAttempt, verifiedSections, type SectionEntry } from './node/model.ts'
 import { challengeSectionEntries, reviewSectionEntries } from './node/panels.ts'
 import { ReviewSections } from './node/ReviewSections.tsx'
+import { sidecarSectionEntries } from './node/sidecar.ts'
+import { SidecarHeadline, SidecarSections } from './node/SidecarSections.tsx'
 import { CandidateLanes, VerifiedEvidence, WorkerReportLink, type LaneEntry } from './node/VerifySections.tsx'
 import { WorkerSections } from './node/WorkerSections.tsx'
 import { NodeHeader } from './NodeHeader.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { attemptPathname, runPathname } from './routes.ts'
 import { NodeSection, SectionIndex } from './SectionIndex.tsx'
-import { isChallengeNode } from './status.ts'
+import { isChallengeNode, isSidecarNode } from './status.ts'
 import { Time } from './Time.tsx'
 import { useResource, type Resource } from './useResource.ts'
 import { useRunResult, useRunResults } from './useRunData.ts'
@@ -35,6 +37,9 @@ type Props = {
   /** The run's inputs (null once loaded when the export predates them), shared by every node of the run. */
   inputs: Resource<RunInputs | null>
   onRetryInputs: () => void
+  /** The review sidecar's ledger, polled by the run page (null once loaded when not recorded); idle for a run without a sidecar. */
+  sidecar: Resource<SidecarLedger | null>
+  onRetrySidecar: () => void
   /** The run's timeline, once its events loaded: the header's times, attempts and markers. */
   timeline: Timeline | null
   /** The run's situation, once derived: its next step is repeated on the focus node. */
@@ -54,17 +59,20 @@ type Props = {
 
 /**
  * One node of a run (docs/PRD_VIEWER_UX.md 4.4-4.9): the header (status by cause, timing, attempts, next step), a section
- * index with counts, then the sections of its kind (worker, verification, candidate, review, challenge or the controller's
- * own steps) and History, always last. Empty sections are absent; a result the launch and verify nodes share is said once.
+ * index with counts, then the sections of its kind (worker, verification, candidate, review, challenge, review sidecar or the
+ * controller's own steps) and History, always last. Empty sections are absent; a result the launch and verify nodes share is said once.
  * An earlier attempt's page shows that attempt's own result under a banner that leads back to the latest.
  */
-export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
+export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, sidecar, onRetrySidecar, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
   const definitionNodes = detail.definition.nodes
   const snapshotNodes = detail.snapshot.nodes
 
   const isWorker = definition.kind === 'worker'
   const isChallenge = isChallengeNode(definition)
-  const isReview = definition.kind === 'review' && !isChallenge
+  const isSidecar = isSidecarNode(definition)
+  // Three nodes are of kind review (the workflow v1 kinds are frozen): the challenge, the sidecar and the independent review,
+  // which is the one named `review`.
+  const isReview = definition.kind === 'review' && definition.node_id === 'review'
   const isCandidate = node.node_id === 'candidate'
   const isVerify = definition.kind === 'verification' && !isCandidate
   const isController = definition.kind === 'prepare' || definition.kind === 'integration'
@@ -106,8 +114,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const worker = isWorker && recordedInputs !== null ? recordedInputs.workers.find(candidate => candidate.launch_node_id === node.node_id) ?? null : null
-  // The design challenge is also of kind review; the independent review is the other one.
-  const reviewNode = snapshotNodes.find(candidate => candidate.kind === 'review' && !isChallengeNode(candidate)) ?? null
+  // The design challenge and the review sidecar are also of kind review; the independent review is the node named `review`.
+  const reviewNode = snapshotNodes.find(candidate => candidate.kind === 'review' && candidate.node_id === 'review') ?? null
 
   // The recorded review, held here for the review's sections and index (Blocking N, Findings N) and the approval's bundle
   // (docs/PRD_VIEWER_UX.md 4.7, 4.9). The snapshot links it; an older export has no link, so the first attempt is asked for
@@ -189,6 +197,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
     ...(isReview ? reviewSectionEntries(reviewData) : []),
     ...(isChallenge ? challengeSectionEntries(recordedInputs?.challenge ?? null) : []),
+    ...(isSidecar ? sidecarSectionEntries(sidecar.status === 'ready' ? sidecar.data : null) : []),
     ...(reuse.length > 0 ? [{ key: 'reuse', label: 'Reuse', count: reuse.length }] : []),
     { key: 'history', label: 'History', ...(events.status === 'ready' ? { count: nodeEvents.length } : {}) },
   ]
@@ -228,6 +237,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
         <ChallengeHeadline challenge={recordedInputs.challenge} spans={timeline?.byNode.get(node.node_id) ?? []} />
       )}
 
+      {isSidecar && isLatest && <SidecarHeadline ledger={sidecar} clock={clock} />}
+
       {!isController && (isLatest || recorded) && (
         <SectionIndex label={definition.label} sections={evidence ? sections : sections.filter(section => section.key === 'history')}>
           {reportNode && <WorkerReportLink href={reportNode.href} label={reportNode.label} onNavigate={onNavigate} />}
@@ -262,6 +273,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           />
         ) : isChallenge ? (
           <ChallengeSections inputs={inputs} onRetryInputs={onRetryInputs} />
+        ) : isSidecar ? (
+          <SidecarSections ledger={sidecar} onRetry={onRetrySidecar} />
         ) : isReview ? (
           <ReviewSections
             scope={scope}

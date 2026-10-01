@@ -3,7 +3,10 @@
  * "this workflow is complete": only a `succeeded` run is complete, and a worker node's success only means
  * its native session launched and ended its turn.
  */
+import { SIDECAR_NODE_ID } from '../../contracts/projects/triage.ts'
 import { isBlockingFinding, type ReviewResult, type RunDetail } from './api.ts'
+
+export { SIDECAR_NODE_ID }
 
 export type RunStatus = RunDetail['summary']['status']
 export type NodeKind = RunDetail['definition']['nodes'][number]['kind']
@@ -123,11 +126,20 @@ export function isChallengeNode(node: { node_id: string; kind: NodeKind }): bool
 }
 
 /**
- * The executor wording for a node; a review names print jobs when the served review result's transport is `print`, and
- * the design challenge is always one print job.
+ * The review sidecar's node (docs/PRD_REVIEW_SIDECAR.md 4.1): kind `review` like the challenge, but neither the challenge
+ * nor the independent review. An agent (its passes are print jobs) with no new legend entry.
+ */
+export function isSidecarNode(node: { node_id: string; kind: NodeKind }): boolean {
+  return node.node_id === SIDECAR_NODE_ID && node.kind === 'review'
+}
+
+/**
+ * The executor wording for a node; a review names print jobs when the served review result's transport is `print`, the
+ * design challenge is always one print job and the review sidecar one print job per pass.
  */
 export function executorOf(kind: NodeKind, transport?: ReviewResult['reviewer']['transport'], nodeId?: string): string {
   if (nodeId !== undefined && isChallengeNode({ node_id: nodeId, kind })) return 'one print job'
+  if (nodeId !== undefined && isSidecarNode({ node_id: nodeId, kind })) return 'one print job per pass'
   if (kind === 'review' && transport === 'print') return 'one print job per reviewer'
   return EXECUTOR_LABEL[kind]
 }

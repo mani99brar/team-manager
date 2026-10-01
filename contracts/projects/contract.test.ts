@@ -4,7 +4,10 @@ import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
 import { validateWorkerResult } from '../workflow/v1.js'
-import { ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs } from './v1.js'
+import {
+  ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateDefinition, validateReviewResult,
+  validateRunDetail, validateRunInputs, validateSidecarLedger,
+} from './v1.js'
 
 test('project examples and generated schemas agree', () => {
   for (const [name, schema] of Object.entries(schemas)) {
@@ -15,6 +18,7 @@ test('project examples and generated schemas agree', () => {
   validateRunDetail(examples.runDetail)
   validateReviewResult(examples.reviewResult)
   validateRunInputs(examples.runInputs)
+  validateSidecarLedger(examples.sidecarLedger)
 })
 
 test('rejects cyclic, dangling and duplicate graph nodes', () => {
@@ -386,5 +390,84 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
     const value = structuredClone(examples.runInputs)
     mutate(value)
     assert.throws(() => validateRunInputs(value), label)
+  }
+})
+
+/** The ledger example of docs/PRD_REVIEW_SIDECAR.md Appendix B, read from the PRD itself so the two cannot drift apart. */
+function appendixBLedger(): unknown {
+  const prd = readFileSync(new URL('../../docs/PRD_REVIEW_SIDECAR.md', import.meta.url), 'utf8')
+  const appendix = prd.slice(prd.indexOf('## Appendix B'))
+  const block = /```json\n([\s\S]*?)\n```/.exec(appendix)
+  assert.ok(block, 'Appendix B holds a JSON block')
+  return JSON.parse(block[1])
+}
+
+test('sidecar ledger 1.6.0: the Appendix B example validates verbatim and is the committed example', () => {
+  const ledger = appendixBLedger()
+  // Parsing keeps every field: nothing of Appendix B is dropped as unknown.
+  assert.deepEqual(sidecarLedgerFileSchema.parse(ledger), ledger)
+  assert.deepEqual(ledger, examples.sidecarLedgerFile)
+  const served = validateSidecarLedger({ ...(ledger as object), contract_version: '1.6.0', node_id: 'sidecar', source: 'export' })
+  assert.equal(served.source, 'export')
+  // S-1's own fields are its latest values; its creation values are history[0].
+  const s1 = served.findings[0]
+  assert.equal(s1.revision, 'b2c3d4e')
+  assert.equal(s1.history[0].revision, 'a1b2c3d')
+})
+
+test('sidecar ledger 1.6.0: Appendix B field rules, no format or referential checks, unknown keys dropped', () => {
+  const base = () => structuredClone(examples.sidecarLedger)
+  // Accepted: ids and shas of any shape, an empty locator and evidence, every nullable field null, empty arrays,
+  // references the ledger does not hold, `pending` and `interrupted`, a handoff of five lists, and a key the engine adds.
+  const accepted: [string, (value: ReturnType<typeof base>) => void][] = [
+    ['any-shaped ids and shas', value => { value.findings[0].id = 'finding one'; value.passes[0].lanes.engine.head_commit = 'HEAD~1'; value.findings[0].revision = 'x' }],
+    ['empty locator and evidence on a closed finding', value => { value.findings[0].locator = ''; value.findings[0].evidence = ''; value.findings[0].disposition = 'verified_resolved' }],
+    ['unresolved references', value => { value.messages[0].finding_ids = ['S-99']; value.findings[0].history[0].pass = 42; value.findings[0].messages = ['M-77'] }],
+    ['a pending message', value => { value.messages[0].status = 'pending' }],
+    ['every message reason', value => { value.messages = SIDECAR_MESSAGE_REASONS.map((reason, index) => ({ ...value.messages[1], id: `M-${index + 1}`, reason })) }],
+    ['every message status', value => { value.messages = SIDECAR_MESSAGE_STATUSES.map((status, index) => ({ ...value.messages[0], id: `M-${index + 1}`, status })) }],
+    ['a closed ledger with a handoff', value => { value.closed_at = '2026-10-01T14:00:00Z'; value.handoff = { unresolved: ['S-2'], structural: [], verified_resolved: ['S-1'], withdrawn: [], gaps: ['no pane for viewer'] } }],
+    ['an escalation', value => { value.escalations = [{ finding_id: 'S-1', kind: 'security', text: 'Escalated.', pass: 3, at: '2026-10-01T13:05:00Z' }] }],
+    ['empty arrays', value => { value.passes = []; value.findings = []; value.messages = []; value.escalations = [] }],
+    ['the text bounds exactly', value => { value.findings[0].problem = 'x'.repeat(2000); value.passes[0].summary = 'x'.repeat(4000); value.findings[0].note = 'x'.repeat(1000); value.findings[0].file = 'x'.repeat(512) }],
+  ]
+  for (const [label, mutate] of accepted) {
+    const value = base()
+    mutate(value)
+    assert.doesNotThrow(() => validateSidecarLedger(value), label)
+  }
+  const extra = { ...base(), written_by: 'controller' }
+  assert.equal('written_by' in validateSidecarLedger(extra), false, 'a key the engine adds is dropped, not refused')
+  const refused: [string, (value: ReturnType<typeof base>) => void][] = [
+    ['another ledger version', value => { (value as Record<string, unknown>).version = '2.0.0' }],
+    ['another contract version', value => { (value as Record<string, unknown>).contract_version = '1.5.0' }],
+    ['another node', value => { (value as Record<string, unknown>).node_id = 'review' }],
+    ['an unknown source', value => { (value as Record<string, unknown>).source = 'cache' }],
+    ['an empty id', value => { value.findings[0].id = '' }],
+    ['an empty revision', value => { value.findings[0].revision = '' }],
+    ['a null locator', value => { (value.findings[0] as Record<string, unknown>).locator = null }],
+    ['a null evidence', value => { (value.findings[0] as Record<string, unknown>).evidence = null }],
+    ['a null problem', value => { (value.findings[0] as Record<string, unknown>).problem = null }],
+    ['a null pass time', value => { (value.passes[0] as Record<string, unknown>).finished_at = null }],
+    ['a problem over 2,000 characters', value => { value.findings[0].problem = 'x'.repeat(2001) }],
+    ['a message over 2,000 characters', value => { value.messages[0].text = 'x'.repeat(2001) }],
+    ['a summary over 4,000 characters', value => { value.passes[0].summary = 'x'.repeat(4001) }],
+    ['a note over 1,000 characters', value => { value.findings[0].note = 'x'.repeat(1001) }],
+    ['a file over 512 characters', value => { value.findings[0].file = 'x'.repeat(513) }],
+    ['a handoff entry over 4,000 characters', value => { value.handoff = { unresolved: ['x'.repeat(4001)], structural: [], verified_resolved: [], withdrawn: [], gaps: [] } }],
+    ['a message citing no finding', value => { value.messages[0].finding_ids = [] }],
+    ['an unknown disposition', value => { (value.findings[0] as Record<string, unknown>).disposition = 'resolved' }],
+    ['an unknown reason', value => { (value.messages[1] as Record<string, unknown>).reason = 'busy' }],
+    ['an unknown pass status', value => { (value.passes[0] as Record<string, unknown>).status = 'running' }],
+    ['a cadence out of bounds', value => { value.settings.cadence_seconds = 30 }],
+    ['a handoff missing a list', value => { (value as Record<string, unknown>).handoff = { unresolved: [] } }],
+    ['duplicate finding ids', value => { value.findings[1].id = 'S-1' }],
+    ['duplicate message ids', value => { value.messages[1].id = 'M-1' }],
+    ['duplicate pass numbers', value => { value.passes[1].n = 1 }],
+  ]
+  for (const [label, mutate] of refused) {
+    const value = base()
+    mutate(value)
+    assert.throws(() => validateSidecarLedger(value), label)
   }
 })
