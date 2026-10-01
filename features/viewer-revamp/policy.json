@@ -40,7 +40,10 @@
         "tests/project-workflows/revamp-lists.spec.ts",
         "tests/unit/tone.test.ts",
         "tests/unit/lists.test.ts",
-        "docs/handoff/revamp-shell.md"
+        "docs/handoff/revamp-shell.md",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/ux-time.spec.ts"
       ],
       "checks": [
         {
@@ -127,7 +130,19 @@
         "tests/project-workflows/revamp-pages.spec.ts",
         "tests/unit/panels.test.ts",
         "tests/unit/steps.test.ts",
-        "docs/handoff/revamp-pages.md"
+        "docs/handoff/revamp-pages.md",
+        "tests/project-workflows/review.spec.ts",
+        "tests/project-workflows/reviewers.spec.ts",
+        "tests/project-workflows/lanes.spec.ts",
+        "tests/project-workflows/clarity.spec.ts",
+        "tests/project-workflows/inputs.spec.ts",
+        "tests/project-workflows/guardrails.spec.ts",
+        "tests/project-workflows/ux-run.spec.ts",
+        "tests/project-workflows/ux-node.spec.ts",
+        "tests/project-workflows/ux-verify.spec.ts",
+        "tests/project-workflows/ux-launch.spec.ts",
+        "tests/project-workflows/ux-review.spec.ts",
+        "tests/project-workflows/sidecar.spec.ts"
       ],
       "checks": [
         {

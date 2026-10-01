@@ -4,7 +4,7 @@
   --accent: #3454d1; --accent-fg: #ffffff; --accent-soft: #e6ebfb;
   --ok: #1a6b3e; --ok-soft: #dff3e6; --run: #1f4fc2; --run-soft: #e2eafc; --warn: #9a4a05; --warn-soft: #fdebd6; --fail: #a81e27; --fail-soft: #fbe1e3; --pause: #7a4e00; --pause-soft: #fff1cc; --idle: #5b6472; --idle-soft: #e9ebef;
   --p0: #a81e27; --p1: #a93a06; --p2: #4b5563; --sev-fg: #ffffff;
-  --font-display: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --font-display: system-ui, "Segoe UI", Roboto, sans-serif; --font-body: system-ui, "Segoe UI", Roboto, sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace;
   --radius: 6px; --shadow: 0 1px 2px rgba(20, 30, 50, 0.06); --band: transparent; --band-fg: var(--fg);
   background: var(--bg); color: var(--fg);
 }
@@ -29,7 +29,7 @@
   --accent: #c8461c; --accent-fg: #ffffff; --accent-soft: #fde3d8;
   --ok: #0f6b45; --ok-soft: #d4f2e4; --run: #1452b4; --run-soft: #d9e7fd; --warn: #9a4e07; --warn-soft: #fde7c6; --fail: #ad1f2c; --fail-soft: #fcdada; --pause: #754a00; --pause-soft: #fff0b8; --idle: #5c6172; --idle-soft: #e9e4d9;
   --p0: #ad1f2c; --p1: #a3450a; --p2: #4f5466; --sev-fg: #ffffff;
-  --font-display: "Sora", "Manrope", system-ui, sans-serif; --font-body: "Manrope", "Segoe UI", system-ui, sans-serif; --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --font-display: "Avenir Next", "Trebuchet MS", system-ui, sans-serif; --font-body: "Avenir Next", "Segoe UI", system-ui, sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace;
   --radius: 12px; --shadow: 0 6px 20px rgba(60, 40, 10, 0.08); --band: #14213d; --band-fg: #f7f3ec;
 }
 @media (prefers-color-scheme: dark) {
