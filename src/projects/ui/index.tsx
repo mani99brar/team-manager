@@ -69,6 +69,24 @@ export function FilterRow({ filters, selected, onSelect, className = '', ...rest
   )
 }
 
+/** Several filters pressed at once (a reviewer, a lane and "Open only" together); each button toggles independently. */
+export function FilterToggles({ filters, selected, onToggle, className = '', ...rest }: { filters: readonly Filter[]; selected: ReadonlySet<string>; onToggle: (id: string, pressed: boolean) => void } & DivProps) {
+  const classes = ['ui-filters', className].filter(Boolean).join(' ')
+  return (
+    <div className={classes} role="group" {...rest}>
+      {filters.map((filter) => {
+        const pressed = selected.has(filter.id)
+        return (
+          <FilterButton key={filter.id} pressed={pressed} onClick={() => onToggle(filter.id, !pressed)} data-filter={filter.id}>
+            {filter.label}
+            {filter.count !== undefined ? ` ${filter.count}` : ''}
+          </FilterButton>
+        )
+      })}
+    </div>
+  )
+}
+
 export function FilterButton({ pressed, children, ...rest }: { pressed: boolean; children: ReactNode } & ButtonHTMLAttributes<HTMLButtonElement>) {
   return <button type="button" aria-pressed={pressed} {...rest}>{children}</button>
 }

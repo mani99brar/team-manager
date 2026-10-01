@@ -90,11 +90,11 @@
           "scenarios": [
             {
               "id": "revamp-home",
-              "description": "Runs home shows the project rail with status dots and the folded project-B group, Needs you cards with the cause and the next command, Running cards with lane chips, Recent grouped by day with the search narrowing to one row, the Failed filter leaving only failed rows and Show older revealing the rest; every existing runs-home assertion holds; at 390 px no horizontal overflow"
+              "description": "Runs home shows the rail with project dots and, with the spec's /api/projects route override adding project-B-1..3, the folded project-B group; Needs you cards with the cause and the next command; Running cards with lane chips named from the definition and elapsed time; Recent grouped by day with the search narrowing to one own row, the Failed filter leaving only failed own rows and Show older making every own run visible; every existing runs-home assertion holds; at 390 px no horizontal overflow"
             },
             {
               "id": "revamp-look",
-              "description": "The look switch sets data-look=bold on the root, section headers take the band and a tone card takes its soft background, the choice survives a reload; calm is the default without a stored value; in the dark theme both looks keep chip text over its soft background at a contrast ratio of at least 4.5:1 computed in the test"
+              "description": "The look switch sets data-look=bold on the Projects shell element and nothing on the html element, section headers take the band and a toned card takes its soft background, the choice survives a reload; calm is the default without a stored value; in both looks and both themes (light and dark via emulateMedia) every rendered chip keeps its text over its background at a contrast ratio of at least 4.5:1 computed in the test"
             }
           ]
         }
@@ -181,7 +181,7 @@
             },
             {
               "id": "revamp-review",
-              "description": "The review node opens on the four figures (blocking, open, per reviewer, per lane), findings as cards in P0/P1/P2 then lane order with their data-severity, data-disposition, data-worker and data-reviewer attributes, one filter row (reviewer, lane, open only) narrowing the cards, the blocking card first on a blocked review, reviewer cards; the finding counts of reviewers.spec.ts and review.spec.ts are unchanged"
+              "description": "The review node opens on the four figures (blocking, open, per reviewer, per lane), findings as cards in P0/P1/P2 then lane order with their data-severity, data-disposition, data-worker and data-reviewer attributes, one toggle row (reviewers, lanes, Open only, combining when several are pressed) narrowing the cards, the blocking card first on a blocked review, reviewer cards; the finding counts of reviewers.spec.ts and review.spec.ts are unchanged"
             }
           ]
         }

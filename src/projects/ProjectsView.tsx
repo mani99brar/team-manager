@@ -329,7 +329,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
         <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
         {info !== null && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>
-      <main className="workspace workspace-projects" aria-busy={busy} data-testid="projects-workspace">
+      <main className="workspace workspace-projects projects-shell" aria-busy={busy} data-testid="projects-workspace">
         {refreshFailure !== null && (
           <div className="projects-notice" role="alert" data-testid="refresh-failed">
             <p>
