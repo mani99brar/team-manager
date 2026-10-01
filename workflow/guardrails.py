@@ -41,6 +41,8 @@ from .verification import CONTRACTS, validate_schema
 from .worktrees import git_worktree
 
 GUARDED_VERSION = "2.2.0"
+# 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py).
+GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
 DECISIONS = "decisions.md"
 COMPLETION_VERSION = "1.1.0"
@@ -100,7 +102,7 @@ def stop_rule(text: str) -> str | None:
 
 
 def is_guarded(manifest: dict) -> bool:
-    return manifest.get("version") == GUARDED_VERSION
+    return manifest.get("version") in GUARDED_VERSIONS
 
 
 def migration_note(manifest: dict) -> str | None:
@@ -117,7 +119,7 @@ def prd_path(target: Path, value: str) -> Path:
 
 
 def refusals(target: Path, folder: Path, manifest: dict, tasks: dict[str, Path]) -> list[str]:
-    """Every reason a 2.2.0 feature may not launch; empty for a feature before 2.2.0."""
+    """Every reason a 2.2.0 or 2.3.0 feature may not launch; empty for a feature before 2.2.0."""
     if not is_guarded(manifest):
         return []
     found = []

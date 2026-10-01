@@ -38,17 +38,18 @@ def repo_name(target: Path) -> str:
     return name
 
 
-def registry_entry(target: Path, feature: str, runs_root: Path, lanes: list[str], challenge: bool = False) -> dict:
+def registry_entry(target: Path, feature: str, runs_root: Path, lanes: list[str], challenge: bool = False, sidecar: bool = False) -> dict:
     """The project entry a launch registers: one workflow named after the feature, over every lane the feature declares.
 
     The workflow's definition is the feature's graph, not one run's: a `--workers` subset launch registers the same graph.
-    `challenge` (a 2.2.0 feature that keeps its design challenge) puts the challenge node first.
+    `challenge` (a 2.2.0 feature that keeps its design challenge) puts the challenge node first; `sidecar` (a 2.3.0
+    feature that declares a review sidecar) adds the sidecar node after it, before every launch.
     """
     name = repo_name(target)
     if not ID_PATTERN.fullmatch(feature):
         raise ValueError(f"Feature name is not a registry id: {feature}")
     return {"project_id": name.lower(), "name": name, "repository": str(target),
-            "workflows": [{"workflow_id": feature, "runs_root": str(runs_root), "definition": definition(list(lanes), None, challenge)}]}
+            "workflows": [{"workflow_id": feature, "runs_root": str(runs_root), "definition": definition(list(lanes), None, challenge, sidecar)}]}
 
 
 # A minimal position-aware JSON reader: enough to find the byte spans of the registry's projects and workflows.
@@ -136,6 +137,10 @@ def has_challenge_node(workflow: dict) -> bool:
     return any(node.get("node_id") == "challenge" for node in workflow["definition"]["nodes"])
 
 
+def has_sidecar_node(workflow: dict) -> bool:
+    return any(node.get("node_id") == "sidecar" for node in workflow["definition"]["nodes"])
+
+
 def overlaps(left: str, right: str) -> bool:
     """Containment after resolving symlinks where the paths exist, as the server's `assertCanonicalRoots` does."""
     left, right = os.path.realpath(left), os.path.realpath(right)
@@ -183,7 +188,7 @@ def merge_registry(text: str | None, entry: dict) -> tuple[str | None, str]:
         for (item_start, item_end), existing in zip(workflows, project["workflows"]):
             if existing.get("workflow_id") == workflow["workflow_id"]:
                 # The stored definition is kept verbatim (operator-edited labels included) while its nodes are unchanged.
-                workflow = {**workflow, "definition": definition(nodes_of(workflow), existing, has_challenge_node(workflow))}
+                workflow = {**workflow, "definition": definition(nodes_of(workflow), existing, has_challenge_node(workflow), has_sidecar_node(workflow))}
                 if existing == workflow:
                     return None, f"Registry already has {where}"
                 indent = indentation(text, item_start)

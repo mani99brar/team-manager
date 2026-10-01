@@ -259,6 +259,8 @@ class Pipeline:
         self.policy = validate_pipeline_policy(read_json(self.directory / "policy.json"))
         if self.plan.get("policy_sha256") != policy_digest(self.policy):
             raise ValueError("Pinned policy changed")
+        from .sidecar import validate_plan
+        validate_plan(self.plan)
         self.workers, self.excluded = lanes_of(self.plan, self.policy)
         self.sessions = sessions or InteractiveSessions(self.directory, timeout=45)
         self._events_lock = threading.Lock()
@@ -431,6 +433,8 @@ class Pipeline:
             if set(handoff) != {"summary", "open_assumptions"} or not isinstance(handoff["summary"], str) or not handoff["summary"].strip() or not isinstance(handoff["open_assumptions"], list) or any(not isinstance(item, str) for item in handoff["open_assumptions"]):
                 raise ValueError("Malformed worker handoff")
             handoffs[node] = handoff
+        from .sidecar import close
+        close(self, "freeze")  # The review sidecar ends here, whatever its ledger says; it never raises.
         self.stop_workers()
         snapshots = {}
         for node in self.workers:
@@ -860,7 +864,8 @@ def report(runtime: Pipeline, state) -> Path:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
-                        help="resume and answer (feature.json 2.2.0 runs) and repair have their own options: python -m workflow resume|answer|repair --help")
+                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar) and repair have their own "
+             "options: python -m workflow resume|answer|sidecar-pass|repair --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -885,6 +890,10 @@ def main():
     parser.add_argument("--decisions", type=Path, help="prepare --guardrails: the feature's decisions.md, pinned into the plan")
     parser.add_argument("--prd", type=Path, help="prepare --guardrails: the PRD the design challenge reads, copied into the run")
     parser.add_argument("--no-challenge", action="store_true", help="prepare --guardrails: the feature sets challenge: false")
+    parser.add_argument("--sidecar-brief", type=Path, help="prepare --guardrails: the review sidecar's brief (feature.json 2.3.0 sidecar.prompt), pinned "
+                                                         "into plan.sidecar")
+    parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
+                                                   "max_passes, max_messages_per_lane; omitted ones take the defaults)")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -939,8 +948,22 @@ def main():
                     raise ValueError(f"decisions.md is missing or empty: {args.decisions}")
                 if args.prd and not args.prd.is_file():
                     raise ValueError(f"PRD does not exist: {args.prd}")
-            elif args.decisions or args.prd or args.no_challenge:
-                parser.error("--decisions, --prd and --no-challenge apply to prepare --guardrails (feature.json 2.2.0) only")
+            elif args.decisions or args.prd or args.no_challenge or args.sidecar_brief:
+                parser.error("--decisions, --prd, --no-challenge and --sidecar-brief apply to prepare --guardrails (feature.json 2.2.0 and 2.3.0) only")
+            if args.sidecar_settings is not None and not args.sidecar_brief:
+                parser.error("--sidecar-settings applies to prepare --sidecar-brief only")
+            sidecar_settings = None
+            if args.sidecar_brief:
+                from .sidecar import settings as sidecar_bounds
+                try:
+                    sidecar_settings = json.loads(args.sidecar_settings) if args.sidecar_settings else {}
+                except ValueError as error:
+                    raise ValueError(f"--sidecar-settings is not JSON: {error}") from None
+                if not isinstance(sidecar_settings, dict):
+                    raise ValueError("--sidecar-settings must be a JSON object")
+                sidecar_bounds(sidecar_settings, "--sidecar-settings ")
+                if not args.sidecar_brief.is_file() or not args.sidecar_brief.read_text().strip():
+                    raise ValueError(f"Sidecar brief is missing or empty: {args.sidecar_brief}")
             tasks = {}
             for worker in policy["workers"]:
                 node = worker["node_id"]
@@ -956,6 +979,9 @@ def main():
                         failure_drill=None if drill_skipped else drill)
             if args.guardrails:
                 pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
+            if args.sidecar_brief:
+                from .sidecar import pin
+                pin(plan, args.sidecar_brief, sidecar_settings)
             if args.automatic:
                 from .automatic import automatic_settings
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
@@ -963,6 +989,9 @@ def main():
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
+            if args.sidecar_brief:
+                from .sidecar import write_initial
+                write_initial(directory, plan)  # The viewer shows the sidecar node from prepare, with no pass yet.
             from types import SimpleNamespace
             runtime = Pipeline(directory)
             if drill_skipped:

@@ -28,6 +28,14 @@ and `verify_yourself` (null for a 1.0.0 completion) with the `question` status, 
 The definition of a run with a design challenge starts with the `challenge` node.
 A completion is served only as the controller reads it, with its `version` and the
 text of a `question` not recorded yet; a fourth question is served as `blocked`.
+
+Version 1.6.0 (additive, docs/PRD_REVIEW_SIDECAR.md section 4.7) records the review
+sidecar of feature.json 2.3.0 runs: the top-level `sidecar` section is the ledger as
+written (`<run>/sidecar.ledger.json`, contracts/workflow/sidecar.schema.json), the
+empty ledger before its first pass, and `null` for a run without a sidecar (every run
+prepared before) or a ledger that fails the schema. The definition of a run with a
+sidecar has the `sidecar` node right after `challenge` (first without one), before
+every launch, and `handoff` depends on it last. Everything else is 1.5.0 unchanged.
 """
 from __future__ import annotations
 
@@ -39,10 +47,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .guardrails import MAX_QUESTIONS, decisions_text, has_challenge
+from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.5.0"
+EXPORT_VERSION = "1.6.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -55,28 +64,33 @@ GRAPH_TAIL = [
 
 
 CHALLENGE_NODE = {"node_id": "challenge", "label": "Design challenge", "kind": "review", "depends_on": []}
+# The workflow v1 node kinds are frozen: the sidecar, an agent beside the workers, is a `review` node like the challenge.
+SIDECAR_NODE = {"node_id": "sidecar", "label": "Review sidecar", "kind": "review", "depends_on": []}
 
 
-def graph_nodes(workers: list[str], challenge: bool = False) -> list[dict]:
+def graph_nodes(workers: list[str], challenge: bool = False, sidecar: bool = False) -> list[dict]:
     """The pinned graph of a run over `workers`: per-lane launch and verify fan-outs around the fixed tail.
 
-    A 2.2.0 run with its design challenge starts with the `challenge` node, and every launch depends on it.
+    A 2.2.0 run with its design challenge starts with the `challenge` node, and every launch depends on it. A 2.3.0 run
+    with a review sidecar has the `sidecar` node next (depending on the challenge, if any) and `handoff` depends on it last.
     """
     launches = [f"launch_{node}" for node in workers]
     verifies = [f"verify_{node}" for node in workers]
     first = [CHALLENGE_NODE["node_id"]] if challenge else []
     nodes = [dict(CHALLENGE_NODE, depends_on=[])] if challenge else []
+    if sidecar:
+        nodes.append(dict(SIDECAR_NODE, depends_on=list(first)))
     nodes.extend({"node_id": name, "label": f"Launch {node} worker", "kind": "worker", "depends_on": list(first)} for node, name in zip(workers, launches))
-    nodes.append({"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": launches})
+    nodes.append({"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": launches + ([SIDECAR_NODE["node_id"]] if sidecar else [])})
     nodes.extend({"node_id": name, "label": f"Verify {node}", "kind": "verification", "depends_on": ["handoff"]} for node, name in zip(workers, verifies))
     for item in GRAPH_TAIL:
         nodes.append({**item, "depends_on": list(item.get("depends_on", verifies))})
     return nodes
 
 
-def definition(workers: list[str], previous: dict | None, challenge: bool = False) -> dict:
+def definition(workers: list[str], previous: dict | None, challenge: bool = False, sidecar: bool = False) -> dict:
     """A stored definition over the same nodes is kept verbatim (labels included); anything else is rebuilt."""
-    nodes = graph_nodes(workers, challenge)
+    nodes = graph_nodes(workers, challenge, sidecar)
     stored = (previous or {}).get("definition")
     if isinstance(stored, dict) and isinstance(stored.get("nodes"), list) and stored.get("name") and \
             [item.get("node_id") for item in stored["nodes"]] == [item["node_id"] for item in nodes]:
@@ -238,6 +252,25 @@ def challenge_section(directory: Path) -> dict | None:
     return section
 
 
+def sidecar_section(directory: Path, plan: dict) -> dict | None:
+    """The ledger as written; the empty ledger before it exists; null without a sidecar or for a ledger that fails its schema."""
+    if not has_sidecar(plan):
+        return None
+    path = ledger_path(directory)
+    if not path.exists():
+        return initial_ledger(plan)
+    item = load_optional(path)
+    if item is None:
+        return None
+    from jsonschema.exceptions import ValidationError
+    from .verification import validate_schema
+    try:
+        validate_schema("sidecar", item)
+    except ValidationError:
+        return None
+    return item
+
+
 def accepted_handoff(item) -> dict | None:
     if not isinstance(item, dict) or not isinstance(item.get("summary"), str) or not item["summary"].strip() or not string_list(item.get("open_assumptions")):
         return None
@@ -309,11 +342,12 @@ def export_state(runtime, state) -> dict:
                         "sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest()})
     policy = getattr(runtime, "policy", None) or load_optional(runtime.directory / "policy.json")
     value = {"version": EXPORT_VERSION, "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
-             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan)),
+             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan), has_sidecar(runtime.plan)),
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
              "verification_packets": packets,
              "review": review_section(runtime.directory),
-             "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None}
+             "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None,
+             "sidecar": sidecar_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous
     value["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

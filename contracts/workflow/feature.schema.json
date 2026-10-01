@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Feature file v2.2.0",
-  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. 2.1.0 adds the optional `reviewers`: every reviewer of the run with its brief (a file relative to the feature directory, existing and non-empty, or `builtin:<id>` for a brief bundled in `workflow/prompts/reviewers/`); a file without `reviewers` runs the single built-in reviewer (`workflow/prompts/review.md`) with id `review`. A 1.0.0 file (`ui_task`/`adapter_task`) is refused by `launch` with a message to use 2.x. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy, existing non-empty task and brief files inside the feature directory, unique reviewer ids that are neither a lane id nor a reserved name, and version 2.1.0 or later whenever `reviewers` is present. 2.2.0 turns on the guardrails (docs/PRD_PORTABLE_WORKFLOW.md section 4.3): every task must have non-empty `## Goal`, `## Acceptance` and `## Stop` sections, the feature directory must hold a non-empty `decisions.md`, and `prd` must exist in the target; it adds the optional `challenge` (default true: a design challenge runs before any worker) and `prd`. 2.0.0 and 2.1.0 files launch as before, with a note that no guardrail is enforced.",
+  "title": "Feature file v2.3.0",
+  "description": "`features/<name>/feature.json`: the committed assignment `workflow launch <name>` prepares. `workers` declares every lane: a node id that must match a `workers[].node_id` of the policy file and the task file that lane receives. `launch --workers a,b` selects a subset; omitted means every declared lane. 2.1.0 adds the optional `reviewers`: every reviewer of the run with its brief (a file relative to the feature directory, existing and non-empty, or `builtin:<id>` for a brief bundled in `workflow/prompts/reviewers/`); a file without `reviewers` runs the single built-in reviewer (`workflow/prompts/review.md`) with id `review`. A 1.0.0 file (`ui_task`/`adapter_task`) is refused by `launch` with a message to use 2.x. Hand-written; the controller validates it with `workflow.verification.validate_schema(\"feature\", ...)` and additionally requires unique node ids, the same id set as the policy, existing non-empty task and brief files inside the feature directory, unique reviewer ids that are neither a lane id nor a reserved name, and version 2.1.0 or later whenever `reviewers` is present. 2.2.0 turns on the guardrails (docs/PRD_PORTABLE_WORKFLOW.md section 4.3): every task must have non-empty `## Goal`, `## Acceptance` and `## Stop` sections, the feature directory must hold a non-empty `decisions.md`, and `prd` must exist in the target; it adds the optional `challenge` (default true: a design challenge runs before any worker) and `prd`. 2.3.0 keeps every 2.2.0 guardrail and adds the optional `sidecar` (docs/PRD_REVIEW_SIDECAR.md section 3): a review sidecar that reads the lanes' diffs and panes on a cadence and on every claimed completion during the work phase, keeps `<run>/sidecar.ledger.json` (contracts/workflow/sidecar.schema.json) and may message a lane through the controller; `false` or an absent key means none, and `sidecar` on an earlier version is refused. `launch` additionally requires a `prompt` file inside the feature directory that exists and is not empty, or a `builtin:<id>` bundled in `workflow/prompts/sidecar/`. 2.0.0 and 2.1.0 files launch as before, with a note that no guardrail is enforced; 2.2.0 files launch unchanged.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -16,7 +16,8 @@
       "enum": [
         "2.0.0",
         "2.1.0",
-        "2.2.0"
+        "2.2.0",
+        "2.3.0"
       ]
     },
     "name": {
@@ -45,7 +46,7 @@
         "properties": {
           "node_id": {
             "type": "string",
-            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge|sidecar)$)(?!(?:launch_|verify_|candidate_|review-|challenge-|sidecar-))[a-z][a-z0-9-]{0,31}$",
             "description": "A lane id as the policy declares it: lower-case, at most 32 characters, never a reserved graph name, attribution or per-lane prefix."
           },
           "task": {
@@ -70,7 +71,7 @@
         "properties": {
           "reviewer_id": {
             "type": "string",
-            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$",
+            "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge|sidecar)$)(?!(?:launch_|verify_|candidate_|review-|challenge-|sidecar-))[a-z][a-z0-9-]{0,31}$",
             "description": "Lower-case, at most 32 characters, unique, never a lane id of the policy nor a reserved graph name, attribution or per-lane prefix."
           },
           "prompt": {
@@ -90,6 +91,52 @@
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
       "description": "2.2.0: the specification the design challenge reads, a path relative to the target repository that must exist."
+    },
+    "sidecar": {
+      "description": "2.3.0: the review sidecar. `false` (or no key) means none. The bounds are pinned into `plan.sidecar` at prepare with the defaults shown: one pass every `cadence_seconds` and at once when a lane writes a `completed` completion, each a read-only `claude --print` job stopped after `pass_timeout_seconds`, at most `max_passes` passes plus the final pass, and at most `max_messages_per_lane` messages typed into each lane's pane.",
+      "oneOf": [
+        {
+          "const": false
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prompt"
+          ],
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The brief: a file relative to the feature directory (existing, non-empty) or `builtin:<id>` for a brief bundled in `workflow/prompts/sidecar/` (today `senior-review`). The controller appends the run's vocabulary, the pass inputs, the ledger and the output rules."
+            },
+            "cadence_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 7200,
+              "default": 900
+            },
+            "pass_timeout_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 3600,
+              "default": 600
+            },
+            "max_passes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 16
+            },
+            "max_messages_per_lane": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20,
+              "default": 6
+            }
+          }
+        }
+      ]
     }
   }
 }

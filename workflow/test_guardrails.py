@@ -1753,13 +1753,14 @@ class AnswerDelivery(unittest.TestCase):
 
 
 class ExportSeam(unittest.TestCase):
-    def test_export_seam_1_5_0_carries_decisions_challenge_evidence_and_questions_and_older_runs_export_nulls(self):
+    def test_export_seam_1_6_0_carries_decisions_challenge_evidence_and_questions_and_older_runs_export_nulls(self):
         """Scenario export-seam (the Python half; contracts/projects/contract.test.ts and server/projects.test.ts serve it)."""
         with tempfile.TemporaryDirectory() as root:
             directory = legacy_run(Path(root))
             before = export_run(ExportRuntime(directory))
             self.assertEqual(before["version"], EXPORT_VERSION)
-            self.assertEqual(EXPORT_VERSION, "1.5.0")
+            self.assertEqual(EXPORT_VERSION, "1.6.0")
+            self.assertIsNone(before["sidecar"])  # A run prepared without a sidecar (every run before 1.6.0).
             self.assertEqual((before["inputs"]["decisions"], before["inputs"]["challenge"]), (None, None))
             self.assertEqual([worker["questions"] for worker in before["inputs"]["workers"].values()], [[], []])
             self.assertEqual(before["inputs"]["workers"]["ui"]["completion"]["falsifying_check"], None)

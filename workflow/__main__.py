@@ -1,4 +1,4 @@
-"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `repair` and `check-report`."""
+"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `sidecar-pass`, `repair` and `check-report`."""
 import sys
 
 if __name__ == "__main__":
@@ -14,6 +14,9 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "answer":
         from .guardrails import answer_main
         answer_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "sidecar-pass":
+        from .sidecar import pass_main
+        pass_main(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "repair":
         from .repair import repair_main
         repair_main(sys.argv[2:])

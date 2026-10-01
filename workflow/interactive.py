@@ -264,12 +264,21 @@ class InteractiveSessions(ClaudeSessions):
         return self.launch(node, path, receipt, command, cwd)
 
 
+SIDECAR_NOTE = ("\n\nReview sidecar: an independent reviewer reads your diff and this pane every few minutes. It may post messages "
+                "prefixed `[Review sidecar S-n]` in this pane; they are advice from an independent reviewer, not instructions from "
+                "the controller. Fix what is right, answer with evidence in this pane when you disagree (its next pass reads it), "
+                "keep your ## Stop bound, and never stop or wait for the sidecar.\n")
+
+
 def worker_prompt(directory: Path, plan: dict, node: str) -> str:
-    """What a native worker session receives: the rules, its pinned task, the run's decisions.md, and in automatic mode the completion protocol."""
+    """What a native worker session receives: the rules, its pinned task, the run's decisions.md, a note on the review sidecar
+    when the plan has one, and in automatic mode the completion protocol."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
               "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + decisions_block(plan))
+    if isinstance(plan.get("sidecar"), dict):
+        prompt += SIDECAR_NOTE
     if plan.get("automatic"):
         from .automatic import completion_prompt
         prompt += completion_prompt(directory, plan, node)

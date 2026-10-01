@@ -1,6 +1,7 @@
 """`workflow init <feature> [--repo X]`: write a feature directory to fill in; never overwrite a file.
 
-The scaffold is a 2.2.0 `feature.json` with one lane, the bundled reviewers and a `prd` to name, a 1.2.0
+The scaffold is a 2.3.0 `feature.json` with one lane, the bundled reviewers and a `prd` to name (its README shows
+the optional review `sidecar` key, which the feature file leaves out), a 1.2.0
 `policy.json` with a placeholder check, the lane's task in outcome-brief form (with the browser scenario rules
 and the Playwright report command, to delete for a lane without browser checks), a `decisions.md` for the
 workflow-grill skill to fill in and a `README.md`, plus a starter `CLAUDE.md` in the target root when it
@@ -22,7 +23,7 @@ LANE = "main"
 
 def feature_files(feature: str) -> dict[str, str]:
     """The feature directory's files by relative path."""
-    manifest = {"version": "2.2.0", "name": f"TODO: one line saying what {feature} delivers", "branch_prefix": f"feature/{feature}",
+    manifest = {"version": "2.3.0", "name": f"TODO: one line saying what {feature} delivers", "branch_prefix": f"feature/{feature}",
                 "prd": "TODO: the specification the design challenge reads, relative to the repository root (or delete this key)",
                 "policy": "policy.json", "workers": [{"node_id": LANE, "task": f"{LANE}-task.md"}],
                 "reviewers": [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]}
@@ -58,6 +59,10 @@ def feature_files(feature: str) -> dict[str, str]:
               "TODO: why this feature exists and where its specification lives.\n\n"
               "- `feature.json`: the lanes, their task files, the reviewers (`builtin:<id>` names a bundled brief), the `prd` the design "
               "challenge reads and `challenge` (default true).\n"
+              "- Optional `sidecar` in `feature.json`: a review sidecar, an independent reviewer that reads the lanes' diffs and panes "
+              "while they work and may message them through the controller (the workflow tool's README, section Review sidecar). Add it as "
+              "`\"sidecar\": {\"prompt\": \"builtin:senior-review\"}`, optionally with `cadence_seconds` (default 900), "
+              "`pass_timeout_seconds` (600), `max_passes` (16) and `max_messages_per_lane` (6).\n"
               "- `policy.json`: each lane's owned paths and the checks the controller runs independently.\n"
               f"- `{LANE}-task.md`: the lane's task as an outcome brief (## Goal, ## Acceptance and ## Stop are required).\n"
               "- `decisions.md`: the operator's decisions, assumptions and deferrals from the workflow-grill interview.\n\n"

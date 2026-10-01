@@ -194,9 +194,13 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     others work; once every lane's signal was accepted, one whose session works again is held to the latest lane deadline.
     A 1.1.0 `question` completion pauses only that lane's deadline (persisted in `<node>.deadline.json`) from when it was
     written until the operator answers, with `workflow answer` or by typing in the pane; the other lanes keep running.
+
+    A run with a review sidecar (plan.sidecar) runs its passes beside this poll (sidecar.Scheduler, never raising into it):
+    once every lane's completion is accepted, the handoffs are saved only after the final pass is recorded, while the
+    deadlines keep being checked. Leaving on an error or an interrupt terminates a running pass's job and records nothing.
     """
-    from .guardrails import (PANE_ANSWER, deadline_met, iso, load_questions, mark_deadline_met, record_pane_answer, record_question,
-                             waiting_question)
+    from .guardrails import deadline_met, load_questions
+    from .sidecar import Scheduler, has_sidecar
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
     if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
@@ -214,6 +218,18 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     # Answers recorded before this controller started need no second event.
     answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
+    sidecar = Scheduler(runtime, workers, clock) if has_sidecar(runtime.plan) else None
+    try:
+        _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, clock, sleep)
+    finally:
+        if sidecar is not None:
+            sidecar.abandon()
+
+
+def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, clock, sleep) -> None:
+    """wait_handoffs' poll loop."""
+    from .guardrails import (PANE_ANSWER, iso, load_questions, mark_deadline_met, record_pane_answer, record_question,
+                             waiting_question)
     while True:
         rows = runtime.sessions.inventory()
         handoffs = {}
@@ -283,10 +299,13 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
                     "then until the latest lane deadline" if node in met else "waiting until its deadline"))
             elif row["state"] != "blocked":
                 attention.discard(node)
-        if set(handoffs) == set(workers):
+        done = set(handoffs) == set(workers)
+        if done and (sidecar is None or sidecar.tick(rows, handoffs, True)):
             for node, value in handoffs.items():
                 save_json(runtime.directory / f"{node}.handoff.json", value)
             return
+        if sidecar is not None and not done:
+            sidecar.tick(rows, handoffs, False)
         for node in set(handoffs) - met:
             mark_deadline_met(runtime.directory, node, clock())
             met.add(node)
@@ -1286,6 +1305,8 @@ def drive(runtime, *, single_step=False) -> str | None:
                         runtime.stop_workers()
                     except Exception as cleanup_error:
                         runtime.event("freeze", "blocked", f"Could not confirm worker stop: {cleanup_error}")
+                    from .sidecar import close
+                    close(runtime, "stopped")  # No blocked run shows a running sidecar; it never raises.
                     report(runtime, state)
                     raise
                 if frozen:

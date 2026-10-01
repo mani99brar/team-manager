@@ -23,9 +23,9 @@
       ]
     },
     "nodeId": {
-      "description": "A worker lane id: lower-case, at most 32 characters, never a fixed graph node (review, candidate, handoff, approval, integrate), a finding attribution (multiple, none, both), a per-lane node prefix (launch_, verify_, candidate_, review-) or the design challenge's node and files (challenge, challenge-).",
+      "description": "A worker lane id: lower-case, at most 32 characters, never a fixed graph node (review, candidate, handoff, approval, integrate), a finding attribution (multiple, none, both), a per-lane node prefix (launch_, verify_, candidate_, review-), the design challenge's node and files (challenge, challenge-) or the review sidecar's (sidecar, sidecar-).",
       "type": "string",
-      "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge)$)(?!(?:launch_|verify_|candidate_|review-|challenge-))[a-z][a-z0-9-]{0,31}$"
+      "pattern": "^(?!(?:review|candidate|handoff|approval|integrate|multiple|none|both|challenge|sidecar)$)(?!(?:launch_|verify_|candidate_|review-|challenge-|sidecar-))[a-z][a-z0-9-]{0,31}$"
     }
   },
   "allOf": [

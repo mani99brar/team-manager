@@ -17,6 +17,7 @@ from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusal
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
+from . import sidecar
 from .verification import validate_schema
 
 # The repository this tool lives in: the fallback target, and the working directory of every
@@ -108,15 +109,18 @@ def placeholders(folder: Path) -> list[str]:
 
 
 def load_feature(folder: Path) -> dict:
-    """The feature file as 2.0.0, 2.1.0 or 2.2.0; 1.0.0 files are refused.
+    """The feature file as 2.0.0, 2.1.0, 2.2.0 or 2.3.0; 1.0.0 files are refused.
 
     2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
     A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
-    (workflow/guardrails.py) and adds the optional `challenge` and `prd`.
+    (workflow/guardrails.py) and adds the optional `challenge` and `prd`. 2.3.0 adds the optional review
+    `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them.
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
         raise ValueError(LEGACY_FEATURE_MESSAGE)
+    if isinstance(manifest, dict):
+        sidecar.declared(manifest)
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -192,6 +196,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         if not path.is_file() or not path.read_text().strip():
             raise ValueError(f"Brief for reviewer {reviewer['reviewer_id']} is missing or empty: {reviewer['prompt']}")
         reviewers[reviewer["reviewer_id"]] = path
+    # 2.3.0: the review sidecar's brief, refused here like a reviewer's, before any Git action.
+    review_sidecar = sidecar.declared(manifest)
+    sidecar_brief = sidecar.brief_path(folder, review_sidecar["prompt"]) if review_sidecar else None
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     run = (run_root / run_id).resolve()
@@ -217,6 +224,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             prepare.extend(["--prd", str(prd_path(repo, manifest["prd"]))])
         if manifest.get("challenge") is False:
             prepare.append("--no-challenge")
+        if review_sidecar:
+            bounds = {key: value for key, value in review_sidecar.items() if key != "prompt"}
+            prepare.extend(["--sidecar-brief", str(sidecar_brief), "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
     commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -277,14 +287,19 @@ def main(argv=None):
         manifest = load_feature(feature_folder(repo, args.feature))
         declared = [worker["node_id"] for worker in manifest["workers"]]
         challenge = is_guarded(manifest) and manifest.get("challenge", True) is True
-        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge)
+        review_sidecar = sidecar.declared(manifest)
+        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge, sidecar=review_sidecar is not None)
         # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
         migration = migration_note(manifest)
         if args.dry_run:
-            print(json.dumps({"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
-                              "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
-                              "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
-                                             "migration_note": migration}}, indent=2))
+            printed = {"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
+                       "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
+                       "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
+                                      "migration_note": migration}}
+            if review_sidecar:
+                # What prepare pins as plan.sidecar (the brief's text in place of its path); a feature without one prints no key.
+                printed["sidecar"] = {**review_sidecar, "brief": str(sidecar.brief_path(feature_folder(repo, args.feature), review_sidecar["prompt"]))}
+            print(json.dumps(printed, indent=2))
             for note in notes + ([migration] if migration else []):
                 print(f"Note: {note}", file=sys.stderr)
             return
@@ -340,7 +355,9 @@ def main(argv=None):
         from jsonschema.exceptions import ValidationError
         if not isinstance(error, ValidationError):
             raise
-        parser.exit(1, f"Launch blocked: feature.json is invalid: {error.message}\nNo fallback, reset or cleanup was attempted.\n")
+        where = "/".join(map(str, error.absolute_path))
+        parser.exit(1, f"Launch blocked: feature.json is invalid: {error.message}{f' (at {where})' if where else ''}\n"
+                       "No fallback, reset or cleanup was attempted.\n")
 
 
 if __name__ == "__main__":

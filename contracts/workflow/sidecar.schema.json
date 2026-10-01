@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review sidecar ledger v1.0.0",
+  "description": "`<run>/sidecar.ledger.json` of a feature.json 2.3.0 run that declares `sidecar` (docs/PRD_REVIEW_SIDECAR.md section 4 and Appendix B), written only by the controller: atomic replace under `<run>/sidecar.lock`, validated with `workflow.verification.validate_schema(\"sidecar\", ...)` before every write, at most 4 MiB. Export 1.6.0 carries it as the top-level `sidecar` section (null for a run without a sidecar). Hand-written. Field rules both validators share: every id, sha and revision is a non-empty string with no format check; `locator` and `evidence` are strings that may be empty; `note`, `summary`, pass `session_id`, message `reason`, `handoff` and `closed_at` are the only nullable fields; `problem`, `evidence`, `remedy` and `text` hold at most 2,000 characters, `summary` and every `handoff` entry at most 4,000, `note` and `locator` at most 1,000, `file` at most 512; arrays may be empty; no referential constraint (a message's `finding_ids`, a history entry's `pass` and an escalation's `finding_id` are resolved by the controller's merge only). Choices the PRD leaves open (docs/handoff/sidecar-engine.md): a stored escalation is `{pass, finding_id, kind, text, at}`; a rejected output leaves the ledger byte-identical, so the engine never appends a `rejected` pass (the value stays in the enum, and the rejection is an `interactive` event on the `sidecar` node). `$defs.output` is what one pass's `claude --print` job returns (`--json-schema`): an upsert is a finding without `messages` and `history`, `id` null for a new finding with a `ref` (`new-<k>`) that messages and escalations of the same output cite; at most 40 upserts, 8 messages and 8 escalations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "settings", "passes", "findings", "messages", "escalations", "handoff", "closed_at"],
+  "properties": {
+    "version": {"const": "1.0.0"},
+    "run_id": {"$ref": "#/$defs/id"},
+    "settings": {"$ref": "#/$defs/settings"},
+    "passes": {"type": "array", "items": {"$ref": "#/$defs/pass"}},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "messages": {"type": "array", "items": {"$ref": "#/$defs/message"}},
+    "escalations": {"type": "array", "items": {"$ref": "#/$defs/escalation"}},
+    "handoff": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/handoff"}]},
+    "closed_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1},
+    "count": {"type": "integer", "minimum": 0},
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cadence_seconds", "pass_timeout_seconds", "max_passes", "max_messages_per_lane"],
+      "properties": {
+        "cadence_seconds": {"type": "integer", "minimum": 60, "maximum": 7200},
+        "pass_timeout_seconds": {"type": "integer", "minimum": 60, "maximum": 3600},
+        "max_passes": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_messages_per_lane": {"type": "integer", "minimum": 0, "maximum": 20}
+      }
+    },
+    "category": {"enum": ["defect", "risk", "structure", "operational", "suggestion"]},
+    "severity": {"enum": ["P0", "P1", "P2"]},
+    "disposition": {"enum": ["open", "acknowledged", "fix_reported", "verified_resolved", "withdrawn", "accepted_trade_off"]},
+    "kind": {"enum": ["security", "data_loss", "architecture"]},
+    "file": {"type": "string", "minLength": 1, "maxLength": 512},
+    "locator": {"type": "string", "maxLength": 1000},
+    "longText": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "evidence": {"type": "string", "maxLength": 2000},
+    "note": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 1000}]},
+    "summaryText": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unresolved", "structural", "verified_resolved", "withdrawn", "gaps"],
+      "properties": {
+        "unresolved": {"type": "array", "items": {"$ref": "#/$defs/summaryText"}},
+        "structural": {"type": "array", "items": {"$ref": "#/$defs/summaryText"}},
+        "verified_resolved": {"type": "array", "items": {"$ref": "#/$defs/summaryText"}},
+        "withdrawn": {"type": "array", "items": {"$ref": "#/$defs/summaryText"}},
+        "gaps": {"type": "array", "items": {"$ref": "#/$defs/summaryText"}}
+      }
+    },
+    "pass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["n", "trigger", "started_at", "finished_at", "status", "session_id", "lanes", "counts", "summary"],
+      "properties": {
+        "n": {"type": "integer", "minimum": 1},
+        "trigger": {"enum": ["cadence", "completion", "final", "manual"]},
+        "started_at": {"$ref": "#/$defs/id"},
+        "finished_at": {"$ref": "#/$defs/id"},
+        "status": {"enum": ["completed", "rejected", "failed", "timed_out", "interrupted"]},
+        "session_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]},
+        "lanes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["head_commit", "pane_captured"],
+            "properties": {"head_commit": {"$ref": "#/$defs/id"}, "pane_captured": {"type": "boolean"}}
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["new", "changed", "messages"],
+          "properties": {"new": {"$ref": "#/$defs/count"}, "changed": {"$ref": "#/$defs/count"}, "messages": {"$ref": "#/$defs/count"}}
+        },
+        "summary": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/summaryText"}]}
+      }
+    },
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "disposition", "revision", "evidence", "note", "at"],
+      "properties": {
+        "pass": {"type": "integer", "minimum": 1},
+        "disposition": {"$ref": "#/$defs/disposition"},
+        "revision": {"$ref": "#/$defs/id"},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "note": {"$ref": "#/$defs/note"},
+        "at": {"$ref": "#/$defs/id"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "severity", "lane", "file", "locator", "revision", "problem", "evidence", "remedy", "disposition", "note", "messages", "history"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "category": {"$ref": "#/$defs/category"},
+        "severity": {"$ref": "#/$defs/severity"},
+        "lane": {"$ref": "#/$defs/id"},
+        "file": {"$ref": "#/$defs/file"},
+        "locator": {"$ref": "#/$defs/locator"},
+        "revision": {"$ref": "#/$defs/id"},
+        "problem": {"$ref": "#/$defs/longText"},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "remedy": {"$ref": "#/$defs/longText"},
+        "disposition": {"$ref": "#/$defs/disposition"},
+        "note": {"$ref": "#/$defs/note"},
+        "messages": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "history": {"type": "array", "items": {"$ref": "#/$defs/history"}}
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "pass", "lane", "finding_ids", "text", "status", "reason", "at"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "pass": {"type": "integer", "minimum": 1},
+        "lane": {"$ref": "#/$defs/id"},
+        "finding_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/id"}},
+        "text": {"$ref": "#/$defs/longText"},
+        "status": {"enum": ["pending", "delivered", "undeliverable", "refused"]},
+        "reason": {"enum": [null, "question_waiting", "lane_finished", "lane_not_launched", "rate_limited", "after_freeze", "lane_blocked", "pane_busy",
+                            "pane_unknown", "pane_not_attached", "herdr_unavailable", "herdr_timeout", "interrupted"]},
+        "at": {"$ref": "#/$defs/id"}
+      }
+    },
+    "escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "finding_id", "kind", "text", "at"],
+      "properties": {
+        "pass": {"type": "integer", "minimum": 1},
+        "finding_id": {"$ref": "#/$defs/id"},
+        "kind": {"$ref": "#/$defs/kind"},
+        "text": {"$ref": "#/$defs/longText"},
+        "at": {"$ref": "#/$defs/id"}
+      }
+    },
+    "upsert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ref", "category", "severity", "lane", "file", "locator", "revision", "problem", "evidence", "remedy", "disposition", "note"],
+      "properties": {
+        "id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]},
+        "ref": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^new-[0-9]+$"}]},
+        "category": {"$ref": "#/$defs/category"},
+        "severity": {"$ref": "#/$defs/severity"},
+        "lane": {"$ref": "#/$defs/id"},
+        "file": {"$ref": "#/$defs/file"},
+        "locator": {"$ref": "#/$defs/locator"},
+        "revision": {"$ref": "#/$defs/id"},
+        "problem": {"$ref": "#/$defs/longText"},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "remedy": {"$ref": "#/$defs/longText"},
+        "disposition": {"$ref": "#/$defs/disposition"},
+        "note": {"$ref": "#/$defs/note"}
+      },
+      "allOf": [{"if": {"properties": {"id": {"type": "null"}}}, "then": {"properties": {"ref": {"type": "string"}}}}]
+    },
+    "output": {
+      "description": "One pass's structured output. `handoff` is null except on the final pass.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings", "messages", "escalations", "handoff"],
+      "properties": {
+        "summary": {"$ref": "#/$defs/summaryText"},
+        "findings": {"type": "array", "maxItems": 40, "items": {"$ref": "#/$defs/upsert"}},
+        "messages": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["lane", "finding_ids", "text"],
+            "properties": {
+              "lane": {"$ref": "#/$defs/id"},
+              "finding_ids": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/id"}},
+              "text": {"$ref": "#/$defs/longText"}
+            }
+          }
+        },
+        "escalations": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["finding_id", "kind", "text"],
+            "properties": {"finding_id": {"$ref": "#/$defs/id"}, "kind": {"$ref": "#/$defs/kind"}, "text": {"$ref": "#/$defs/longText"}}
+          }
+        },
+        "handoff": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/handoff"}]}
+      }
+    }
+  }
+}

@@ -195,6 +195,7 @@ class NoTargetSchema(LaneRun):
         for item in bin_dir.iterdir():
             item.chmod(0o755)
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        env.pop("WORKFLOW_WORKER_EFFORT", None)  # the stub answers --help with the base flags only; an operator-level effort setting would demand --effort
         result = subprocess.run(commands[0], cwd=TOOL, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
@@ -220,6 +221,7 @@ class PreflightClaudeFlags(Isolated):
         bin_dir.mkdir()
         (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        env.pop("WORKFLOW_WORKER_EFFORT", None)  # the stub answers --help with the base flags only; an operator-level effort setting would demand --effort
         preflight = [PY, "-m", "workflow", "preflight", str(run), "--repo", str(target), "--policy", str(target / "features/skeleton/policy.json")]
         for flags, code in (("--bg --safe-mode --tools --permission-mode --settings", 0), ("--bg --safe-mode --tools --permission-mode", 1)):
             # A stand-in answers --help with exactly these flags, and auth status; nothing else.
@@ -331,6 +333,35 @@ class RegistryEntry(Isolated):
         self.assertEqual(json.loads(self.registry.read_text()), {"version": 1, "projects": [updated]})
 
 
+class SidecarRegistry(Isolated):
+    def test_a_feature_with_a_sidecar_registers_the_sidecar_node_and_an_existing_entry_gains_it(self):
+        """The registry entry carries the sidecar node when the feature declares one (docs/PRD_REVIEW_SIDECAR.md section 4.7)."""
+        target = make_target(self.root)
+        folder = target / "features/skeleton"
+        (folder / "app-task.md").write_text("## Goal\n\nBuild the app.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n")
+        (folder / "decisions.md").write_text("# Decisions\n\n## Decisions\n\n- One lane.\n")
+        manifest = read_json(folder / "feature.json")
+        save_json(folder / "feature.json", {**manifest, "version": "2.2.0"})
+        commit_all(target, "Guarded")
+        before = self.dry_run("skeleton", "--repo", str(target), "--no-herdr")
+        self.assertNotIn("sidecar", before)
+        self.assertNotIn("sidecar", [node["node_id"] for node in before["registry"]["entry"]["workflows"][0]["definition"]["nodes"]])
+        self.live("skeleton", "--repo", str(target), "--no-herdr")
+        save_json(folder / "feature.json", {**manifest, "version": "2.3.0", "sidecar": {"prompt": "builtin:senior-review", "max_passes": 4}})
+        commit_all(target, "Sidecar")
+        printed = self.dry_run("skeleton", "--repo", str(target), "--no-herdr")
+        self.assertEqual(printed["sidecar"]["max_passes"], 4)
+        nodes = printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"]
+        self.assertEqual([node["node_id"] for node in nodes][:3], ["challenge", "sidecar", "launch_app"])
+        self.assertEqual(nodes, registry_entry(target, "skeleton", self.home / ".local/state/agent-workflows/project-B/skeleton", ["app"],
+                                               challenge=True, sidecar=True)["workflows"][0]["definition"]["nodes"])
+        # The registered workflow without the node gains it; registering again changes nothing.
+        text, note = merge_registry(self.registry.read_text(), printed["registry"]["entry"])
+        self.assertEqual(note, "Registry updated project-b/skeleton")
+        self.assertEqual(json.loads(text)["projects"][0]["workflows"][0]["definition"]["nodes"], nodes)
+        self.assertEqual(merge_registry(text, printed["registry"]["entry"]), (None, "Registry already has project-b/skeleton"))
+
+
 class InitScaffold(Isolated):
     def test_init_scaffold_writes_the_files_never_overwrites_and_launch_names_every_placeholder(self):
         """Scenario init-scaffold."""
@@ -341,8 +372,10 @@ class InitScaffold(Isolated):
         self.assertEqual(sorted(path.name for path in folder.iterdir()), ["README.md", "decisions.md", "feature.json", "main-task.md", "policy.json"])
         self.assertTrue((target / "CLAUDE.md").is_file())
         manifest = read_json(folder / "feature.json")
+        self.assertNotIn("sidecar", manifest)  # The README shows the optional key; the scaffold declares none.
+        self.assertIn('"sidecar": {"prompt": "builtin:senior-review"}', (folder / "README.md").read_text())
         self.assertEqual((manifest["version"], manifest["branch_prefix"], manifest["reviewers"]),
-                         ("2.2.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
+                         ("2.3.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
         decisions = (folder / "decisions.md").read_text()
         for heading in ("## Decisions", "## Assumptions", "## Deferred"):
             self.assertIn(heading, decisions)

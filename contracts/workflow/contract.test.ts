@@ -113,10 +113,11 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   const lane = new RegExp(schema.$defs.nodeId.pattern)
   assert.equal(readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern, schema.$defs.nodeId.pattern)
   for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'challenger', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
-  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
+  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
+  assert.ok(lane.test('sidecars'))
   const attribution = new RegExp(readJson('./reviewCompletion.schema.json').properties.findings.items.properties.worker.pattern)
   for (const ok of ['ui', 'docs', 'multiple', 'none']) assert.ok(attribution.test(ok), ok)
-  for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
+  for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
   // The committed examples carry the shapes the schema describes.
   const example = readJson('./verification.example.json')
   assert.equal(example.version, '1.2.0')
@@ -155,15 +156,54 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   rejectReviewed('no reviewers', value => { value.reviewers = [] })
   rejectReviewed('blank brief', value => { value.reviewers[0].prompt = '' })
   rejectReviewed('unknown reviewer key', value => { (value.reviewers[0] as Record<string, unknown>).transport = 'print' })
-  for (const bad of ['review', 'review-x', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'launch_x', 'General', '1general', '', 'a'.repeat(33)]) {
+  for (const bad of ['review', 'review-x', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'launch_x', 'General', '1general', '', 'a'.repeat(33)]) {
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0'])
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)
   assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', challenge: 'no' }).success, false)
+  // 2.3.0 adds the optional review sidecar: false, or a brief with optional bounds (workflow/sidecar.py refuses it on an earlier version).
+  const sidecar = { prompt: 'builtin:senior-review', cadence_seconds: 900, pass_timeout_seconds: 600, max_passes: 16, max_messages_per_lane: 6 }
+  feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar })
+  feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: { prompt: 'sidecar-brief.md' } })
+  feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: false })
+  for (const bad of [true, {}, { prompt: '' }, { ...sidecar, cadence_seconds: 59 }, { ...sidecar, cadence_seconds: 7201 }, { ...sidecar, pass_timeout_seconds: 3601 },
+    { ...sidecar, max_passes: 0 }, { ...sidecar, max_passes: 65 }, { ...sidecar, max_messages_per_lane: 21 }, { ...sidecar, max_passes: 1.5 }, { ...sidecar, extra: 1 }]) {
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: bad }).success, false, JSON.stringify(bad))
+  }
+})
+
+test('review sidecar ledger 1.0.0: the PRD Appendix B example validates verbatim and the field rules hold', () => {
+  const ledger = handWritten('sidecar')
+  const prd = readFileSync(new URL('../../docs/PRD_REVIEW_SIDECAR.md', import.meta.url), 'utf8')
+  const example = JSON.parse(prd.split('## Appendix B')[1].split('```json\n')[1].split('\n```')[0])
+  ledger.parse(example)
+  const reject = (label: string, mutate: (value: typeof example) => void) => {
+    const value = structuredClone(example)
+    mutate(value)
+    assert.equal(ledger.safeParse(value).success, false, label)
+  }
+  reject('unknown key', value => { value.extra = true })
+  reject('empty id', value => { value.findings[0].id = '' })
+  reject('problem over 2,000', value => { value.findings[0].problem = 'p'.repeat(2001) })
+  reject('file over 512', value => { value.findings[0].file = 'f'.repeat(513) })
+  reject('null evidence', value => { value.findings[0].evidence = null })
+  reject('unknown disposition', value => { value.findings[0].disposition = 'fixed' })
+  reject('unknown message reason', value => { value.messages[1].reason = 'busy' })
+  reject('no finding cited', value => { value.messages[0].finding_ids = [] })
+  reject('summary over 4,000', value => { value.passes[0].summary = 's'.repeat(4001) })
+  reject('cadence below its bound', value => { value.settings.cadence_seconds = 59 })
+  // Empty strings where the rules allow them, the nullable set, no referential check.
+  ledger.parse({ ...structuredClone(example), findings: [{ ...structuredClone(example.findings[1]), locator: '', evidence: '' }] })
+  ledger.parse({ ...structuredClone(example), messages: [{ ...structuredClone(example.messages[0]), status: 'pending', finding_ids: ['S-99'] }], closed_at: '2026-10-01T14:00:00Z',
+    handoff: { unresolved: ['S-2'], structural: [], verified_resolved: [], withdrawn: [], gaps: [] } })
+  const schema = readJson('./sidecar.schema.json')
+  assert.deepEqual(schema.properties.passes.items, { $ref: '#/$defs/pass' })
+  assert.deepEqual(schema.$defs.pass.properties.status.enum, ['completed', 'rejected', 'failed', 'timed_out', 'interrupted'])
+  assert.deepEqual(schema.$defs.message.properties.status.enum, ['pending', 'delivered', 'undeliverable', 'refused'])
 })
 
 test('review completion 1.2.0 binds a file to one reviewer node and attributes findings to a lane id, multiple or none, never both', () => {
