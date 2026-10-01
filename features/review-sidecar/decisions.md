@@ -19,6 +19,9 @@ From the PRD review of 2026-10-01 with the operator; the operator chose md-manag
 - The pass reads the visible pane text through Herdr when available (`pane_file: null` otherwise); a transcript tail is deferred.
 - Both lanes land together in one candidate: the live API is restarted after integration, before any run exports 1.6.0.
 
+- After design challenge attempt 2 (P1: Appendix B could not come out of the defined merge): an upsert overwrites the finding's own fields, and each history entry copies that upsert's disposition, revision, evidence and note (the first entry holds the creation values); Appendix B's S-1 now shows the pass-3 revision and evidence with the pass-1 values in `history[0]`, and the engine's seam test merges three hand-written outputs into Appendix B.
+- After attempt 2's P2s: the ledger is bounded at 4 MiB on both sides (the engine rejects an output that would cross it with reason `size`; the viewer's live cap is 4 MiB, not the 256 KiB questions cap); when the last completion is accepted a running pass is terminated and recorded `interrupted`, the final pass runs as a polled child inside the loop and the handoffs are saved after it is recorded; the delivery gate takes a fresh inventory and pane read per message, Herdr calls are bounded to one capture per lane per pass and the first Herdr timeout in a pass skips the pass's remaining Herdr calls.
+
 ## Assumptions
 
 - `WORKFLOW_WORKER_EFFORT`, `ANTHROPIC_MODEL` and the other launch environment apply to the pass as they do to the challenge job; the pass takes no `--effort`.
