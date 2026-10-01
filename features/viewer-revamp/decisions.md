@@ -19,6 +19,8 @@ From the operator's answers of 2026-10-01 (scope, jobs, look, delivery) and the 
 
 - After design challenge attempt 1 of viewer-revamp-003: specs are assigned by the DOM they test (`ux-time.spec.ts` moves to `pages`), each lane keeps the DOM that specs it does not own assert (PRD section 6's list: `.status-badge` on headers and rows, the time-zone toggle beside `run-status`, check cells, `time` attributes, `run-list` as `li` rows, "N nodes", "N features") and runs the other lane's specs read-only before completing; `StatusBadge` is restyled only through `.status-badge` CSS the shell owns and is part of the contrast measurement; the `revamp-home` scenario text says "next-step label" and asserts the Failed filter and Show older on at least one own failed row.
 
+- After design challenge attempt 1 of viewer-revamp-004: the header's first button stays Refresh (the look switch follows it in the DOM); a run row's `<time>` keeps its exact text and the `live-status` chip its exact texts; the shell also runs `ux-time`, `ux-run` and `ux-launch` read-only; the worker-phase route override builds on `mockResponse(url)` and uses `route.fetch()` only in the candidate phase; no `<form>` anywhere and no fixture lane or reviewer id containing a forbidden button word; `revamp-look` measures the token pairs on the shell element in both looks and both themes, not only rendered chips; the PRD's stale sentences (tokens on `:root`, Google Fonts, closed Activity groups, `ux-time` under `shell`) are corrected to match these decisions.
+
 ## Assumptions
 
 - Running cards show a deadline-based progress bar only when the served activity carries the deadline; otherwise elapsed time only.
