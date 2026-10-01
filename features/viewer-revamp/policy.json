@@ -42,8 +42,7 @@
         "tests/unit/lists.test.ts",
         "docs/handoff/revamp-shell.md",
         "tests/project-workflows/ux-lists.spec.ts",
-        "tests/project-workflows/projects.spec.ts",
-        "tests/project-workflows/ux-time.spec.ts"
+        "tests/project-workflows/projects.spec.ts"
       ],
       "checks": [
         {
@@ -93,7 +92,7 @@
           "scenarios": [
             {
               "id": "revamp-home",
-              "description": "Runs home shows the rail with project dots and, with the spec's /api/projects route override adding project-B-1..3, the folded project-B group; Needs you cards with the cause and the next command; Running cards with lane chips named from the definition and elapsed time; Recent grouped by day with the search narrowing to one own row, the Failed filter leaving only failed own rows and Show older making every own run visible; every existing runs-home assertion holds; at 390 px no horizontal overflow"
+              "description": "Runs home shows the rail with project dots and, with the spec's /api/projects route override adding project-B-1..3, the folded project-B group; Needs you cards with the cause and a next-step label (no command on Runs home); Running cards with lane chips named from the definition and elapsed time; Recent grouped by day with the search narrowing to one own row, the Failed filter leaving only failed own rows and Show older making every own run visible; every existing runs-home assertion holds; at 390 px no horizontal overflow; the Failed filter and Show older are asserted on at least one own failed row made visible by the search or by Show older"
             },
             {
               "id": "revamp-look",
@@ -142,7 +141,8 @@
         "tests/project-workflows/ux-verify.spec.ts",
         "tests/project-workflows/ux-launch.spec.ts",
         "tests/project-workflows/ux-review.spec.ts",
-        "tests/project-workflows/sidecar.spec.ts"
+        "tests/project-workflows/sidecar.spec.ts",
+        "tests/project-workflows/ux-time.spec.ts"
       ],
       "checks": [
         {
