@@ -28,6 +28,8 @@ From the PRD review of 2026-10-01 with the operator; the operator chose md-manag
 
 - Run 002 (2026-10-01): run 001 reached a candidate (`5e569c31`, tag `workflow/review-sidecar-001-candidate`) that passed every policy check and was blocked by the coverage reviewer on five P2 test gaps; both lanes restore their owned paths from that commit first and add the missing tests, so the reviewers of run 002 review the whole change again on a fresh candidate. The repair of run 001 (test_portable's preflight stubs scrub `WORKFLOW_WORKER_EFFORT`) is part of that commit.
 
+- Run 003 (2026-10-01): run 002's candidate (`840787b6`, tag `workflow/review-sidecar-002-candidate`) passed every check and closed run 001's five findings, and the coverage reviewer blocked again on two further P2 gaps. Both lanes restore from that candidate and close the two gaps. The operator also aligned this feature's coverage brief with the controller's verdict rule: an untested Acceptance scenario, check or PRD safety rule is P0/P1 and blocks; every other gap is a P2 finding and the reviewer approves with it listed. Without this the review cannot converge: each round finds a smaller gap.
+
 ## Assumptions
 
 - `WORKFLOW_WORKER_EFFORT`, `ANTHROPIC_MODEL` and the other launch environment apply to the pass as they do to the challenge job; the pass takes no `--effort`.
