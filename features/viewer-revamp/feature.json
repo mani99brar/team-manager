@@ -1,7 +1,7 @@
 {
   "version": "2.3.0",
   "name": "Projects viewer revamp (PRD_VIEWER_REVAMP): operator's desk layout, state colour, two looks, filters and findings cards",
-  "branch_prefix": "feature/viewer-revamp",
+  "branch_prefix": "feature/viewer-revamp-runs",
   "policy": "policy.json",
   "prd": "docs/PRD_VIEWER_REVAMP.md",
   "workers": [
