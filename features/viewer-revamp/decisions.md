@@ -25,6 +25,8 @@ From the operator's answers of 2026-10-01 (scope, jobs, look, delivery) and the 
 
 - After design challenge attempt 1 of viewer-revamp-005: the one-clock exemption is `RunView.tsx` and `ProjectsView.tsx` only, so `WorkerQuestions` loses its own clock; the shell adds no `useNow` and takes elapsed and ago times from the list clock; a failed run is finished and listed in Recent, so the Running card tones asserted are paused (pause) and interrupted, in both phases; the pages lane switches look in its tests by setting `data-look` on `main.projects-shell` with `page.evaluate` and asserts a Bold-only token resolved; the worker-phase versus candidate-phase route rule (mock response versus `route.fetch()`) applies to every route a spec overrides, including run lists for the empty Needs-you state and the Attention card.
 
+- Run 006 (2026-10-02): run 005's candidate (`09fafd8b`, tag `workflow/viewer-revamp-005-candidate`) passed every check, was approved by the coverage reviewer and by the general reviewer's file (four P2s), and the run ended on the general reviewer's deadline because a Claude Code auto-update broke its background session before the controller accepted the file. Both lanes restore from that candidate and close the general reviewer's P2s; run 006 uses `--reviewer-transport print` so the review step does not depend on background sessions an update can break.
+
 ## Assumptions
 
 - Running cards show a deadline-based progress bar only when the served activity carries the deadline; otherwise elapsed time only.
