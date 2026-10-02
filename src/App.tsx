@@ -378,7 +378,9 @@ function App() {
   const [projectsRefreshing, setProjectsRefreshing] = useState(false)
   // The Projects look (docs/PRD_VIEWER_REVAMP.md 4): remembered in localStorage, Calm without a readable stored value.
   const [look, setLook] = useState<Look>(() => {
-    try { return lookFromStored(window.localStorage.getItem(LOOK_STORAGE_KEY)) } catch { return 'calm' }
+    // VITE_DEFAULT_LOOK (build time) picks the look when nothing is stored, so two instances can show Calm and Bold side by side.
+    const fallback = lookFromStored(import.meta.env.VITE_DEFAULT_LOOK)
+    try { const stored = window.localStorage.getItem(LOOK_STORAGE_KEY); return stored === null ? fallback : lookFromStored(stored) } catch { return fallback }
   })
   const chooseLook = useCallback((next: Look) => {
     setLook(next)
