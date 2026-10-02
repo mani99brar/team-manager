@@ -33,6 +33,12 @@
 .app-header-projects { flex-wrap: nowrap; justify-content: flex-start; gap: 8px 16px; min-height: 48px; padding: 6px 0; }
 .app-header-projects .roots { order: 0; flex-basis: auto; }
 .app-header-projects > .button { margin-left: auto; }
+/* The Calm/Bold look switch (docs/PRD_VIEWER_REVAMP.md 4): after Refresh in the DOM (the header's first button stays Refresh), placed before it. */
+.app-header-projects > .look-switch { order: 1; margin-left: auto; display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: 2px; gap: 2px; }
+.app-header-projects > .button:has(+ .look-switch) { order: 2; margin-left: 0; }
+.look-switch button { font: inherit; font-size: 0.85rem; min-height: 32px; min-width: 44px; padding: 2px 12px; border: 0; border-radius: 999px; background: none; color: var(--text); cursor: pointer; }
+.look-switch button[aria-pressed="true"] { background: var(--text); color: var(--surface); }
+.look-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .app-title h1 { margin: 0; font-size: 1.25rem; }
 .app-title p { margin: 0; color: var(--text-muted); font-size: 0.85rem; }
 
@@ -397,11 +403,15 @@
 @media (max-width: 760px) {
   /* Two rows on a phone: the title and Refresh, then the roots. */
   .app-header-projects { flex-wrap: wrap; }
-  .app-header-projects .roots { order: 3; flex-basis: 100%; }
+  /* The roots wrap below the title and Refresh; the look switch shares their row, so the header stays two rows. */
+  .app-header-projects .roots { order: 3; flex-basis: auto; }
+  .app-header-projects > .look-switch { order: 4; }
+  .app-header-projects > .button:has(+ .look-switch) { margin-left: auto; }
   /* The Projects trail keeps its last two steps on a phone; the roots lead back to Projects. */
   .app-projects .breadcrumbs li:not(:nth-last-child(-n + 2)) { display: none; }
   /* Tap targets are at least 44 px on phones (PRD_VIEWER_UX section 10). */
   .time-zone-toggle .button { min-height: 44px; min-width: 44px; }
+  .look-switch button { min-height: 34px; }
   .workspace-projects { padding: 10px; }
   .projects-facts { grid-template-columns: 1fr; }
   .status-badge { white-space: normal; }

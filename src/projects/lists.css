@@ -1,51 +1,166 @@
-/* Run lists (docs/PRD_VIEWER_UX.md 4.1, 6.3, 6.4): Runs home, the project page's feature groups and the feature page's rows. */
-.runs-home { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
-.runs-home-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
-.runs-home-head h2 { margin: 0; }
-.lists-section { display: flex; flex-direction: column; gap: 6px; }
-.lists-section-title { margin: 0; font-size: 0.85rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
-.lists-count, .lists-note { text-transform: none; letter-spacing: 0; font-weight: 400; }
-.lists-empty { margin: 0; }
-.lists-errors { border: 1px solid var(--warn-border, #c99a2e); background: var(--warn-bg, #fff4d6); color: var(--warn-text, #5c4100); border-radius: 8px; padding: 8px 12px; }
-.lists-errors p, .lists-errors ul { margin: 0; }
+/* Run lists (docs/PRD_VIEWER_UX.md 4.1, 6.3, 6.4; docs/PRD_VIEWER_REVAMP.md 5.1, 5.2, 5.5): Runs home's rail, cards and Recent,
+   the project page's feature groups and the feature page's rows. Every colour comes from the Projects tokens (theme.css). */
 
-/* One row: a single link, the whole row its tap target. Wide: the id, its names and status on the left, the time on the right, the summary under them. */
-.run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+/* Runs home: the project rail beside the sections; the rail becomes a row of chips at 860 px and below. */
+.home-layout { display: grid; grid-template-columns: minmax(200px, 240px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.home-rail { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.rail-needs {
+  display: flex; align-items: center; min-height: 40px; padding: 6px 12px; border-radius: var(--radius); border: 1px solid var(--border);
+  background: var(--surface); font-weight: 600; text-decoration: none;
+}
+.workspace-projects .rail-needs { color: var(--fg); }
+.workspace-projects .rail-needs.has-waiting { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
+.rail-title { margin: 8px 0 0; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-family: var(--font-display); }
+.projects-shell[data-look="bold"] .rail-title { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); }
+.home-rail .rail-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.rail-project {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 8px; min-height: 40px; padding: 4px 10px; border-radius: var(--radius);
+  text-decoration: none; overflow-wrap: anywhere;
+}
+.workspace-projects .rail-project { color: var(--fg); }
+.rail-project:hover { background: var(--surface-2); }
+.rail-name { font-weight: 600; }
+.rail-facts { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+.rail-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--idle); flex: none; }
+.rail-dot.tone-ok { background: var(--ok); }
+.rail-dot.tone-run { background: var(--run); }
+.rail-dot.tone-warn { background: var(--warn); }
+.rail-dot.tone-fail { background: var(--fail); }
+.rail-dot.tone-pause { background: var(--pause); }
+.rail-group > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 10px; cursor: pointer; font-weight: 600; border-radius: var(--radius); }
+.rail-group > summary:hover { background: var(--surface-2); }
+.rail-group > .rail-list { padding-left: 10px; border-left: 2px solid var(--border); margin-left: 12px; }
+.rail-note { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+.home-rail a:focus-visible, .rail-group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.runs-home { display: flex; flex-direction: column; gap: 20px; margin-bottom: 20px; min-width: 0; }
+.runs-home-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.runs-home-head h2 { margin: 0; font-family: var(--font-display); }
+.home-section { scroll-margin-top: 12px; }
+.lists-empty { margin: 0; }
+
+/* Needs you and Running: cards, each one link (the whole card is the tap target). */
+.home-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 10px; }
+.projects-shell .home-card { padding: 0; gap: 0; }
+.home-card-link { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; min-height: 44px; text-decoration: none; overflow-wrap: anywhere; border-radius: inherit; }
+.workspace-projects .home-card-link { color: var(--fg); }
+.home-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.home-card-id { font-weight: 700; font-family: var(--font-mono); font-size: 0.95rem; }
+.home-card-context { color: var(--muted); font-size: 0.9rem; }
+.home-card-summary { font-weight: 600; }
+.home-card-cause { color: var(--muted); font-size: 0.9rem; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.home-card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 0.9rem; color: var(--muted); }
+.home-card-next { color: var(--warn); font-weight: 600; }
+.home-card-lanes { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.home-card-open { margin-left: auto; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.home-error { padding: 12px 14px; overflow-wrap: anywhere; }
+
+/* Recent: the search and filters, day (or project) rows, the rows themselves, then Show older. */
+.home-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.home-search {
+  flex: 1 1 220px; min-width: 0; max-width: 360px; min-height: 36px; box-sizing: border-box; padding: 4px 12px; font: inherit;
+  color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 999px;
+}
+.home-search:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.recent-group { display: flex; flex-direction: column; gap: 4px; }
+.workspace-projects .recent-group-label {
+  margin: 6px 0 0; padding: 4px 2px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.home-show-older {
+  align-self: flex-start; font: inherit; min-height: 36px; padding: 4px 14px; border-radius: 999px; cursor: pointer;
+  color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong);
+}
+.home-show-older:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* One row: a single link, the whole row its tap target, a stripe in its tone. Wide: the id, its names and status on the left,
+   the time on the right, the outcome on one line under them (full text in its title). */
+.run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .run-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: baseline; min-height: 44px; box-sizing: border-box;
-  padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); text-decoration: none; overflow-wrap: anywhere;
+  padding: 8px 12px; border: 1px solid var(--border); border-left: 4px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--surface); color: var(--fg); text-decoration: none; overflow-wrap: anywhere;
 }
-.run-row:hover { background: var(--surface-alt); }
+.workspace-projects .run-row { color: var(--fg); }
+.run-row-item[data-tone="ok"] > .run-row { border-left-color: var(--ok); }
+.run-row-item[data-tone="run"] > .run-row { border-left-color: var(--run); }
+.run-row-item[data-tone="warn"] > .run-row { border-left-color: var(--warn); }
+.run-row-item[data-tone="fail"] > .run-row { border-left-color: var(--fail); }
+.run-row-item[data-tone="pause"] > .run-row { border-left-color: var(--pause); }
+.run-row:hover { background: var(--surface-2); }
 .run-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .run-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
-.run-row-glyph { width: 1.1em; text-align: center; color: var(--text-muted); }
-.run-row-id { font-weight: 600; }
-.run-row-context { color: var(--text-muted); }
-.run-row-when { color: var(--text-muted); font-size: 0.9rem; text-align: right; white-space: nowrap; }
-.run-row-span { font-variant-numeric: tabular-nums; color: var(--text); }
-.run-row-detail { grid-column: 1 / -1; color: var(--text-muted); font-size: 0.9rem; padding-left: calc(1.1em + 8px); }
-.run-row[data-status="failed"] .run-row-glyph { color: var(--node-directory-stroke, #b3261e); }
-.run-row[data-status="succeeded"] .run-row-glyph { color: var(--node-location-stroke, #2f7a4b); }
-/* Waiting on the operator: an amber ring and a `?`; the status stays what it is. */
-.run-row[data-attention] { border-color: var(--attention, #b86e00); box-shadow: inset 3px 0 0 var(--attention, #b86e00); }
-.run-row[data-attention] .run-row-glyph { color: var(--attention, #b86e00); font-weight: 700; }
-.run-row[data-attention] .run-row-detail { color: var(--warn-text, #5c4100); }
+.run-row-glyph { width: 1.1em; text-align: center; color: var(--muted); }
+.run-row-id { font-weight: 600; font-family: var(--font-mono); font-size: 0.95rem; }
+.run-row-context { color: var(--muted); }
+.run-row-when { color: var(--muted); font-size: 0.9rem; text-align: right; white-space: nowrap; }
+.run-row-span { font-variant-numeric: tabular-nums; color: var(--fg); }
+/* The outcome ellipsises on one line; the waiting-since time beside it never shrinks, so it is not the part cut off. */
+.run-row-detail { grid-column: 1 / -1; display: flex; min-width: 0; color: var(--muted); font-size: 0.9rem; padding-left: calc(1.1em + 8px); white-space: nowrap; }
+.run-row-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.run-row-since { flex: none; white-space: pre; }
+.run-row[data-status="failed"] .run-row-glyph { color: var(--fail); }
+.run-row[data-status="succeeded"] .run-row-glyph { color: var(--ok); }
+/* Waiting on the operator: a warn ring and a `?`; the status stays what it is. */
+.run-row[data-attention] { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
+.run-row[data-attention] .run-row-glyph { color: var(--warn); font-weight: 700; }
+.run-row[data-attention] .run-row-detail { color: var(--warn); }
 
-/* The project page: one group per feature, its header linking to the feature's runs. */
+/* The status pill (StatusBadge) in its tone, everywhere in the Projects shell: colour, dot and text together. */
+.projects-shell .status-badge { background: var(--idle-soft); color: var(--idle); border-color: transparent; }
+.projects-shell .status-badge::before { background: currentColor; }
+.projects-shell .status-badge.status-running { background: var(--run-soft); color: var(--run); }
+.projects-shell .status-badge.status-awaiting_approval { background: var(--warn-soft); color: var(--warn); }
+.projects-shell .status-badge.status-paused { background: var(--pause-soft); color: var(--pause); }
+.projects-shell .status-badge.status-succeeded { background: var(--ok-soft); color: var(--ok); }
+.projects-shell .status-badge.status-failed { background: var(--fail-soft); color: var(--fail); }
+
+/* The live chip (6.3) in the shell's tokens; its texts are LiveStatus's. */
+.projects-shell .live-status { background: var(--surface); border-color: var(--border); color: var(--muted); }
+.projects-shell .live-status-live > [aria-hidden] { color: var(--ok); }
+.projects-shell .live-status-watching > [aria-hidden] { color: var(--run); }
+.projects-shell .live-status-stale { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); }
+/* The live chip's controller suffix: warn once the controller has read not running for 15 s. */
+.live-status-controller-down { color: var(--warn); font-weight: 600; }
+
+/* The project page: one card per feature, its header linking to the feature's runs. */
 .lists-groups { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 16px; }
 .lists-group { display: flex; flex-direction: column; gap: 6px; }
-.lists-group-head { background: var(--surface-alt); }
-.runs-home-projects .lists-project-card { min-height: 44px; }
+.projects-shell .lists-group-head { padding: 10px 12px; gap: 4px; }
+.lists-group-last { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 0.9rem; }
 
-/* The feature page: the current definition folded away below its runs. */
+/* The feature page: the lanes, the run history strip, the rows, then the current definition folded away below them. */
+.feature-lanes, .feature-reviews { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
+.run-history { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.workspace-projects .run-history-chip { text-decoration: none; min-width: 28px; min-height: 24px; justify-content: center; }
+.workspace-projects .run-history-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .lists-definition > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .lists-definition > summary h3 { display: inline; margin: 0; font-size: 1rem; }
 
-/* The live chip's controller suffix (6.3): amber once the controller has read not running for 15 s. */
-.live-status-controller-down { color: var(--warn-text, #5c4100); font-weight: 600; }
+@media (max-width: 860px) {
+  /* The rail above the sections: Needs you, then the projects as one row of chips that scrolls inside the rail (the page never
+     widens); an open group's projects follow its summary on the same row; the facts fold away. */
+  .home-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .home-rail { position: static; }
+  .rail-title { display: none; }
+  /* contain: its own row never sizes the page; it scrolls within the width the layout gives it. relative: the visually hidden
+     words inside it are positioned within the scroller, not against the page, so they never widen the page either. */
+  .home-rail > .rail-list { flex-direction: row; flex-wrap: nowrap; align-items: flex-start; gap: 6px; overflow-x: auto; padding-bottom: 4px; contain: inline-size; position: relative; }
+  .home-rail > .rail-list > li { flex: none; }
+  .home-rail .rail-project, .rail-group > summary { border: 1px solid var(--border); border-radius: 999px; background: var(--surface); padding: 4px 12px; white-space: nowrap; }
+  .rail-facts { display: none; }
+  .rail-group[open] { display: flex; align-items: flex-start; gap: 6px; }
+  .rail-group > .rail-list { flex-direction: row; flex-wrap: nowrap; border-left: 0; margin: 0; padding: 0; gap: 6px; }
+  .rail-group > .rail-list > li { flex: none; }
+  .rail-note { margin-top: 4px; }
+}
 
 @media (max-width: 760px) {
   /* Three short lines: id and status, then the time, then the summary. */
   .run-row { grid-template-columns: minmax(0, 1fr); }
   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
+  .run-row-detail { display: block; white-space: normal; }
+  .run-row-summary, .run-row-since { white-space: normal; }
+  .home-search { max-width: none; }
 }

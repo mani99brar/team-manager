@@ -12,6 +12,7 @@ import { GraphLayout, type LayoutSnapshot } from './graph/layout.ts'
 import { Outline } from './graph/Outline.tsx'
 import { ProjectsView } from './projects/ProjectsView.tsx'
 import { parseProjectsPathname, projectsPathname } from './projects/routes.ts'
+import { LOOK_STORAGE_KEY, lookFromStored, type Look } from './projects/tone.ts'
 import {
   buildIndex,
   childCounts,
@@ -375,6 +376,14 @@ function App() {
   // ---- Projects root (read-only workflow runs; a separate domain from the skill sources) ----
   const [projectsRefresh, setProjectsRefresh] = useState(0)
   const [projectsRefreshing, setProjectsRefreshing] = useState(false)
+  // The Projects look (docs/PRD_VIEWER_REVAMP.md 4): remembered in localStorage, Calm without a readable stored value.
+  const [look, setLook] = useState<Look>(() => {
+    try { return lookFromStored(window.localStorage.getItem(LOOK_STORAGE_KEY)) } catch { return 'calm' }
+  })
+  const chooseLook = useCallback((next: Look) => {
+    setLook(next)
+    try { window.localStorage.setItem(LOOK_STORAGE_KEY, next) } catch { /* the choice still holds for this page */ }
+  }, [])
   /** Navigates to any app pathname (Projects pages or Home) through history, keeping the unsaved-edit guards. */
   const navigatePathname = useCallback((pathname: string) => {
     guardLeave(() => {
@@ -646,9 +655,16 @@ function App() {
         </nav>
         {inProjects ? (
           // Busy but still focusable (aria-disabled, not disabled), so a keyboard user's focus stays on it while it reloads.
-          <button type="button" className="button" onClick={() => { if (!projectsRefreshing) setProjectsRefresh(previous => previous + 1) }} aria-disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
-            {projectsRefreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
+          <>
+            <button type="button" className="button" onClick={() => { if (!projectsRefreshing) setProjectsRefresh(previous => previous + 1) }} aria-disabled={projectsRefreshing} aria-busy={projectsRefreshing}>
+              {projectsRefreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+            {/* After Refresh in the DOM, so the header's first button stays Refresh; CSS places it before. */}
+            <div className="look-switch" role="group" aria-label="Look">
+              <button type="button" aria-pressed={look === 'calm'} onClick={() => chooseLook('calm')}>Calm</button>
+              <button type="button" aria-pressed={look === 'bold'} onClick={() => chooseLook('bold')}>Bold</button>
+            </div>
+          </>
         ) : (
           <button type="button" className="button" onClick={() => void refresh()} disabled={!ready || refreshing} aria-busy={refreshing}>
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -698,7 +714,7 @@ function App() {
       )}
 
       {inProjects && (
-        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce} />
+        <ProjectsView route={projectsRoute} look={look} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce} />
       )}
 
       {!inProjects && <div className="navigation">

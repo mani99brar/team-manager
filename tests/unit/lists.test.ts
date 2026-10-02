@@ -8,8 +8,9 @@ import assert from 'node:assert/strict'
 import { deriveNow, type ControllerReading, type Now } from '../../contracts/projects/triage.ts'
 import { validateRunDetail, type RunActivity, type RunDetail, type RunSummary } from '../../contracts/projects/v1.ts'
 import {
-  controllerSuffix, homeSections, latestFeature, latestRun, projectFacts, readsNextPage, recordReading, RECENT_WINDOW_MS, rowSummary, rowTime,
-  servedDisagreement, servedNow, workflowTitle, type ServedRun,
+  controllerSuffix, dayKey, cardElapsed, dayLabel, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun,
+  NEXT_STEP, PREFIX_GROUP_MIN, projectFacts, projectPrefix, projectTone, railEntries, readsNextPage, RECENT_FILTERS, RECENT_SHOWN, recentCounts,
+  recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, waitingKind, workflowTitle, type ServedRun,
 } from '../../src/projects/lists.ts'
 import { definition, laneGraphNodes, runDetail, type NodeState } from '../project-workflows/fixtures.ts'
 
@@ -242,5 +243,185 @@ describe('the Now banner reads the served activity', () => {
     const held = [reading(0, 'not_running'), reading(20, 'not_running')]
     const now = servedNow(nowOf(detail, { activity: detail.summary.activity }), served(detail, held))
     assert.equal(now.situation, 'question')
+  })
+})
+
+// ---- Viewer revamp (docs/PRD_VIEWER_REVAMP.md 5.1): search, filters, day groups, the rail ---------------------------------
+
+describe('Recent search', () => {
+  const failed = summary('desk-fail-1', 'failed', { activity: activity({ feature: 'Operator desk', finished_at: '2026-03-19T10:00:00Z', headline: 'Verify ui · Injected gate failure' }) })
+  const ok = summary('desk-ok-1', 'succeeded', { activity: activity({ feature: 'Operator desk', finished_at: '2026-03-19T11:00:00Z', headline: 'Integrate candidate · fast-forwarded' }) })
+  const other = summary('lists-failed', 'failed', { activity: activity({ finished_at: '2026-03-19T09:00:00Z', headline: 'Verify adapter · exit 1' }) })
+  const project = { project_id: 'alpha-project', name: 'Alpha project' }
+  const rows = [
+    { run: failed, title: 'Revamp desk', project },
+    { run: ok, title: 'Revamp desk', project },
+    { run: other, title: 'Runs home lists', project: { project_id: 'beta', name: 'Beta' } },
+  ]
+  const ids = (list: readonly { run: RunSummary }[]) => list.map(row => row.run.run_id)
+  test('an empty or blank query keeps every row in order', () => {
+    assert.deepEqual(ids(searchRows(rows, '')), ['desk-fail-1', 'desk-ok-1', 'lists-failed'])
+    assert.deepEqual(ids(searchRows(rows, '   ')), ['desk-fail-1', 'desk-ok-1', 'lists-failed'])
+  })
+  test('matches the run id, the feature title and the outcome, case-insensitively', () => {
+    assert.deepEqual(ids(searchRows(rows, 'DESK-FAIL-1')), ['desk-fail-1'])
+    assert.deepEqual(ids(searchRows(rows, 'revamp desk')), ['desk-fail-1', 'desk-ok-1'])
+    assert.deepEqual(ids(searchRows(rows, 'operator')), ['desk-fail-1', 'desk-ok-1'])
+    assert.deepEqual(ids(searchRows(rows, 'gate failure')), ['desk-fail-1'])
+    assert.deepEqual(ids(searchRows(rows, 'FAILED')), ['desk-fail-1', 'lists-failed'])
+    assert.deepEqual(ids(searchRows(rows, 'beta')), ['lists-failed'])
+  })
+  test('every word must match; an unmatched query leaves nothing', () => {
+    assert.deepEqual(ids(searchRows(rows, 'desk exit')), [])
+    assert.deepEqual(ids(searchRows(rows, 'nothing-like-this')), [])
+  })
+})
+
+describe('Recent filters and day groups', () => {
+  const NOW_MARCH_12 = Date.parse('2026-03-12T20:00:00Z')
+  const finished = (runId: string, status: RunSummary['status'], at: string) =>
+    ({ run: summary(runId, status, { created: at, activity: activity({ finished_at: at }) }), title: 't', project: { project_id: 'p', name: 'P' } })
+  const legacy = { run: summary('legacy', 'succeeded', { updated: '2026-03-11T08:00:00Z' }), title: 't', project: { project_id: 'q', name: 'Q' } }
+  const rows = [
+    finished('f-today', 'failed', '2026-03-12T19:00:00Z'),
+    finished('s-today', 'succeeded', '2026-03-12T01:00:00Z'),
+    finished('s-yesterday', 'succeeded', '2026-03-11T23:59:59Z'),
+    legacy,
+    finished('f-older', 'failed', '2026-03-10T12:00:00Z'),
+    finished('c-older', 'cancelled', '2026-03-10T11:00:00Z'),
+  ]
+  const ids = (list: readonly { run: RunSummary }[]) => list.map(row => row.run.run_id)
+  test('All keeps every row; Failed and Succeeded keep their status; Today keeps what ended today', () => {
+    assert.deepEqual(ids(filterRecent(rows, 'all', NOW_MARCH_12, 'utc')), ids(rows))
+    assert.deepEqual(ids(filterRecent(rows, 'failed', NOW_MARCH_12, 'utc')), ['f-today', 'f-older'])
+    assert.deepEqual(ids(filterRecent(rows, 'succeeded', NOW_MARCH_12, 'utc')), ['s-today', 's-yesterday', 'legacy'])
+    assert.deepEqual(ids(filterRecent(rows, 'today', NOW_MARCH_12, 'utc')), ['f-today', 's-today'])
+    assert.deepEqual(recentCounts(rows, NOW_MARCH_12, 'utc'), { all: 6, failed: 2, succeeded: 3, today: 2 })
+    assert.deepEqual([...RECENT_FILTERS], ['all', 'failed', 'succeeded', 'today'])
+  })
+  test('a day key is the calendar day in the chosen zone', () => {
+    assert.equal(dayKey('2026-03-12T01:00:00Z', 'utc'), '2026-03-12')
+    assert.equal(dayKey('2026-03-11T23:59:59Z', 'utc'), '2026-03-11')
+    assert.match(dayKey('2026-03-11T23:59:59Z', 'local'), /^2026-03-1[12]$/)
+  })
+  test('rows are grouped under Today, Yesterday and then the date, in the order given (newest first)', () => {
+    const groups = groupByDay(rows, NOW_MARCH_12, 'utc')
+    assert.deepEqual(groups.map(group => group.label), ['Today', 'Yesterday', 'Mar 10'])
+    assert.deepEqual(groups.map(group => ids(group.rows)), [['f-today', 's-today'], ['s-yesterday', 'legacy'], ['f-older', 'c-older']])
+    assert.deepEqual(groups.map(group => group.key), ['2026-03-12', '2026-03-11', '2026-03-10'])
+  })
+  test('a day in another year names its year; a day after today is named by its date', () => {
+    assert.equal(dayLabel('2025-12-31', NOW_MARCH_12, 'utc'), 'Dec 31 2025')
+    assert.equal(dayLabel('2026-03-19', NOW_MARCH_12, 'utc'), 'Mar 19')
+    assert.equal(dayLabel('2026-03-12', NOW_MARCH_12, 'utc'), 'Today')
+    assert.equal(dayLabel('2026-03-11', NOW_MARCH_12, 'utc'), 'Yesterday')
+  })
+  test('Group by project groups by project in first-seen order', () => {
+    const groups = groupByProject(rows)
+    assert.deepEqual(groups.map(group => group.label), ['P', 'Q'])
+    assert.deepEqual(groups.map(group => group.rows.length), [5, 1])
+  })
+  test('the first rows across groups are shown; the rest are counted behind Show older', () => {
+    const groups = groupByDay(rows, NOW_MARCH_12, 'utc')
+    const shown = firstRows(groups, 3)
+    assert.deepEqual(shown.groups.map(group => ids(group.rows)), [['f-today', 's-today'], ['s-yesterday']])
+    assert.equal(shown.hidden, 3)
+    const all = firstRows(groups, RECENT_SHOWN)
+    assert.equal(all.hidden, 0)
+    assert.deepEqual(all.groups.map(group => ids(group.rows)), groups.map(group => ids(group.rows)))
+    assert.equal(RECENT_SHOWN, 10)
+    assert.deepEqual(firstRows(groups, 0), { groups: [], hidden: 6 })
+  })
+})
+
+describe('the project rail', () => {
+  const project = (project_id: string) => ({ project_id, name: project_id })
+  const shape = (entries: ReturnType<typeof railEntries<{ project_id: string; name: string }>>) =>
+    entries.map(entry => (entry.kind === 'project' ? entry.project.project_id : `${entry.prefix}(${entry.projects.map(item => item.project_id).join(',')})`))
+  test('three or more siblings sharing the prefix before the last segment fold into one group, at the first one\'s place', () => {
+    const projects = ['alpha-project', 'project-B-1', 'empty-project', 'project-B-2', 'project-B-3'].map(project)
+    assert.deepEqual(shape(railEntries(projects)), ['alpha-project', 'project-B(project-B-1,project-B-2,project-B-3)', 'empty-project'])
+    assert.equal(PREFIX_GROUP_MIN, 3)
+  })
+  test('two siblings stay flat; an id without a dash has no prefix', () => {
+    assert.deepEqual(shape(railEntries(['game-1', 'game-2', 'solo', 'other'].map(project))), ['game-1', 'game-2', 'solo', 'other'])
+    assert.equal(projectPrefix('solo'), null)
+    assert.equal(projectPrefix('project-B-27'), 'project-B')
+    assert.equal(projectPrefix('-x'), null)
+  })
+  test('the threshold is a parameter', () => {
+    assert.deepEqual(shape(railEntries(['game-1', 'game-2'].map(project), 2)), ['game(game-1,game-2)'])
+  })
+  test('a project\'s dot: needs you, then failed (its latest finished run), then running, else idle', () => {
+    const waiting = summary('w', 'running', { activity: activity({ attention: { kind: 'pane', node_id: 'launch_ui', since: null } }) })
+    const live = summary('l', 'running', { activity: activity() })
+    const failedLast = summary('f', 'failed', { activity: activity({ finished_at: '2026-03-19T10:00:00Z' }) })
+    const okBefore = summary('o', 'succeeded', { activity: activity({ finished_at: '2026-03-18T10:00:00Z' }) })
+    const okLast = summary('o2', 'succeeded', { activity: activity({ finished_at: '2026-03-20T10:00:00Z' }) })
+    assert.equal(projectTone([live, failedLast, waiting]), 'warn')
+    assert.equal(projectTone([live, okBefore, failedLast]), 'fail')
+    assert.equal(projectTone([live, failedLast, okLast]), 'run')
+    assert.equal(projectTone([okBefore, okLast]), 'ok')
+    assert.equal(projectTone([]), 'idle')
+    // A paused run is stopped, not running: its project's dot says Paused.
+    const paused = summary('p', 'paused', { activity: activity() })
+    assert.equal(projectTone([paused]), 'pause')
+    assert.equal(projectTone([paused, okBefore]), 'pause')
+    assert.equal(projectTone([paused, live]), 'run')
+    assert.equal(projectTone([paused, failedLast]), 'fail')
+    assert.equal(projectTone([summary('a', 'awaiting_approval', { activity: activity() }), live]), 'warn')
+    assert.equal(projectTone([summary('n', 'pending', { activity: activity() })]), 'idle')
+  })
+})
+
+describe('Runs home cards', () => {
+  test('each waiting kind has a next-step label and no command', () => {
+    assert.equal(NEXT_STEP.question, 'answer the question')
+    assert.equal(NEXT_STEP.pane, 'attend the pane')
+    assert.equal(NEXT_STEP.approval, 'approve the candidate')
+    for (const label of Object.values(NEXT_STEP)) assert.doesNotMatch(label, /workflow|\$RUN|python/)
+  })
+  test('lanes are named from the definition\'s launch nodes, in definition order', () => {
+    assert.deepEqual(laneNamesOf(NODES), ['ui', 'adapter'])
+    assert.deepEqual(laneNamesOf(laneGraphNodes(['ui', 'adapter', 'docs'])), ['ui', 'adapter', 'docs'])
+    assert.deepEqual(laneNamesOf([{ node_id: 'review' }]), [])
+  })
+  test('controller readings are recorded per run across polls and dropped for runs no longer listed', () => {
+    const first = recordHomeReadings(new Map(), [{ key: 'a', value: 'not_running' }, { key: 'b', value: 'running' }], '2026-03-20T12:00:00Z')
+    assert.equal(controllerSuffix('running', first.get('a')!), null)
+    assert.equal(controllerSuffix('running', first.get('b')!), 'running')
+    const second = recordHomeReadings(first, [{ key: 'a', value: 'not_running' }], '2026-03-20T12:00:16Z')
+    assert.equal(second.has('b'), false)
+    assert.equal(second.get('a')!.length, 2)
+    assert.equal(controllerSuffix('running', second.get('a')!), 'not_running')
+  })
+  test('a Running card names a stopped run\'s age as since it started, never as how long it has been stopped (run 006)', () => {
+    const now = Date.parse('2026-03-12T20:00:00Z')
+    const created = '2026-03-12T16:00:00Z'
+    const live = (status: RunSummary['status'], since: string | null) => ({ status, created_at: created, activity: { attention: since === null ? null : { kind: 'interrupted' as const, node_id: 'handoff', since } } })
+    assert.deepEqual(cardElapsed(live('running', null), now), { elapsed: 'running for 4h00m', since: null, started: created })
+    // Interrupted at 16:20 after starting at 16:00: at 20:00 it says it started 4h00m ago and has been paused since 16:20.
+    assert.deepEqual(cardElapsed(live('paused', '2026-03-12T16:20:00Z'), now), { elapsed: 'paused · started 4h00m ago', since: '2026-03-12T16:20:00Z', started: null })
+    assert.doesNotMatch(cardElapsed(live('paused', null), now)!.elapsed, /^paused · \d/)
+    // Served without a since (run 007): the line already says when it started, so no start time follows it a second time.
+    assert.deepEqual(cardElapsed(live('paused', null), now), { elapsed: 'paused · started 4h00m ago', since: null, started: null })
+    assert.deepEqual(cardElapsed(live('awaiting_approval', null), now), { elapsed: 'awaiting approval · started 4h00m ago', since: null, started: null })
+    // A running run's since is not a stop time, and a finished run has no elapsed line.
+    assert.equal(cardElapsed(live('running', '2026-03-12T16:20:00Z'), now)?.since, null)
+    assert.equal(cardElapsed({ status: 'failed', created_at: created, activity: { attention: null } }, now), null)
+  })
+  test('a paused run served without attention.since waits on nobody: a Running card, not a Needs-you card (run 007)', () => {
+    const held = summary('held', 'paused', { created: '2026-03-20T07:00:00Z', activity: activity({ last_activity_at: '2026-03-20T07:00:16Z', attention: { kind: 'paused', node_id: 'handoff', since: null } }) })
+    assert.equal(waitingKind(held), null)
+    const sections = homeSections([{ run: held }], NOW)
+    assert.deepEqual(sections.running.map(row => row.run.run_id), ['held'])
+    assert.equal(sections.needsYou.length, 0)
+    assert.deepEqual(cardElapsed(held, NOW), { elapsed: 'paused · started 5h00m ago', since: null, started: null })
+  })
+  test('the review steps a feature declares come from its definition, in definition order (run 007)', () => {
+    assert.deepEqual(reviewStepsOf(NODES), ['Independent review'])
+    const guarded = [{ node_id: 'challenge', label: 'Design challenge', kind: 'review' as const }, ...NODES]
+    assert.deepEqual(reviewStepsOf(guarded), ['Design challenge', 'Independent review'])
+    assert.deepEqual(reviewStepsOf(NODES.filter(node => node.kind !== 'review')), [])
   })
 })

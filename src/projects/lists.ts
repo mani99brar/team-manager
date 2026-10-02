@@ -12,6 +12,8 @@ import {
 } from '../../contracts/projects/triage.ts'
 import type { RunActivity, RunDetail, RunSummary } from './api.ts'
 import { GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
+import { formatSpan, type Zone } from './time.ts'
+import { statusTone, type Tone } from './tone.ts'
 
 /** Recent lists every run that finished in the last seven days (decisions.md). */
 export const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -136,6 +138,23 @@ export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated
   return { kind: 'live', started: run.created_at, last: activity.last_activity_at, ms: Math.max(0, now - ms(run.created_at)) }
 }
 
+/**
+ * A Running card's time line (PRD_VIEWER_REVAMP 5.1), from the list clock: a running run says how long it has run; a live
+ * run that stopped (paused, interrupted) says how long ago it *started*, never a bare span that reads as how long it has been
+ * stopped, and gives the served attention `since` as when it stopped. `started` is the start time a card adds after the line,
+ * only for a running run: a stopped run's line already says when it started, so without a served `since` nothing follows it.
+ * A finished run has no such line.
+ */
+export function cardElapsed(
+  run: Pick<RunSummary, 'status' | 'created_at'> & { activity?: { attention: { since: string | null } | null } | null },
+  now: number,
+): { elapsed: string; since: string | null; started: string | null } | null {
+  if (isFinished(run.status)) return null
+  const span = formatSpan(Math.max(0, now - ms(run.created_at)))
+  if (run.status === 'running') return { elapsed: `running for ${span}`, since: null, started: run.created_at }
+  return { elapsed: `${STATUS_LABEL[run.status].toLowerCase()} · started ${span} ago`, since: run.activity?.attention?.since ?? null, started: null }
+}
+
 /** A project card's secondary text: how many features it registers and when its latest run last moved. */
 export function projectFacts(workflows: number, runs: readonly Pick<RunSummary, 'updated_at' | 'activity'>[]): { features: string; lastRun: string | null } {
   const last = runs.reduce<string | null>((latest, run) => (latest === null || ms(movedAt(run)) > ms(latest) ? movedAt(run) : latest), null)
@@ -203,4 +222,181 @@ export function servedDisagreement(now: Now, served: ServedRun): 'question-answe
 export function servedNow(now: Now, served: ServedRun | null): Now {
   if (served === null || servedDisagreement(now, served) === null) return now
   return deriveNow({ detail: served.detail, events: [], inputs: null, activity: served.activity, controller: served.controller })
+}
+
+// ---- The revamp's Runs home (docs/PRD_VIEWER_REVAMP.md 5.1): search, filters, day groups, the rail, the cards ---------------
+
+/** Recent shows this many rows; the rest wait behind "Show older". */
+export const RECENT_SHOWN = 10
+/** Projects fold into a rail group when this many or more share the prefix before their last `-` segment. */
+export const PREFIX_GROUP_MIN = 3
+export const RECENT_FILTERS = ['all', 'failed', 'succeeded', 'today'] as const
+export type RecentFilter = (typeof RECENT_FILTERS)[number]
+
+/** What a mixed list knows about a row beyond its run: its feature title and project, and its workflow's node labels. */
+export type ListRow = { run: RunSummary; title: string; project: { project_id: string; name: string }; labels?: ReadonlyMap<string, string> }
+
+/**
+ * Recent's client-side search: every word of the query must occur, ignoring case, in the run id, the feature title, the
+ * run's feature, the project or the outcome (the row's summary and the served headline). A blank query keeps every row.
+ */
+export function searchRows<T extends ListRow>(rows: readonly T[], query: string): T[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return [...rows]
+  return rows.filter(row => {
+    const haystack = [row.run.run_id, row.title, row.run.activity?.feature, row.project.name, row.run.activity?.headline, rowSummary(row.run, row.labels)]
+      .filter(Boolean).join('\n').toLowerCase()
+    return words.every(word => haystack.includes(word))
+  })
+}
+
+const pad2 = (value: number) => String(value).padStart(2, '0')
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** The calendar day of an instant in the reader's zone, as `YYYY-MM-DD`. */
+export function dayKey(at: string | number, zone: Zone): string {
+  const date = new Date(typeof at === 'number' ? at : ms(at))
+  return zone === 'utc'
+    ? `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}`
+    : `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+/** A day row's label: "Today", "Yesterday", else the date as the clocks write it ("Mar 10", "Dec 31 2025"). */
+export function dayLabel(key: string, now: number, zone: Zone): string {
+  const today = dayKey(now, zone)
+  if (key === today) return 'Today'
+  const [year, month, day] = key.split('-').map(Number)
+  const [todayYear, todayMonth, todayDay] = today.split('-').map(Number)
+  if ((Date.UTC(todayYear, todayMonth - 1, todayDay) - Date.UTC(year, month - 1, day)) / 86_400_000 === 1) return 'Yesterday'
+  return `${MONTH_NAMES[month - 1]} ${day}${year === todayYear ? '' : ` ${year}`}`
+}
+
+/** Recent's filters: Failed and Succeeded by status, Today by the day the run ended in the reader's zone. */
+export function filterRecent<T extends { run: RunSummary }>(rows: readonly T[], filter: RecentFilter, now: number, zone: Zone): T[] {
+  if (filter === 'failed') return rows.filter(row => row.run.status === 'failed')
+  if (filter === 'succeeded') return rows.filter(row => row.run.status === 'succeeded')
+  if (filter === 'today') {
+    const today = dayKey(now, zone)
+    return rows.filter(row => dayKey(endedAt(row.run), zone) === today)
+  }
+  return [...rows]
+}
+
+/** How many rows each filter keeps, for the counts on its button. */
+export function recentCounts<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone): Record<RecentFilter, number> {
+  return Object.fromEntries(RECENT_FILTERS.map(filter => [filter, filterRecent(rows, filter, now, zone).length])) as Record<RecentFilter, number>
+}
+
+export type RowGroup<T> = { key: string; label: string; rows: T[] }
+
+function groupBy<T>(rows: readonly T[], keyOf: (row: T) => string, labelOf: (key: string, row: T) => string): RowGroup<T>[] {
+  const groups = new Map<string, RowGroup<T>>()
+  for (const row of rows) {
+    const key = keyOf(row)
+    const group = groups.get(key)
+    if (group) group.rows.push(row)
+    else groups.set(key, { key, label: labelOf(key, row), rows: [row] })
+  }
+  return [...groups.values()]
+}
+
+/** Recent's day rows: each group is the day the run ended, in the order the rows come (newest first). */
+export function groupByDay<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone): RowGroup<T>[] {
+  return groupBy(rows, row => dayKey(endedAt(row.run), zone), key => dayLabel(key, now, zone))
+}
+
+/** Recent grouped by project instead of by day, projects in the order their first row comes. */
+export function groupByProject<T extends ListRow>(rows: readonly T[]): RowGroup<T>[] {
+  return groupBy(rows, row => row.project.project_id, (_, row) => row.project.name)
+}
+
+/** The first `limit` rows across the groups, in order, and how many are left behind "Show older". */
+export function firstRows<T>(groups: readonly RowGroup<T>[], limit: number): { groups: RowGroup<T>[]; hidden: number } {
+  const shown: RowGroup<T>[] = []
+  let left = limit
+  let hidden = 0
+  for (const group of groups) {
+    const take = group.rows.slice(0, Math.max(0, left))
+    left -= take.length
+    hidden += group.rows.length - take.length
+    if (take.length > 0) shown.push({ ...group, rows: take })
+  }
+  return { groups: shown, hidden }
+}
+
+/** A project id's family prefix: everything before its last `-` segment, or null when it has none. */
+export function projectPrefix(projectId: string): string | null {
+  const index = projectId.lastIndexOf('-')
+  return index > 0 ? projectId.slice(0, index) : null
+}
+
+export type RailEntry<P> = { kind: 'project'; project: P } | { kind: 'group'; prefix: string; projects: P[] }
+
+/** The rail's entries: projects in registry order, families of `min` or more siblings folded into one group at the first one's place. */
+export function railEntries<P extends { project_id: string }>(projects: readonly P[], min = PREFIX_GROUP_MIN): RailEntry<P>[] {
+  const families = new Map<string, P[]>()
+  for (const project of projects) {
+    const prefix = projectPrefix(project.project_id)
+    if (prefix !== null) families.set(prefix, [...(families.get(prefix) ?? []), project])
+  }
+  const entries: RailEntry<P>[] = []
+  const placed = new Set<string>()
+  for (const project of projects) {
+    const prefix = projectPrefix(project.project_id)
+    const family = prefix === null ? undefined : families.get(prefix)
+    if (prefix === null || family === undefined || family.length < min) entries.push({ kind: 'project', project })
+    else if (!placed.has(prefix)) {
+      placed.add(prefix)
+      entries.push({ kind: 'group', prefix, projects: family })
+    }
+  }
+  return entries
+}
+
+/**
+ * A project's rail dot from its listed runs: needs you while any run waits on the operator, failed when its latest finished
+ * run failed, else its most pressing live run's own tone (awaiting approval, running, paused), succeeded when its latest
+ * finished run did, else idle.
+ */
+export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at'>[]): Tone {
+  if (runs.some(run => waitingKind(run) !== null)) return 'warn'
+  const latest = runs.filter(run => isFinished(run.status)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at'> | null>(
+    (last, run) => (last === null || ms(endedAt(run)) > ms(endedAt(last)) ? run : last), null)
+  if (latest?.status === 'failed') return 'fail'
+  // A live run in its own tone (statusTone): awaiting approval is warn, running is run, paused is pause, never "Running".
+  const live = runs.filter(run => !isFinished(run.status)).map(run => statusTone(run.status))
+  const order: readonly Tone[] = ['warn', 'run', 'pause']
+  const liveTone = order.find(tone => live.includes(tone))
+  if (liveTone) return liveTone
+  if (latest?.status === 'succeeded') return 'ok'
+  return 'idle'
+}
+
+/** A Needs-you card's next step, a label only: the exact command needs the run detail and stays on the run page. */
+export const NEXT_STEP: Record<WaitingKind, string> = {
+  question: 'answer the question',
+  pane: 'attend the pane',
+  approval: 'approve the candidate',
+}
+
+/** The lanes a workflow definition launches (`launch_<lane>` nodes), in definition order. */
+export function laneNamesOf(nodes: readonly { node_id: string }[]): string[] {
+  return nodes.filter(node => node.node_id.startsWith('launch_')).map(node => node.node_id.slice('launch_'.length))
+}
+
+/**
+ * Runs home's controller readings, one list per live run, extended with each poll's served `activity.controller` so a
+ * Running card says "not running" only once it has held for 15 s (`controllerSuffix`); runs no longer listed are dropped.
+ */
+export function recordHomeReadings(previous: ReadonlyMap<string, readonly ControllerReading[]>, readings: readonly { key: string; value: ControllerState }[], at: string): Map<string, ControllerReading[]> {
+  return new Map(readings.map(({ key, value }) => [key, recordReading(previous.get(key) ?? [], { at, value })]))
+}
+
+/**
+ * The review steps a feature's definition declares (its `review` nodes, such as the design challenge and the independent
+ * review), by label in definition order. The reviewer ids themselves are in each run's review result, which the lists never
+ * fetch, so a feature's header names its review steps from the definition instead.
+ */
+export function reviewStepsOf(nodes: readonly { kind: string; label: string }[]): string[] {
+  return nodes.filter(node => node.kind === 'review').map(node => node.label)
 }

@@ -4,6 +4,7 @@ import { AppLink, StatusBadge } from './panels.tsx'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatAgo, formatSpan } from './time.ts'
+import { stateTone } from './tone.ts'
 
 type Props = {
   run: RunSummary
@@ -20,15 +21,18 @@ type Props = {
  * One run in a list (docs/PRD_VIEWER_UX.md 4.1, 6.4): a single link in an `<li>` whose accessible name starts with the run
  * id, carrying `data-run-id`, `data-status` and, while a question, a pane or an approval waits, `data-attention` with an
  * amber `?`. It says what happened (the status at the focus step, from the served activity), when, and for how long. A run
- * served without activity says only its status and when it was updated: no finish and no duration are invented.
+ * served without activity says only its status and when it was updated: no finish and no duration are invented. The revamp
+ * (PRD_VIEWER_REVAMP 5.1) draws it as a table row: a tone stripe from `stateTone`, the outcome on one line with its full text
+ * in the title, and the waiting-since time outside the ellipsised outcome so it is never the part cut off.
  */
 export function RunRow({ run, href, labels, context = [], now, onNavigate }: Props) {
   const kind = waitingKind(run)
   const time = rowTime(run, now)
   const since = kind === null ? null : run.activity?.attention?.since ?? null
   const names = context.filter((name): name is string => Boolean(name))
+  const summary = rowSummary(run, labels)
   return (
-    <li className="run-row-item">
+    <li className="run-row-item" data-tone={stateTone({ status: run.status, attention: kind })}>
       <AppLink href={href} onNavigate={onNavigate} className="run-row" data-run-id={run.run_id} data-status={run.status} data-attention={kind ?? undefined}>
         <span className="run-row-head">
           <span className="run-row-glyph" aria-hidden="true">{kind === null ? STATUS_GLYPH[run.status] : '?'}</span>
@@ -43,8 +47,8 @@ export function RunRow({ run, href, labels, context = [], now, onNavigate }: Pro
         </span>
         <span className="run-row-detail">
           {kind !== null && <span className="visually-hidden">Waiting on you: </span>}
-          {rowSummary(run, labels)}
-          {since && <> · since <Time iso={since} /></>}
+          <span className="run-row-summary" title={summary}>{summary}</span>
+          {since && <span className="run-row-since"> · since <Time iso={since} /></span>}
         </span>
       </AppLink>
     </li>

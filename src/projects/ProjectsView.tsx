@@ -5,7 +5,7 @@ import {
   describeApiError, fetchProjects, fetchRegistryRuns, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, workflowTitle, type ServedRun } from './lists.ts'
+import { laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
 import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
@@ -14,8 +14,11 @@ import { projectPathname, projectsPathname, runPathname, workflowPathname, type 
 import { RunRow } from './RunRow.tsx'
 import { ProjectRunGroups, RunsHome } from './RunsHome.tsx'
 import { RunView } from './RunView.tsx'
-import { shortRevision } from './status.ts'
+import { shortRevision, STATUS_LABEL } from './status.ts'
+import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
+import { statusTone, toneClass, type Look } from './tone.ts'
+import { Chip, Section } from './ui/index.tsx'
 import { TimeReferenceContext, useNow } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
@@ -26,6 +29,8 @@ const LOADING_FAILED = 'Loading failed.'
 type Props = {
   /** Null when the pathname is under /projects but malformed. */
   route: ProjectsRoute | null
+  /** The look the header's switch chose (docs/PRD_VIEWER_REVAMP.md 4), set as `data-look` on this shell element only. */
+  look?: Look
   refreshToken: number
   /** Whether a header Refresh is still loading in the background, for the button's busy state. */
   onRefreshingChange: (refreshing: boolean) => void
@@ -38,7 +43,7 @@ type Props = {
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
+export function ProjectsView({ route, look = 'calm', refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
   const projectId = route && route.level !== 'projects' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
@@ -182,6 +187,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // The read-only note is said once, on the Projects root (docs/PRD_VIEWER_UX.md 3.2); each command block repeats it in one line.
   const info = route?.level === 'projects' ? 'Read-only: runs are started, answered and approved in the workflow CLI, never from this page.' : null
 
+  const homeShown = route?.level === 'projects' && projects.status === 'ready' && projects.data.length > 0
   const busy = projects.status === 'loading' || workflows.status === 'loading' || firstPage.status === 'loading' || detail.status === 'loading'
 
   let content: React.ReactNode
@@ -201,7 +207,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} onNavigate={onNavigate} />
+    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} note={info} onNavigate={onNavigate} />
   } else if (route.level === 'project') {
     if (workflows.status === 'loading' || workflows.status === 'idle') content = <LoadingPanel>Loading workflows of {projectName}…</LoadingPanel>
     else if (workflows.status === 'error' && notFound(workflows.error)) {
@@ -220,10 +226,10 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       )
     } else {
       content = (
-        <section aria-labelledby="workflows-title">
-          <h2 id="workflows-title">{projectName}: features</h2>
+        <Section headingId="workflows-title" className="project-features" title={`${projectName}: features`}
+          sub={`${workflows.data.length} ${workflows.data.length === 1 ? 'feature' : 'features'}`}>
           <ProjectRunGroups projectId={route.projectId} workflows={workflows.data} runs={projectRuns} now={listClock} onNavigate={onNavigate} />
-        </section>
+        </Section>
       )
     }
   } else if (route.level === 'workflow') {
@@ -242,8 +248,35 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     else {
       content = (
         <div className="workflow-view">
-          <section aria-labelledby="runs-title">
-            <h2 id="runs-title">{workflowName}: runs</h2>
+          <Section headingId="runs-title" className="feature-runs" title={`${workflowName}: runs`}
+            sub={runs.length > 0 ? `${runs.length}${nextCursor ? '+' : ''} ${runs.length === 1 && !nextCursor ? 'run' : 'runs'}, newest first` : undefined}>
+            {currentWorkflow && laneNamesOf(currentWorkflow.nodes).length > 0 && (
+              <p className="feature-lanes">
+                <span className="projects-muted">Lanes</span>
+                {laneNamesOf(currentWorkflow.nodes).map(lane => <Chip key={lane} plain className="lane-chip">{lane}</Chip>)}
+              </p>
+            )}
+            {currentWorkflow && reviewStepsOf(currentWorkflow.nodes).length > 0 && (
+              // The review steps the definition declares; the reviewer ids are in each run's review result, on the run's review page.
+              <p className="feature-reviews">
+                <span className="projects-muted">Review</span>
+                {reviewStepsOf(currentWorkflow.nodes).map(step => <Chip key={step} plain className="review-step-chip">{step}</Chip>)}
+              </p>
+            )}
+            {runs.length > 0 && (
+              // The run history at a glance: one chip per listed run, newest first, its status in colour, glyph and title.
+              <ol className="run-history" aria-label="Run history, newest first">
+                {runs.map(run => (
+                  <li key={run.run_id}>
+                    <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate}
+                      className={`ui-chip plain ${toneClass(statusTone(run.status))} run-history-chip`} title={`${run.run_id} · ${STATUS_LABEL[run.status]}`}
+                      aria-label={`Run ${run.run_id}, ${STATUS_LABEL[run.status]}`}>
+                      {STATUS_GLYPH[run.status]}
+                    </AppLink>
+                  </li>
+                ))}
+              </ol>
+            )}
             {runs.length === 0 ? (
               <EmptyPanel title="No runs have been recorded for this workflow." testId="empty-runs">
                 <p>The workflow definition exists (see its current graph below) but it has never been run, or its runs are stored elsewhere. Runs are started from the workflow CLI.</p>
@@ -263,7 +296,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
               </div>
             )}
             {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={() => void loadMore()} />}
-          </section>
+          </Section>
           <section aria-label="Current definition" className="workflow-definition">
             {workflows.status === 'loading' && <LoadingPanel>Loading the current definition…</LoadingPanel>}
             {workflows.status === 'error' && <ErrorPanel error={workflows.error} what="The current definition" onRetry={reloadWorkflows} />}
@@ -327,9 +360,10 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     <>
       <div className="navigation">
         <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
-        {info !== null && <p className="folder-info" data-testid="projects-info">{info}</p>}
+        {/* Runs home says it at the rail's foot (docs/PRD_VIEWER_REVAMP.md 3); a Projects root without the rail says it here. */}
+        {info !== null && !homeShown && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>
-      <main className="workspace workspace-projects projects-shell" aria-busy={busy} data-testid="projects-workspace">
+      <main className="workspace workspace-projects projects-shell" data-look={look} aria-busy={busy} data-testid="projects-workspace">
         {refreshFailure !== null && (
           <div className="projects-notice" role="alert" data-testid="refresh-failed">
             <p>
