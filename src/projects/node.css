@@ -1,6 +1,15 @@
 /* ---- Node view shell (docs/PRD_VIEWER_UX.md 4.4, 7, 10): header, attempt strip, section index, sections ---- */
 
-.node-header { display: flex; flex-direction: column; gap: 4px; }
+.node-header { display: flex; flex-direction: column; gap: 4px; margin: -12px -12px 0; padding: 10px 12px 8px; border-top: 4px solid var(--idle); border-radius: var(--radius) var(--radius) 0 0; border-bottom: 1px solid var(--border); }
+/* The node header card: a top rule in the node's tone, as the run header (docs/PRD_VIEWER_REVAMP.md 5.4). */
+.node-header.tone-ok { border-top-color: var(--ok); }
+.node-header.tone-run { border-top-color: var(--run); }
+.node-header.tone-warn { border-top-color: var(--warn); }
+.node-header.tone-fail { border-top-color: var(--fail); }
+.node-header.tone-pause { border-top-color: var(--pause); }
+.projects-shell .node-title-row h3 { font-family: var(--font-display); }
+/* A node's figures (review, verify, launch) open its page under the header. */
+.node-detail .ui-figures { margin-top: 10px; }
 .node-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
 .workspace-projects .node-title-row h3 { margin: 0; }
 .node-executor-line { font-size: 0.85rem; color: var(--text-muted); }
@@ -13,6 +22,9 @@
 .node-attempts-label { color: var(--text-muted); }
 .node-attempts-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; }
 .node-attempt-chip, .node-attempt-marker { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.node-attempt-chip:has(.status-text-failed) { background: var(--fail-soft); border-color: var(--fail); }
+.node-attempt-chip:has(.status-text-succeeded) { background: var(--ok-soft); border-color: var(--ok); }
+.node-attempt-chip:has(.status-text-running) { background: var(--run-soft); border-color: var(--run); }
 a.node-attempt-chip { color: var(--text); text-decoration: none; }
 a.node-attempt-chip:hover { background: var(--surface-alt); }
 a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
@@ -22,6 +34,7 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
 
 /* The section index sticks under the step strip once the page scrolls; its top is measured from the strip. */
 .section-index { position: sticky; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin: 8px 0 0; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+.section-index-link[data-count] .section-index-count { display: inline-block; min-width: 1.4em; padding: 0 5px; border-radius: 999px; background: var(--idle-soft); text-align: center; }
 .section-index-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
 .section-index-list li, .node-attempts-list li { flex: none; }
 .section-index > nav { min-width: 0; max-width: 100%; }
@@ -29,7 +42,8 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
 .section-index-link:hover { background: var(--surface-alt); }
 .section-index-count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .node-section { margin-top: 12px; }
-.workspace-projects .node-section-title { margin: 0 0 6px; }
+.workspace-projects .node-section-title { margin: 0 0 6px; font-family: var(--font-display); }
+.projects-shell[data-look="bold"] .node-section-title { background: var(--band); color: var(--band-fg); padding: 6px 12px; border-radius: var(--radius); }
 .node-section h4:focus, .node-section h5:focus, .node-section summary:focus { outline: none; }
 
 @media (max-width: 760px) {

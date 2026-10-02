@@ -1,10 +1,12 @@
 import { useMemo, useState } from 'react'
 import type { ActivityRow, MarkerKind, Timeline } from '../../contracts/projects/triage.ts'
+import { groupActivity, orderActivityGroups, phaseState, type ActivityPhase } from './node/model.ts'
 import { AppLink } from './panels.tsx'
 import { STATUS_LABEL } from './status.ts'
 import { outageBands, STATUS_GLYPH, timeAxis, type StepRow, type TimeAxis } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
+import { stateTone, toneClass } from './tone.ts'
 import { useTimeZone } from './useNow.ts'
 
 /** Where the Activity order is remembered in this browser; the page works the same without it. */
@@ -66,7 +68,7 @@ type StepsProps = {
 
 /**
  * The Steps table (docs/PRD_VIEWER_UX.md 4.2, `run-node-list`): one row per step with when it started, how long it took, its
- * attempts and their marks, its outcome and a bar on the run's time axis. Each row's step link opens the node page; the
+ * attempts and their marks, its outcome and a bar on the run's time axis, toned by status (docs/PRD_VIEWER_REVAMP.md 5.3). Each row's step link opens the node page; the
  * bar is decoration, its times are in the text cells. Inferred times carry `≈`, their source in the tooltip.
  */
 export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: StepsProps) {
@@ -83,9 +85,14 @@ export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: 
     return [{ start: Date.parse(start.at), end: span.end ? Date.parse(span.end.at) : span.live ? now : Date.parse(start.at) }]
   }))
   const axis = from !== null && to !== null && to > from ? timeAxis(from, to, busy) : null
+  const done = rows.filter(row => row.shown === 'succeeded').length
+  const failed = rows.filter(row => row.shown === 'failed').length
   return (
-    <section className="run-steps" aria-labelledby="run-steps-title">
-      <h3 id="run-steps-title" className="visually-hidden">Steps</h3>
+    <section className="run-steps" data-testid="run-steps" aria-labelledby="run-steps-title">
+      <header className="ui-section-header">
+        <h3 id="run-steps-title">Steps</h3>
+        <span className="ui-sub">{done} of {rows.length} done{failed > 0 ? ` · ${failed} failed` : ''}</span>
+      </header>
       <table className="steps-table" data-testid="run-node-list" role="table" aria-labelledby="run-steps-title">
         <caption className="steps-hint" data-testid="node-hint">Select a step to open its evidence. ≈ marks a time no event recorded: it is inferred (hover for the source).</caption>
         <thead role="rowgroup">
@@ -113,7 +120,7 @@ export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: 
             const glyph = row.attention ? '?' : STATUS_GLYPH[row.shown]
             const note = sourceNote(row)
             return (
-              <tr key={row.node_id} role="row" className={`step-row status-row-${row.shown}`} data-node-id={row.node_id} data-status={row.status} data-attention={row.attention ?? undefined}>
+              <tr key={row.node_id} role="row" className={`step-row status-row-${row.shown} ${toneClass(stateTone({ status: row.shown, attention: row.attention }))}`} data-node-id={row.node_id} data-status={row.status} data-attention={row.attention ?? undefined}>
                 <th scope="row" role="rowheader" className="step-name">
                   <AppLink href={nodeHref(row.node_id)} onNavigate={onNavigate} className="step-link" title={`${row.label}: ${STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}>
                     <span className={`step-glyph status-text-${row.shown}`} aria-hidden="true">{glyph}</span>
@@ -140,6 +147,10 @@ const STATUS_WORD: Record<string, string> = { failed: 'failed', succeeded: 'succ
 type ActivityProps = {
   timeline: Timeline
   labels: ReadonlyMap<string, string>
+  /** The phase each step belongs to (`nodePhase`), by node id; null for one with none of its own (the sidecar). */
+  phaseOf: (nodeId: string) => ActivityPhase | null
+  /** What a step waits on the operator for, if anything: its phase then says so. */
+  attentionOf: (nodeId: string) => string | null
   nodeHref: (nodeId: string) => string
   /** An attempt's own page, `/nodes/<n>/attempts/<k>`. */
   attemptHref: (nodeId: string, attempt: number) => string
@@ -147,15 +158,20 @@ type ActivityProps = {
 }
 
 /**
- * Activity (docs/PRD_VIEWER_UX.md 4.2, `run-timeline`): the run's history as rows, oldest first unless the reader chose
- * newest first (remembered). Node-less controller rows, the diagnosis and the repair included, are shown like any other; only
- * the controller's PID checkpoints sit behind "Controller log (n)". Silences are rows of text. An attempt row opens that attempt;
- * a reworded row's `#n` button shows the event number's full served message under it.
+ * Activity (docs/PRD_VIEWER_UX.md 4.2, `run-timeline`; docs/PRD_VIEWER_REVAMP.md 5.3): the run's history as rows grouped by
+ * phase (challenge, workers, freeze and verification, review and integration), each group a disclosure open by default, so every
+ * row is visible without a click; "Collapse all" and "Expand all" fold them. Oldest first unless the reader chose newest first
+ * (remembered), which reverses the groups and the rows inside them. Node-less controller rows, the diagnosis and the repair
+ * included, are shown like any other in the phase where they occur; only the controller's PID checkpoints sit behind
+ * "Controller log (n)". Silences are rows of text. An attempt row opens that attempt; a reworded row's `#n` button shows the
+ * event number's full served message under it.
  */
-export function Activity({ timeline, labels, nodeHref, attemptHref, onNavigate }: ActivityProps) {
+export function Activity({ timeline, labels, phaseOf, attentionOf, nodeHref, attemptHref, onNavigate }: ActivityProps) {
   const [zone] = useTimeZone()
   const [newestFirst, setNewestFirst] = useState(readNewestFirst)
   const [showLog, setShowLog] = useState(false)
+  // The groups the reader closed, by key; every group is open until then.
+  const [closed, setClosed] = useState<ReadonlySet<string>>(() => new Set())
   // The rows whose event number and served message are expanded, by row key.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
   const toggle = (key: string) => setExpanded(previous => {
@@ -164,10 +180,16 @@ export function Activity({ timeline, labels, nodeHref, attemptHref, onNavigate }
     return next
   })
   const logCount = timeline.activity.filter(row => row.controller_log).length
-  const rows = useMemo(() => {
-    const shown = timeline.activity.filter(row => showLog || !row.controller_log)
-    return newestFirst ? [...shown].reverse() : shown
-  }, [timeline, showLog, newestFirst])
+  const shown = useMemo(() => timeline.activity.filter(row => showLog || !row.controller_log), [timeline, showLog])
+  const groups = useMemo(() => orderActivityGroups(groupActivity(shown, phaseOf), newestFirst), [shown, phaseOf, newestFirst])
+  const allOpen = groups.every(group => !closed.has(group.key))
+  const setOpen = (key: string, open: boolean) => setClosed(previous => {
+    if (open !== previous.has(key)) return previous
+    const next = new Set(previous)
+    if (open) next.delete(key)
+    else next.add(key)
+    return next
+  })
   const attempts = (nodeId: string) => timeline.byNode.get(nodeId)?.length ?? 0
 
   const who = (row: ActivityRow) => {
@@ -184,78 +206,104 @@ export function Activity({ timeline, labels, nodeHref, attemptHref, onNavigate }
     return value
   }
 
+  const item = (row: ActivityRow, index: number) => {
+    if (row.kind === 'gap') {
+      return (
+        <li key={`gap-${row.at}-${index}`} className="activity-row activity-gap" data-kind="gap" data-gap={row.gap?.kind}>
+          <span className="activity-gap-text">┆ {row.text} {row.ms === null ? '' : formatSpan(row.ms)}</span>
+        </li>
+      )
+    }
+    const status = row.kind === 'end' ? row.status : null
+    const link = row.kind === 'end' && row.node_id !== null && labels.has(row.node_id) && (row.status === 'failed' || attempts(row.node_id) > 1)
+    const key = `${row.sequence ?? row.at}-${row.kind}-${row.node_id ?? ''}-${row.lane ?? ''}`
+    // The served message, when the row reworded it, opens under the row with its event number.
+    const detail = row.raw !== null && row.raw !== row.text
+    const open = detail && expanded.has(key)
+    const rawId = `activity-raw-${key}`.replace(/[^\w-]/g, '_')
+    return (
+      <li
+        key={`${key}-${index}`}
+        className={`activity-row${row.controller_log ? ' activity-log' : ''}`}
+        data-kind={row.kind}
+        data-marker={row.marker ?? undefined}
+        data-node-id={row.node_id ?? undefined}
+        data-status={status ?? undefined}
+      >
+        <span className="activity-time">{row.inferred ? '≈' : ''}<Time iso={row.at} seconds /></span>
+        <span className="activity-who">{who(row)}</span>
+        <span className="activity-text">
+          {status && <span className={`activity-glyph status-text-${status === 'no_record' ? 'pending' : status}`} aria-hidden="true">{status === 'no_record' ? '?' : STATUS_GLYPH[status]} </span>}
+          {text(row)}
+          {detail && (
+            <button
+              type="button"
+              className="activity-more"
+              aria-expanded={open}
+              aria-controls={open ? rawId : undefined}
+              aria-label={`${open ? 'Hide' : 'Show'} the recorded message${row.sequence === null ? '' : ` of event ${row.sequence}`}`}
+              data-testid="activity-more"
+              onClick={() => toggle(key)}
+            >
+              {row.sequence === null ? 'message' : `#${row.sequence}`}
+            </button>
+          )}
+          {open && <span id={rawId} className="activity-raw" data-testid="activity-raw">{row.raw}</span>}
+        </span>
+        {link && (
+          <AppLink href={row.attempt !== null && row.attempt > 0 ? attemptHref(row.node_id!, row.attempt) : nodeHref(row.node_id!)} onNavigate={onNavigate} className="activity-open" aria-label={`Open ${labels.get(row.node_id!)}, attempt ${row.attempt ?? ''}`.trim()}>open ›</AppLink>
+        )}
+      </li>
+    )
+  }
+
   return (
     <section className="run-activity" data-testid="run-timeline" aria-labelledby="run-activity-title">
-      <div className="activity-head">
+      <header className="ui-section-header activity-head">
         <h3 id="run-activity-title">Activity{zone === 'utc' ? ' (UTC)' : ''}</h3>
-        <span className="projects-muted">{newestFirst ? 'newest first' : 'oldest first'}</span>
-        <button
-          type="button"
-          className="button button-small"
-          aria-pressed={newestFirst}
-          data-testid="activity-order"
-          onClick={() => setNewestFirst(previous => { rememberNewestFirst(!previous); return !previous })}
-        >
-          Newest first
-        </button>
-        {logCount > 0 && (
-          <button type="button" className="button button-small" aria-pressed={showLog} data-testid="activity-controller-log" onClick={() => setShowLog(previous => !previous)}>
-            Controller log ({logCount})
+        <span className="ui-sub">{shown.length} {shown.length === 1 ? 'event' : 'events'} in {groups.length} {groups.length === 1 ? 'phase' : 'phases'} · <span className="projects-muted">{newestFirst ? 'newest first' : 'oldest first'}</span></span>
+        <div className="ui-tools">
+          <button
+            type="button"
+            className="button button-small"
+            aria-pressed={newestFirst}
+            data-testid="activity-order"
+            onClick={() => setNewestFirst(previous => { rememberNewestFirst(!previous); return !previous })}
+          >
+            Newest first
           </button>
-        )}
-      </div>
-      <ol className="activity-list">
-        {rows.map((row, index) => {
-          if (row.kind === 'gap') {
-            return (
-              <li key={`gap-${row.at}-${index}`} className="activity-row activity-gap" data-kind="gap" data-gap={row.gap?.kind}>
-                <span className="activity-gap-text">┆ {row.text} {row.ms === null ? '' : formatSpan(row.ms)}</span>
-              </li>
-            )
-          }
-          const status = row.kind === 'end' ? row.status : null
-          const link = row.kind === 'end' && row.node_id !== null && labels.has(row.node_id) && (row.status === 'failed' || attempts(row.node_id) > 1)
-          const key = `${row.sequence ?? row.at}-${row.kind}-${row.node_id ?? ''}-${row.lane ?? ''}`
-          // The served message, when the row reworded it, opens under the row with its event number.
-          const detail = row.raw !== null && row.raw !== row.text
-          const open = detail && expanded.has(key)
-          const rawId = `activity-raw-${key}`.replace(/[^\w-]/g, '_')
-          return (
-            <li
-              key={`${key}-${index}`}
-              className={`activity-row${row.controller_log ? ' activity-log' : ''}`}
-              data-kind={row.kind}
-              data-marker={row.marker ?? undefined}
-              data-node-id={row.node_id ?? undefined}
-              data-status={status ?? undefined}
-            >
-              <span className="activity-time">{row.inferred ? '≈' : ''}<Time iso={row.at} seconds /></span>
-              <span className="activity-who">{who(row)}</span>
-              <span className="activity-text">
-                {status && <span className={`activity-glyph status-text-${status === 'no_record' ? 'pending' : status}`} aria-hidden="true">{status === 'no_record' ? '?' : STATUS_GLYPH[status]} </span>}
-                {text(row)}
-                {detail && (
-                  <button
-                    type="button"
-                    className="activity-more"
-                    aria-expanded={open}
-                    aria-controls={open ? rawId : undefined}
-                    aria-label={`${open ? 'Hide' : 'Show'} the recorded message${row.sequence === null ? '' : ` of event ${row.sequence}`}`}
-                    data-testid="activity-more"
-                    onClick={() => toggle(key)}
-                  >
-                    {row.sequence === null ? 'message' : `#${row.sequence}`}
-                  </button>
-                )}
-                {open && <span id={rawId} className="activity-raw" data-testid="activity-raw">{row.raw}</span>}
-              </span>
-              {link && (
-                <AppLink href={row.attempt !== null && row.attempt > 0 ? attemptHref(row.node_id!, row.attempt) : nodeHref(row.node_id!)} onNavigate={onNavigate} className="activity-open" aria-label={`Open ${labels.get(row.node_id!)}, attempt ${row.attempt ?? ''}`.trim()}>open ›</AppLink>
-              )}
-            </li>
-          )
-        })}
-      </ol>
+          {groups.length > 0 && (
+            <button type="button" className="button button-small" data-testid="activity-expand" onClick={() => setClosed(allOpen ? new Set(groups.map(group => group.key)) : new Set())}>
+              {allOpen ? 'Collapse all' : 'Expand all'}
+            </button>
+          )}
+          {logCount > 0 && (
+            <button type="button" className="button button-small" aria-pressed={showLog} data-testid="activity-controller-log" onClick={() => setShowLog(previous => !previous)}>
+              Controller log ({logCount})
+            </button>
+          )}
+        </div>
+      </header>
+      {groups.map(group => {
+        const { tone, words } = phaseState(group.rows, (status, nodeId) => stateTone({ status, attention: attentionOf(nodeId) }))
+        return (
+          <details
+            key={group.key}
+            className={`activity-group ${toneClass(tone)}`}
+            data-testid="activity-group"
+            data-phase={group.phase}
+            data-tone={tone}
+            open={!closed.has(group.key)}
+            onToggle={event => setOpen(group.key, event.currentTarget.open)}
+          >
+            <summary className="activity-group-summary">
+              <span className="activity-phase">{group.label}</span>
+              <span className="activity-phase-count">{group.rows.length} {group.rows.length === 1 ? 'event' : 'events'}{words ? ` · ${words}` : ''}</span>
+            </summary>
+            <ol className="activity-list">{group.rows.map(item)}</ol>
+          </details>
+        )
+      })}
     </section>
   )
 }

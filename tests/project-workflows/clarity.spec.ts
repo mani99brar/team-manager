@@ -41,8 +41,11 @@ const capturedFile = (page: Page, path: string) => page.locator(`[data-testid="c
 const findings = (page: Page) => page.getByTestId('review-findings')
 const findingRows = (page: Page) => findings(page).getByTestId('finding')
 const findingRow = (page: Page, message: string) => findingRows(page).filter({ hasText: message })
-const reviewerGroups = (page: Page) => findings(page).locator('section[data-reviewer-group]')
-const filterButton = (page: Page, reviewer: string) => findings(page).locator(`[data-testid="filter-reviewer"][data-reviewer="${reviewer}"]`)
+// One filter row (docs/PRD_VIEWER_REVAMP.md 5.4, 8): a toggle per reviewer in declared order; the reviewer cards carry each
+// reviewer's verdict and severity counts, which the per-reviewer group headings carried.
+const reviewerToggles = (page: Page) => findings(page).getByTestId('findings-filters').locator('button[data-filter^="reviewer:"]')
+const filterButton = (page: Page, reviewer: string) => findings(page).getByTestId('findings-filters').locator(`button[data-filter="reviewer:${reviewer}"]`)
+const reviewerCard = (page: Page, reviewer: string) => page.locator(`[data-testid="reviewer-entry"][data-reviewer="${reviewer}"]`)
 
 const SOLID = ['launch_ui', 'launch_adapter', 'review']
 const DASHED = ['handoff', 'verify_ui', 'verify_adapter', 'candidate', 'approval', 'integrate']
@@ -309,49 +312,49 @@ test(`[scenario:findings-on-files] A captured file lists exactly the findings wh
   await expectNoExecutionControls(page)
 })
 
-test(`[scenario:findings-by-reviewer] A two-reviewer run opens grouped by reviewer in declared order with each verdict and counts; the reviewer filter composes; a single-reviewer run opens by disposition (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:findings-by-reviewer] A two-reviewer run opens with a filter per reviewer in declared order and a card per reviewer with its verdict and counts; the reviewer filter composes; a single-reviewer run has one (${phase})`, async ({ page }, testInfo) => {
   await page.goto(clarityRunUrl(RUN_FILES, 'review'))
-  await expect(findings(page)).toHaveAttribute('data-group-by', 'reviewer')
-  await expect(page.getByTestId('group-by-reviewer')).toHaveAttribute('aria-pressed', 'true')
+  await expect(findings(page)).toHaveAttribute('data-filters', 'all')
 
-  // One group per reviewer in declared order, labelled with its id, own verdict and severity counts.
-  await expect(reviewerGroups(page)).toHaveCount(2)
-  expect(await attributeList(reviewerGroups(page), 'data-reviewer-group')).toEqual([...TWO_REVIEWERS])
-  const general = findings(page).locator('section[data-reviewer-group="general"]')
-  const coverage = findings(page).locator('section[data-reviewer-group="coverage"]')
-  await expect(general.getByRole('heading', { level: 5 })).toHaveText('general · approved · 2 P2 (2)')
-  await expect(coverage.getByRole('heading', { level: 5 })).toHaveText('coverage · approved · 1 P1, 2 P2 (3)')
-  await expect(general.getByTestId('finding')).toHaveCount(2)
-  await expect(coverage.getByTestId('finding')).toHaveCount(3)
-  for (const row of await general.getByTestId('finding').all()) await expect(row).toHaveAttribute('data-reviewer', 'general')
+  // One toggle and one reviewer card per reviewer in declared order, with its id, own verdict, severity counts and finding count.
+  await expect(reviewerToggles(page)).toHaveCount(2)
+  expect(await attributeList(reviewerToggles(page), 'data-filter')).toEqual(TWO_REVIEWERS.map(reviewer => `reviewer:${reviewer}`))
+  expect(await attributeList(page.getByTestId('reviewer-entry'), 'data-reviewer')).toEqual([...TWO_REVIEWERS])
+  await expect(reviewerCard(page, 'general').getByTestId('reviewer-verdict')).toHaveText('Approved')
+  await expect(reviewerCard(page, 'general').getByTestId('reviewer-counts')).toHaveText('2 P2')
+  await expect(filterButton(page, 'general')).toHaveText('general 2')
+  await expect(reviewerCard(page, 'coverage').getByTestId('reviewer-verdict')).toHaveText('Approved')
+  await expect(reviewerCard(page, 'coverage').getByTestId('reviewer-counts')).toHaveText('1 P1, 2 P2')
+  await expect(filterButton(page, 'coverage')).toHaveText('coverage 3')
+  const general = findings(page).locator('[data-testid="finding"][data-reviewer="general"]')
+  const coverage = findings(page).locator('[data-testid="finding"][data-reviewer="coverage"]')
+  await expect(general).toHaveCount(2)
+  await expect(coverage).toHaveCount(3)
   await attach(page, testInfo, 'findings-by-reviewer')
 
-  // The reviewer filter hides the other reviewer's group, and still applies when the grouping changes.
+  // The reviewer filter hides the other reviewer's findings, and still applies while another toggle is pressed and released.
   await filterButton(page, 'coverage').click()
-  await expect(reviewerGroups(page)).toHaveCount(1)
   await expect(general).toHaveCount(0)
-  await expect(coverage.getByTestId('finding')).toHaveCount(3)
-  await page.getByTestId('group-by-disposition').click()
-  await expect(findings(page)).toHaveAttribute('data-group-by', 'disposition')
+  await expect(coverage).toHaveCount(3)
+  await findings(page).getByTestId('findings-filters').locator('button[data-filter="open"]').click()
+  for (const row of await findingRows(page).all()) await expect(row).toHaveAttribute('data-reviewer', 'coverage')
+  await findings(page).getByTestId('findings-filters').locator('button[data-filter="open"]').click()
   await expect(findingRows(page)).toHaveCount(3)
   for (const row of await findingRows(page).all()) await expect(row).toHaveAttribute('data-reviewer', 'coverage')
-  await page.getByTestId('group-by-worker').click()
-  await expect(findingRows(page)).toHaveCount(3)
-  await page.getByTestId('group-by-reviewer').click()
-  await filterButton(page, 'all').click()
-  await expect(reviewerGroups(page)).toHaveCount(2)
+  await filterButton(page, 'coverage').click()
+  await expect(findingRows(page)).toHaveCount(5)
 
-  // The parallel-reviewers run opens by reviewer too, in its declared order.
+  // The parallel-reviewers run lists its reviewers in its declared order too.
   await page.goto(runUrl(RUN_TWO_REVIEWERS, 'review', REVIEWERS_WORKFLOW_ID))
-  await expect(findings(page)).toHaveAttribute('data-group-by', 'reviewer')
-  expect(await attributeList(reviewerGroups(page), 'data-reviewer-group')).toEqual([...TWO_REVIEWERS])
+  await expect(reviewerToggles(page)).toHaveCount(2)
+  expect(await attributeList(reviewerToggles(page), 'data-filter')).toEqual(TWO_REVIEWERS.map(reviewer => `reviewer:${reviewer}`))
 
-  // A single-reviewer run opens by disposition.
+  // A single-reviewer run has one reviewer toggle and one reviewer card.
   await page.goto(runUrl(RUN_SUCCEEDED, 'review'))
   await expect(page.getByTestId('review-result')).toHaveAttribute('data-reviewer-count', '1')
-  await expect(findings(page)).toHaveAttribute('data-group-by', 'disposition')
-  await expect(page.getByTestId('group-by-disposition')).toHaveAttribute('aria-pressed', 'true')
-  await expect(reviewerGroups(page)).toHaveCount(0)
+  await expect(findings(page)).toHaveAttribute('data-filters', 'all')
+  await expect(reviewerToggles(page)).toHaveCount(1)
+  await expect(page.getByTestId('reviewer-entry')).toHaveCount(1)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
   await expectNoExecutionControls(page)
 })

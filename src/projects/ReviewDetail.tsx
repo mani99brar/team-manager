@@ -10,24 +10,22 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
-import { findingsForFile, runLanes, workerGroupOf, workerGroups, workerWording } from './findings.ts'
+import { findingsForFile, runLanes, workerWording } from './findings.ts'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
-import { blockingFindings, reviewerTime } from './node/panels.ts'
+import { blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
+import { Card, Chip, FilterToggles, SeverityChip } from './ui/index.tsx'
+import { severityClass, severityTone, toneClass, type Tone } from './tone.ts'
 import type { Resource } from './useResource.ts'
 
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type Lane = ReviewFinding['requirement_found_in'][number]
-type Disposition = ReviewFinding['disposition']
-type GroupBy = 'disposition' | 'worker' | 'reviewer'
-/** A reviewer id, or null for every reviewer. */
-type ReviewerFilter = string | null
 
 type Props = {
   scope: RunScope
@@ -54,8 +52,6 @@ const TRANSPORT_WORDING: Record<Reviewer['transport'], string> = {
   print: 'print-mode session',
   manual: 'operator-supplied review',
 }
-const DISPOSITIONS: readonly Disposition[] = ['open', 'resolved', 'accepted']
-const DISPOSITION_LABEL: Record<Disposition, string> = { open: 'Open', resolved: 'Resolved', accepted: 'Accepted' }
 /** The graph node that launched a lane: from the inputs when loaded, else `launch_<lane>` when the pinned graph has it, else the lane itself. */
 function launchNodeFor(lane: Lane, definitionNodes: DefinitionNode[], inputs: Resource<RunInputs | null>): string {
   if (inputs.status === 'ready' && inputs.data !== null) {
@@ -65,27 +61,37 @@ function launchNodeFor(lane: Lane, definitionNodes: DefinitionNode[], inputs: Re
   return definitionNodes.some(candidate => candidate.node_id === `launch_${lane}`) ? `launch_${lane}` : lane
 }
 
-type RowProps = Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement' | 'onOpenFile'> & {
+type CardProps = Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement' | 'onOpenFile'> & {
   finding: ReviewFinding
   /** The run's captured files by path, with the launch node that shows each. */
   capturedFiles: Map<string, string>
 }
 
-function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement, onOpenFile, capturedFiles }: RowProps) {
+/**
+ * One finding as a card (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in its severity's colour, the severity and disposition as
+ * chips (a blocking one says so in words), the message with the captured files it names, then the worker, the reviewer and
+ * the quoted requirement with the tasks it was found in. The `finding` test id and its data attributes are the table row's.
+ */
+function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequirement, onOpenFile, capturedFiles }: CardProps) {
   const blocking = isBlockingFinding(finding)
   // A finding links to every captured file its message names verbatim; the review result itself records no location.
   const files = [...capturedFiles].filter(([path]) => findingsForFile([finding], path).length > 0)
   return (
-    <tr
+    <Card
+      tone={blocking ? 'fail' : 'idle'}
+      className={['finding-card', severityClass(severityTone(finding.severity)), blocking ? 'finding-blocking' : ''].filter(Boolean).join(' ')}
       data-testid="finding"
       data-severity={finding.severity}
       data-disposition={finding.disposition}
       data-worker={finding.worker ?? 'unrecorded'}
       data-reviewer={finding.reviewer}
-      className={blocking ? 'finding-blocking' : undefined}
     >
-      <td data-label="Severity"><span className="finding-severity">{finding.severity}</span>{blocking && <span className="visually-hidden"> (blocks integration)</span>}</td>
-      <td data-label="Message">
+      <div className="finding-card-head">
+        <SeverityChip severity={finding.severity} />
+        <Chip tone={DISPOSITION_TONE[finding.disposition]} plain data-testid="finding-disposition">{finding.disposition}</Chip>
+        {blocking && <Chip tone="fail">blocks integration</Chip>}
+      </div>
+      <p className="finding-message">
         {finding.message}
         {files.map(([path, nodeId]) => (
           <AppLink
@@ -100,35 +106,40 @@ function FindingRow({ finding, scope, definitionNodes, inputs, onOpenRequirement
             Open the captured {path}
           </AppLink>
         ))}
-      </td>
-      <td data-label="Worker">{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</td>
-      <td data-label="Reviewer" data-testid="finding-reviewer">{finding.reviewer}</td>
-      <td data-label="Requirement">
-        {finding.requirement === null ? '—' : (
-          <>
-            <q data-testid="finding-requirement">{finding.requirement}</q>
-            {finding.requirement_found_in.length === 0 ? (
-              <span className="projects-muted finding-task-note" data-testid="finding-task-unlinked">not found verbatim in the task</span>
-            ) : finding.requirement_found_in.map(lane => {
-              const nodeId = launchNodeFor(lane, definitionNodes, inputs)
-              const quote = finding.requirement!
-              return (
-                <AppLink
-                  key={lane}
-                  href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)}
-                  onNavigate={() => onOpenRequirement(nodeId, quote)}
-                  className="finding-task-link"
-                  data-testid="finding-task-link"
-                  data-lane={lane}
-                >
-                  Open in the {lane} task
-                </AppLink>
-              )
-            })}
-          </>
-        )}
-      </td>
-    </tr>
+      </p>
+      <dl className="finding-fields">
+        <div><dt className="finding-field-label">Worker</dt><dd data-testid="finding-worker">{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</dd></div>
+        <div><dt className="finding-field-label">Reviewer</dt><dd data-testid="finding-reviewer">{finding.reviewer}</dd></div>
+        <div className="finding-requirement-field">
+          <dt className="finding-field-label">Requirement</dt>
+          <dd>
+            {finding.requirement === null ? <span data-testid="finding-requirement-none">—</span> : (
+              <>
+                <q data-testid="finding-requirement">{finding.requirement}</q>
+                {finding.requirement_found_in.length === 0 ? (
+                  <span className="projects-muted finding-task-note" data-testid="finding-task-unlinked">not found verbatim in the task</span>
+                ) : finding.requirement_found_in.map(lane => {
+                  const nodeId = launchNodeFor(lane, definitionNodes, inputs)
+                  const quote = finding.requirement!
+                  return (
+                    <AppLink
+                      key={lane}
+                      href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)}
+                      onNavigate={() => onOpenRequirement(nodeId, quote)}
+                      className="finding-task-link"
+                      data-testid="finding-task-link"
+                      data-lane={lane}
+                    >
+                      Open in the {lane} task
+                    </AppLink>
+                  )
+                })}
+              </>
+            )}
+          </dd>
+        </div>
+      </dl>
+    </Card>
   )
 }
 
@@ -173,7 +184,7 @@ function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
       <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
       <ul className="evidence-list reviewer-list">
         {reviewers.map(reviewer => (
-          <li key={reviewer.reviewer_id} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+          <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
             <p>
               <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
               <ReviewerVerdict verdict={reviewer.verdict} />{' '}
@@ -192,29 +203,11 @@ function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
   )
 }
 
-const UNLISTED_REVIEWER = 'unlisted'
-
-/**
- * One group per reviewer of the run in declared order, labelled with its id, its own verdict and its severity counts, then a
- * guard group for findings whose reviewer the run does not list (the contract forbids it, so it stays hidden when empty).
- */
-function reviewerGroups(reviewers: readonly Reviewer[], visible: readonly ReviewFinding[]) {
-  const ids = new Set(reviewers.map(reviewer => reviewer.reviewer_id))
-  const verdictWording = (verdict: Reviewer['verdict']) => (verdict === null ? 'no verdict' : verdict === 'approved' ? 'approved' : 'blocked')
-  return [
-    ...reviewers.map(reviewer => ({
-      key: `reviewer-${reviewer.reviewer_id}`,
-      label: `${reviewer.reviewer_id} · ${verdictWording(reviewer.verdict)} · ${severityCounts(reviewer.findings)}`,
-      attributes: { 'data-reviewer-group': reviewer.reviewer_id, 'data-verdict': reviewer.verdict ?? 'none' },
-      findings: visible.filter(finding => finding.reviewer === reviewer.reviewer_id),
-    })),
-    {
-      key: `reviewer-${UNLISTED_REVIEWER}`,
-      label: 'Reviewer not listed for this run',
-      attributes: { 'data-reviewer-group': UNLISTED_REVIEWER, 'data-verdict': 'none' },
-      findings: visible.filter(finding => !ids.has(finding.reviewer)),
-    },
-  ]
+/** What a reviewer's own outcome means for the run, as a tone: approved ok, blocked fail, no verdict yet idle. */
+function reviewerTone(reviewer: Reviewer): Tone {
+  if (reviewer.verdict === 'approved') return reviewer.findings.some(isBlockingFinding) ? 'warn' : 'ok'
+  if (reviewer.verdict === 'blocked' || reviewer.status === 'blocked') return 'fail'
+  return 'idle'
 }
 
 function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: { review: ReviewResult } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri'>) {
@@ -227,20 +220,24 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
   const diffHref = review.diff === null ? null : paths.artifact(scope, review.diff.artifact_id)
   const diffScoped = review.diff !== null && review.diff.uri === diffHref
-  // Several reviewers read best as one group each; a single reviewer's findings group by disposition.
-  const [groupBy, setGroupBy] = useState<GroupBy>(several ? 'reviewer' : 'disposition')
-  const [reviewerFilter, setReviewerFilter] = useState<ReviewerFilter>(null)
+  // One filter row (docs/PRD_VIEWER_REVAMP.md 5.4): each reviewer, each lane and Open only, any of them pressed at once.
+  const [pressed, setPressed] = useState<ReadonlySet<string>>(() => new Set())
   const lanes = runLanes(definitionNodes, inputs)
   const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
-  // The filter narrows the union to one reviewer's findings; grouping then applies to what is left.
-  const visible = reviewerFilter === null ? review.findings : review.findings.filter(finding => finding.reviewer === reviewerFilter)
-  const countFor = (reviewerId: string) => review.findings.filter(finding => finding.reviewer === reviewerId).length
-  const groups = groupBy === 'disposition'
-    ? DISPOSITIONS.map(disposition => ({ key: disposition, label: DISPOSITION_LABEL[disposition], attributes: { 'data-disposition': disposition }, findings: visible.filter(finding => finding.disposition === disposition) }))
-    : groupBy === 'reviewer'
-      ? reviewerGroups(reviewers, visible)
-      : workerGroups(lanes, visible).map(group => ({ ...group, attributes: { 'data-worker-group': group.key }, findings: visible.filter(finding => workerGroupOf(finding) === group.key) }))
-  const populated = groups.filter(group => group.findings.length > 0)
+  const ordered = orderFindings(review.findings, lanes, reviewers.map(reviewer => reviewer.reviewer_id))
+  const visible = filterFindings(ordered, pressed)
+  const toggles = findingFilterIds(review, lanes)
+  // In the toggles' order, so the attribute reads the same however they were pressed.
+  const pressedIds = [...toggles.reviewers, ...toggles.lanes, toggles.open].map(toggle => toggle.id).filter(id => pressed.has(id))
+  const onlyReviewer = pressedIds.length === 1 && pressedIds[0].startsWith('reviewer:') ? pressedIds[0].slice('reviewer:'.length) : null
+  const onToggle = (id: string, on: boolean) => {
+    setPressed(previous => {
+      const next = new Set(previous)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
   return (
     <div className="review-result" data-testid="review-result" data-verdict={review.verdict} data-reviewer-count={reviewers.length}>
       <p className="review-verdict-line">
@@ -291,67 +288,47 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
         </div>
       </dl>
 
-      <ReviewerStrip reviewers={reviewers} />
-
-      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-group-by={groupBy} data-reviewer-filter={reviewerFilter ?? 'all'}>
-        <div className="review-findings-head">
+      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-filters={pressedIds.length === 0 ? 'all' : pressedIds.join(' ')}>
+        <div className="ui-section-header review-findings-head">
           <h4 id="review-findings-title">Findings</h4>
-          {review.findings.length > 0 && (
-            <>
-              <div className="review-group-toggle" role="group" aria-label="Show findings from">
-                <span className="projects-muted">Reviewer</span>
-                <button type="button" className="button button-small" aria-pressed={reviewerFilter === null} data-testid="filter-reviewer" data-reviewer="all" onClick={() => setReviewerFilter(null)}>All ({review.findings.length})</button>
-                {reviewers.map(reviewer => (
-                  <button
-                    key={reviewer.reviewer_id}
-                    type="button"
-                    className="button button-small"
-                    aria-pressed={reviewerFilter === reviewer.reviewer_id}
-                    data-testid="filter-reviewer"
-                    data-reviewer={reviewer.reviewer_id}
-                    onClick={() => setReviewerFilter(reviewer.reviewer_id)}
-                  >
-                    {reviewer.reviewer_id} ({countFor(reviewer.reviewer_id)})
-                  </button>
-                ))}
-              </div>
-              <div className="review-group-toggle" role="group" aria-label="Group findings by">
-                <span className="projects-muted">Group by</span>
-                <button type="button" className="button button-small" aria-pressed={groupBy === 'disposition'} data-testid="group-by-disposition" onClick={() => setGroupBy('disposition')}>Disposition</button>
-                <button type="button" className="button button-small" aria-pressed={groupBy === 'worker'} data-testid="group-by-worker" onClick={() => setGroupBy('worker')}>Worker</button>
-                <button type="button" className="button button-small" aria-pressed={groupBy === 'reviewer'} data-testid="group-by-reviewer" onClick={() => setGroupBy('reviewer')}>Reviewer</button>
-              </div>
-            </>
-          )}
+          <span className="ui-sub" data-testid="findings-shown">{visible.length === review.findings.length ? `${review.findings.length} ${review.findings.length === 1 ? 'finding' : 'findings'}` : `${visible.length} of ${review.findings.length} shown`} · P0, P1, P2, then by lane</span>
         </div>
-        {populated.length === 0 ? (
+        {review.findings.length > 0 && (
+          <FilterToggles
+            className="findings-filters"
+            data-testid="findings-filters"
+            aria-label="Narrow the findings"
+            filters={[...toggles.reviewers, ...toggles.lanes, toggles.open]}
+            selected={pressed}
+            onToggle={onToggle}
+          />
+        )}
+        {visible.length === 0 ? (
           <p className="projects-muted" data-testid="findings-empty">
-            {reviewerFilter !== null ? `Reviewer ${reviewerFilter} recorded no findings.` : several ? 'No reviewer recorded a finding.' : 'The reviewer recorded no findings.'}
+            {review.findings.length > 0 && onlyReviewer !== null ? `Reviewer ${onlyReviewer} recorded no findings.`
+              : review.findings.length > 0 ? 'No finding matches the pressed filters.'
+                : several ? 'No reviewer recorded a finding.' : 'The reviewer recorded no findings.'}
           </p>
-        ) : populated.map(group => (
-          <section key={group.key} className="finding-group" {...group.attributes} aria-labelledby={`findings-${group.key}`}>
-            <h5 id={`findings-${group.key}`}>{group.label} ({group.findings.length})</h5>
-            <div className="table-wrap">
-              <table className="findings-table">
-                <thead>
-                  <tr><th scope="col">Severity</th><th scope="col">Message</th><th scope="col">Worker</th><th scope="col">Reviewer</th><th scope="col">Requirement</th></tr>
-                </thead>
-                <tbody>
-                  {group.findings.map((finding, index) => (
-                    <FindingRow key={`${group.key}-${index}`} finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ))}
+        ) : (
+          <ul className="finding-cards">
+            {visible.map(finding => (
+              <li key={review.findings.indexOf(finding)}>
+                <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
+              </li>
+            ))}
+          </ul>
+        )}
         <p className="projects-muted">
           A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
         </p>
       </section>
+
+      <ReviewerStrip reviewers={reviewers} />
     </div>
   )
 }
+
+const DISPOSITION_TONE: Record<ReviewFinding['disposition'], Tone> = { open: 'warn', resolved: 'ok', accepted: 'idle' }
 
 /** Where a finding's worker points, said on a blocking card: the lane, several lanes, none, or not recorded. */
 function laneWording(worker: ReviewFinding['worker']): string {
@@ -369,9 +346,9 @@ export function BlockingFindings({ review, scope, definitionNodes, inputs, onOpe
   return (
     <ul className="blocking-cards">
       {blockingFindings(review).map((finding, index) => (
-        <li key={index} className="blocking-card" data-testid="blocking-finding" data-severity={finding.severity} data-reviewer={finding.reviewer}>
+        <li key={index} className={`blocking-card ui-card tone-fail ${severityClass(severityTone(finding.severity))}`} data-testid="blocking-finding" data-severity={finding.severity} data-reviewer={finding.reviewer}>
           <p className="blocking-card-head">
-            <span className="finding-severity">{finding.severity}</span> · {finding.disposition} · {finding.reviewer} · {laneWording(finding.worker)}
+            <SeverityChip severity={finding.severity} className="finding-severity" /> · {finding.disposition} · {finding.reviewer} · {laneWording(finding.worker)}
           </p>
           <p className="blocking-card-message">{finding.message}</p>
           {finding.requirement !== null && finding.requirement_found_in.length > 0 && (

@@ -22,7 +22,10 @@ installHooks()
 const reviewPanel = (page: Page) => page.getByTestId('review-result')
 const findings = (page: Page) => page.getByTestId('review-findings')
 const findingRows = (page: Page) => findings(page).getByTestId('finding')
-const group = (page: Page, disposition: string) => findings(page).locator(`section[data-disposition="${disposition}"]`)
+// Findings are cards (docs/PRD_VIEWER_REVAMP.md 5.4, 8): a disposition is each card's data attribute, a lane a filter toggle.
+const byDisposition = (page: Page, disposition: string) => findings(page).locator(`[data-testid="finding"][data-disposition="${disposition}"]`)
+const toggle = (page: Page, id: string) => findings(page).getByTestId('findings-filters').locator(`button[data-filter="${id}"]`)
+const laneFigure = (page: Page) => page.getByTestId('figure-lanes').locator('[data-lane]')
 
 test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bundle, summary and findings (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED, 'review'))
@@ -46,15 +49,20 @@ test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bun
   await expect(bundle.getByRole('link')).toHaveAttribute('href', runUrl(RUN_SUCCEEDED, 'candidate'))
   await expect(bundle).toContainText(CANDIDATE_COMMIT.slice(0, 12))
 
-  // One-line summary and the findings table grouped by disposition (open before accepted, no resolved group).
+  // One-line summary and the findings as cards, by disposition: four open, two accepted, none resolved (two dispositions).
   await expect(page.getByTestId('review-summary')).toHaveText('approved with 6 findings: 4 open, 2 accepted, none blocking')
   await expect(findingRows(page)).toHaveCount(6)
-  await expect(group(page, 'open').getByRole('heading')).toContainText('Open')
-  await expect(group(page, 'open').getByTestId('finding')).toHaveCount(4)
-  await expect(group(page, 'accepted').getByTestId('finding')).toHaveCount(2)
-  await expect(group(page, 'resolved')).toHaveCount(0)
-  await expect(findings(page).locator('section')).toHaveCount(2)
-  await expect(group(page, 'open').getByRole('columnheader')).toHaveText(['Severity', 'Message', 'Worker', 'Reviewer', 'Requirement'])
+  await expect(byDisposition(page, 'open')).toHaveCount(4)
+  await expect(byDisposition(page, 'open').first().getByTestId('finding-disposition')).toHaveText('open')
+  await expect(byDisposition(page, 'accepted')).toHaveCount(2)
+  await expect(byDisposition(page, 'resolved')).toHaveCount(0)
+  expect(new Set(await findingRows(page).evaluateAll(cards => cards.map(card => card.getAttribute('data-disposition'))))).toEqual(new Set(['open', 'accepted']))
+  // Every card names its severity, message, worker, reviewer and requirement, as the table's five columns did.
+  for (const row of await findingRows(page).all()) {
+    await expect(row.locator('.ui-sev')).toHaveCount(1)
+    await expect(row.locator('.finding-message')).toHaveCount(1)
+    await expect(row.locator('.finding-field-label')).toHaveText(['Worker', 'Reviewer', 'Requirement'])
+  }
   for (const row of await findingRows(page).all()) {
     await expect(row).toHaveAttribute('data-severity', 'P2')
     await expect(row).not.toHaveClass(/finding-blocking/)
@@ -62,16 +70,19 @@ test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bun
   for (const finding of reviewFindings(RUN_SUCCEEDED)) await expect(findings(page)).toContainText(finding.message)
   await expect(findingRows(page).filter({ hasText: 'root Playwright suite' })).toHaveAttribute('data-worker', 'none')
 
-  // The same findings can be grouped by the worker they concern (ui, adapter, both, none), keyboard-operable, then back.
-  await expect(page.getByTestId('group-by-disposition')).toHaveAttribute('aria-pressed', 'true')
-  await page.getByTestId('group-by-worker').click()
-  await expect(findings(page)).toHaveAttribute('data-group-by', 'worker')
-  await expect(findings(page).locator('section[data-worker-group]')).toHaveCount(4)
-  await expect(findings(page).locator('section[data-worker-group="ui"]').getByTestId('finding')).toHaveCount(3)
-  await expect(findings(page).locator('section[data-worker-group="none"]').getByRole('heading')).toContainText('No worker')
+  // The same findings by the worker they concern (ui, adapter, both, none): four lanes in the figure and the filter row,
+  // keyboard-operable, then back to all.
+  await expect(laneFigure(page)).toHaveCount(4)
+  await expect(page.getByTestId('figure-lanes').locator('[data-lane="ui"]')).toHaveAttribute('data-count', '3')
+  await expect(page.getByTestId('figure-lanes').locator('[data-lane="none"]')).toContainText('no worker')
+  await toggle(page, 'lane:ui').focus()
+  await page.keyboard.press('Enter')
+  await expect(toggle(page, 'lane:ui')).toHaveAttribute('aria-pressed', 'true')
+  await expect(findingRows(page)).toHaveCount(3)
+  for (const row of await findingRows(page).all()) await expect(row).toHaveAttribute('data-worker', 'ui')
+  await page.keyboard.press('Enter')
   await expect(findingRows(page)).toHaveCount(6)
-  await page.getByTestId('group-by-disposition').click()
-  await expect(group(page, 'open').getByTestId('finding')).toHaveCount(4)
+  await expect(byDisposition(page, 'open')).toHaveCount(4)
 
   // The diff the reviewer saw is a plain-text patch artifact of this run, opened in a new tab.
   const diff = page.getByTestId('review-diff')
@@ -116,15 +127,15 @@ test(`[scenario:review-blocked] A blocked review shows the verdict, the failed n
 
   // The unresolved P1 is marked as the blocking finding; the resolved P2 is listed but not blocking.
   await expect(findingRows(page)).toHaveCount(2)
-  const blocking = group(page, 'open').getByTestId('finding')
+  const blocking = byDisposition(page, 'open')
   await expect(blocking).toHaveCount(1)
   await expect(blocking).toHaveAttribute('data-severity', 'P1')
   await expect(blocking).toHaveClass(/finding-blocking/)
-  const resolved = group(page, 'resolved').getByTestId('finding')
+  const resolved = byDisposition(page, 'resolved')
   await expect(resolved).toHaveCount(1)
   await expect(resolved).toHaveAttribute('data-severity', 'P2')
   await expect(resolved).not.toHaveClass(/finding-blocking/)
-  await expect(group(page, 'accepted')).toHaveCount(0)
+  await expect(byDisposition(page, 'accepted')).toHaveCount(0)
   for (const finding of reviewFindings(RUN_BLOCKED)) await expect(findings(page)).toContainText(finding.message)
   await expect(page.getByTestId('review-diff')).toContainText('No diff artifact was recorded')
   await expect(page.getByTestId('projects-error')).toHaveCount(0)

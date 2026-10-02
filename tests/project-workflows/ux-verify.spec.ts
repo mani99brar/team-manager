@@ -11,7 +11,7 @@ import { RUN_IDENTICAL, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
 import {
   CANDIDATE_REJECTED, NO_MATCH_REASON, RUN_REJECTED_CHECKS, RUN_TESTS_COMMAND, SETUP_LOG_ID, UNKEYED_REASON, UX_VERIFY_WORKFLOW_ID,
 } from './fixtures/ux-verify.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, renderedText, runUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, renderedText, runUrl, workspace } from './support.ts'
 
 installHooks()
 
@@ -24,6 +24,30 @@ const overflow = (target: Locator) => target.evaluate(element => (element as unk
 const pageWidth = (page: Page) => page.evaluate(() => (globalThis as unknown as { document: { documentElement: { scrollWidth: number } } }).document.documentElement.scrollWidth)
 /** The colour of a row's status stripe, which tells a rejected check from a passed one. */
 const borderColor = (row: Locator) => row.evaluate(element => (globalThis as unknown as { getComputedStyle: (target: unknown) => { borderLeftColor: string } }).getComputedStyle(element).borderLeftColor)
+/** Computed colours of an element, by property name. */
+const colours = (target: Locator, ...names: string[]) => target.evaluate((element, keys) => {
+  const computed = (globalThis as unknown as { getComputedStyle: (node: unknown) => Record<string, string> }).getComputedStyle(element)
+  return Object.fromEntries(keys.map(key => [key, computed[key]]))
+}, names)
+/** What a token of the Projects shell resolves to as a computed colour (docs/PRD_VIEWER_REVAMP.md section 4). */
+const token = (page: Page, name: string): Promise<string> => workspace(page).evaluate((shell, variable) => {
+  const doc = (globalThis as unknown as { document: { createElement: (tag: string) => { style: Record<string, string>; remove: () => void } } }).document
+  const probe = doc.createElement('span')
+  probe.style.color = `var(${variable})`
+  ;(shell as unknown as { appendChild: (node: unknown) => void }).appendChild(probe)
+  const value = (globalThis as unknown as { getComputedStyle: (node: unknown) => { color: string } }).getComputedStyle(probe).color
+  probe.remove()
+  return value
+}, name)
+/** A check's exit chip (docs/PRD_VIEWER_REVAMP.md 5.4): a tone chip whose colours are the tone's and its soft background. */
+async function expectExitChip(page: Page, row: Locator, tone: 'ok' | 'fail') {
+  const exit = row.locator('.check-exit')
+  await expect(exit).toHaveClass(/ui-chip/)
+  await expect(exit).toHaveAttribute('data-tone', tone)
+  const chip = await colours(exit, 'color', 'backgroundColor')
+  expect(chip.color).toBe(await token(page, `--${tone}`))
+  expect(chip.backgroundColor).toBe(await token(page, `--${tone}-soft`))
+}
 
 test(`[scenario:gate-rejected-checks] The gate counts the checks it rejected, keys each reason to its check, keeps an unkeyed reason at the gate, and shows rejected checks red with their log tail open (${phase})`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -66,6 +90,25 @@ test(`[scenario:gate-rejected-checks] The gate counts the checks it rejected, ke
     await expect(row.getByRole('button', { name: 'Hide contents' })).toBeVisible()
   }
   expect(await borderColor(checkRow(page, 'frontend-unit'))).not.toEqual(await borderColor(build))
+  // The revamp's tones (docs/PRD_VIEWER_REVAMP.md 5.4): the failed gate line in fail (left rule, soft background, verdict word),
+  // each rejected row's exit chip, stripe, background and reasons in fail, the passing build's chip in ok.
+  const gateLine = error.locator('.gate-line')
+  await expect(gateLine).toHaveAttribute('data-tone', 'fail')
+  await expect(gateLine).toHaveClass(/tone-fail/)
+  const line = await colours(gateLine, 'borderLeftColor', 'backgroundColor')
+  expect(line.borderLeftColor).toBe(await token(page, '--fail'))
+  expect(line.backgroundColor).toBe(await token(page, '--fail-soft'))
+  expect((await colours(gateLine.locator('strong'), 'color')).color).toBe(await token(page, '--fail'))
+  await expectExitChip(page, build, 'ok')
+  for (const id of ['frontend-unit', 'project-workflows-browser']) {
+    const row = checkRow(page, id)
+    await expectExitChip(page, row, 'fail')
+    const stripe = await colours(row, 'borderLeftColor', 'backgroundColor')
+    expect(stripe.borderLeftColor).toBe(await token(page, '--fail'))
+    expect(stripe.backgroundColor).toBe(await token(page, '--fail-soft'))
+    expect((await colours(row.locator('.check-reasons'), 'color')).color).toBe(await token(page, '--fail'))
+    expect((await colours(row.locator('.check-glyph'), 'color')).color).toBe(await token(page, '--fail'))
+  }
   await attach(page, testInfo, 'gate-rejected-checks')
 
   // At phone width the rows wrap; the page never scrolls sideways.
@@ -84,6 +127,9 @@ test(`[scenario:gate-rejected-checks] The gate counts the checks it rejected, ke
   const runTests = checkRow(page, 'backend-unit')
   await expect(runTests.locator('.check-command')).toHaveText(RUN_TESTS_COMMAND)
   await expect(runTests).toHaveAttribute('data-state', 'failed')
+  // A check that exited non-zero: its exit chip in fail, as a rejected one; the passing contract check's in ok.
+  await expectExitChip(page, runTests, 'fail')
+  await expectExitChip(page, checkRow(page, 'backend-contract'), 'ok')
   await expect(runTests.locator('.check-reasons li')).toHaveCount(3)
   await expect(runTests.locator('.check-reasons')).toContainText(UNKEYED_REASON)
   await expect(checkRow(page, 'backend-contract')).toHaveAttribute('data-state', 'passed')

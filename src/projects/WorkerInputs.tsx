@@ -9,7 +9,6 @@ import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
-import { useNow } from './useNow.ts'
 import type { Resource } from './useResource.ts'
 
 type TaskProps = {
@@ -278,11 +277,11 @@ function CompletionEvidence({ completion, worker, result, checksNode, onNavigate
 
 /**
  * The questions the worker asked mid-run, with the operator's answers and times. While one waits this is the launch node's
- * first section, with both ways to answer it (`answer`, docs/PRD_VIEWER_UX.md 4.5); otherwise it sits in Session.
+ * first section, with both ways to answer it (`answer`, docs/PRD_VIEWER_UX.md 4.5); otherwise it sits in Session. A waiting
+ * question's age reads the run page's one clock (`clock`, from `RunView`), so it ticks with the rest of the page.
  */
-export function WorkerQuestions({ questions, answer = null }: { questions: RunInputWorker['questions']; answer?: NextStep | null }) {
+export function WorkerQuestions({ questions, clock, answer = null }: { questions: RunInputWorker['questions']; clock: number; answer?: NextStep | null }) {
   const waiting = questions.filter(question => question.answer === null).length
-  const now = useNow(waiting > 0, 30_000)
   return (
     <section className={`evidence-section${waiting > 0 ? ' worker-questions-open' : ''}`} aria-labelledby="worker-questions-title" data-testid="worker-questions">
       <h4 id="worker-questions-title">Questions to the operator</h4>
@@ -302,7 +301,7 @@ export function WorkerQuestions({ questions, answer = null }: { questions: RunIn
                 <li key={question.n} data-testid="worker-question" data-question={question.n} data-answered={answered ? 'true' : 'false'}>
                   <p>
                     <strong>Question {question.n}{answered ? '' : ` of ${MAX_QUESTIONS}`}</strong>{' '}
-                    <span className="projects-muted">asked at <Time iso={question.asked_at} />{!answered && ` (${formatAgo(question.asked_at, now)})`}</span>
+                    <span className="projects-muted">asked at <Time iso={question.asked_at} />{!answered && ` (${formatAgo(question.asked_at, clock)})`}</span>
                     {!answered && <> · <span className="status-badge status-awaiting_approval" data-testid="question-waiting"><span>Waiting on the operator</span></span> · <span className="projects-muted">deadline paused</span></>}
                   </p>
                   <p className="worker-question-text">{question.question}</p>

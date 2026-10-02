@@ -18,23 +18,44 @@
 
 .run-view { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 
-/* Status as glyph colour and bar fill; the glyph or the text always carries the status too. */
-.status-text-failed { color: var(--danger-text); }
-.status-text-succeeded { color: var(--node-location-stroke); }
-.status-text-running { color: var(--accent); }
-.status-text-paused, .status-text-awaiting_approval { color: var(--node-directory-stroke); }
-.status-text-pending, .status-text-cancelled { color: var(--text-muted); }
-.status-fill-failed { background: var(--danger-text); }
-.status-fill-succeeded { background: var(--node-location-stroke); }
-.status-fill-running { background: var(--accent); }
-.status-fill-paused, .status-fill-awaiting_approval { background: var(--node-directory-stroke); }
-.status-fill-pending, .status-fill-cancelled, .status-fill-no_record { background: var(--text-muted); }
+/* Status as glyph colour and bar fill, through the tone tokens of theme.css (one mapping, tone.ts `statusTone`); the glyph or
+   the text always carries the status too. */
+.status-text-failed { color: var(--fail); }
+.status-text-succeeded { color: var(--ok); }
+.status-text-running { color: var(--run); }
+.status-text-awaiting_approval { color: var(--warn); }
+.status-text-paused { color: var(--pause); }
+.status-text-pending, .status-text-cancelled { color: var(--idle); }
+.status-fill-failed { background: var(--fail); }
+.status-fill-succeeded { background: var(--ok); }
+.status-fill-running { background: var(--run); }
+.status-fill-awaiting_approval { background: var(--warn); }
+.status-fill-paused { background: var(--pause); }
+.status-fill-pending, .status-fill-cancelled, .status-fill-no_record { background: var(--idle); }
 
-/* ---- Header: two lines on a desktop ---- */
-.run-header { display: flex; flex-direction: column; gap: 2px; }
+/* Section headers of the run and node pages are h3/h4: they take the primitives' h2 look (theme.css). */
+.projects-shell .ui-section-header :is(h3, h4) { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.projects-shell[data-look="bold"] .ui-section-header :is(h3, h4) { color: var(--band-fg); letter-spacing: 0; text-transform: none; font-size: 15px; }
+.projects-shell[data-look="bold"] .ui-section-header .projects-muted { color: inherit; }
+
+/* ---- Header card: two lines on a desktop, a top rule in the run's tone (Bold: the tone into the band and the accent) ---- */
+.run-header { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-top: 4px solid var(--idle); border-radius: var(--radius); padding: 6px 10px; box-shadow: var(--shadow); }
+.run-header.tone-ok { border-top-color: var(--ok); }
+.run-header.tone-run { border-top-color: var(--run); }
+.run-header.tone-warn { border-top-color: var(--warn); }
+.run-header.tone-fail { border-top-color: var(--fail); }
+.run-header.tone-pause { border-top-color: var(--pause); }
+.projects-shell[data-look="bold"] .run-header { border-top-width: 6px; border-image: linear-gradient(90deg, currentColor 0 30%, var(--band) 70%, var(--accent)) 1; border-image-width: 6px 0 0 0; }
+.projects-shell[data-look="bold"] .run-header.tone-ok { border-image-source: linear-gradient(90deg, var(--ok) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell[data-look="bold"] .run-header.tone-run { border-image-source: linear-gradient(90deg, var(--run) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell[data-look="bold"] .run-header.tone-warn { border-image-source: linear-gradient(90deg, var(--warn) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell[data-look="bold"] .run-header.tone-fail { border-image-source: linear-gradient(90deg, var(--fail) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell[data-look="bold"] .run-header.tone-pause { border-image-source: linear-gradient(90deg, var(--pause) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell[data-look="bold"] .run-header.tone-idle { border-image-source: linear-gradient(90deg, var(--idle) 0 30%, var(--band) 70%, var(--accent)); }
+.projects-shell .run-header h2 { font-family: var(--font-display); }
 .run-header-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 30px; }
 /* A long title gives way (ellipsized, in full in its tooltip) so the status, span, chip and toggle keep one row. */
-.workspace-projects .run-header h2 { flex: 0 1 auto; max-width: 32%; min-width: 0; margin: 0; font-size: 1.15rem; line-height: 1.3; display: flex; align-items: baseline; gap: 0 8px; }
+.workspace-projects .run-header h2 { flex: 0 1 auto; max-width: 29%; min-width: 0; margin: 0; font-size: 1.15rem; line-height: 1.3; display: flex; align-items: baseline; gap: 0 8px; }
 .run-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-id { flex: none; font-size: 0.95rem; font-weight: 400; color: var(--text-muted); }
 .run-header-line > .run-status-line, .run-header-line > .run-span { flex: none; }
@@ -61,15 +82,17 @@
 .run-bar-status > .status-badge { flex: none; }
 .run-bar-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
 
-/* ---- Now banner ---- */
-.run-now { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; background: var(--surface); font-size: 0.9rem; line-height: 21px; min-width: 0; }
-.run-now-failed, .run-now-blocked { border-color: var(--danger-border); border-left-color: var(--danger-text); background: var(--danger-bg); }
-.run-now-paused, .run-now-interrupted, .run-now-waiting { border-color: var(--warn-border); border-left-color: var(--attention); background: var(--warn-bg); }
-.run-now-running { border-left-color: var(--accent); }
-.run-now-succeeded { border-color: var(--node-location-stroke); border-left-color: var(--node-location-stroke); background: var(--node-location-fill); }
+/* ---- Now banner: its content is NowBanner's; here a left rule in its tone over the tone's soft background ---- */
+.run-now { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-left-color: var(--idle); border-radius: var(--radius); background: var(--surface); font-size: 0.9rem; line-height: 21px; min-width: 0; }
+.run-now-failed, .run-now-blocked { border-left-color: var(--fail); background: var(--fail-soft); }
+.run-now-paused, .run-now-interrupted { border-left-color: var(--pause); background: var(--pause-soft); }
+.run-now-waiting { border-left-color: var(--warn); background: var(--warn-soft); }
+.run-now-running { border-left-color: var(--run); background: var(--run-soft); }
+.run-now-succeeded { border-left-color: var(--ok); background: var(--ok-soft); }
 .run-now-headline { margin: 0; font-size: 1rem; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-.run-now-failed .run-now-headline, .run-now-blocked .run-now-headline { color: var(--danger-text); }
-.run-now-paused .run-now-headline, .run-now-interrupted .run-now-headline, .run-now-waiting .run-now-headline { color: var(--warn-text); }
+.run-now-failed .run-now-headline, .run-now-blocked .run-now-headline { color: var(--fail); }
+.run-now-paused .run-now-headline, .run-now-interrupted .run-now-headline { color: var(--pause); }
+.run-now-waiting .run-now-headline { color: var(--warn); }
 .run-now-glyph { flex: none; }
 .run-now-headline > span:nth-child(2) { flex: 1 1 0; min-width: 0; }
 .run-now-reason-row { display: flex; align-items: flex-start; gap: 4px 12px; flex-wrap: wrap; }
@@ -102,12 +125,17 @@
 .command-caveat { margin: 0; font-size: 0.85rem; }
 .command-caption { margin: 0; font-size: 0.8rem; line-height: 18px; color: var(--text-muted); }
 
-/* ---- Lanes line (two or more lanes) ---- */
-.run-lanes { display: flex; align-items: baseline; gap: 12px; font-size: 0.875rem; line-height: 20px; padding: 2px 12px; min-width: 0; }
-.workspace-projects .run-lanes-title { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-muted); font-weight: 600; }
-.run-lanes-list { list-style: none; margin: 0; padding: 0; min-width: 0; flex: 1; }
-.run-lanes-list li { display: flex; gap: 12px; min-width: 0; }
-.run-lane-name { flex: none; min-width: 7ch; font-weight: 600; }
+/* ---- Lanes line (two or more lanes) as chips: each toned by its steps (a failed step wins, then a running one, then a
+   paused or waiting one; all passed is ok), the steps' glyphs and words unchanged ---- */
+.run-lanes { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; font-size: 0.875rem; line-height: 20px; padding: 2px 0; min-width: 0; }
+.workspace-projects .run-lanes-title { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.run-lanes-list { list-style: none; margin: 0; padding: 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.run-lanes-list li { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; max-width: 100%; padding: 2px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--idle-soft); }
+.run-lanes-list li:not(:has(.run-lane-step:not(.status-text-succeeded))) { background: var(--ok-soft); border-color: var(--ok); }
+.run-lanes-list li:has(.status-text-paused, .status-text-awaiting_approval) { background: var(--pause-soft); border-color: var(--pause); }
+.run-lanes-list li:has(.status-text-running) { background: var(--run-soft); border-color: var(--run); }
+.run-lanes-list li:has(.status-text-failed) { background: var(--fail-soft); border-color: var(--fail); }
+.run-lane-name { flex: none; font-weight: 600; }
 .run-lane-steps { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-lanes-more > summary { cursor: pointer; color: var(--accent); }
 
@@ -118,8 +146,15 @@
 .run-body, .assignment { min-width: 0; }
 .run-body { display: flex; flex-direction: column; gap: 0; }
 
-/* ---- Workflow DAG: fitted to the width, dashes for the executor only, colour for the status only ---- */
-.workflow-graph-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-alt); padding: 4px; }
+/* ---- Pipeline and Steps: side by side once the board fits the compact graph at its 83 % floor and a 400 px Steps column
+   (RunView measures it, node/board.ts), stacked otherwise ---- */
+.run-board { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.run-board > section { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+/* The graph's column takes the graph's full size when there is room, never less than its floor (its min-content). */
+.run-board.is-split { display: grid; grid-template-columns: minmax(min-content, max-content) minmax(400px, 1fr); align-items: start; gap: 12px 16px; }
+
+/* ---- Workflow DAG: fitted to the width, dashes for the executor only, colour for the status only (tone classes) ---- */
+.workflow-graph-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 4px; }
 .workflow-graph { display: block; height: auto; margin: 0 auto; }
 .workflow-edge { fill: none; stroke: var(--edge); stroke-width: 1.5; }
 .workflow-edge-arrow { fill: var(--edge); }
@@ -127,24 +162,27 @@
 .workflow-node[role='button'] { cursor: pointer; }
 .workflow-node-shape { fill: var(--surface); stroke: var(--node-file-stroke); stroke-width: 1.5; }
 .workflow-node-status-bar { fill: var(--text-muted); }
-.workflow-node.is-succeeded .workflow-node-status-bar { fill: var(--node-location-stroke); }
-.workflow-node.is-failed .workflow-node-status-bar { fill: var(--danger-text); }
-.workflow-node.is-failed .workflow-node-shape { stroke: var(--danger-text); fill: var(--danger-bg); }
-.workflow-node.is-running .workflow-node-status-bar { fill: var(--accent); }
-.workflow-node.is-awaiting_approval .workflow-node-status-bar, .workflow-node.is-paused .workflow-node-status-bar { fill: var(--node-directory-stroke); }
-.workflow-node.is-awaiting_approval .workflow-node-shape, .workflow-node.is-paused .workflow-node-shape { stroke: var(--node-directory-stroke); fill: var(--node-directory-fill); }
 .workflow-node.is-definition .workflow-node-status-bar { fill: var(--edge); }
 /* The status glyph sits in a badge on the node's corner, clear of its label. */
 .workflow-node-badge circle { fill: var(--surface); stroke: var(--text-muted); stroke-width: 1.5; }
 .workflow-node-glyph { font-size: 11px; font-weight: 700; fill: var(--text-muted); }
-.workflow-node.is-succeeded .workflow-node-glyph { fill: var(--node-location-stroke); }
-.workflow-node.is-succeeded .workflow-node-badge circle { stroke: var(--node-location-stroke); }
-.workflow-node.is-failed .workflow-node-glyph { fill: var(--danger-text); }
-.workflow-node.is-failed .workflow-node-badge circle { stroke: var(--danger-text); }
-.workflow-node.is-running .workflow-node-glyph { fill: var(--accent); }
-.workflow-node.is-running .workflow-node-badge circle { stroke: var(--accent); }
-.workflow-node.is-paused .workflow-node-glyph, .workflow-node.is-awaiting_approval .workflow-node-glyph { fill: var(--node-directory-stroke); }
-.workflow-node.is-paused .workflow-node-badge circle, .workflow-node.is-awaiting_approval .workflow-node-badge circle { stroke: var(--node-directory-stroke); }
+/* A run's node: the tone's soft fill, the tone's stroke, status bar and glyph (tone.ts `statusTone`). */
+.projects-shell .workflow-node.tone-ok { --node-tone: var(--ok); --node-tone-soft: var(--ok-soft); }
+.projects-shell .workflow-node.tone-run { --node-tone: var(--run); --node-tone-soft: var(--run-soft); }
+.projects-shell .workflow-node.tone-warn { --node-tone: var(--warn); --node-tone-soft: var(--warn-soft); }
+.projects-shell .workflow-node.tone-fail { --node-tone: var(--fail); --node-tone-soft: var(--fail-soft); }
+.projects-shell .workflow-node.tone-pause { --node-tone: var(--pause); --node-tone-soft: var(--pause-soft); }
+.projects-shell .workflow-node.tone-idle { --node-tone: var(--idle); --node-tone-soft: var(--idle-soft); }
+.projects-shell .workflow-node[data-tone] .workflow-node-shape { fill: var(--node-tone-soft); stroke: var(--node-tone); }
+.projects-shell .workflow-node[data-tone] .workflow-node-status-bar { fill: var(--node-tone); }
+.projects-shell .workflow-node[data-tone] .workflow-node-glyph { fill: var(--node-tone); }
+.projects-shell .workflow-node[data-tone] .workflow-node-badge circle { stroke: var(--node-tone); }
+.projects-shell .workflow-node[data-tone] .workflow-node-meta { fill: var(--fg); }
+.projects-shell .workflow-node-label { fill: var(--fg); }
+.workflow-graph.is-compact .workflow-node-label { font-size: 11px; }
+/* A step that waits on the operator keeps its amber ring, glyph and badge over its tone. */
+.projects-shell .workflow-node[data-attention] .workflow-node-glyph { fill: var(--attention); }
+.projects-shell .workflow-node[data-attention] .workflow-node-badge circle { stroke: var(--attention); stroke-width: 2.5; }
 .workflow-node-ring { fill: none; stroke: none; stroke-width: 3; }
 /* Selection: a thick text-coloured outline and an offset ring, never the running colour. */
 .workflow-node.is-selected .workflow-node-shape { stroke: var(--text); stroke-width: 3; }
@@ -163,6 +201,7 @@
 /* ---- Steps table: one 28 px line per step ---- */
 .run-steps { min-width: 0; }
 .steps-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+.run-steps { container: steps / inline-size; }
 .steps-table th, .steps-table td { height: 28px; padding: 0 8px; text-align: left; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--border); font-weight: 400; }
 .steps-table thead th { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: var(--text-muted); }
 .steps-table th.step-name { width: 22%; }
@@ -176,12 +215,20 @@
 .step-link:hover .step-label { text-decoration: underline; }
 .step-label { overflow: hidden; text-overflow: ellipsis; }
 .step-glyph { flex: none; width: 1.1em; text-align: center; font-weight: 700; }
-.step-row[data-attention] th.step-name { box-shadow: inset 3px 0 var(--attention); }
 .step-row[data-attention] .step-glyph { color: var(--attention); }
 .step-row:hover { background: var(--surface-alt); }
 .step-marks { letter-spacing: 0.08em; }
 .step-outcome { color: var(--text-muted); }
-.step-bar-track { position: relative; display: block; height: 10px; border-radius: 2px; background: var(--surface-alt); }
+.step-bar-track { position: relative; display: block; height: 10px; border-radius: 2px; background: var(--idle-soft); }
+/* A row's tone as a thin rule before its step; the glyph says the status in text. */
+.steps-table .step-row > th.step-name { box-shadow: inset 3px 0 var(--idle); }
+.steps-table .step-row.tone-ok > th.step-name { box-shadow: inset 3px 0 var(--ok); }
+.steps-table .step-row.tone-run > th.step-name { box-shadow: inset 3px 0 var(--run); }
+.steps-table .step-row.tone-warn > th.step-name { box-shadow: inset 3px 0 var(--warn); }
+.steps-table .step-row.tone-fail > th.step-name { box-shadow: inset 3px 0 var(--fail); }
+.steps-table .step-row.tone-pause > th.step-name { box-shadow: inset 3px 0 var(--pause); }
+/* A step that waits on the operator keeps its amber rule over any tone. */
+.steps-table .step-row[data-attention] > th.step-name { box-shadow: inset 3px 0 var(--attention), inset 6px 0 var(--attention); }
 .step-bar-segment { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; }
 /* A shortened silence: a gap in the track. */
 /* A controller outage over a worker's bar: hatched, so it reads apart from the status fill in both schemes. */
@@ -190,17 +237,31 @@
 .step-axis { display: flex; align-items: center; gap: 6px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .step-axis-rule { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: center; border-bottom: 1px solid var(--border); line-height: 1.2; }
 
-/* ---- Activity ---- */
-.run-activity { margin-top: 16px; min-width: 0; }
-.activity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-bottom: 4px; }
-.workspace-projects .activity-head h3 { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+/* ---- Activity: one disclosure per phase, open by default, a left rule in the phase's tone ---- */
+.run-activity { margin-top: 16px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.activity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.activity-group { border: 1px solid var(--border); border-left: 4px solid var(--idle); border-radius: var(--radius); background: var(--surface); padding: 0 10px; min-width: 0; }
+.activity-group.tone-ok { border-left-color: var(--ok); }
+.activity-group.tone-run { border-left-color: var(--run); }
+.activity-group.tone-warn { border-left-color: var(--warn); }
+.activity-group.tone-fail { border-left-color: var(--fail); }
+.activity-group.tone-pause { border-left-color: var(--pause); }
+.activity-group-summary { cursor: pointer; display: flex; align-items: baseline; gap: 10px; padding: 6px 0; list-style: none; }
+.activity-group-summary::-webkit-details-marker { display: none; }
+.activity-group-summary::before { content: '▸'; color: var(--muted); width: 1em; }
+.activity-group[open] > .activity-group-summary::before { content: '▾'; }
+.activity-group-summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.activity-phase { font-family: var(--font-display); font-weight: 600; }
+.activity-phase-count { color: var(--muted); font-size: 0.85rem; }
+.activity-group[open] > .activity-group-summary { border-bottom: 1px solid var(--border); }
 .activity-list { list-style: none; margin: 0; padding: 0; font-size: 0.875rem; }
+.activity-list > li:last-child { border-bottom: none; }
 .activity-row { display: grid; grid-template-columns: 6.5em minmax(8em, 15em) minmax(0, 1fr) auto; gap: 0 12px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--surface-alt); }
 .activity-time { font-variant-numeric: tabular-nums; color: var(--text-muted); white-space: nowrap; }
 .activity-who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-text { min-width: 0; overflow-wrap: anywhere; }
-.activity-row[data-marker='diagnosis'], .activity-row[data-marker='repair'] { background: var(--warn-bg); }
-.activity-row[data-marker='diagnosis'] .activity-who, .activity-row[data-marker='repair'] .activity-who { color: var(--warn-text); }
+.activity-row[data-marker='diagnosis'], .activity-row[data-marker='repair'] { background: var(--warn-soft); }
+.activity-row[data-marker='diagnosis'] .activity-who, .activity-row[data-marker='repair'] .activity-who { color: var(--warn); }
 .activity-log { color: var(--text-muted); }
 .activity-gap { display: block; color: var(--text-muted); font-style: italic; padding-left: calc(6.5em + 12px); }
 .activity-open { white-space: nowrap; }
@@ -221,21 +282,44 @@
 .step-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 22px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 0.8rem; text-decoration: none; white-space: nowrap; }
 .workspace-projects .step-chip { color: var(--text); }
 .step-chip:hover { background: var(--surface-alt); }
-.step-chip[aria-current='page'] { border-color: var(--text); box-shadow: inset 0 0 0 1px var(--text); font-weight: 600; }
+.step-chip.tone-ok { background: var(--ok-soft); border-color: var(--ok); }
+.step-chip.tone-run { background: var(--run-soft); border-color: var(--run); }
+.step-chip.tone-warn { background: var(--warn-soft); border-color: var(--warn); }
+.step-chip.tone-fail { background: var(--fail-soft); border-color: var(--fail); }
+.step-chip.tone-pause { background: var(--pause-soft); border-color: var(--pause); }
+.step-chip[aria-current='page'] { border-color: var(--fg); box-shadow: inset 0 0 0 1px var(--fg); font-weight: 600; }
 .step-strip-list li[data-attention] .step-chip { border-color: var(--attention); box-shadow: 0 0 0 2px var(--attention); }
 .step-chip-took { color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.run-node-area { min-width: 0; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
+.run-node-area { min-width: 0; margin-top: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: var(--surface); box-shadow: var(--shadow); }
 .run-node-area .node-detail h3 { scroll-margin-top: 64px; }
 .run-node-area .node-detail h3:focus { outline: none; }
 .run-node-area .node-detail h3:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
+/* ---- Steps in a narrow column (beside the Pipeline): each row on two lines, the bar kept on the second ---- */
+@container steps (max-width: 680px) {
+  /* The hint follows the rows, as the table's bottom caption does. */
+  .steps-table { display: flex; flex-direction: column; }
+  .steps-table tbody { display: block; }
+  .steps-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .steps-table caption { display: block; order: 1; }
+  .steps-table tr { display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--border); padding: 2px 0 4px; }
+  .steps-table th, .steps-table td { display: block; height: auto; border-bottom: none; padding: 0 4px; }
+  .steps-table th.step-name { flex: 1 1 calc(100% - 10em); width: auto; min-width: 0; }
+  .steps-table .step-started { flex: 0 0 4.5em; width: auto; text-align: right; }
+  .steps-table .step-took { flex: 0 0 5.5em; width: auto; text-align: right; }
+  .steps-table .step-attempts { flex: none; width: auto; color: var(--muted); font-size: 0.8rem; }
+  .steps-table .step-outcome { flex: 1 1 0; min-width: 0; font-size: 0.8rem; }
+  .steps-table td.step-bar { flex: 0 0 22%; width: auto; }
+}
+
 /* ---- Phones and narrow windows ---- */
 @media (max-width: 760px) {
   /* The graph is hidden; the Steps table and the step strip are the navigators. */
-  .run-graph { display: none; }
+  .run-graph, .run-board > .run-graph { display: none; }
   /* The header collapses to title, status, span and freshness (and a changed definition, which is a warning); every other
      fact is behind Details. */
   .run-header-line { gap: 2px 8px; }
+  .run-header { padding: 4px 8px; border-top-width: 3px; }
   /* The banner headline says it too; screen readers keep it, the badge and the span share a line. */
   .run-header .run-status-meaning { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .workspace-projects .run-header h2 { flex-basis: 100%; max-width: none; flex-wrap: wrap; }

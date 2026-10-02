@@ -9,6 +9,7 @@ import { withoutGlyph } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
 import { TimeZoneToggle } from './TimeZoneToggle.tsx'
+import { toneClass, type Tone } from './tone.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
 
 type Props = {
@@ -20,6 +21,8 @@ type Props = {
   freshness: ResourceMeta
   timeline: Timeline | null
   clock: number
+  /** The run's tone (`stateTone`): the header card's top rule. */
+  tone: Tone
 }
 
 /** The run's span: start → end · duration once it finished, start and elapsed time while it runs, else its last activity. */
@@ -35,11 +38,12 @@ function RunSpan({ detail, timeline, clock }: { detail: RunDetail; timeline: Tim
 }
 
 /**
- * The run header (docs/PRD_VIEWER_UX.md 4.2): line 1 names the run (its feature, else the workflow's title), its status in
- * a few words, its span and how fresh the page is, with the Local/UTC switch; line 2 is the pinned inputs as one facts line
- * (`run-inputs-facts`), whether the definition changed since, and every other fact behind `Details`.
+ * The run header (docs/PRD_VIEWER_UX.md 4.2), a card with a top rule in the run's tone (docs/PRD_VIEWER_REVAMP.md 5.3): line 1
+ * names the run (its feature, else the workflow's title), its status in a few words, its span and how fresh the page is, with
+ * the Local/UTC switch; line 2 is the pinned inputs as one facts line (`run-inputs-facts`), whether the definition changed
+ * since, and every other fact behind `Details`.
  */
-export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, timeline, clock }: Props) {
+export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, timeline, clock, tone }: Props) {
   const { summary, definition } = detail
   const data = inputs.status === 'ready' ? inputs.data : null
   const definitionChanged = current !== null && current.definition_revision !== definition.definition_revision
@@ -78,7 +82,7 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
     : <span className="run-definition" data-testid="definition-current">definition <code>{shortRevision(definition.definition_revision)}</code> (current)</span>
 
   return (
-    <section className="run-summary run-header" aria-labelledby="run-summary-title">
+    <section className={`run-summary run-header ${toneClass(tone)}`} data-testid="run-header" data-tone={tone} aria-labelledby="run-summary-title">
       <div className="run-header-line">
         <h2 id="run-summary-title"><span className="run-title" title={title}>{title}</span> <span className="run-id">{summary.run_id}</span></h2>
         <p className="run-status-line" data-testid="run-status">

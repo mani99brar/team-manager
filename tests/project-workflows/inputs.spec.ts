@@ -197,7 +197,8 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
   await expect(unlinked.getByTestId('finding-requirement')).toHaveText(PARAPHRASED_QUOTE)
   await expect(unlinked.getByTestId('finding-task-unlinked')).toHaveText('not found verbatim in the task')
   await expect(unlinked.getByTestId('finding-task-link')).toHaveCount(0)
-  await expect(findingRows(page).filter({ hasText: 'root Playwright suite' }).locator('td').last()).toHaveText('—')
+  // A finding without a quote shows a dash in its card's Requirement field (the table's last cell before the cards).
+  await expect(findingRows(page).filter({ hasText: 'root Playwright suite' }).getByTestId('finding-requirement-none')).toHaveText('—')
 
   const linked = findingRows(page).filter({ hasText: UI_QUOTE })
   const link = linked.getByTestId('finding-task-link')

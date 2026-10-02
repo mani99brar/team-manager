@@ -239,3 +239,111 @@ export function verifiedSections(result: WorkerResult, options: { requirements?:
     { key: 'result', label: 'Result' },
   ]
 }
+
+// ---- Activity by phase (docs/PRD_VIEWER_REVAMP.md 5.3) -----------------------------------------------------------
+
+/** The stretches of a run Activity groups its rows into; `run` holds a run's rows when no step recorded any. */
+export type ActivityPhase = 'challenge' | 'workers' | 'verification' | 'review' | 'run'
+export const ACTIVITY_PHASE_LABEL: Record<ActivityPhase, string> = {
+  challenge: 'Challenge',
+  workers: 'Workers',
+  verification: 'Freeze and verification',
+  review: 'Review and integration',
+  run: 'Run',
+}
+
+/**
+ * The phase a step belongs to: the design challenge; the workers' launches; the freeze, the verifications and the combined
+ * candidate; the review, the approval and the integration. The review sidecar runs beside the others and has none of its own,
+ * so its rows, like the controller's, join the phase they occur in.
+ */
+export function nodePhase(node: { node_id: string; kind: RunDetail['definition']['nodes'][number]['kind'] }): ActivityPhase | null {
+  if (node.node_id === 'sidecar' && node.kind === 'review') return null
+  if (node.node_id === 'challenge' && node.kind === 'review') return 'challenge'
+  switch (node.kind) {
+    case 'worker': return 'workers'
+    case 'prepare': return 'verification'
+    case 'verification': return 'verification'
+    case 'review': return 'review'
+    case 'integration': return 'review'
+    default: return null
+  }
+}
+
+/**
+ * One stretch of Activity: consecutive rows of one phase. `key` names it by its phase and the row that opened it, so it stays
+ * the same in either order, when the controller log is shown or hidden, and when a poll adds rows before, inside or after it.
+ */
+export type ActivityGroup<T> = { key: string; phase: ActivityPhase; label: string; rows: T[] }
+
+/** What names a row for a group key: its event number, else its time, step and kind (a receipt or an inferred instant). */
+type KeyedRow = { node_id: string | null; sequence?: number | null; at?: string; kind?: string }
+const rowKey = (row: KeyedRow, index: number) => row.sequence != null ? `#${row.sequence}`
+  : row.at !== undefined ? `${row.at}/${row.node_id ?? ''}/${row.kind ?? ''}` : `@${index}`
+
+/**
+ * Activity's rows (oldest first) cut into consecutive stretches of one phase, keeping every row once and in order. A row
+ * without a step of a phase (the controller's, the diagnosis, a repair, a silence, the sidecar's) joins the stretch it
+ * occurs in, or, before any step, the first phase that follows; a run whose rows name no step is one `run` stretch.
+ * A stretch is keyed by its phase and its first row of that phase (never a node-less row, which the controller log toggle
+ * hides), not by its position, so a stretch the reader closed stays closed when rows come or go elsewhere.
+ */
+export function groupActivity<T extends KeyedRow>(rows: readonly T[], phaseOf: (nodeId: string) => ActivityPhase | null): ActivityGroup<T>[] {
+  const phases = rows.map(row => (row.node_id === null ? null : phaseOf(row.node_id)))
+  const first = phases.find(phase => phase !== null) ?? 'run'
+  const groups: (ActivityGroup<T> & { opener: string | null })[] = []
+  let current: ActivityPhase = first
+  rows.forEach((row, index) => {
+    current = phases[index] ?? current
+    let last = groups.at(-1)
+    if (!last || last.phase !== current) {
+      last = { key: '', opener: null, phase: current, label: ACTIVITY_PHASE_LABEL[current], rows: [] }
+      groups.push(last)
+    }
+    last.rows.push(row)
+    if (last.opener === null && phases[index] !== null) last.opener = rowKey(row, index)
+  })
+  return groups.map(({ opener, ...group }) => ({ ...group, key: `${group.phase}-${opener ?? 'start'}` }))
+}
+
+/** The groups as shown: oldest first as built, or newest first with the groups and the rows inside them reversed. */
+export function orderActivityGroups<T>(groups: readonly ActivityGroup<T>[], newestFirst: boolean): ActivityGroup<T>[] {
+  return newestFirst ? [...groups].reverse().map(group => ({ ...group, rows: [...group.rows].reverse() })) : [...groups]
+}
+
+/** A tone as `tone.ts` names it; the mapping is passed in (`statusTone`), so this module stays free of it. */
+type PhaseTone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'idle'
+const PHASE_TONE_RANK: readonly PhaseTone[] = ['fail', 'warn', 'pause', 'run', 'ok', 'idle']
+
+/**
+ * Where a phase stands, from each step's latest status in it (a step that failed and then passed counts as passed), through
+ * `toneOf` (the page's `stateTone`, so a step that waits on the operator is warn whatever its status): its tone
+ * (failed first, then waiting on the operator, paused, running; ok once every step passed) and the same in words for the
+ * group's summary, so a closed group never says it by colour alone. Empty words when no step in it recorded a status.
+ */
+export function phaseState<T extends PhaseTone>(rows: readonly { at: string; sequence: number | null; node_id: string | null; lane: string | null; kind: string; status: string | null }[], toneOf: (status: string, nodeId: string) => T): { tone: PhaseTone; words: string } {
+  // The latest by time, then event number, so the rows may come in either order (Activity's newest first reverses them).
+  const later = (a: { at: string; sequence: number | null }, b: { at: string; sequence: number | null }) => {
+    const difference = Date.parse(a.at) - Date.parse(b.at)
+    return difference !== 0 ? difference > 0 : (a.sequence ?? -1) >= (b.sequence ?? -1)
+  }
+  const latest = new Map<string, (typeof rows)[number]>()
+  for (const row of rows) {
+    if (row.node_id === null || row.status === null || row.kind === 'gap') continue
+    const key = `${row.node_id}/${row.lane ?? ''}`
+    const known = latest.get(key)
+    if (known === undefined || later(row, known)) latest.set(key, row)
+  }
+  const tones: PhaseTone[] = [...latest.values()].map(row => toneOf(row.status!, row.node_id!))
+  if (tones.length === 0) return { tone: 'idle', words: '' }
+  const found = PHASE_TONE_RANK.find(rank => tones.includes(rank)) ?? 'idle'
+  // Green only once every step in it passed: a phase with a step not started or ended without a record is idle.
+  const tone = found === 'ok' && !tones.every(item => item === 'ok') ? 'idle' : found
+  const count = tones.filter(item => item === tone).length
+  const words = tone === 'fail' ? `${count} failed`
+    : tone === 'warn' ? 'waiting on you'
+      : tone === 'pause' ? 'paused'
+        : tone === 'run' ? 'running'
+          : tone === 'ok' ? 'all passed' : ''
+  return { tone, words }
+}

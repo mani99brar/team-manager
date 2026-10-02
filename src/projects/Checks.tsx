@@ -4,6 +4,7 @@ import { fetchArtifactText, type RunScope, type WorkerResult } from './api.ts'
 import type { CheckGate } from './node/gate.ts'
 import { ErrorPanel, LoadingPanel } from './panels.tsx'
 import { Time } from './Time.tsx'
+import { toneClass, type Tone } from './tone.ts'
 import { formatSpan, spanBetween, utcTitle } from './time.ts'
 import { useResource } from './useResource.ts'
 
@@ -49,6 +50,8 @@ export function TextArtifact({ scope, artifactId, tail = false }: { scope: RunSc
 
 type State = 'passed' | 'failed' | 'rejected' | 'deferred'
 const GLYPH: Record<State, string> = { passed: '✓', failed: '✗', rejected: '✗', deferred: '◐' }
+/** The tone of a row's exit chip (docs/PRD_VIEWER_REVAMP.md 5.4); the glyph and the words say the same. */
+const STATE_TONE: Record<State, Tone> = { passed: 'ok', failed: 'fail', rejected: 'fail', deferred: 'idle' }
 
 /**
  * The checks the verifier executed (docs/PRD_VIEWER_UX.md 7), one row each: glyph, declared check id, the command
@@ -106,7 +109,7 @@ export function Checks({ scope, result, gate, deferred, attemptStart, idPrefix =
               {offset >= 0 && <span className="check-offset">{formatOffset(offset)}</span>}
               {took !== null && <span className="check-duration">{formatSpan(took)}</span>}
               <span className="visually-hidden">, started <Time iso={check.started_at} seconds />, ended <Time iso={check.finished_at} seconds /></span>
-              <span className="check-exit">
+              <span className={`check-exit ui-chip ${toneClass(STATE_TONE[state])}`} data-tone={STATE_TONE[state]}>
                 {isDeferred ? `${exitText} · recorded, gated at the combined candidate` : check.exit_code !== 0 ? `${exitText} (failed)` : rejected ? `${exitText} · rejected by the gate` : exitText}
               </span>
             </div>

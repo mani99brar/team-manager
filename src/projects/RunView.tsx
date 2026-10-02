@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import {
   buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
   type RunData, type Timeline,
@@ -7,6 +7,8 @@ import { fetchEvents, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRec
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { LanesLine, NowBanner } from './NowBanner.tsx'
+import { boardSplitWidth } from './node/board.ts'
+import { nodePhase } from './node/model.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
@@ -15,6 +17,7 @@ import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
 import { Activity, StepsTable } from './StepsTimeline.tsx'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
+import { stateTone } from './tone.ts'
 import { useNow, useTimeReference, useTimeZone } from './useNow.ts'
 import { useResource, type ResourceMeta } from './useResource.ts'
 import { useRunResults, useRunReview } from './useRunData.ts'
@@ -54,6 +57,25 @@ const TABS: { id: Tab; label: string; testId: string }[] = [
 /** The timeline of a run whose events have not loaded yet: every step shows its status, none a time. */
 function emptyTimeline(detail: RunDetail): Timeline {
   return { runStart: { at: detail.summary.created_at, source: 'receipt' }, runEnd: null, lastActivity: null, spans: [], markers: [], gaps: [], byNode: new Map(), activity: [] }
+}
+
+/**
+ * Whether the board is wide enough for the Pipeline and the Steps side by side (`boardSplitWidth`): measured on the board
+ * itself, so it follows the space the page gives it, not only the window.
+ */
+function useBoardSplit(needed: number) {
+  const [board, setBoard] = useState<HTMLDivElement | null>(null)
+  const [split, setSplit] = useState(false)
+  useLayoutEffect(() => {
+    if (board === null) return
+    const measure = () => setSplit(board.clientWidth >= needed)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(board)
+    return () => observer.disconnect()
+  }, [board, needed])
+  return [setBoard, split] as const
 }
 
 /**
@@ -105,6 +127,13 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const timeline = useMemo(() => (run ? buildTimeline(run) : null), [run])
   const rows = stepRows(detail, timeline ?? emptyTimeline(detail), { now: clock, attention: attention ?? undefined })
   const labels = useMemo(() => new Map(definition.nodes.map(node => [node.node_id, node.label])), [definition.nodes])
+  const phaseOf = useMemo(() => {
+    const phases = new Map(definition.nodes.map(node => [node.node_id, nodePhase(node)]))
+    return (nodeId: string) => phases.get(nodeId) ?? null
+  }, [definition.nodes])
+  const [boardRef, split] = useBoardSplit(useMemo(() => boardSplitWidth(definition.nodes), [definition.nodes]))
+  // The run's one tone (docs/PRD_VIEWER_REVAMP.md 4): what waits on the operator wins over the status.
+  const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null })
   const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
     const state = snapshotById.get(node.node_id)!
     return { node_id: node.node_id, label: node.label, kind: node.kind, depends_on: node.depends_on, status: state.status, attempt: state.attempt, attention: attention?.nodes.get(node.node_id)?.kind ?? null }
@@ -212,7 +241,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     <div className="run-view" data-testid="run-view" data-run-id={summary.run_id} data-run-status={summary.status}>
       {selectedNodeId === null ? (
         <>
-          <RunHeader detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} timeline={timeline} clock={clock} />
+          <RunHeader detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} timeline={timeline} clock={clock} tone={tone} />
           {events.status === 'error'
             ? <ErrorPanel error={events.error} what="The run's events" onRetry={reloadEvents}><span>Without them the situation and the next step cannot be read.</span></ErrorPanel>
             : <NowBanner now={now} clock={clock} focusHref={now?.focus ? nodeHref(now.focus.node_id) : null} onNavigate={onNavigate} />}
@@ -231,12 +260,19 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
         <div role="tabpanel" id="run-panel-run" aria-labelledby="run-tab-run" className="run-body">
           {selectedNodeId === null ? (
             <>
-              <section className="run-graph" aria-label="Pinned graph">
-                <WorkflowGraph title={`Pinned definition graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} />
-              </section>
-              <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
+              {/* Pipeline and Steps side by side where both fit at the graph's legible floor, stacked otherwise (docs/PRD_VIEWER_REVAMP.md 5.3). */}
+              <div ref={boardRef} className={split ? 'run-board is-split' : 'run-board'} data-testid="run-board" data-layout={split ? 'side-by-side' : 'stacked'}>
+                <section className="run-graph run-pipeline" data-testid="run-pipeline" aria-labelledby="run-pipeline-title">
+                  <header className="ui-section-header">
+                    <h3 id="run-pipeline-title">Pipeline</h3>
+                    <span className="ui-sub">pinned definition · {definition.nodes.length} steps</span>
+                  </header>
+                  <WorkflowGraph title={`Pinned definition graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} compact />
+                </section>
+                <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
+              </div>
               {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
-              {timeline && <Activity timeline={timeline} labels={labels} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
+              {timeline && <Activity timeline={timeline} labels={labels} phaseOf={phaseOf} attentionOf={nodeId => attention?.nodes.get(nodeId)?.kind ?? null} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
             </>
           ) : (
             <>

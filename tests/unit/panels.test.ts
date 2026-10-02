@@ -11,6 +11,7 @@ import type { WorkflowEvent } from '../../contracts/workflow/v1.ts'
 import {
   approvalLine, blockingFindings, challengeHeadline, challengeSectionEntries, deadlineText, handoffWait, integratedCommit, lastStatusAt,
   reviewerDeadline, reviewerTime, reviewSectionEntries,
+  filterFindings, findingFilterIds, laneFilterId, OPEN_ONLY, orderFindings, reviewerFilterId, reviewFigures,
 } from '../../src/projects/node/panels.ts'
 
 type Challenge = NonNullable<RunInputs['challenge']>
@@ -113,4 +114,70 @@ test('the integrated commit is the one the integration row names, else the revie
   assert.equal(integratedCommit([], null), null)
   assert.equal(lastStatusAt([event('approval', 1, '2026-03-05T10:00:00Z', 'running', 'a'), event('approval', 2, '2026-03-05T10:02:00Z', null, 'log'), event('approval', 3, '2026-03-05T10:01:00Z', 'awaiting_approval', 'b')]), '2026-03-05T10:01:00Z')
   assert.equal(lastStatusAt([]), null)
+})
+
+// ---- Findings as cards (docs/PRD_VIEWER_REVAMP.md 5.4): order, the filter row and the four figures ----------------------
+
+const raised = (reviewer: string, severity: ReviewFinding['severity'], worker: string | null, disposition: ReviewFinding['disposition'], message: string): ReviewFinding => ({
+  severity, disposition, message, worker, requirement: null, requirement_found_in: [], reviewer,
+})
+/** `revamp-blocked`'s findings in record order: general's two P2s, then coverage's open P1 and P2. */
+const BLOCKED: ReviewFinding[] = [
+  raised('general', 'P2', 'ui', 'open', 'g-ui'),
+  raised('general', 'P2', 'adapter', 'accepted', 'g-adapter'),
+  raised('coverage', 'P1', 'ui', 'open', 'c-ui'),
+  raised('coverage', 'P2', 'adapter', 'open', 'c-adapter'),
+]
+const LANES = ['ui', 'adapter']
+const REVIEWERS = ['general', 'coverage']
+const messages = (findings: readonly ReviewFinding[]) => findings.map(item => item.message)
+
+test('findings order P0, P1, P2, then by lane in run order (then multiple, none, not recorded), then by declared reviewer, else record order', () => {
+  assert.deepEqual(messages(orderFindings(BLOCKED, LANES, REVIEWERS)), ['c-ui', 'g-ui', 'g-adapter', 'c-adapter'])
+  const mixed = [
+    raised('coverage', 'P2', null, 'open', 'unrecorded'),
+    raised('general', 'P2', 'none', 'open', 'none'),
+    raised('general', 'P2', 'both', 'open', 'legacy both'),
+    raised('coverage', 'P2', 'docs', 'open', 'unlisted lane'),
+    raised('coverage', 'P0', 'adapter', 'resolved', 'p0'),
+    raised('coverage', 'P2', 'ui', 'open', 'ui second'),
+    raised('general', 'P2', 'ui', 'open', 'ui first'),
+    raised('unlisted', 'P2', 'ui', 'open', 'ui unlisted reviewer'),
+  ]
+  assert.deepEqual(messages(orderFindings(mixed, LANES, REVIEWERS)), ['p0', 'ui first', 'ui second', 'ui unlisted reviewer', 'unlisted lane', 'legacy both', 'none', 'unrecorded'])
+  // Pure: the input keeps its order.
+  assert.equal(mixed[0].message, 'unrecorded')
+})
+
+test('the four figures count the blocking and open findings and the findings per reviewer and per lane', () => {
+  const figures = reviewFigures({ findings: BLOCKED, reviewers: REVIEWERS.map(reviewer_id => ({ reviewer_id })) }, LANES)
+  assert.equal(figures.blocking, 1)
+  assert.equal(figures.open, 3)
+  assert.deepEqual(figures.reviewers, [{ id: 'general', count: 2 }, { id: 'coverage', count: 2 }])
+  assert.deepEqual(figures.lanes, [{ key: 'ui', label: 'ui', count: 2 }, { key: 'adapter', label: 'adapter', count: 2 }])
+  // A declared reviewer without findings still counts (0); lanes list only the populated groups, specials by their words.
+  const legacy = reviewFigures({ findings: [raised('review', 'P2', 'both', 'open', 'x'), raised('review', 'P2', 'none', 'accepted', 'y')], reviewers: [{ reviewer_id: 'review' }, { reviewer_id: 'general' }] }, LANES)
+  assert.deepEqual(legacy.reviewers, [{ id: 'review', count: 2 }, { id: 'general', count: 0 }])
+  assert.deepEqual(legacy.lanes, [{ key: 'multiple', label: 'multiple workers', count: 1 }, { key: 'none', label: 'no worker', count: 1 }])
+  assert.equal(legacy.blocking, 0)
+  assert.equal(legacy.open, 1)
+})
+
+test('the filter row: one toggle per reviewer and per populated lane and Open only; within a kind they add up, across kinds they narrow', () => {
+  assert.deepEqual(findingFilterIds({ findings: BLOCKED, reviewers: REVIEWERS.map(reviewer_id => ({ reviewer_id })) }, LANES), {
+    reviewers: [{ id: 'reviewer:general', label: 'general', count: 2 }, { id: 'reviewer:coverage', label: 'coverage', count: 2 }],
+    lanes: [{ id: 'lane:ui', label: 'ui', count: 2 }, { id: 'lane:adapter', label: 'adapter', count: 2 }],
+    open: { id: OPEN_ONLY, label: 'Open only', count: 3 },
+  })
+  const pick = (...ids: string[]) => messages(filterFindings(BLOCKED, new Set(ids)))
+  assert.deepEqual(pick(), messages(BLOCKED))
+  assert.deepEqual(pick(reviewerFilterId('coverage')), ['c-ui', 'c-adapter'])
+  assert.deepEqual(pick(reviewerFilterId('coverage'), reviewerFilterId('general')), messages(BLOCKED))
+  assert.deepEqual(pick(reviewerFilterId('coverage'), laneFilterId('adapter')), ['c-adapter'])
+  assert.deepEqual(pick(laneFilterId('adapter')), ['g-adapter', 'c-adapter'])
+  assert.deepEqual(pick(laneFilterId('adapter'), OPEN_ONLY), ['c-adapter'])
+  assert.deepEqual(pick(OPEN_ONLY), ['g-ui', 'c-ui', 'c-adapter'])
+  assert.deepEqual(pick(reviewerFilterId('general'), laneFilterId('adapter'), OPEN_ONLY), [])
+  // A legacy `both` matches the `multiple` lane filter, as it groups under it.
+  assert.deepEqual(messages(filterFindings([raised('review', 'P2', 'both', 'open', 'x')], new Set([laneFilterId('multiple')]))), ['x'])
 })

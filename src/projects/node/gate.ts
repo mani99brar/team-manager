@@ -22,3 +22,21 @@ export function checkGate(result: WorkerResult, declared: readonly DeclaredCheck
   const ids = result.checks.map(check => declared.find(entry => entry.command === check.command)?.id ?? null)
   return { reasons, ids, rejected: reasons.byCheck.size }
 }
+
+/** How the executed checks of one result came out, as the check rows say it: passed, failed or rejected, and deferred. */
+export type CheckTally = { passed: number; failed: number; deferred: number }
+
+/**
+ * The verify node's figures (docs/PRD_VIEWER_REVAMP.md 5.4), counted the way `Checks` marks its rows: a check recorded for the
+ * candidate gate is deferred; else one that exited non-zero, or that a gate reason names, failed; the rest passed.
+ */
+export function checkTally(result: WorkerResult, gate: CheckGate, deferred: ReadonlyMap<number, string>): CheckTally {
+  const tally: CheckTally = { passed: 0, failed: 0, deferred: 0 }
+  result.checks.forEach((check, index) => {
+    const id = gate.ids[index]
+    if (deferred.has(index)) tally.deferred += 1
+    else if (check.exit_code !== 0 || (id !== null && (gate.reasons.byCheck.get(id)?.length ?? 0) > 0)) tally.failed += 1
+    else tally.passed += 1
+  })
+  return tally
+}

@@ -1,8 +1,10 @@
 import { useEffect, useId, useMemo, useRef, type KeyboardEvent } from 'react'
 import type { AttentionKind } from '../../contracts/projects/triage.ts'
 import { DAG_NODE_HEIGHT, DAG_NODE_WIDTH, layoutDag } from './dag.ts'
+import { COMPACT_GRAPH as COMPACT, compactLayout, GRAPH_MIN_SCALE as MIN_SCALE } from './node/board.ts'
 import { executorCategory, executorOf, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
+import { stateTone, toneClass } from './tone.ts'
 import { wrapLabel } from '../graph/labels.ts'
 import './run.css'
 
@@ -27,6 +29,11 @@ type Props = {
   focusId?: string | null
   /** When omitted, the graph is a static picture of a definition. */
   onSelect?: (nodeId: string) => void
+  /**
+   * Narrower nodes and gaps, for the run page's Pipeline beside the Steps (docs/PRD_VIEWER_REVAMP.md 5.3): the same columns,
+   * rows, meta line and 83 % floor.
+   */
+  compact?: boolean
 }
 
 /** Controller and verifier nodes are outlined dashed (an inline attribute, so no stylesheet rule is needed); agents stay solid. */
@@ -40,8 +47,6 @@ const LEGEND: { executor: Executor; label: string; meaning: string }[] = [
 ]
 /** Beyond this many characters the 10px meta line would overflow the node, so it is fitted to the node width. */
 const META_FIT = 22
-/** The graph scales down to this share of its width before its box scrolls sideways (docs/PRD_VIEWER_UX.md 10). */
-const MIN_SCALE = 0.83
 
 /**
  * Layered SVG rendering of a workflow definition, optionally coloured by a run's node statuses. It is fitted to the width
@@ -49,8 +54,9 @@ const MIN_SCALE = 0.83
  * label, kind, status, attempt and executor; a status glyph repeats the status so colour never carries it alone, and a
  * step that waits on the operator gets an amber ring and a `?`. The outline says who executes it, as the legend explains.
  */
-export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSelect }: Props) {
-  const layout = useMemo(() => layoutDag(nodes), [nodes])
+export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSelect, compact = false }: Props) {
+  const layout = useMemo(() => (compact ? compactLayout(layoutDag(nodes)) : layoutDag(nodes)), [nodes, compact])
+  const nodeWidth = compact ? COMPACT.width : DAG_NODE_WIDTH
   const interactive = onSelect !== undefined
   const hintId = useId()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -87,7 +93,7 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
     <>
       <div className="workflow-graph-scroll" ref={scrollRef}>
         <svg
-          className="workflow-graph"
+          className={compact ? 'workflow-graph is-compact' : 'workflow-graph'}
           role="group"
           aria-label={title}
           aria-describedby={interactive ? hintId : undefined}
@@ -104,7 +110,7 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
           {layout.edges.map(edge => {
             const from = layout.positions.get(edge.from)!
             const to = layout.positions.get(edge.to)!
-            const x1 = from.x + DAG_NODE_WIDTH
+            const x1 = from.x + nodeWidth
             const y1 = from.y + DAG_NODE_HEIGHT / 2
             const x2 = to.x
             const y2 = to.y + DAG_NODE_HEIGHT / 2
@@ -123,7 +129,7 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
           {nodes.map((node, index) => {
             const position = layout.positions.get(node.node_id)!
             const status = node.status
-            const lines = wrapLabel(node.label, 16, 2)
+            const lines = wrapLabel(node.label, compact ? COMPACT.chars : 16, 2)
             const executor = executorCategory(node.kind)
             const description = [
               node.label,
@@ -136,11 +142,15 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
               ? `${STATUS_LABEL[status]}${node.attempt !== undefined ? ` · attempt ${node.attempt}` : ''} · ${EXECUTOR_SHORT[executor]}`
               : `${KIND_LABEL[node.kind]} · ${EXECUTOR_SHORT[executor]}`
             const glyph = node.attention ? '?' : status ? STATUS_GLYPH[status] : null
+            // Fill and stroke by status through the one tone mapping, a wait on the operator winning (`stateTone`); the glyph and
+            // the meta line say it in text too.
+            const tone = status ? stateTone({ status, attention: node.attention ?? null }) : null
             const className = [
               'workflow-node',
               `workflow-node-${node.kind}`,
               executor === 'agent' ? 'is-agent' : 'is-controller',
               status ? `is-${status}` : 'is-definition',
+              tone ? toneClass(tone) : '',
               node.node_id === selectedId ? 'is-selected' : '',
             ].filter(Boolean).join(' ')
             return (
@@ -150,6 +160,7 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
                 transform={`translate(${position.x} ${position.y})`}
                 data-graph-node={node.node_id}
                 data-status={status ?? 'definition'}
+                data-tone={tone ?? undefined}
                 data-executor={executor}
                 data-attention={node.attention ?? undefined}
                 role={interactive ? 'button' : undefined}
@@ -159,9 +170,9 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
                 onClick={interactive ? () => onSelect(node.node_id) : undefined}
                 onKeyDown={keyHandler(node.node_id, index)}
               >
-                <rect className="workflow-node-ring" x="-5" y="-5" width={DAG_NODE_WIDTH + 10} height={DAG_NODE_HEIGHT + 10} rx="12" />
-                <rect className="workflow-node-shape" width={DAG_NODE_WIDTH} height={DAG_NODE_HEIGHT} rx="8" strokeDasharray={DASH[executor]} />
-                <rect className="workflow-node-focus" x="-3" y="-3" width={DAG_NODE_WIDTH + 6} height={DAG_NODE_HEIGHT + 6} rx="10" />
+                <rect className="workflow-node-ring" x="-5" y="-5" width={nodeWidth + 10} height={DAG_NODE_HEIGHT + 10} rx="12" />
+                <rect className="workflow-node-shape" width={nodeWidth} height={DAG_NODE_HEIGHT} rx="8" strokeDasharray={DASH[executor]} />
+                <rect className="workflow-node-focus" x="-3" y="-3" width={nodeWidth + 6} height={DAG_NODE_HEIGHT + 6} rx="10" />
                 <rect className="workflow-node-status-bar" x="0" y="0" width="6" height={DAG_NODE_HEIGHT} rx="3" />
                 <text className="workflow-node-label" x="14" y={lines.length === 1 ? 24 : 20} aria-hidden="true">
                   {lines.map((line, lineIndex) => (
@@ -169,7 +180,7 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
                   ))}
                 </text>
                 {glyph && (
-                  <g className="workflow-node-badge" transform={`translate(${DAG_NODE_WIDTH - 3} 3)`} aria-hidden="true">
+                  <g className="workflow-node-badge" transform={`translate(${nodeWidth - 3} 3)`} aria-hidden="true">
                     <circle r="8" />
                     <text className="workflow-node-glyph" y="4" textAnchor="middle">{glyph}</text>
                   </g>
@@ -179,8 +190,8 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
                   x="14"
                   y={DAG_NODE_HEIGHT - 10}
                   aria-hidden="true"
-                  textLength={meta.length > META_FIT ? DAG_NODE_WIDTH - 22 : undefined}
-                  lengthAdjust={meta.length > META_FIT ? 'spacingAndGlyphs' : undefined}
+                  textLength={meta.length > META_FIT * nodeWidth / DAG_NODE_WIDTH ? nodeWidth - 22 : undefined}
+                  lengthAdjust={meta.length > META_FIT * nodeWidth / DAG_NODE_WIDTH ? 'spacingAndGlyphs' : undefined}
                 >
                   {meta}
                 </text>

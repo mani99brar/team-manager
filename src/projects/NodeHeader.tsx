@@ -8,6 +8,7 @@ import { executorCategory, executorOf, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
+import { statusTone, toneClass } from './tone.ts'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type NodeStatus = RunDetail['snapshot']['nodes'][number]['status']
@@ -172,7 +173,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
   const starts = timing?.start ? Date.parse(timing.start.at) : Infinity
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && marker.node_id === definition.node_id && Date.parse(marker.at) <= starts).map(marker => marker.repair?.n ?? 0).filter(n => n > 0)
   return (
-    <header className="node-header" data-testid="node-header">
+    <header className={`node-header ${toneClass(status === 'no_record' ? 'idle' : statusTone(status))}`} data-testid="node-header">
       <div className="node-title-row">
         <h3 id="node-detail-title" tabIndex={-1}>{definition.label} <span className="projects-muted node-detail-id">({definition.node_id})</span></h3>
         {status === 'no_record'

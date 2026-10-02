@@ -4,6 +4,7 @@ import { layoutDag } from './dag.ts'
 import { AppLink } from './panels.tsx'
 import { STATUS_LABEL } from './status.ts'
 import { formatShortSpan, shortStepLabel, STATUS_GLYPH, type StepRow } from './steps.ts'
+import { stateTone, toneClass } from './tone.ts'
 
 type Props = {
   detail: RunDetail
@@ -15,8 +16,8 @@ type Props = {
 }
 
 /**
- * The sticky step strip of a node page (docs/PRD_VIEWER_UX.md 4.4, `run-node-list`): every step as a chip in the graph's
- * column order, lanes stacked within a column, the current one marked; then the previous and next step. It replaces the
+ * The sticky step strip of a node page (docs/PRD_VIEWER_UX.md 4.4, `run-node-list`): every step as a chip toned by its status
+ * (docs/PRD_VIEWER_REVAMP.md 5.4) in the graph's column order, lanes stacked within a column, the current one marked; then the previous and next step. It replaces the
  * graph on node pages, so the two never share a screen. On a phone it scrolls sideways inside itself, never the page.
  */
 export function StepStrip({ detail, rows, current, runHref, nodeHref, onNavigate }: Props) {
@@ -55,7 +56,7 @@ export function StepStrip({ detail, rows, current, runHref, nodeHref, onNavigate
                 href={nodeHref(row.node_id)}
                 onNavigate={onNavigate}
                 current={row.node_id === current}
-                className={`step-chip status-row-${row.shown}`}
+                className={`step-chip status-row-${row.shown} ${toneClass(stateTone({ status: row.shown, attention: row.attention }))}`}
                 aria-label={`${row.label}, ${STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}
                 title={row.label}
               >

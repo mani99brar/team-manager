@@ -18,6 +18,7 @@ import { attemptPathname, runPathname } from './routes.ts'
 import { NodeSection, SectionIndex } from './SectionIndex.tsx'
 import { isChallengeNode, isSidecarNode } from './status.ts'
 import { Time } from './Time.tsx'
+import { Figures } from './ui/index.tsx'
 import { useResource, type Resource } from './useResource.ts'
 import { useRunResult, useRunResults } from './useRunData.ts'
 import './node.css'
@@ -55,6 +56,26 @@ type Props = {
   fileFocus: string | null
   onFileFocusApplied: () => void
   onOpenFile: (nodeId: string, path: string) => void
+}
+
+/**
+ * A launch node's figures (docs/PRD_VIEWER_REVAMP.md 5.4): the files its freeze lists, its completion file's state and its
+ * questions to the operator, a waiting one in the needs-you tone. Nothing is claimed that the run's records do not hold.
+ */
+function WorkerFigures({ worker, files }: { worker: RunInputs['workers'][number] | null; files: number | null }) {
+  const waiting = worker?.questions.filter(question => question.answer === null).length ?? 0
+  const asked = worker?.questions.length ?? 0
+  return (
+    <Figures
+      className="node-figures"
+      data-testid="worker-figures"
+      items={[
+        { testId: 'figure-files', value: files ?? '—', label: files === null ? 'Files (not frozen yet)' : 'Files changed' },
+        { testId: 'figure-completion', value: worker === null ? '—' : worker.completion?.status ?? 'none yet', label: 'Completion', tone: worker?.completion?.status === 'completed' ? 'ok' : worker?.completion?.status === 'blocked' ? 'fail' : undefined },
+        { testId: 'figure-questions', value: waiting > 0 ? `${waiting} waiting` : asked, label: waiting > 0 ? `Questions (${asked} asked)` : 'Questions', tone: waiting > 0 ? 'warn' : undefined },
+      ]}
+    />
+  )
 }
 
 /**
@@ -239,6 +260,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
       {isSidecar && isLatest && <SidecarHeadline ledger={sidecar} clock={clock} />}
 
+      {isWorker && isLatest && <WorkerFigures worker={worker} files={(frozen ?? resultData)?.changed_files.length ?? null} />}
+
       {!isController && (isLatest || recorded) && (
         <SectionIndex label={definition.label} sections={evidence ? sections : sections.filter(section => section.key === 'history')}>
           {reportNode && <WorkerReportLink href={reportNode.href} label={reportNode.label} onNavigate={onNavigate} />}
@@ -270,6 +293,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             onHighlightApplied={onHighlightApplied}
             fileFocus={fileFocus}
             onFileFocusApplied={onFileFocusApplied}
+            clock={clock}
           />
         ) : isChallenge ? (
           <ChallengeSections inputs={inputs} onRetryInputs={onRetryInputs} />
@@ -313,6 +337,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
                 scope={scope} result={data} phase="worker" anchored
                 declared={verifiedWorker?.checks ?? null}
                 attemptStart={timing?.start?.at ?? null}
+                tookMs={isVerify ? timing?.ms ?? null : undefined}
                 requirements={verifiedWorker && { worker: verifiedWorker, cap: recordedInputs?.max_verification_attempts ?? null }}
               />
             ))}

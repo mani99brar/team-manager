@@ -59,7 +59,7 @@ function VerifiedLine({ result, checksNode, frozenCommit, repairNote, onNavigate
  * no verify node shows them, else the run's base and the revision frozen at handoff), the questions when none waits, and the
  * stop line.
  */
-function SessionDisclosure({ worker, children }: { worker: RunInputWorker; children: ReactNode }) {
+function SessionDisclosure({ worker, clock, children }: { worker: RunInputWorker; clock: number; children: ReactNode }) {
   const stopped = worker.stop !== null && worker.stop.stopped && worker.stop.confirmed_at !== null
   return (
     <details className="evidence-section worker-session" data-testid="worker-session">
@@ -70,7 +70,7 @@ function SessionDisclosure({ worker, children }: { worker: RunInputWorker; child
       {children}
       {waitingQuestions(worker) === 0 && (worker.questions.length === 0
         ? <p className="projects-muted" data-testid="worker-questions-none">No questions were recorded for this worker.</p>
-        : <WorkerQuestions questions={worker.questions} />)}
+        : <WorkerQuestions questions={worker.questions} clock={clock} />)}
       <StopLine stop={worker.stop} />
     </details>
   )
@@ -105,6 +105,8 @@ type Props = {
   onHighlightApplied: () => void
   fileFocus: string | null
   onFileFocusApplied: () => void
+  /** The run page's one clock (`RunView`); a waiting question's age reads it. */
+  clock: number
 }
 
 /**
@@ -112,7 +114,7 @@ type Props = {
  * worker's report, said once; the files it froze at handoff as dense rows; the task, and the session behind closed
  * disclosures.
  */
-export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, answer, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied }: Props) {
+export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, answer, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied, clock }: Props) {
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const files = result.status === 'ready' ? launchFilesCount(frozen, result.data) : 0
   const lane = worker?.node_id ?? null
@@ -120,7 +122,7 @@ export function WorkerSections({ scope, renderResult, result, role, checksNode, 
     <>
       {worker !== null && waitingQuestions(worker) > 0 && (
         <NodeSection sectionKey="questions" labelledBy="worker-questions-title" className="worker-questions-section">
-          <WorkerQuestions questions={worker.questions} answer={answer ?? answerNext(lane!)} />
+          <WorkerQuestions questions={worker.questions} clock={clock} answer={answer ?? answerNext(lane!)} />
         </NodeSection>
       )}
 
@@ -168,7 +170,7 @@ export function WorkerSections({ scope, renderResult, result, role, checksNode, 
             </TaskDisclosure>
           </NodeSection>
           <NodeSection sectionKey="session" labelledBy="worker-session-summary">
-            <SessionDisclosure worker={worker}>
+            <SessionDisclosure worker={worker} clock={clock}>
               {role.facts && result.status === 'ready' ? <ResultFacts result={result.data} /> : (
                 <dl className="projects-facts" data-testid="worker-identifiers">
                   {recordedInputs !== null && <div><dt>Base commit</dt><dd><code>{recordedInputs.base_commit.slice(0, 12)}</code></dd></div>}

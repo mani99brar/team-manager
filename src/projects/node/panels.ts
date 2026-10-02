@@ -7,6 +7,7 @@
 import type { Span } from '../../../contracts/projects/triage.ts'
 import { isBlockingFinding, type ReviewFinding, type ReviewResult, type RunInputs } from '../../../contracts/projects/v1.ts'
 import type { WorkflowEvent } from '../../../contracts/workflow/v1.ts'
+import { workerGroupOf, workerGroups } from '../findings.ts'
 import { formatSpan } from '../time.ts'
 import type { SectionEntry } from './model.ts'
 
@@ -165,3 +166,82 @@ export function lastStatusAt(events: readonly WorkflowEvent[]): string | null {
   return rows.length ? rows.reduce((last, event) => (event.sequence > last.sequence ? event : last)).occurred_at : null
 }
 
+
+// ---- Findings as cards (docs/PRD_VIEWER_REVAMP.md 5.4): their order, the filter row and the four figures ---------------
+
+type Finding = Pick<ReviewFinding, 'severity' | 'worker' | 'reviewer' | 'disposition'>
+const SEVERITY_RANK: Record<ReviewFinding['severity'], number> = { P0: 0, P1: 1, P2: 2 }
+/** How a lane group that is not a lane of the run is said on a figure. */
+const GROUP_WORDS: Record<string, string> = { multiple: 'multiple workers', none: 'no worker', unrecorded: 'worker not recorded' }
+
+/** The filter id of "Open only"; a reviewer's is `reviewer:<id>`, a lane group's `lane:<key>`. */
+export const OPEN_ONLY = 'open'
+export const reviewerFilterId = (reviewerId: string) => `reviewer:${reviewerId}`
+export const laneFilterId = (key: string) => `lane:${key}`
+
+/** The lane groups the findings populate, in display order: the run's lanes, any other lane named, then multiple, none, not recorded. */
+function laneKeys(lanes: readonly string[], findings: readonly Pick<ReviewFinding, 'worker'>[]): string[] {
+  const populated = new Set(findings.map(workerGroupOf))
+  return workerGroups(lanes, findings).map(group => group.key).filter(key => populated.has(key))
+}
+
+/**
+ * The cards' order: P0, P1, P2; within a severity by lane (the run's lanes in order, any other lane named, then multiple
+ * workers, none, not recorded), then by reviewer in declared order (a reviewer the run does not list last), else as recorded.
+ */
+export function orderFindings<T extends Finding>(findings: readonly T[], lanes: readonly string[], reviewers: readonly string[]): T[] {
+  const lane = workerGroups(lanes, findings).map(group => group.key)
+  const reviewerRank = (id: string) => (reviewers.includes(id) ? reviewers.indexOf(id) : reviewers.length)
+  return findings.map((finding, index) => ({ finding, index }))
+    .sort((a, b) => SEVERITY_RANK[a.finding.severity] - SEVERITY_RANK[b.finding.severity]
+      || lane.indexOf(workerGroupOf(a.finding)) - lane.indexOf(workerGroupOf(b.finding))
+      || reviewerRank(a.finding.reviewer) - reviewerRank(b.finding.reviewer)
+      || a.index - b.index)
+    .map(entry => entry.finding)
+}
+
+/**
+ * The findings the pressed filters keep. Toggles of one kind add up (two reviewers show both reviewers' findings); kinds
+ * narrow each other (a reviewer, a lane and Open only keep that reviewer's open findings on that lane). Nothing pressed keeps all.
+ */
+export function filterFindings<T extends Finding>(findings: readonly T[], pressed: ReadonlySet<string>): T[] {
+  const of = (prefix: string) => [...pressed].filter(id => id.startsWith(prefix)).map(id => id.slice(prefix.length))
+  const reviewers = of('reviewer:')
+  const lanes = of('lane:')
+  return findings.filter(finding => (reviewers.length === 0 || reviewers.includes(finding.reviewer))
+    && (lanes.length === 0 || lanes.includes(workerGroupOf(finding)))
+    && (!pressed.has(OPEN_ONLY) || finding.disposition === 'open'))
+}
+
+export type ReviewFigures = {
+  /** Unresolved P0 and P1 findings from any reviewer. */
+  blocking: number
+  open: number
+  /** Every reviewer of the run in declared order, with the findings it raised (0 included). */
+  reviewers: { id: string; count: number }[]
+  /** Every populated lane group in display order, with its findings. */
+  lanes: { key: string; label: string; count: number }[]
+}
+
+/** The four figures a review node opens on: blocking, open, per reviewer and per lane. */
+export function reviewFigures(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): ReviewFigures {
+  const { findings } = review
+  return {
+    blocking: findings.filter(isBlockingFinding).length,
+    open: findings.filter(finding => finding.disposition === 'open').length,
+    reviewers: review.reviewers.map(reviewer => ({ id: reviewer.reviewer_id, count: findings.filter(finding => finding.reviewer === reviewer.reviewer_id).length })),
+    lanes: laneKeys(lanes, findings).map(key => ({ key, label: GROUP_WORDS[key] ?? key, count: findings.filter(finding => workerGroupOf(finding) === key).length })),
+  }
+}
+
+export type FindingFilter = { id: string; label: string; count: number }
+
+/** The filter row's toggles: one per reviewer (declared order), one per populated lane group (labelled by its id), and Open only. */
+export function findingFilterIds(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): { reviewers: FindingFilter[]; lanes: FindingFilter[]; open: FindingFilter } {
+  const figures = reviewFigures(review, lanes)
+  return {
+    reviewers: figures.reviewers.map(item => ({ id: reviewerFilterId(item.id), label: item.id, count: item.count })),
+    lanes: figures.lanes.map(item => ({ id: laneFilterId(item.key), label: item.key, count: item.count })),
+    open: { id: OPEN_ONLY, label: 'Open only', count: figures.open },
+  }
+}

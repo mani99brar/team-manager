@@ -2,8 +2,14 @@
 
 .worker-report-link { margin: 0; font-size: 0.85rem; color: var(--text-muted); }
 
-/* The gate: a headline, the error code, one bullet per reason; the candidate's ownership tag follows the line. */
-.gate-line { margin: 0; }
+/* The gate: a headline, the error code, one bullet per reason; the candidate's ownership tag follows the line. The line takes a
+   left rule in its tone over the tone's soft background, its verdict word in the tone (docs/PRD_VIEWER_REVAMP.md 5.4). */
+.gate-line { margin: 0; padding: 4px 10px; border-left: 4px solid var(--idle); border-radius: 4px; background: var(--idle-soft); color: var(--fg); }
+.gate-line.tone-ok { border-left-color: var(--ok); background: var(--ok-soft); }
+.gate-line.tone-ok > strong { color: var(--ok); }
+.gate-line.tone-fail { border-left-color: var(--fail); background: var(--fail-soft); }
+.gate-line.tone-fail > strong { color: var(--fail); }
+.gate-line .gate-code { color: var(--fg); }
 .gate-code { color: var(--text-muted); font-weight: normal; }
 .gate-tag { display: inline-block; max-width: 100%; margin-left: 8px; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 0.8rem; font-weight: normal; color: var(--text-muted); }
 .gate-reasons { margin: 6px 0 0; padding-left: 20px; }
@@ -14,18 +20,20 @@
 .check-list .check { padding: 4px 8px; }
 .check-list .check-head { flex-wrap: nowrap; justify-content: flex-start; gap: 8px; min-width: 0; font-size: 0.9rem; }
 .check-glyph { flex: none; width: 1em; text-align: center; font-weight: 700; }
-.check-passed .check-glyph { color: var(--node-location-stroke); }
-.check-failed .check-glyph, .check-rejected .check-glyph { color: var(--danger-text); }
+.check-passed .check-glyph { color: var(--ok); }
+.check-failed .check-glyph, .check-rejected .check-glyph { color: var(--fail); }
+.check-deferred .check-glyph { color: var(--idle); }
 .check-id { flex: none; font-weight: 600; }
 .check-list .check-command { flex: 0 1 auto; margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .check-offset, .check-list .check-duration { flex: none; color: var(--text-muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+/* The exit as a tone chip (theme.css `.ui-chip`): ok when it passed, fail when it failed or the gate rejected it, idle deferred. */
 .check-list .check-exit { flex: none; }
+.projects-shell .check-list .check-exit.ui-chip { white-space: normal; font-weight: 600; }
 .check-list .artifact-text { margin-top: 4px; }
 .check-list .screenshot-grid { margin-top: 6px; }
 /* Rejected by the gate: red even at exit 0. */
-.check-rejected { border-left: 4px solid var(--danger-text); background: var(--danger-bg); }
-.check-rejected .check-exit { color: var(--danger-text); }
-.check-reasons { margin: 4px 0 0; padding-left: 28px; font-size: 0.85rem; color: var(--danger-text); }
+.check-rejected { border-left: 4px solid var(--fail); background: var(--fail-soft); }
+.check-reasons { margin: 4px 0 0; padding-left: 28px; font-size: 0.85rem; color: var(--fail); }
 
 /* Screenshots: thumbnails at most 220 px wide, captioned; a click opens the full size in a dialog. */
 .screenshot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 220px)); gap: 12px; margin: 0; padding: 0; list-style: none; }
@@ -60,9 +68,9 @@
 .lane-result[open] > .lane-summary .lane-toggle { display: inline-block; transform: rotate(90deg); }
 .lane-name { font-weight: 600; }
 /* Under a failing lane's row: which attempt of the cap it is, and a repair when it failed identically. */
-.lane-note { grid-column: 2 / -1; font-size: 0.85rem; color: var(--danger-text); }
-.lane-gate[data-passed='false'], .lane-result[data-passed='false'] .lane-reason { color: var(--danger-text); }
-.lane-gate[data-passed='true'] { color: var(--node-location-stroke); }
+.lane-note { grid-column: 2 / -1; font-size: 0.85rem; color: var(--fail); }
+.lane-gate[data-passed='false'], .lane-result[data-passed='false'] .lane-reason { color: var(--fail); }
+.lane-gate[data-passed='true'] { color: var(--ok); }
 .lane-reason { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lane-checks, .lane-screenshots { font-variant-numeric: tabular-nums; }
 .lane-links { white-space: nowrap; }

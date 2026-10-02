@@ -7,7 +7,9 @@ import { runPathname } from '../routes.ts'
 import { Screenshots } from '../Screenshots.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
 import { useRunResult, useRunResults } from '../useRunData.ts'
-import { checkGate, type CheckGate, type DeclaredCheck } from './gate.ts'
+import { formatSpan } from '../time.ts'
+import { Figures } from '../ui/index.tsx'
+import { checkGate, checkTally, type CheckGate, type DeclaredCheck } from './gate.ts'
 import { evidenceOf, nodeTiming, revisionAttempt, sectionId } from './model.ts'
 import { OwnedPaths, RequiredChecks } from './Requirements.tsx'
 import { ResultFacts } from './ResultFacts.tsx'
@@ -31,7 +33,7 @@ function GateFailure({ result, gate, tag }: { result: WorkerResult; gate: CheckG
     : reasons.length > 0 ? `Failed: the gate recorded ${reasons.length} ${reasons.length === 1 ? 'reason' : 'reasons'}` : 'Failed: the gate recorded no reason'
   return (
     <div className="projects-error gate-failure" role="alert" data-testid="worker-error">
-      <p className="gate-line">
+      <p className="gate-line tone-fail" data-tone="fail">
         <strong>{headline}</strong>
         {result.error && <> <span className="gate-code">· <code>{result.error.code}</code></span></>}
         {tag}
@@ -91,7 +93,7 @@ function Requirements({ result, requirements }: { result: WorkerResult; requirem
  * (`anchored`) each block is a section of the page's index; a candidate lane keeps them inside its lane. Captured files
  * are the launch node's; they are not repeated here.
  */
-export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result', anchored = false, declared = null, attemptStart = null, requirements = null }: {
+export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result', anchored = false, declared = null, attemptStart = null, requirements = null, tookMs }: {
   scope: RunScope
   result: WorkerResult
   phase: Phase
@@ -102,9 +104,12 @@ export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result
   /** When the attempt started, for each check's offset. */
   attemptStart?: string | null
   requirements?: LaneRequirements | null
+  /** How long the shown attempt took, for the verify node's figures; undefined shows none (a candidate lane). */
+  tookMs?: number | null
 }) {
   const { screenshots, others, deferred, passed } = evidenceOf(result)
   const gate = useMemo(() => checkGate(result, declared ?? []), [result, declared])
+  const tally = checkTally(result, gate, deferred)
   // On a candidate lane the screenshots sit in the row of its browser check (7), when exactly one declared browser check ran.
   const browserRows = phase === 'candidate' && screenshots.length > 0
     ? gate.ids.flatMap((id, index) => (id !== null && declared?.some(check => check.id === id && check.kind === 'browser') ? [index] : []))
@@ -149,11 +154,23 @@ export function VerifiedEvidence({ scope, result, phase, testId = 'worker-result
   )
   return (
     <div className="worker-evidence" data-testid={testId} data-view="verified">
+      {tookMs !== undefined && (
+        <Figures
+          className="node-figures"
+          data-testid="verify-figures"
+          items={[
+            { testId: 'figure-checks-passed', value: tally.passed, label: 'Checks passed', tone: tally.passed > 0 && tally.failed === 0 ? 'ok' : undefined },
+            { testId: 'figure-checks-failed', value: tally.failed, label: 'Checks failed', tone: tally.failed > 0 ? 'fail' : undefined },
+            ...(tally.deferred > 0 ? [{ testId: 'figure-checks-deferred', value: tally.deferred, label: 'Gated at the candidate' }] : []),
+            { testId: 'figure-took', value: tookMs === null ? '—' : formatSpan(tookMs), label: 'Took' },
+          ]}
+        />
+      )}
       <div className="gate-block" data-testid="gate-outcome" data-passed={passed ? 'true' : 'false'}>
         {block('gate', 'Gate', (
           <>
             {passed ? (
-              <p className="gate-line">
+              <p className="gate-line tone-ok" data-tone="ok">
                 <strong>Passed:</strong> {gating === 1 ? 'the gating check' : `all ${gating} gating checks`} of this {phase === 'worker' ? 'isolated lane snapshot' : 'combined candidate'} exited 0.
                 {ownershipTag}
               </p>

@@ -27,7 +27,7 @@ const precedes = async (first: Locator, second: Locator) => first.evaluate((a, b
 const display = (target: Locator) => target.evaluate(element => (globalThis as unknown as { getComputedStyle: (target: unknown) => { display: string } }).getComputedStyle(element).display)
 const overflow = (target: Locator) => target.evaluate(element => (element as unknown as { scrollWidth: number; clientWidth: number }).scrollWidth - (element as unknown as { clientWidth: number }).clientWidth)
 
-test(`[scenario:review-blocking-first] A review opens on its blocking finding before the table; reviewers show their time only from served fields; phone width shows the same findings as cards (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:review-blocking-first] A review opens on its blocking finding before the finding cards; reviewers show their time only from served fields; phone width shows the same findings as cards (${phase})`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   // A fixed clock: a reviewer that recorded no verdict shows no ticking time.
   await page.clock.install({ time: new Date('2026-03-05T10:00:00Z') })
@@ -35,14 +35,14 @@ test(`[scenario:review-blocking-first] A review opens on its blocking finding be
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(findingRows(page)).toHaveCount(2)
 
-  // The blocking card: outside the findings, no `finding` test id, before the table, in the first screen.
+  // The blocking card: outside the findings, no `finding` test id, before the finding cards, in the first screen.
   const cards = blockingCards(page)
   await expect(cards).toHaveCount(1)
   await expect(cards).toContainText(PENDING_P1)
   await expect(cards).toContainText('P1 · open · coverage · lane ui')
   await expect(findings(page).getByTestId('blocking-finding')).toHaveCount(0)
   await expect(page.getByTestId('blocking-findings').getByTestId('finding')).toHaveCount(0)
-  expect(await precedes(cards.first(), findings(page).locator('table').first())).toBe(true)
+  expect(await precedes(cards.first(), findingRows(page).first())).toBe(true)
   expect((await cards.first().boundingBox())!.y).toBeLessThan(900)
   await expect(cards.getByRole('link', { name: 'Requirement in the ui task ›' })).toBeVisible()
   await expect(indexLink(page, 'blocking')).toHaveAttribute('data-count', '1')
@@ -73,18 +73,19 @@ test(`[scenario:review-blocking-first] A review opens on its blocking finding be
   await expect(findingRows(page)).toHaveCount(2)
   await expect(blockingCards(page)).toHaveCount(1)
   await expect(blockingCards(page)).toContainText(PRINT_P1)
-  expect(await precedes(blockingCards(page).first(), findings(page).locator('table').first())).toBe(true)
+  expect(await precedes(blockingCards(page).first(), findingRows(page).first())).toBe(true)
   const print = reviewer(page, 'review')
   await expect(print.getByTestId('reviewer-time')).toContainText('launch time not recorded (print)')
   await expect(print).not.toContainText(/took|deadline/)
   await renderedText(nodeDetail(page))
 
-  // At 390 px the same findings DOM is restyled as cards: no second copy, no sideways scroll, the headers still there.
+  // At 390 px the same finding cards stack: no second copy, no sideways scroll, every field still labelled.
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(findingRows(page)).toHaveCount(2)
-  expect(await display(findingRows(page).first())).toBe('block')
-  await expect(findings(page).locator('table').first().getByRole('columnheader')).toHaveCount(5)
-  for (const wrap of await findings(page).locator('.table-wrap').all()) expect(await overflow(wrap)).toBeLessThanOrEqual(0)
+  expect(await display(findingRows(page).first())).toBe('flex')
+  await expect(findingRows(page).first().locator('.ui-sev')).toHaveCount(1)
+  await expect(findingRows(page).first().locator('.finding-field-label')).toHaveText(['Worker', 'Reviewer', 'Requirement'])
+  for (const card of await findingRows(page).all()) expect(await overflow(card)).toBeLessThanOrEqual(0)
   await expect.poll(() => pageWidth(page)).toBeLessThanOrEqual(390)
   await expect(blockingCards(page)).toHaveCount(1)
   await expectNoExecutionControls(page)
