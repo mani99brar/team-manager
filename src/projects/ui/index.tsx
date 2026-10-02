@@ -23,12 +23,13 @@ export function Card({ tone = 'idle', className = '', children, ...rest }: { ton
   return <article className={classes} {...rest}>{children}</article>
 }
 
-export function Section({ title, sub, tools, className = '', children, ...rest }: { title: ReactNode; sub?: ReactNode; tools?: ReactNode; children: ReactNode } & HTMLAttributes<HTMLElement>) {
+/** A page section with one header: its title, a one-line sub-header (counts, an empty state) and tools on the right. `headingId` names the section by its title. */
+export function Section({ title, sub, tools, headingId, className = '', children, ...rest }: { title: ReactNode; sub?: ReactNode; tools?: ReactNode; headingId?: string; children?: ReactNode } & HTMLAttributes<HTMLElement>) {
   const classes = ['ui-section', className].filter(Boolean).join(' ')
   return (
-    <section className={classes} {...rest}>
+    <section className={classes} aria-labelledby={headingId} {...rest}>
       <header className="ui-section-header">
-        <h2>{title}</h2>
+        <h2 id={headingId}>{title}</h2>
         {sub ? <span className="ui-sub">{sub}</span> : null}
         {tools ? <div className="ui-tools">{tools}</div> : null}
       </header>
@@ -55,7 +56,7 @@ export function Figures({ items, className = '', ...rest }: { items: readonly Fi
 
 export type Filter = { id: string; label: ReactNode; count?: number }
 
-export function FilterRow({ filters, selected, onSelect, className = '', ...rest }: { filters: readonly Filter[]; selected: string; onSelect: (id: string) => void } & DivProps) {
+export function FilterRow({ filters, selected, onSelect, className = '', ...rest }: { filters: readonly Filter[]; selected: string; onSelect: (id: string) => void } & Omit<DivProps, 'onSelect'>) {
   const classes = ['ui-filters', className].filter(Boolean).join(' ')
   return (
     <div className={classes} role="group" {...rest}>
@@ -70,7 +71,7 @@ export function FilterRow({ filters, selected, onSelect, className = '', ...rest
 }
 
 /** Several filters pressed at once (a reviewer, a lane and "Open only" together); each button toggles independently. */
-export function FilterToggles({ filters, selected, onToggle, className = '', ...rest }: { filters: readonly Filter[]; selected: ReadonlySet<string>; onToggle: (id: string, pressed: boolean) => void } & DivProps) {
+export function FilterToggles({ filters, selected, onToggle, className = '', ...rest }: { filters: readonly Filter[]; selected: ReadonlySet<string>; onToggle: (id: string, pressed: boolean) => void } & Omit<DivProps, 'onToggle'>) {
   const classes = ['ui-filters', className].filter(Boolean).join(' ')
   return (
     <div className={classes} role="group" {...rest}>

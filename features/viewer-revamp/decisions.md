@@ -29,6 +29,8 @@ From the operator's answers of 2026-10-01 (scope, jobs, look, delivery) and the 
 
 - Run 007 (2026-10-02): run 006's candidate (`9823632c`, tag `workflow/viewer-revamp-006-candidate`) passed every check, was approved by the general reviewer and blocked by the coverage reviewer on one P1 (the step strip's non-colour status carriers, glyph and accessible-name words, are untested) and nine P2s; both lanes restore from that candidate and close their findings. Print-transport reviewers again.
 
+- Run 008 (2026-10-02): the design challenge of run 007 showed the pages lane could not close the FilterToggles typing finding because the shell's `ui/index.tsx` seam was not in the base; the base (`feature/viewer-revamp`) now carries the shell's `theme.css`, `tone.ts`, `ui/index.tsx` and `ui/props.check.ts` from candidate `9823632c`, so both snapshots see the same seam. The paused-without-`since` fixture, the request-level no-web-font check and the narrow-rail assertion are settled in the shell task.
+
 ## Assumptions
 
 - Running cards show a deadline-based progress bar only when the served activity carries the deadline; otherwise elapsed time only.
