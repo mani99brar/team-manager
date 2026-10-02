@@ -27,6 +27,8 @@ From the operator's answers of 2026-10-01 (scope, jobs, look, delivery) and the 
 
 - Run 006 (2026-10-02): run 005's candidate (`09fafd8b`, tag `workflow/viewer-revamp-005-candidate`) passed every check, was approved by the coverage reviewer and by the general reviewer's file (four P2s), and the run ended on the general reviewer's deadline because a Claude Code auto-update broke its background session before the controller accepted the file. Both lanes restore from that candidate and close the general reviewer's P2s; run 006 uses `--reviewer-transport print` so the review step does not depend on background sessions an update can break.
 
+- Run 007 (2026-10-02): run 006's candidate (`9823632c`, tag `workflow/viewer-revamp-006-candidate`) passed every check, was approved by the general reviewer and blocked by the coverage reviewer on one P1 (the step strip's non-colour status carriers, glyph and accessible-name words, are untested) and nine P2s; both lanes restore from that candidate and close their findings. Print-transport reviewers again.
+
 ## Assumptions
 
 - Running cards show a deadline-based progress bar only when the served activity carries the deadline; otherwise elapsed time only.
