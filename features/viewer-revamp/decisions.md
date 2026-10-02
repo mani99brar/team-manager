@@ -37,9 +37,9 @@ From the operator's answers of 2026-10-01 (scope, jobs, look, delivery) and the 
 - Project prefix grouping folds families of three or more siblings sharing the prefix before the last `-` segment.
 - Fonts are system stacks only in this run; a web font is a follow-up decision for the operator.
 - Workers run targeted tests only; the verifier runs every policy check per phase.
+- The operator chose Calm on 2026-10-02; Bold, the look switch, `data-look` and the `mdm-look` storage key were removed, so Calm is the only look.
 
 ## Deferred
 
-- Removing the look the operator does not keep.
 - Any server-side list endpoint or new contract field (PRD_VIEWER_UX B4, B5).
 - The document and skills areas of the app.

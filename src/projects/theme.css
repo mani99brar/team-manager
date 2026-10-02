@@ -1,4 +1,4 @@
-/* Projects viewer tokens (docs/PRD_VIEWER_REVAMP.md section 4), scoped to the Projects shell so the document and skills areas keep the app's own tokens of index.css. Two looks: Calm on `.projects-shell`, Bold on `.projects-shell[data-look="bold"]`; each with a dark variant. Components take every colour from these tokens; state colours (ok, run, warn, fail, pause, idle) and severities (p0, p1, p2) are separate from the accent. Every chip text on its soft background keeps a contrast ratio of at least 4.5:1 in both looks and both themes. */
+/* Projects viewer tokens (docs/PRD_VIEWER_REVAMP.md section 4), scoped to the Projects shell so the document and skills areas keep the app's own tokens of index.css. Calm on `.projects-shell`, with a dark variant. Components take every colour from these tokens; state colours (ok, run, warn, fail, pause, idle) and severities (p0, p1, p2) are separate from the accent. Every chip text on its soft background keeps a contrast ratio of at least 4.5:1 in both themes. */
 .projects-shell {
   --bg: #f4f6f9; --surface: #ffffff; --surface-2: #eceff4; --fg: #1b2130; --muted: #5d6675; --border: #dde2ea; --border-strong: #c4ccd8;
   --accent: #3454d1; --accent-fg: #ffffff; --accent-soft: #e6ebfb;
@@ -25,30 +25,6 @@
   --p0: #ff8b93; --p1: #f5ab5a; --p2: #a9b2c2; --sev-fg: #0d1220; --shadow: none; color-scheme: dark;
 }
 
-/* Bold: warm paper, a navy band for section headers, coral accent, tinted cards, a display face. */
-.projects-shell[data-look="bold"] {
-  --bg: #f7f3ec; --surface: #fffdf9; --surface-2: #efe9df; --fg: #171c2e; --muted: #5a5f70; --border: #e2dacc; --border-strong: #c9bfa9;
-  --accent: #b23e18; --accent-fg: #ffffff; --accent-soft: #fde3d8;
-  --ok: #0f6b45; --ok-soft: #d4f2e4; --run: #1452b4; --run-soft: #d9e7fd; --warn: #9a4e07; --warn-soft: #fde7c6; --fail: #ad1f2c; --fail-soft: #fcdada; --pause: #754a00; --pause-soft: #fff0b8; --idle: #5c6172; --idle-soft: #e9e4d9;
-  --p0: #ad1f2c; --p1: #a3450a; --p2: #4f5466; --sev-fg: #ffffff;
-  --font-display: "Avenir Next", "Trebuchet MS", system-ui, sans-serif; --font-body: "Avenir Next", "Segoe UI", system-ui, sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace;
-  --radius: 12px; --shadow: 0 6px 20px rgba(60, 40, 10, 0.08); --band: #14213d; --band-fg: #f7f3ec;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .projects-shell[data-look="bold"] {
-    --bg: #15131a; --surface: #1f1c26; --surface-2: #2a2634; --fg: #f1ecf4; --muted: #a79fb3; --border: #342f40; --border-strong: #4a4458;
-    --accent: #ff8a60; --accent-fg: #1a0d08; --accent-soft: #46261b;
-    --ok: #62d99a; --ok-soft: #173b2a; --run: #8cb4ff; --run-soft: #1f2d4f; --warn: #ffbb66; --warn-soft: #432d10; --fail: #ff8f98; --fail-soft: #4a1c22; --pause: #ffd87a; --pause-soft: #41350f; --idle: #b3abc0; --idle-soft: #2e2938;
-    --p0: #ff8f98; --p1: #ffbb66; --p2: #b3abc0; --sev-fg: #1a0d08; --band: #0d1630; --band-fg: #f1ecf4; --shadow: none;
-  }
-}
-:root[data-theme="dark"] .projects-shell[data-look="bold"] {
-  --bg: #15131a; --surface: #1f1c26; --surface-2: #2a2634; --fg: #f1ecf4; --muted: #a79fb3; --border: #342f40; --border-strong: #4a4458;
-  --accent: #ff8a60; --accent-fg: #1a0d08; --accent-soft: #46261b;
-  --ok: #62d99a; --ok-soft: #173b2a; --run: #8cb4ff; --run-soft: #1f2d4f; --warn: #ffbb66; --warn-soft: #432d10; --fail: #ff8f98; --fail-soft: #4a1c22; --pause: #ffd87a; --pause-soft: #41350f; --idle: #b3abc0; --idle-soft: #2e2938;
-  --p0: #ff8f98; --p1: #ffbb66; --p2: #b3abc0; --sev-fg: #1a0d08; --band: #0d1630; --band-fg: #f1ecf4; --shadow: none;
-}
-
 /* Shared primitives (src/projects/ui). Tone classes: .tone-ok .tone-run .tone-warn .tone-fail .tone-pause .tone-idle; severities: .sev-p0 .sev-p1 .sev-p2. */
 .projects-shell .ui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }
 .projects-shell .ui-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -68,18 +44,11 @@
 .projects-shell .ui-card.tone-warn { border-left-color: var(--warn); }
 .projects-shell .ui-card.tone-fail { border-left-color: var(--fail); }
 .projects-shell .ui-card.tone-pause { border-left-color: var(--pause); }
-.projects-shell[data-look="bold"] .ui-card.tone-warn { background: var(--warn-soft); }
-.projects-shell[data-look="bold"] .ui-card.tone-fail { background: var(--fail-soft); }
-.projects-shell[data-look="bold"] .ui-card.tone-run { background: var(--run-soft); }
-.projects-shell[data-look="bold"] .ui-card.tone-pause { background: var(--pause-soft); }
 .projects-shell .ui-section { display: flex; flex-direction: column; gap: 10px; }
 .projects-shell .ui-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .projects-shell .ui-section-header h2 { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .projects-shell .ui-section-header .ui-sub { color: var(--muted); font-size: 13px; }
 .projects-shell .ui-section-header .ui-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
-.projects-shell[data-look="bold"] .ui-section-header { background: var(--band); color: var(--band-fg); padding: 8px 14px; border-radius: var(--radius); }
-.projects-shell[data-look="bold"] .ui-section-header h2 { color: var(--band-fg); letter-spacing: 0; text-transform: none; font-size: 15px; }
-.projects-shell[data-look="bold"] .ui-section-header .ui-sub { color: var(--band-fg); opacity: 0.85; }
 .projects-shell .ui-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .projects-shell .ui-figure { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 2px; box-shadow: var(--shadow); }
 .projects-shell .ui-figure .ui-figure-value { font-family: var(--font-display); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }

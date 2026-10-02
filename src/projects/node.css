@@ -43,7 +43,6 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
 .section-index-count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .node-section { margin-top: 12px; }
 .workspace-projects .node-section-title { margin: 0 0 6px; font-family: var(--font-display); }
-.projects-shell[data-look="bold"] .node-section-title { background: var(--band); color: var(--band-fg); padding: 6px 12px; border-radius: var(--radius); }
 .node-section h4:focus, .node-section h5:focus, .node-section summary:focus { outline: none; }
 
 @media (max-width: 760px) {

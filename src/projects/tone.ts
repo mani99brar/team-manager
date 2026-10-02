@@ -62,15 +62,6 @@ export const toneClass = (tone: Tone): string => `tone-${tone}`
 /** CSS class for a severity tone, as `theme.css` spells it. */
 export const severityClass = (tone: SeverityTone): string => `sev-${tone}`
 
-export const LOOKS = ['calm', 'bold'] as const
-export type Look = (typeof LOOKS)[number]
-export const LOOK_STORAGE_KEY = 'mdm-look'
-
-/** The look to apply from a stored value: anything but `bold` is `calm`. */
-export function lookFromStored(value: string | null | undefined): Look {
-  return value === 'bold' ? 'bold' : 'calm'
-}
-
 /** What each tone says in words, for the title of a rail dot and anything else drawn in a tone: colour never carries state alone. */
 export const TONE_LABEL: Record<Tone, string> = {
   ok: 'Succeeded',

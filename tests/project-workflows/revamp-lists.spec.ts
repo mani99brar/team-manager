@@ -1,6 +1,6 @@
 /**
  * Projects viewer revamp, lane `shell` (docs/PRD_VIEWER_REVAMP.md 3, 4, 5.1, 5.5 and 7): Runs home as a project rail and
- * Needs you, Running and Recent sections, and the Calm/Bold look switch with its contrast in both themes.
+ * Needs you, Running and Recent sections, and the Calm look with its contrast in both themes.
  *
  * The `revamp-home` scenario adds the `project-B-1..3` family through its own route override of `/api/projects` (the worker
  * phase builds on the mocks' answer, the candidate phase on the real API's), so the folded rail group has something to show;
@@ -8,7 +8,7 @@
  * `ux-revamp-lists` runs, and assert on those runs only, since the combined candidate also lists other slices' runs.
  */
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test'
-import { contrastRatio, LOOK_STORAGE_KEY, parseColor } from '../../src/projects/tone.ts'
+import { contrastRatio, parseColor } from '../../src/projects/tone.ts'
 import { waitingKind } from '../../src/projects/lists.ts'
 import type { Project, RunSummary } from '../../contracts/projects/v1.ts'
 import { EMPTY_WORKFLOW_ID, PROJECT } from './fixtures.ts'
@@ -265,12 +265,11 @@ test(`[scenario:revamp-home] Runs home: a project rail with status dots and the 
   await expect(page.getByTestId('projects-list').locator('details[data-prefix="project-B"]')).toHaveJSProperty('open', true)
 })
 
-/** The token pairs every primitive draws text with (PRD_VIEWER_REVAMP 4); the band only where it is opaque. */
+/** The token pairs every primitive draws text with (PRD_VIEWER_REVAMP 4). */
 const PAIRS: [string, string][] = [
   ['--ok', '--ok-soft'], ['--run', '--run-soft'], ['--warn', '--warn-soft'], ['--fail', '--fail-soft'], ['--pause', '--pause-soft'], ['--idle', '--idle-soft'],
   ['--sev-fg', '--p0'], ['--sev-fg', '--p1'], ['--sev-fg', '--p2'],
   ['--fg', '--surface'], ['--fg', '--bg'], ['--muted', '--surface'], ['--muted', '--bg'],
-  ['--band-fg', '--band'],
 ]
 
 /** A colour's relative luminance proxy: its contrast against black (higher is lighter). */
@@ -297,80 +296,48 @@ async function renderedChips(shell: Locator) {
   }))
 }
 
-test(`[scenario:revamp-look] The Calm/Bold switch sets data-look on the Projects shell only, is remembered, and every chip reads at 4.5:1 in both looks and both themes (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:revamp-look] Calm is the only look: no look switch and no data-look anywhere, and every chip reads at 4.5:1 in both themes (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
   await page.clock.setFixedTime(REVAMP_NOW)
   await page.goto(projectsUrl)
   const shell = page.getByTestId('projects-workspace')
-  const switcher = page.getByRole('group', { name: 'Look' })
   const needsCard = page.getByTestId('needs-you').locator(`li:has(> a[data-run-id="${RUN_DESK_PANE}"])`)
-  const header = page.getByTestId('needs-you').locator('.ui-section-header')
-  const resolved = (name: string) => shell.evaluate((element, token) => element.ownerDocument.defaultView!.getComputedStyle(element).getPropertyValue(token).trim(), name)
   const background = (target: Locator) => target.evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).backgroundColor)
-  const sameColour = (a: string, b: string) => expect(parseColor(a)?.slice(0, 3), `${a} vs ${b}`).toEqual(parseColor(b)?.slice(0, 3))
   await expect(needsCard).toHaveCount(1)
 
-  // Calm without a stored value; the header's first button is still Refresh and the switch follows it.
-  expect(await page.evaluate(key => localStorage.getItem(key), LOOK_STORAGE_KEY)).toBeNull()
-  await expect(shell).toHaveAttribute('data-look', 'calm')
-  await expect(switcher.getByRole('button', { name: 'Calm' })).toHaveAttribute('aria-pressed', 'true')
-  await expect(switcher.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'false')
-  expect(await page.evaluate("document.querySelector('.app-header button')?.textContent")).toMatch(/^Refresh/)
-  expect(await background(header)).toBe('rgba(0, 0, 0, 0)')
-
-  // Bold: on the shell element only, never on <html>; the section headers take the band, a toned card its soft background.
-  await switcher.getByRole('button', { name: 'Bold' }).click()
-  await expect(shell).toHaveAttribute('data-look', 'bold')
+  // No switch and no look attribute, on the shell, <html>, <body> or anywhere else; the header's first button is Refresh.
+  await expect(page.locator('.look-switch')).toHaveCount(0)
+  await expect(page.locator('[data-look]')).toHaveCount(0)
   expect(await page.evaluate("[document.documentElement.hasAttribute('data-look'), document.body.hasAttribute('data-look')]")).toEqual([false, false])
-  expect(await page.evaluate(key => localStorage.getItem(key), LOOK_STORAGE_KEY)).toBe('bold')
-  sameColour(await background(header), await resolved('--band'))
-  sameColour(await background(needsCard), await resolved('--warn-soft'))
+  expect(await page.evaluate("document.querySelector('.app-header button')?.textContent")).toMatch(/^Refresh/)
   await attach(page, testInfo, 'revamp-look')
-  // The choice survives a reload.
-  await page.reload()
-  await expect(page.getByTestId('projects-workspace')).toHaveAttribute('data-look', 'bold')
-  await expect(switcher.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'true')
-  // The runs are read again after the reload: measure only once they are on the page.
-  await expect(needsCard).toHaveCount(1)
   await expect(page.getByTestId('recent-runs').locator('a[data-run-id]').first()).toBeVisible()
 
-  // Both looks in both themes: every token pair the primitives use, and every rendered chip, at 4.5:1 or more.
+  // Both themes: every token pair the primitives use, and every rendered chip, at 4.5:1 or more.
   const surfaces: Record<string, { bg: string; fg: string; surface: string; pageBackground: string }> = {}
   for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme })
     // The emulated scheme took effect: the page itself now matches it, and nothing pins the other one.
     expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches"), colorScheme).toBe(colorScheme === 'dark')
-    for (const look of ['calm', 'bold'] as const) {
-      await switcher.getByRole('button', { name: look === 'calm' ? 'Calm' : 'Bold' }).click()
-      await expect(shell).toHaveAttribute('data-look', look)
-      const values = await tokens(shell)
-      const where = `${look} ${colorScheme}`
-      surfaces[where] = { bg: values['--bg'], fg: values['--fg'], surface: values['--surface'], pageBackground: await background(shell) }
-      for (const [fg, bg] of PAIRS) {
-        const background = parseColor(values[bg])
-        expect(background, `${where}: ${bg} = ${values[bg]}`).not.toBeNull()
-        if (bg === '--band' && background![3] === 0) continue
-        expect(contrastRatio(values[fg], values[bg]), `${where}: ${fg} ${values[fg]} on ${bg} ${values[bg]}`).toBeGreaterThanOrEqual(4.5)
-      }
-      if (look === 'calm') expect(parseColor(values['--band'])![3], `${where}: Calm has no band`).toBe(0)
-      const chips = await renderedChips(shell)
-      expect(chips.some(chip => chip.className.includes('ui-chip')), `${where}: chips rendered`).toBe(true)
-      expect(chips.some(chip => chip.className.includes('status-badge')), `${where}: status badges rendered`).toBe(true)
-      for (const chip of chips) {
-        expect(chip.text.length, `${where}: ${chip.className} keeps its text`).toBeGreaterThan(0)
-        expect(contrastRatio(chip.color, chip.background), `${where}: "${chip.text}" (${chip.className}) ${chip.color} on ${chip.background}`).toBeGreaterThanOrEqual(4.5)
-      }
+    const values = await tokens(shell)
+    surfaces[colorScheme] = { bg: values['--bg'], fg: values['--fg'], surface: values['--surface'], pageBackground: await background(shell) }
+    for (const [fg, bg] of PAIRS) {
+      expect(parseColor(values[bg]), `${colorScheme}: ${bg} = ${values[bg]}`).not.toBeNull()
+      expect(contrastRatio(values[fg], values[bg]), `${colorScheme}: ${fg} ${values[fg]} on ${bg} ${values[bg]}`).toBeGreaterThanOrEqual(4.5)
+    }
+    const chips = await renderedChips(shell)
+    expect(chips.some(chip => chip.className.includes('ui-chip')), `${colorScheme}: chips rendered`).toBe(true)
+    expect(chips.some(chip => chip.className.includes('status-badge')), `${colorScheme}: status badges rendered`).toBe(true)
+    for (const chip of chips) {
+      expect(chip.text.length, `${colorScheme}: ${chip.className} keeps its text`).toBeGreaterThan(0)
+      expect(contrastRatio(chip.color, chip.background), `${colorScheme}: "${chip.text}" (${chip.className}) ${chip.color} on ${chip.background}`).toBeGreaterThanOrEqual(4.5)
     }
   }
-  // The dark set really was measured: in each look the dark tokens, and the shell's own painted background, differ from the
-  // light ones (a dark ground under light text), so the loop above did not read the light set twice.
-  for (const look of ['calm', 'bold'] as const) {
-    const light = surfaces[`${look} light`]
-    const dark = surfaces[`${look} dark`]
-    for (const key of ['bg', 'fg', 'surface', 'pageBackground'] as const) expect(dark[key], `${look}: ${key} changes with the theme`).not.toBe(light[key])
-    expect(luminanceOf(dark.bg), `${look}: the dark --bg is dark`).toBeLessThan(luminanceOf(light.bg))
-    expect(luminanceOf(dark.fg), `${look}: the dark --fg is light`).toBeGreaterThan(luminanceOf(light.fg))
-  }
+  // The dark set really was measured: the dark tokens, and the shell's own painted background, differ from the light ones
+  // (a dark ground under light text), so the loop above did not read the light set twice.
+  for (const key of ['bg', 'fg', 'surface', 'pageBackground'] as const) expect(surfaces.dark[key], `${key} changes with the theme`).not.toBe(surfaces.light[key])
+  expect(luminanceOf(surfaces.dark.bg), 'the dark --bg is dark').toBeLessThan(luminanceOf(surfaces.light.bg))
+  expect(luminanceOf(surfaces.dark.fg), 'the dark --fg is light').toBeGreaterThan(luminanceOf(surfaces.light.fg))
   await expectNoExecutionControls(page)
 })
 
@@ -414,16 +381,11 @@ test(`Runs home with a run list that failed to load: a fail-toned Attention card
   // Only that list is missing: its runs are gone, the other lists of the project still show theirs.
   for (const runId of OWN) await expect(page.locator(`a[data-run-id="${runId}"]`)).toHaveCount(0)
   await expect(page.getByTestId('recent-runs').locator('a[data-run-id]').first()).toBeVisible()
-  // In Bold the card takes the fail tone's soft background, and its text reads on it.
-  await page.getByRole('group', { name: 'Look' }).getByRole('button', { name: 'Bold' }).click()
-  const shell = page.getByTestId('projects-workspace')
-  const [cardBackground, cardColour, failSoft] = await card.evaluate(element => {
+  // The card's text reads on the background it is drawn on.
+  const [cardBackground, cardColour] = await card.evaluate(element => {
     const view = element.ownerDocument.defaultView!
-    const shellElement = element.closest('.projects-shell')!
-    return [view.getComputedStyle(element).backgroundColor, view.getComputedStyle(element).color, view.getComputedStyle(shellElement).getPropertyValue('--fail-soft').trim()]
+    return [view.getComputedStyle(element).backgroundColor, view.getComputedStyle(element).color]
   })
-  await expect(shell).toHaveAttribute('data-look', 'bold')
-  expect(parseColor(cardBackground)?.slice(0, 3)).toEqual(parseColor(failSoft)?.slice(0, 3))
   expect(contrastRatio(cardColour, cardBackground)).toBeGreaterThanOrEqual(4.5)
   await expectNoExecutionControls(page)
 })
@@ -460,12 +422,11 @@ for (const failure of LIST_FAILURES) {
 /** A request for a web font: a font host, or a font file by its extension. */
 const isFontRequest = (url: string) => /fonts\.googleapis\.com|fonts\.gstatic\.com|\.woff2?(\?|#|$)/i.test(url)
 
-test(`No web font: the Projects pages in both looks request no font and declare no @font-face (${phase})`, async ({ page }) => {
+test(`No web font: the Projects pages request no font and declare no @font-face (${phase})`, async ({ page }) => {
   test.setTimeout(90_000)
   const fonts: string[] = []
   page.on('request', request => { if (isFontRequest(request.url()) || request.resourceType() === 'font') fonts.push(request.url()) })
   await page.clock.setFixedTime(REVAMP_NOW)
-  const switcher = page.getByRole('group', { name: 'Look' })
   const shell = page.getByTestId('projects-workspace')
   /** What the document declares: every @font-face rule in a readable sheet, every FontFace in document.fonts, every font link. */
   // Evaluated as a string: the spec compiles without the DOM library, as the other specs' page code reads the DOM untyped.
@@ -488,13 +449,8 @@ test(`No web font: the Projects pages in both looks request no font and declare 
   for (const url of [projectsUrl, projectUrl(PROJECT.project_id), workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID)]) {
     await page.goto(url)
     await expect(shell).toBeVisible()
-    for (const look of ['calm', 'bold'] as const) {
-      await switcher.getByRole('button', { name: look === 'calm' ? 'Calm' : 'Bold' }).click()
-      await expect(shell).toHaveAttribute('data-look', look)
-      // Bold's display face is a system stack: the heading renders with it and still nothing is fetched.
-      await expect(page.locator('.ui-section-header h2').first()).toBeVisible()
-      expect(await declared(), `${url} in ${look}`).toEqual({ faces: [], fontSet: [], links: [] })
-    }
+    await expect(page.locator('.ui-section-header h2').first()).toBeVisible()
+    expect(await declared(), url).toEqual({ faces: [], fontSet: [], links: [] })
   }
   expect(fonts).toEqual([])
 })
@@ -507,7 +463,7 @@ const HISTORY: Record<string, [label: string, glyph: string, tone: string]> = Ob
   ...REVAMP_FAILED_RUNS.map(runId => [runId, ['Failed', '✗', 'fail']]),
 ])
 
-test(`Project and feature pages (PRD_VIEWER_REVAMP 5.2): feature cards with the last run, the run-history strip and lane chips, the definition open only without runs, readable in both looks and themes (${phase})`, async ({ page }) => {
+test(`Project and feature pages (PRD_VIEWER_REVAMP 5.2): feature cards with the last run, the run-history strip and lane chips, the definition open only without runs, readable in both themes (${phase})`, async ({ page }) => {
   test.setTimeout(90_000)
   await page.clock.setFixedTime(REVAMP_NOW)
 
@@ -570,21 +526,16 @@ test(`Project and feature pages (PRD_VIEWER_REVAMP 5.2): feature cards with the 
   expect(cut.title).toMatch(/needs attention in its pane/)
   await narrowList.evaluate(style => style.remove())
 
-  // Every chip of the feature page (history glyphs, lane chips, status pills) reads at 4.5:1 in both looks and both themes.
+  // Every chip of the feature page (history glyphs, lane chips, status pills) reads at 4.5:1 in both themes.
   const shell = page.getByTestId('projects-workspace')
-  const switcher = page.getByRole('group', { name: 'Look' })
   for (const colorScheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme })
-    for (const look of ['calm', 'bold'] as const) {
-      await switcher.getByRole('button', { name: look === 'calm' ? 'Calm' : 'Bold' }).click()
-      await expect(shell).toHaveAttribute('data-look', look)
-      const where = `${look} ${colorScheme}`
-      const chips = await renderedChips(shell)
-      for (const kind of ['run-history-chip', 'lane-chip', 'review-step-chip', 'status-badge']) expect(chips.some(chip => chip.className.includes(kind)), `${where}: ${kind} rendered`).toBe(true)
-      for (const chip of chips) {
-        expect(chip.text.length, `${where}: ${chip.className} keeps its text`).toBeGreaterThan(0)
-        expect(contrastRatio(chip.color, chip.background), `${where}: "${chip.text}" (${chip.className}) ${chip.color} on ${chip.background}`).toBeGreaterThanOrEqual(4.5)
-      }
+    const where = colorScheme
+    const chips = await renderedChips(shell)
+    for (const kind of ['run-history-chip', 'lane-chip', 'review-step-chip', 'status-badge']) expect(chips.some(chip => chip.className.includes(kind)), `${where}: ${kind} rendered`).toBe(true)
+    for (const chip of chips) {
+      expect(chip.text.length, `${where}: ${chip.className} keeps its text`).toBeGreaterThan(0)
+      expect(contrastRatio(chip.color, chip.background), `${where}: "${chip.text}" (${chip.className}) ${chip.color} on ${chip.background}`).toBeGreaterThanOrEqual(4.5)
     }
   }
   await expectNoExecutionControls(page)
@@ -595,40 +546,4 @@ test(`Project and feature pages (PRD_VIEWER_REVAMP 5.2): feature cards with the 
   await expect(page.getByRole('list', { name: 'Run history, newest first' })).toHaveCount(0)
   await expect(page.getByTestId('current-definition')).toHaveJSProperty('open', true)
   await expect(page.getByTestId('current-definition')).toContainText('3 nodes')
-})
-
-test(`The look switch keeps working when storage throws, and an invalid stored look falls back to Calm (${phase})`, async ({ page }) => {
-  const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
-  await page.clock.setFixedTime(REVAMP_NOW)
-  const shell = page.getByTestId('projects-workspace')
-  const switcher = page.getByRole('group', { name: 'Look' })
-
-  // A stored value that is not a look reads as Calm; choosing a look then replaces it.
-  await page.goto(projectsUrl)
-  await page.evaluate(key => localStorage.setItem(key, 'neon'), LOOK_STORAGE_KEY)
-  await page.reload()
-  await expect(shell).toHaveAttribute('data-look', 'calm')
-  await expect(switcher.getByRole('button', { name: 'Calm' })).toHaveAttribute('aria-pressed', 'true')
-  await switcher.getByRole('button', { name: 'Bold' }).click()
-  await expect(shell).toHaveAttribute('data-look', 'bold')
-  expect(await page.evaluate(key => localStorage.getItem(key), LOOK_STORAGE_KEY)).toBe('bold')
-
-  // Storage that throws on every read and write (blocked site data): Calm, even though Bold is stored, and the switch still
-  // changes the look for the page; nothing throws out of the app.
-  await page.addInitScript(() => {
-    const blocked = () => { throw new DOMException('The operation is insecure.', 'SecurityError') }
-    Storage.prototype.getItem = blocked
-    Storage.prototype.setItem = blocked
-  })
-  await page.reload()
-  expect(await page.evaluate(() => { try { localStorage.getItem('x'); return 'readable' } catch { return 'throws' } })).toBe('throws')
-  await expect(shell).toHaveAttribute('data-look', 'calm')
-  await expect(page.getByTestId('needs-you')).toBeVisible()
-  await switcher.getByRole('button', { name: 'Bold' }).click()
-  await expect(shell).toHaveAttribute('data-look', 'bold')
-  await expect(switcher.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'true')
-  await switcher.getByRole('button', { name: 'Calm' }).click()
-  await expect(shell).toHaveAttribute('data-look', 'calm')
-  expect(errors).toEqual([])
 })

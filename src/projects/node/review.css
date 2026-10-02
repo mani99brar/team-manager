@@ -14,7 +14,7 @@
 .blocking-card-head { font-size: 0.85rem; }
 .blocking-card-message { font-weight: 600; }
 .blocking-card-links { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.85rem; }
-/* On the card's tinted background the accent can fall under 4.5:1 (Bold's coral on fail-soft): its links take the text colour, underlined. */
+/* On the card's tinted background the accent can fall under 4.5:1: its links take the text colour, underlined. */
 .projects-shell .blocking-card a { color: var(--fg); text-decoration: underline; }
 
 /* Findings as cards (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in the severity's colour; the filter row above them. */

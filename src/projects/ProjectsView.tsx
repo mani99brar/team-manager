@@ -17,7 +17,7 @@ import { RunView } from './RunView.tsx'
 import { shortRevision, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
-import { statusTone, toneClass, type Look } from './tone.ts'
+import { statusTone, toneClass } from './tone.ts'
 import { Chip, Section } from './ui/index.tsx'
 import { TimeReferenceContext, useNow } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
@@ -29,8 +29,6 @@ const LOADING_FAILED = 'Loading failed.'
 type Props = {
   /** Null when the pathname is under /projects but malformed. */
   route: ProjectsRoute | null
-  /** The look the header's switch chose (docs/PRD_VIEWER_REVAMP.md 4), set as `data-look` on this shell element only. */
-  look?: Look
   refreshToken: number
   /** Whether a header Refresh is still loading in the background, for the button's busy state. */
   onRefreshingChange: (refreshing: boolean) => void
@@ -43,7 +41,7 @@ type Props = {
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, look = 'calm', refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
+export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
   const projectId = route && route.level !== 'projects' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
@@ -363,7 +361,7 @@ export function ProjectsView({ route, look = 'calm', refreshToken, onRefreshingC
         {/* Runs home says it at the rail's foot (docs/PRD_VIEWER_REVAMP.md 3); a Projects root without the rail says it here. */}
         {info !== null && !homeShown && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>
-      <main className="workspace workspace-projects projects-shell" data-look={look} aria-busy={busy} data-testid="projects-workspace">
+      <main className="workspace workspace-projects projects-shell" aria-busy={busy} data-testid="projects-workspace">
         {refreshFailure !== null && (
           <div className="projects-notice" role="alert" data-testid="refresh-failed">
             <p>

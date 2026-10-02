@@ -35,23 +35,14 @@
 
 /* Section headers of the run and node pages are h3/h4: they take the primitives' h2 look (theme.css). */
 .projects-shell .ui-section-header :is(h3, h4) { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-.projects-shell[data-look="bold"] .ui-section-header :is(h3, h4) { color: var(--band-fg); letter-spacing: 0; text-transform: none; font-size: 15px; }
-.projects-shell[data-look="bold"] .ui-section-header .projects-muted { color: inherit; }
 
-/* ---- Header card: two lines on a desktop, a top rule in the run's tone (Bold: the tone into the band and the accent) ---- */
+/* ---- Header card: two lines on a desktop, a top rule in the run's tone ---- */
 .run-header { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-top: 4px solid var(--idle); border-radius: var(--radius); padding: 6px 10px; box-shadow: var(--shadow); }
 .run-header.tone-ok { border-top-color: var(--ok); }
 .run-header.tone-run { border-top-color: var(--run); }
 .run-header.tone-warn { border-top-color: var(--warn); }
 .run-header.tone-fail { border-top-color: var(--fail); }
 .run-header.tone-pause { border-top-color: var(--pause); }
-.projects-shell[data-look="bold"] .run-header { border-top-width: 6px; border-image: linear-gradient(90deg, currentColor 0 30%, var(--band) 70%, var(--accent)) 1; border-image-width: 6px 0 0 0; }
-.projects-shell[data-look="bold"] .run-header.tone-ok { border-image-source: linear-gradient(90deg, var(--ok) 0 30%, var(--band) 70%, var(--accent)); }
-.projects-shell[data-look="bold"] .run-header.tone-run { border-image-source: linear-gradient(90deg, var(--run) 0 30%, var(--band) 70%, var(--accent)); }
-.projects-shell[data-look="bold"] .run-header.tone-warn { border-image-source: linear-gradient(90deg, var(--warn) 0 30%, var(--band) 70%, var(--accent)); }
-.projects-shell[data-look="bold"] .run-header.tone-fail { border-image-source: linear-gradient(90deg, var(--fail) 0 30%, var(--band) 70%, var(--accent)); }
-.projects-shell[data-look="bold"] .run-header.tone-pause { border-image-source: linear-gradient(90deg, var(--pause) 0 30%, var(--band) 70%, var(--accent)); }
-.projects-shell[data-look="bold"] .run-header.tone-idle { border-image-source: linear-gradient(90deg, var(--idle) 0 30%, var(--band) 70%, var(--accent)); }
 .projects-shell .run-header h2 { font-family: var(--font-display); }
 .run-header-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 30px; }
 /* A long title gives way (ellipsized, in full in its tooltip) so the status, span, chip and toggle keep one row. */

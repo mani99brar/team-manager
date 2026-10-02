@@ -531,17 +531,7 @@ const contrasts = (roots: Locator, where: string): Promise<Reading[]> => roots.e
   return readings
 }, where)
 
-/** Bold without the shell's switch: `data-look` set on the shell after navigation, and a Bold-only token checked to resolve. */
-async function applyLook(page: Page, look: 'calm' | 'bold') {
-  if (look === 'bold') {
-    await workspace(page).evaluate(shell => (shell as unknown as { setAttribute: (name: string, value: string) => void }).setAttribute('data-look', 'bold'))
-    expect(await token(page, '--band'), 'Bold draws the section band').not.toBe('rgba(0, 0, 0, 0)')
-  } else {
-    expect(await token(page, '--band'), 'Calm has no section band').toBe('rgba(0, 0, 0, 0)')
-  }
-}
-
-test(`The run and node pages' chips, figures, phase summaries, cards, gate lines, check chips and step strip read at 4.5:1 in Calm and Bold, light and dark (${phase})`, async ({ page }) => {
+test(`The run and node pages' chips, figures, phase summaries, cards, gate lines, check chips and step strip read at 4.5:1 in light and dark (${phase})`, async ({ page }) => {
   test.setTimeout(180_000)
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -560,29 +550,26 @@ test(`The run and node pages' chips, figures, phase summaries, cards, gate lines
   let lightBg = ''
   for (const scheme of ['light', 'dark'] as const) {
     await page.emulateMedia({ colorScheme: scheme })
-    for (const look of ['calm', 'bold'] as const) {
-      for (const entry of pages) {
-        await page.goto(entry.url)
-        await entry.ready(page)
-        await applyLook(page, look)
-        // The theme took: dark changes the shell's background token.
-        const bg = await token(page, '--bg')
-        if (scheme === 'light' && look === 'calm') lightBg = bg
-        if (scheme === 'dark' && look === 'calm') expect(bg, 'dark changes --bg').not.toBe(lightBg)
-        for (const root of entry.roots) {
-          const readings = await contrasts(page.locator(root), `${scheme}/${look} ${entry.url} ${root}`)
-          expect(readings.length, `${scheme}/${look} ${entry.url} ${root} has text to measure`).toBeGreaterThan(0)
-          measured += readings.length
-          failures.push(...readings.filter(reading => reading.ratio < 4.5))
-        }
-        // Pressed filter toggles read too.
-        if (entry.url.endsWith('/review')) {
-          await toggle(page, 'reviewer:coverage').click()
-          failures.push(...(await contrasts(toggle(page, 'reviewer:coverage'), `${scheme}/${look} pressed toggle`)).filter(reading => reading.ratio < 4.5))
-        }
+    for (const entry of pages) {
+      await page.goto(entry.url)
+      await entry.ready(page)
+      // The theme took: dark changes the shell's background token.
+      const bg = await token(page, '--bg')
+      if (scheme === 'light') lightBg = bg
+      if (scheme === 'dark') expect(bg, 'dark changes --bg').not.toBe(lightBg)
+      for (const root of entry.roots) {
+        const readings = await contrasts(page.locator(root), `${scheme} ${entry.url} ${root}`)
+        expect(readings.length, `${scheme} ${entry.url} ${root} has text to measure`).toBeGreaterThan(0)
+        measured += readings.length
+        failures.push(...readings.filter(reading => reading.ratio < 4.5))
+      }
+      // Pressed filter toggles read too.
+      if (entry.url.endsWith('/review')) {
+        await toggle(page, 'reviewer:coverage').click()
+        failures.push(...(await contrasts(toggle(page, 'reviewer:coverage'), `${scheme} pressed toggle`)).filter(reading => reading.ratio < 4.5))
       }
     }
-  }
+}
   expect(measured).toBeGreaterThan(200)
   expect(failures, 'text under 4.5:1').toEqual([])
 })

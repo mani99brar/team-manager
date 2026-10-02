@@ -1,13 +1,13 @@
 /**
  * The one mapping from state to colour tone (docs/PRD_VIEWER_REVAMP.md section 4): every run status, attention kind and
- * severity maps to a tone, an unknown value is idle, attention wins over status, the stored look falls back to calm, and the
+ * severity maps to a tone, an unknown value is idle, attention wins over status, and the
  * contrast helper the `revamp-look` scenario measures with follows WCAG 2.
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { STATUS_LABEL, type RunStatus } from '../../src/projects/status.ts'
 import {
-  attentionTone, contrastRatio, LOOK_STORAGE_KEY, LOOKS, lookFromStored, parseColor, severityClass, severityTone, stateTone, statusTone, TONE_LABEL,
+  attentionTone, contrastRatio, parseColor, severityClass, severityTone, stateTone, statusTone, TONE_LABEL,
   toneClass, type Tone,
 } from '../../src/projects/tone.ts'
 
@@ -69,20 +69,6 @@ describe('stateTone', () => {
       assert.ok(TONE_LABEL[tone].length > 0, tone)
     }
     assert.deepEqual(Object.keys(TONE_LABEL).sort(), [...TONES].sort())
-  })
-})
-
-describe('lookFromStored', () => {
-  test('bold only when stored as bold; anything else is calm', () => {
-    assert.deepEqual([...LOOKS], ['calm', 'bold'])
-    assert.equal(LOOK_STORAGE_KEY, 'mdm-look')
-    assert.equal(lookFromStored('bold'), 'bold')
-    assert.equal(lookFromStored('calm'), 'calm')
-    assert.equal(lookFromStored(null), 'calm')
-    assert.equal(lookFromStored(undefined), 'calm')
-    assert.equal(lookFromStored(''), 'calm')
-    assert.equal(lookFromStored('BOLD'), 'calm')
-    assert.equal(lookFromStored('loud'), 'calm')
   })
 })
 

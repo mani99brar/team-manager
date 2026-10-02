@@ -121,5 +121,6 @@ Assertions that change, each named in the lane's handoff with its old and new fo
 ## 9. Open questions (defaults taken)
 
 - Which look to keep: both ship behind the switch; the operator decides after review. Default if no decision: Calm.
+- Decided 2026-10-02: the operator chose Calm; Bold and the look switch were removed, and Calm is the only look.
 - Whether Running cards show a deadline-based progress bar: only when the served activity carries the deadline; otherwise elapsed only.
 - Project prefix grouping threshold: three or more siblings.
