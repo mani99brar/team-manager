@@ -1,10 +1,13 @@
 """Offline end-to-end graph tests: fake workers, real Git/unit/browser checks."""
+import contextlib
 import copy
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +17,10 @@ from unittest.mock import patch
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from .automatic import automatic_settings
 from .checks import execute, now
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
-from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, save_json
+from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json
 from .verification import CONTRACTS, policy_digest
 
 # What each fake lane writes into its worktree: the two classic lanes edit fixture files the checks read;
@@ -840,6 +844,218 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(sorted(Path(item["path"]).parts[-4:-1] for item in bundle["packets"]),
                          [("candidate", "adapter", "1"), ("candidate", "ui", "1"), ("worker", "adapter", "2"), ("worker", "ui", "1")])
         self.assertEqual(read_json(path), bundle)
+
+
+def pipeline_cli(*arguments: str) -> tuple[int, str, str]:
+    """`python -m workflow <action> ...` in this process: (exit code, stdout, stderr)."""
+    from . import pipeline
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with patch.object(sys, "argv", ["workflow", *arguments]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            pipeline.main()
+        except SystemExit as exit_:
+            code = exit_.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class RecordTests(unittest.TestCase):
+    """The run's record says what happened and what happens next: deferred checks' exit codes, the candidate gate's reasons,
+    a pass after a failed attempt, the attention record of a finished run, and a status that reads beside a running controller.
+    The lanes run build and unit checks only (no browser): ui's build is recorded for the candidate gate, adapter's unit gates."""
+
+    def setUp(self):
+        self.fixture = PipelineTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        f.policy["version"] = "1.2.0"
+        f.policy["workers"][0].update(required_check_kinds=["build"], checks=f.policy["workers"][0]["checks"][:1])
+        f.policy["workers"][1]["required_check_kinds"] = ["unit"]
+        self.feed = f.root / "config" / "attention.jsonl"
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(f.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def pin(self, **plan) -> None:
+        f = self.fixture
+        f.plan.update(plan, policy_sha256=policy_digest(f.policy))
+        save_json(f.directory / "policy.json", f.policy)
+        save_json(f.directory / "plan.json", f.plan)
+        f.runtime = OfflinePipeline(f.directory, f.sessions)
+
+    @contextlib.contextmanager
+    def graph(self):
+        """The run's own checkpoint, the one `status`, `export` and `approve` read."""
+        with SqliteSaver.from_conn_string(str(self.fixture.directory / "pipeline.sqlite")) as saver:
+            yield build_pipeline(saver, self.fixture.runtime)
+
+    def events(self, node: str) -> list:
+        lines = [json.loads(line) for line in (self.fixture.directory / "events.jsonl").read_text().splitlines()]
+        return [(event["status"], event["message"]) for event in lines if event["node"] == node]
+
+    def review_gate(self, graph) -> dict:
+        f = self.fixture
+        graph.invoke({"run_id": "run"}, f.config)
+        outcome = graph.invoke(Command(resume={"freeze": True}), f.config)
+        self.assertEqual(outcome["__interrupt__"][0].value["kind"], "independent_review")
+        report(f.runtime, graph.get_state(f.config))  # The controller's export at the end of its step.
+        return f.review()
+
+    def status(self) -> tuple[dict, str]:
+        code, out, err = pipeline_cli("status", str(self.fixture.directory))
+        self.assertEqual(code, 0, err)
+        return json.loads(out.split("\nReport:")[0]), out
+
+    def test_deferred_checks_show_their_exit_codes_and_a_blocked_candidate_gives_its_reasons(self):
+        f = self.fixture
+        f.policy["workers"][0]["checks"][0]["argv"] = ["python", "-c", "import sys; sys.exit(1)"]  # A ui build that never passes.
+        self.pin()
+        with self.graph() as graph:
+            graph.invoke({"run_id": "run"}, f.config)
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(Command(resume={"freeze": True}), f.config)
+        # The worker gate records the failing build for the candidate gate, as before, and no longer hides its exit code.
+        self.assertEqual(self.events("verify_ui")[-1], ("passed", "Required tests and artifacts passed; recorded for the candidate gate: build (exit 1)"))
+        self.assertEqual(self.events("verify_adapter")[-1], ("passed", "Required tests and artifacts passed"))
+        # The candidate's event keeps its message; a second one gives the gate's reasons.
+        commit = read_json(f.directory / "candidate.json")["commit"]
+        self.assertEqual(self.events("candidate_ui"), [
+            ("blocked", f"Combined revision {commit}"),
+            ("blocked", "Candidate gate blocked on attempt 1: Executed check failed: python -c 'import sys; sys.exit(1)'; build: exit 1")])
+
+    def test_a_check_that_passes_after_a_failed_attempt_on_the_same_revision_says_so(self):
+        f = self.fixture
+        worker, candidate = f.root / "fail-worker-once", f.root / "fail-candidate-once"
+        script = ("import os, pathlib, sys\n"
+                  f"marker = pathlib.Path({str(worker)!r} if os.environ['WORKFLOW_VERIFICATION_PHASE'] == 'worker' else {str(candidate)!r})\n"
+                  "if marker.exists():\n    marker.unlink()\n    print('Ran 1 test in 0.001s\\n\\nFAILED (failures=1)')\n    sys.exit(1)\n"
+                  "print('Ran 1 test in 0.001s\\n\\nOK')\n")
+        f.policy["workers"][1]["checks"][0]["argv"] = ["python", "-c", script]  # Fails once in each phase, then passes.
+        worker.touch()
+        candidate.touch()
+        self.pin()
+        with self.graph() as graph:
+            graph.invoke({"run_id": "run"}, f.config)
+            with self.assertRaisesRegex(RuntimeError, "adapter verification blocked"):
+                graph.invoke(Command(resume={"freeze": True}), f.config)
+            f.runtime.retry_check("worker", "adapter")
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed adapter checks"):
+                graph.invoke(None, f.config)
+            f.runtime.retry_check("candidate", "adapter")
+            self.assertEqual(graph.invoke(None, f.config)["__interrupt__"][0].value["kind"], "independent_review")
+        self.assertEqual(self.events("verify_adapter")[-1], ("passed", "Required tests and artifacts passed on attempt 2 after attempt 1 failed"))
+        self.assertEqual(self.events("verify_ui"), [("running", f"Attempt 1; revision {read_json(f.directory / 'snapshots.json')['ui']['commit']}"),
+                                                    ("passed", "Required tests and artifacts passed; recorded for the candidate gate: build (exit 0)")])
+        commit = read_json(f.directory / "candidate.json")["commit"]
+        self.assertEqual(self.events("candidate_adapter")[-2:], [("passed", f"Combined revision {commit}"),
+                                                                ("passed", "Candidate gate passed on attempt 2 after attempt 1 failed")])
+        self.assertEqual(self.events("candidate_ui"), [("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step; not a retry.
+
+    def test_the_verify_message_keeps_the_viewers_prefix_and_puts_the_retry_last(self):
+        from .pipeline import passed_message
+        packet = {"gate": {"deferred_checks": ["build", "browser", "lint"]},
+                  "evidence": {"checks": [{"id": "unit", "worker_check_index": 0}, {"id": "build", "worker_check_index": 1},
+                                          {"id": "browser", "worker_check_index": 2}]},
+                  "result": {"checks": [{"exit_code": 0}, {"exit_code": 1}, {"exit_code": 124}]}}
+        prefix = "Required tests and artifacts passed; recorded for the candidate gate: "  # contracts/projects/triage.ts reads this prefix.
+        self.assertEqual(passed_message(packet), prefix + "build (exit 1), browser (exit 124), lint")  # lint: no receipt to read.
+        self.assertEqual(passed_message(packet, 3), prefix + "build (exit 1), browser (exit 124), lint; passed on attempt 3 after attempt 2 failed")
+        packet["gate"]["deferred_checks"] = []
+        self.assertEqual(passed_message(packet), "Required tests and artifacts passed")
+        self.assertEqual(passed_message(packet, 2), "Required tests and artifacts passed on attempt 2 after attempt 1 failed")
+
+    def test_only_a_blocked_attempt_of_the_same_revision_counts_as_failed_before(self):
+        from .pipeline import failed_before
+        directory = self.fixture.root / "attempts"
+        def packet(attempt: int, commit: str, status: str):
+            path = directory / "verification" / "worker" / "ui" / str(attempt) / "packet.json"
+            path.parent.mkdir(parents=True)
+            save_json(path, {"phase": "worker", "expected": {"output_commit": commit}, "gate": {"status": status, "reasons": []}})
+        packet(1, "a" * 40, "blocked")
+        self.assertTrue(failed_before(directory, "worker", "ui", 2, "a" * 40))
+        self.assertFalse(failed_before(directory, "worker", "ui", 2, "b" * 40))  # A lane repair's new revision starts over.
+        self.assertFalse(failed_before(directory, "candidate", "ui", 2, "a" * 40))
+        self.assertFalse(failed_before(directory, "worker", "ui", 1, "a" * 40))
+        self.assertFalse(failed_before(directory, "worker", "ui", 3, "a" * 40))  # Attempt 2 recorded nothing (an interrupted check).
+        packet(2, "a" * 40, "passed")
+        self.assertFalse(failed_before(directory, "worker", "ui", 3, "a" * 40))
+
+    def test_a_finished_run_records_attention_once(self):
+        f = self.fixture
+        self.pin()
+        with self.graph() as graph:
+            decision = self.review_gate(graph)
+            graph.invoke(Command(resume=decision), f.config)
+            commit = graph.invoke(Command(resume={"approve": decision["bundle_sha256"]}), f.config)["integrated_commit"]
+        text = f"{f.plan['source_branch']} fast-forwarded to {commit}: the run is finished. Nothing was pushed or merged into main."
+        [line] = [json.loads(line) for line in self.feed.read_text().splitlines()]
+        self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
+                         {"run_id": "run", "run_dir": str(f.directory.resolve()), "kind": "finished", "node": "integrate", "text": text})
+        record = read_json(f.directory / "attention.json")
+        self.assertEqual((record["kind"], record["node"], record["text"], record["at"]), ("finished", "integrate", text, line["at"]))
+        # Integrating again (a controller stopped right after the fast-forward) finds the branch there and records nothing more.
+        self.assertEqual(f.runtime.integrate(decision["bundle_sha256"]), commit)
+        self.assertEqual(len(self.feed.read_text().splitlines()), 1)
+
+    def test_status_reads_beside_a_running_controller_and_writes_nothing(self):
+        f = self.fixture
+        self.pin()
+        with self.graph() as graph:
+            self.review_gate(graph)
+        last = json.loads((f.directory / "events.jsonl").read_text().splitlines()[-1])
+        # The controller holds the run and is writing its next event: half a line, no newline yet.
+        with (f.directory / "events.jsonl").open("a") as handle:
+            handle.write('{"sequence": 99, "time": "2026-10-03T12:00:00Z", "node": "review", "sta')
+        with run_lock(f.directory):
+            files = {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in f.directory.iterdir() if path.is_file()}
+            printed, out = self.status()
+            self.assertEqual({path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in f.directory.iterdir() if path.is_file()}, files)
+        self.assertIn("report.html", files)  # Written by the controller's export; status refreshes nothing.
+        self.assertEqual((printed["workers"], printed["excluded_workers"], printed["next"], printed["pending"], printed["errors"]),
+                         (["ui", "adapter"], [], ["review"], ["independent_review"], []))
+        self.assertEqual(printed["last_event"], last)
+        self.assertIn(f"\nReport: {f.directory / 'report.html'}\n", out)
+        self.assertEqual(out.count("as of the last graph step"), 1)
+
+    def test_status_says_what_happens_next_from_the_finish_policy(self):
+        f = self.fixture
+        self.pin()
+        with self.graph() as graph:
+            decision = self.review_gate(graph)
+            printed, _ = self.status()
+            self.assertIn(f"-m workflow review {f.directory} --review-file ", printed["next_step"])
+            graph.invoke(Command(resume=decision), f.config)
+            report(f.runtime, graph.get_state(f.config))
+            # A manual run stops for approval: the step names the exact bundle to approve.
+            printed, _ = self.status()
+            self.assertEqual(printed["pending"], ["integration_approval"])
+            self.assertIn(f"-m workflow approve {f.directory} --bundle-sha256 {decision['bundle_sha256']}", printed["next_step"])
+            # plan.mode is "interactive" for every run; an automatic plan's finish policy approves its own integration.
+            self.assertEqual(f.plan["mode"], "interactive")
+            manual = dict(f.plan)
+            self.pin(automatic=automatic_settings(), source_branch="feature/record")
+            printed, _ = self.status()
+            self.assertIn("finish verified-feature-branch", printed["next_step"])
+            self.assertIn("does not stop for integration approval", printed["next_step"])
+            self.assertIn(f"-m workflow automatic {f.directory} --live", printed["next_step"])
+            self.assertNotIn("-m workflow approve", printed["next_step"])
+            save_json(f.directory / "plan.json", manual)
+            commit = graph.invoke(Command(resume={"approve": decision["bundle_sha256"]}), f.config)["integrated_commit"]
+            report(f.runtime, graph.get_state(f.config))
+        printed, _ = self.status()
+        self.assertEqual(printed["next_step"], f"none: {manual['source_branch']} was fast-forwarded to {commit}; nothing was pushed or merged into main")
+
+    def test_export_refreshes_report_html(self):
+        f = self.fixture
+        self.pin()
+        with self.graph() as graph:
+            self.review_gate(graph)
+        (f.directory / "report.html").unlink()
+        code, out, err = pipeline_cli("export", str(f.directory))
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Report: {f.directory / 'report.html'}", out)
+        self.assertIn("<h1>Workflow report</h1>", (f.directory / "report.html").read_text())
 
 
 class AdvanceTests(unittest.TestCase):

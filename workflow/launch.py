@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals, resume_command
-from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
+from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
@@ -311,6 +311,10 @@ def main(argv=None):
         merge_registry(read_registry(registry), entry)
         for note in notes + ([migration] if migration else []):
             print(f"Note: {note}", file=sys.stderr)
+        # How the run ends, from the automatic settings prepare pins as plan.automatic (validated by launch_commands).
+        from .automatic import automatic_settings
+        settings = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport) if args.automatic else None
+        print(f"Run {run}: {finish_policy(settings, commands[1][3])}.", flush=True)
         try:
             for index, command in enumerate(commands):
                 subprocess.run(command, cwd=command_cwd(command, repo), check=True)

@@ -524,6 +524,38 @@ class ChallengeHeartbeat(FailingChallenge):
         self.assertNotIn("-m workflow automatic", errors.getvalue())
 
 
+class ChallengeAttention(GuardedFeature):
+    def test_a_paused_challenge_records_attention_once_per_attempt(self):
+        directory = self.prepare("attention-001")
+        feed = self.registry.parent / "attention.jsonl"
+        lines = lambda: [json.loads(line) for line in feed.read_text().splitlines()] if feed.exists() else []
+        self.challenge_says([concern("P1", "The lanes overlap"), concern("P2", "Minor")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        text = (f"Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s). Edit the task files, decisions.md "
+                f"or the PRD, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
+                '--accept-challenge "<reason>"')
+        [line] = lines()
+        self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
+                         {"run_id": "attention-001", "run_dir": str(directory), "kind": "challenge_paused", "node": "challenge", "text": text})
+        self.assertEqual(read_json(directory / "attention.json")["text"], text)
+        # Starting again is refused and records nothing; a rerun that pauses again is attempt 2's record.
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, len(lines())), (1, 1))
+        task = self.folder / "ui-task.md"
+        task.write_text(task.read_text() + "\nOnly ui.txt.\n")
+        self.challenge_says([concern("P0", "The lanes cannot merge")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, [(line["kind"], line["text"].split(":")[0]) for line in lines()]),
+                         (0, [("challenge_paused", "Design challenge attempt 1 paused the run before any worker launch"),
+                              ("challenge_paused", "Design challenge attempt 2 paused the run before any worker launch")]))
+        # A challenge that passes needs nobody: no record.
+        task.write_text(task.read_text() + "\nThe adapter owns backend.py.\n")
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"], len(lines())), (0, "passed", 2))
+
+
 class LaneNamedLikeARunFile(GuardedFeature):
     """Lanes `plan` and `policy` share their names with the run's plan.json and policy.json: neither is a launch receipt."""
 

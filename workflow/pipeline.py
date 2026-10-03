@@ -14,6 +14,7 @@ import html
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from .attention import attention
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
@@ -215,6 +217,42 @@ def changed_files(cwd: Path, base: str) -> list[str]:
     tracked = subprocess.check_output(["git", "-C", str(cwd), "diff", "--no-renames", "--name-only", "-z", base]).decode().split("\0")
     untracked = subprocess.check_output(["git", "-C", str(cwd), "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
     return sorted(set(filter(None, tracked + untracked)))
+
+
+def deferred_exits(packet: dict) -> list[str]:
+    """Each check the worker gate recorded for the candidate gate, with the exit code its run ended with: `build (exit 1)`."""
+    executions = packet["result"]["checks"]
+    indexes = {receipt["id"]: receipt["worker_check_index"] for receipt in packet["evidence"]["checks"]}
+    named = []
+    for check_id in packet["gate"].get("deferred_checks", []):
+        index = indexes.get(check_id)
+        code = executions[index]["exit_code"] if index is not None and 0 <= index < len(executions) else None
+        named.append(check_id if code is None else f"{check_id} (exit {code})")
+    return named
+
+
+def failed_before(directory: Path, phase: str, node: str, attempt: int, commit: str) -> bool:
+    """Attempt `attempt - 1` of this lane's check in `phase` recorded a blocked gate on the same revision. A lane repair's
+    new revision starts over, and an attempt that recorded no packet (an interrupted check) failed nothing."""
+    previous = directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
+    if attempt < 2 or not previous.exists():
+        return False
+    try:
+        packet = read_json(previous)
+    except ValueError:
+        return False
+    return packet.get("expected", {}).get("output_commit") == commit and packet.get("gate", {}).get("status") == "blocked"
+
+
+def passed_message(packet: dict, retried: int | None = None) -> str:
+    """The verify event of a passing worker gate. It names each check recorded for the candidate gate with its exit code,
+    and a pass on attempt `retried` after the attempt before failed on the same revision. The viewer reads the
+    `Required tests and artifacts passed; recorded for the candidate gate: ` prefix, so the retry follows the checks."""
+    deferred = deferred_exits(packet)
+    retry = f"passed on attempt {retried} after attempt {retried - 1} failed" if retried else None
+    if not deferred:
+        return f"Required tests and artifacts {retry}" if retry else "Required tests and artifacts passed"
+    return "Required tests and artifacts passed; recorded for the candidate gate: " + ", ".join(deferred) + (f"; {retry}" if retry else "")
 
 
 def merge_lanes(left: dict | None, right: dict | None) -> dict:
@@ -518,10 +556,8 @@ class Pipeline:
         packet["result"]["summary"] = snap["summary"]
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
-        passed = "Required tests and artifacts passed"
-        if packet["gate"].get("deferred_checks"):
-            passed += "; recorded for the candidate gate: " + ", ".join(packet["gate"]["deferred_checks"])
-        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed)
+        retried = attempt if failed_before(self.directory, "worker", node, attempt, snap["commit"]) else None
+        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed_message(packet, retried))
         if packet["gate"]["status"] != "passed":
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
@@ -564,8 +600,12 @@ class Pipeline:
                                      state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
             path = self.directory / "verification" / "candidate" / node / str(attempt) / "packet.json"
             self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}")
+            # A second event says why, or that this attempt passed after the one before failed; the first stays as the viewer reads it.
             if packet["gate"]["status"] != "passed":
+                self.event(f"candidate_{node}", packet["gate"]["status"], f"Candidate gate blocked on attempt {attempt}: {'; '.join(packet['gate']['reasons'])}")
                 raise RuntimeError(f"Combined candidate failed {node} checks; see {path}")
+            if failed_before(self.directory, "candidate", node, attempt, candidate["commit"]):
+                self.event(f"candidate_{node}", "passed", f"Candidate gate passed on attempt {attempt} after attempt {attempt - 1} failed")
             candidate_paths.append(path)
         bundle = {"run_id": self.plan["run_id"], "base_commit": self.plan["base_commit"],
                   "candidate_commit": candidate["commit"], "policy_sha256": policy_digest(self.policy),
@@ -640,13 +680,20 @@ class Pipeline:
             if read_json(intent) != {"bundle_sha256": digest, "candidate_commit": candidate}:
                 raise ValueError("Integration intent changed")
             if git(repo, "rev-parse", "HEAD") == candidate:
+                self.record_finished(candidate)  # A controller stopped after the fast-forward: recorded once, whichever writes it.
                 return candidate
         if git(repo, "rev-parse", "HEAD") != self.plan["base_commit"]:
             raise ValueError("Source advanced since preparation; rebase/review explicitly")
         save_json(intent, {"bundle_sha256": digest, "candidate_commit": candidate})
         subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", candidate], check=True, capture_output=True)
         self.event("integrate", "succeeded", f"Fast-forwarded to {candidate}; no push performed")
+        self.record_finished(candidate)
         return candidate
+
+    def record_finished(self, commit: str) -> None:
+        """The attention record of a run that reached its end (never raises): merging into main and pushing are the operator's."""
+        attention(self.directory, "finished", f"{self.plan['source_branch']} fast-forwarded to {commit}: the run is finished. "
+                                              "Nothing was pushed or merged into main.", node="integrate")
 
 
 class ExportRuntime:
@@ -726,17 +773,20 @@ def carry_legacy_lanes(runtime: ExportRuntime, state, saver: SqliteSaver | None 
         return carry(own)
 
 
-def export_run(runtime: ExportRuntime) -> dict:
-    """Re-export from the persisted checkpoint. Reading state never invokes a node or a session."""
+def persisted_state(runtime: ExportRuntime):
+    """The run's graph state from its persisted checkpoint. Reading state never invokes a node or a session."""
     from types import SimpleNamespace
     database = runtime.directory / "pipeline.sqlite"
-    if database.exists():
-        config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
-        with SqliteSaver.from_conn_string(str(database)) as saver:
-            state = carry_legacy_lanes(runtime, build_pipeline(saver, runtime).get_state(config), saver)
-    else:
-        state = SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in runtime.workers), tasks=[])  # Prepared, never started.
-    return export_state(runtime, state)
+    if not database.exists():
+        return SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in runtime.workers), tasks=[])  # Prepared, never started.
+    config = {"configurable": {"thread_id": runtime.plan["run_id"]}}
+    with SqliteSaver.from_conn_string(str(database)) as saver:
+        return carry_legacy_lanes(runtime, build_pipeline(saver, runtime).get_state(config), saver)
+
+
+def export_run(runtime: ExportRuntime) -> dict:
+    """Re-export from the persisted checkpoint."""
+    return export_state(runtime, persisted_state(runtime))
 
 
 def build_pipeline(checkpointer, runtime):
@@ -834,8 +884,8 @@ def graph_config(runtime) -> dict:
 
 
 def report(runtime: Pipeline, state) -> Path:
-    """Escaped local results viewer, generated on every CLI boundary; no server needed."""
-    state = carry_legacy_lanes(runtime, state)  # `status` on a legacy run must export the same evidence as `export`.
+    """Escaped local results viewer, generated on every CLI boundary and by `export`; no server needed."""
+    state = carry_legacy_lanes(runtime, state)  # A CLI boundary on a legacy run must export the same evidence as `export`.
     export_state(runtime, state)
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
@@ -880,6 +930,92 @@ def report(runtime: Pipeline, state) -> Path:
     destination = runtime.directory / "report.html"
     destination.write_text("\n".join(parts))
     return destination
+
+
+def finish_policy(automatic: dict | None, branch: str) -> str:
+    """How the run ends, from its automatic settings (plan.automatic, or what prepare pins from launch's flags), never from
+    plan.mode, the transport tag every run records as "interactive". An automatic run approves its own integration: the
+    policy's integration_approval is a schema constant, true in every policy, and no stop for it."""
+    if automatic and automatic.get("finish") == "verified-feature-branch":
+        return (f"automatic, finish {automatic['finish']}: once every reviewer approves, the controller fast-forwards {branch} "
+                "itself; it does not stop for integration approval, and nothing merges main or pushes")
+    if automatic:
+        return f"automatic, finish {automatic.get('finish')}"  # A finish this controller does not describe; it says no more than the plan.
+    return f"manual: you freeze the workers, import each review and approve the fast-forward of {branch}; nothing is pushed"
+
+
+def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
+    """`status`'s next step: the run's finish policy from where its last graph step left it, with the command that goes on."""
+    from .guardrails import resume_command
+    branch = plan.get("source_branch") or "the source branch"
+    run = lambda action: f"{sys.executable} -m workflow {action} {shlex.quote(str(directory))}"
+    automatic, values = plan.get("automatic"), (exported or {}).get("values") or {}
+    gates = {item.get("kind"): item for task in (exported or {}).get("tasks") or [] for item in task.get("interrupts") or [] if isinstance(item, dict)}
+    if values.get("integrated_commit") and not (exported or {}).get("next"):
+        return f"none: {branch} was fast-forwarded to {values['integrated_commit']}; nothing was pushed or merged into main"
+    challenge = (directory / "challenge.json").exists() and read_json(directory / "challenge.json").get("status")
+    if not values and (challenge == "paused" or (directory / "challenge.running.json").exists()):
+        return (f"the design challenge has not passed and no worker started: edit the feature files, then {resume_command(directory)}, "
+                f"or accept it with {resume_command(directory, accept=True)}. Then: {finish_policy(automatic, branch)}")
+    if not values:
+        supervise = f", then supervise them: {run('automatic')} --live" if automatic else ""
+        return f"no worker started yet: {run('start')} --live{supervise}. Then: {finish_policy(automatic, branch)}"
+    if automatic:
+        return (f"{finish_policy(automatic, branch)}. Its supervisor continues the run; if none is running: {run('automatic')} --live "
+                "(it says why when the run cannot go on)")
+    if "integration_approval" in gates:
+        return f"approve the fast-forward of {branch}: {run('approve')} --bundle-sha256 {gates['integration_approval'].get('bundle_sha256')}; nothing is pushed"
+    if "independent_review" in gates:
+        reviewer = " --reviewer <id>" if plan.get("reviewers") else ""
+        return f"import each reviewer's review: {run('review')} --review-file <review.json>{reviewer}; then approve the fast-forward of {branch}"
+    if "worker_handoff" in gates:
+        handoffs = " ".join(f"--handoff {lane}=<handoff.json>" for lane in plan_workers(plan))
+        return f"freeze the workers with their handoffs: {run('freeze')} {handoffs}; then import each review and approve the fast-forward of {branch}"
+    return f"a step failed or was interrupted (see errors): RUNBOOK \"Status, failures and recovery\" says which `retry` or `reconcile` goes on. {finish_policy(None, branch)}"
+
+
+def complete_events(directory: Path) -> list[dict]:
+    """events.jsonl as a reader beside a running controller sees it: a line counts once its newline is written."""
+    path = directory / "events.jsonl"
+    data = path.read_bytes() if path.exists() else b""
+    events = []
+    for line in data[:data.rfind(b"\n") + 1].splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def run_status(directory: Path) -> tuple[dict, str]:
+    """`status` without the controller lock, so it answers while a controller holds the run. It reads plan.json,
+    run-state.json (the export of the last graph step), events.jsonl and the run's other JSON files, which the
+    controller replaces atomically, and writes nothing. Returns what it prints and the note on how current it is."""
+    plan = read_json(directory / "plan.json")
+    exported = read_json(directory / "run-state.json") if (directory / "run-state.json").exists() else None
+    tasks = (exported or {}).get("tasks") or []
+    status = {"workers": plan_workers(plan), "excluded_workers": plan_excluded(plan),
+              "next": exported.get("next") if exported else None,
+              "pending": [item.get("kind") if isinstance(item, dict) else None for task in tasks for item in task.get("interrupts") or []] if exported else None,
+              "errors": [task["error"] for task in tasks if task.get("error")] if exported else None}
+    if (directory / "challenge.json").exists():
+        status["challenge"] = read_json(directory / "challenge.json")["status"]
+    if (directory / "repairs.json").exists():
+        from .repair import load_repairs
+        status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry["source_commit"]}
+                             for entry in load_repairs(directory)]
+    workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
+    if workspaces:
+        status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
+    status["next_step"] = next_step(directory, plan, exported)
+    events = complete_events(directory)
+    status["last_event"] = events[-1] if events else None
+    note = (f"Next, pending and errors are as of the last graph step (run-state.json, updated {exported.get('updated_at')}); the timeline "
+            "can be ahead of them, and last_event is its newest entry." if exported else
+            "No run-state.json yet: next, pending and errors are unknown until the controller or `export` writes it.")
+    return status, note
 
 
 def main():
@@ -1035,10 +1171,20 @@ def main():
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             return
         if args.action == "export":
-            # Re-export an existing run (for example one recorded before a newer export version).
+            # Re-export an existing run (for example one recorded before a newer export version), and refresh its report.html.
             with run_lock(directory):
-                exported = export_run(ExportRuntime(directory))
-            print(f"Exported run-state.json version {exported['version']}: {directory / 'run-state.json'}. No agents launched.")
+                runtime = ExportRuntime(directory)
+                state = persisted_state(runtime)
+                exported = export_state(runtime, state)
+                page = report(runtime, state)  # Exports the same state again, which leaves run-state.json as it is.
+            print(f"Exported run-state.json version {exported['version']}: {directory / 'run-state.json'}. Report: {page}. No agents launched.")
+            return
+        if args.action == "status":
+            # No lock: it reads the files the controller replaces atomically and writes nothing, so it answers while a controller runs.
+            status, note = run_status(directory)
+            print(json.dumps(status, indent=2))
+            print(f"Report: {directory / 'report.html'}")
+            print(note)
             return
         with run_lock(directory):
             runtime = Pipeline(directory)
@@ -1177,27 +1323,12 @@ def main():
                         from .repair import continuation
                         parser.error(f"An automatic run continues under its supervisor until its review is recorded: {continuation(runtime)} "
                                      "(a check or candidate step that left no verdict first needs retry --phase <phase> --node <lane>)")
-                if args.action != "status":
-                    try:
-                        advance(runtime, graph, value, config)
-                    finally:
-                        print(f"Report: {report(runtime, graph.get_state(config))}")
-                    if args.action == "start" and args.herdr:
-                        print(json.dumps(attach_panels(runtime.sessions), indent=2))
-                else:
-                    status = {"workers": runtime.workers, "excluded_workers": runtime.excluded, "next": state.next, "pending": pending,
-                              "errors": [str(task.error) for task in state.tasks if task.error]}
-                    if (directory / "challenge.json").exists():
-                        status["challenge"] = read_json(directory / "challenge.json")["status"]
-                    if (directory / "repairs.json").exists():
-                        from .repair import load_repairs
-                        status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry["source_commit"]}
-                                             for entry in load_repairs(directory)]
-                    workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
-                    if workspaces:
-                        status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
-                    print(json.dumps(status, indent=2))
-                    print(f"Report: {report(runtime, state)}")
+                try:
+                    advance(runtime, graph, value, config)
+                finally:
+                    print(f"Report: {report(runtime, graph.get_state(config))}")
+                if args.action == "start" and args.herdr:
+                    print(json.dumps(attach_panels(runtime.sessions), indent=2))
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
 

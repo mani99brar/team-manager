@@ -108,6 +108,21 @@ class FeatureLaunchTests(unittest.TestCase):
                 if returncode == 75:
                     self.assertIn(f"-m workflow automatic {self.root / 'runs' / 'auto-75'} --live", errors.getvalue())
 
+    def test_a_live_launch_first_says_how_the_run_finishes(self):
+        # From the automatic settings prepare pins (plan.automatic), not from plan.mode, which is "interactive" for every run.
+        finishes = {True: "automatic, finish verified-feature-branch: once every reviewer approves, the controller fast-forwards {branch} "
+                          "itself; it does not stop for integration approval, and nothing merges main or pushes",
+                    False: "manual: you freeze the workers, import each review and approve the fast-forward of {branch}; nothing is pushed"}
+        for automatic, finish in finishes.items():
+            run_id = "finish-automatic" if automatic else "finish-manual"
+            with self.subTest(automatic=automatic), patch("workflow.launch.subprocess.run"), contextlib.redirect_stdout(io.StringIO()) as output, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
+                      *(["--automatic"] if automatic else [])])
+                run = (self.root / "runs" / run_id).resolve()
+                self.assertEqual(output.getvalue().splitlines()[0],
+                                 f"Run {run}: {finish.format(branch=f'feature/project-workflows/{run_id}')}.")
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--repo", str(self.repo), "--dry-run"])

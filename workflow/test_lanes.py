@@ -23,6 +23,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from .attention import feed_path
 from .automatic import DEFAULTS, advance_failed_checks, automatic_settings, check_finding_lanes, drive, read_review_completion, review_prompt, review_schema
 from .export_state import graph_nodes
 from .interactive import InteractiveSessions, attach_panels
@@ -167,6 +168,11 @@ class ThreeLaneRun(LaneRun):
             commit = drive(self.runtime)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
         self.assertEqual(git(self.repo, "symbolic-ref", "--short", "HEAD"), "feature/lanes")
+        # The finished run's attention record: in the run, and one line on the feed beside the (temporary) registry.
+        record = read_json(self.directory / "attention.json")
+        self.assertEqual((record["kind"], record["node"], record["text"].split(":")[0]), ("finished", "integrate", f"feature/lanes fast-forwarded to {commit}"))
+        feed = [json.loads(line) for line in feed_path().read_text().splitlines()]
+        self.assertEqual([line["kind"] for line in feed if line["run_dir"] == str(self.directory.resolve())], ["finished"])
         subjects = git(self.repo, "log", "--reverse", "--format=%s", f"{self.plan['base_commit']}..HEAD").splitlines()
         self.assertEqual(subjects, [f"Workflow run: {node}" for node in LANES])
         self.assertEqual(sorted(self.sessions.starts), ["adapter", "docs", "review", "ui"])

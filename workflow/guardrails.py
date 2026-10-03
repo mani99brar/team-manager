@@ -435,8 +435,11 @@ def run_challenge(runtime, attempt: int) -> dict:
     save_challenge(directory, record)
     running.unlink()
     if blocking:
-        runtime.event(CHALLENGE, "paused", f"Design challenge attempt {attempt} paused the run before any worker launch: "
-                                           f"{len(blocking)} P0/P1 concern(s)")
+        paused = f"Design challenge attempt {attempt} paused the run before any worker launch: {len(blocking)} P0/P1 concern(s)"
+        runtime.event(CHALLENGE, "paused", paused)
+        from .attention import attention
+        attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD, then run: {resume_command(directory)}; "
+                                                 f"or accept it: {resume_command(directory, accept=True)}", node=CHALLENGE)
     else:
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {attempt} passed ({len(output['concerns'])} P2 concern(s)); launching workers")
     return record
