@@ -1,8 +1,12 @@
-"""Worktree changes one at a time per repository (the `git worktree add` race when lanes verify at the same moment).
+"""Worktree changes one at a time per repository (the `git worktree add` race when lanes verify at the same moment), and
+the controller's own Git calls against a shared .git a lane may have changed (C25).
 
 Real temporary repositories, real Git, threads and separate processes; nothing touches the user's state.
 """
+import json
+import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -12,8 +16,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from .sessions import prepare
-from .worktrees import ATTEMPTS, BACKOFF_SECONDS, LOCK_NAME, WorktreeError, git_worktree, worktree_lock
+from .sessions import claude_env, git, prepare, read_json, save_json
+from .worktrees import (ATTEMPTS, BACKOFF_SECONDS, LOCK_NAME, WorktreeError, controller_git_config, git_worktree, shared_git_changes, shared_git_state,
+                        without_controller_git_config, worktree_lock)
 
 TOOL = Path(__file__).resolve().parents[1]
 # A separate process adding one worktree once its stdin closes, so the test can release every child at once.
@@ -162,6 +167,167 @@ class WorktreeCallSites(Repository):
             self.assertFalse((directory / "worktree-ui").exists())
         thread.join(10)
         self.assertEqual(plans[0]["nodes"]["ui"]["observed_start_commit"], plans[0]["base_commit"])
+
+    def test_every_diff_writer_turns_off_external_diff_drivers_and_textconv(self):
+        # A diff.external or textconv driver planted in the shared .git would otherwise rewrite review.diff, a lane's patch,
+        # a repair's diff or the sidecar's inputs. Only a names-only diff runs neither.
+        writers, unsafe = set(), []
+        for source in sorted((TOOL / "workflow").glob("*.py")):
+            if source.name.startswith("test_"):
+                continue
+            for number, line in enumerate(source.read_text().splitlines(), 1):
+                if '"diff",' not in line or '"--name-only"' in line:
+                    continue
+                writers.add(source.name)
+                if '"--no-ext-diff"' not in line or '"--no-textconv"' not in line:
+                    unsafe.append(f"{source.name}:{number}")
+        self.assertEqual(unsafe, [])
+        self.assertLessEqual({"automatic.py", "sessions.py", "repair.py", "sidecar.py"}, writers)  # The scan finds the known writers.
+
+
+def without_git_config(environment: dict) -> dict:
+    """`environment` with no GIT_CONFIG_* entry at all, as a shell outside the controller has (the test runner may run under one)."""
+    return {key: value for key, value in environment.items() if not key.startswith("GIT_CONFIG")}
+
+
+class ControllerGitConfig(Repository):
+    """Hooks and fsmonitor are off for the controller's own Git calls (GIT_CONFIG_* set at `python -m workflow` entry), and
+    on again for Claude sessions and the checks, which run the target's code as written."""
+
+    def plant(self) -> tuple[Path, Path]:
+        """A post-checkout hook and an fsmonitor command in the shared .git, each leaving a marker when it runs."""
+        hook_marker, monitor_marker = self.root / "hook-ran", self.root / "fsmonitor-ran"
+        hook = self.repo / ".git" / "hooks" / "post-checkout"
+        hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(hook_marker))}\n")
+        hook.chmod(0o755)
+        monitor = self.root / "fsmonitor.sh"
+        monitor.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(monitor_marker))}\n")
+        monitor.chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.fsmonitor", str(monitor)], check=True)
+        return hook_marker, monitor_marker
+
+    def policy(self) -> dict:
+        probe = ("import json, os\nprint('GIT ' + json.dumps(sorted(key for key in os.environ if key.startswith('GIT_CONFIG'))))\n"
+                 "print('Ran 1 test in 0.001s\\n\\nOK')\n")
+        return {"version": "1.0.0", "feature": "Planted hooks", "independent_review": True, "integration_approval": True,
+                "workers": [{"node_id": "ui", "role": "backend", "owned_paths": ["README.md"],
+                             "checks": [{"id": "unit", "kind": "unit", "argv": [sys.executable, "-c", probe], "timeout_seconds": 60, "scenarios": []}]}]}
+
+    def test_a_planted_hook_and_fsmonitor_run_in_neither_prepare_nor_verify(self):
+        from .checks import verify_revision
+        hook_marker, monitor_marker = self.plant()
+        bare = without_git_config(os.environ)
+        # What the shared .git now does to any Git command: `git status` runs the monitor, a checkout runs the hook.
+        subprocess.run(["git", "-C", str(self.repo), "status", "--porcelain"], env=bare, check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "--detach", str(self.root / "probe"), "HEAD"], env=bare, check=True, capture_output=True)
+        self.assertTrue(hook_marker.exists() and monitor_marker.exists())
+        hook_marker.unlink()
+        monitor_marker.unlink()
+        # `python -m workflow prepare`: status checks and `git worktree add` through the controller's own entry point.
+        policy, task, run = self.root / "policy.json", self.root / "ui-task.md", self.root / "run"
+        save_json(policy, self.policy())
+        task.write_text("Change the README.\n")
+        result = subprocess.run([sys.executable, "-m", "workflow", "prepare", str(run), "--repo", str(self.repo), "--policy", str(policy), "--task", f"ui={task}"],
+                                cwd=TOOL, capture_output=True, text=True, timeout=120,
+                                env={**bare, "MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((hook_marker.exists(), monitor_marker.exists()), (False, False))
+        # The verifier's worktree add and cleanliness checks, in a controller process; the check itself sees no GIT_CONFIG_*.
+        plan = read_json(run / "plan.json")
+        with patch.dict(os.environ, clear=True):
+            os.environ.update(bare)
+            controller_git_config(os.environ)
+            packet = verify_revision(run, plan, self.policy(), "ui", plan["base_commit"], [], "session")
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        self.assertEqual((hook_marker.exists(), monitor_marker.exists()), (False, False))
+        log = Path(packet["artifact_paths"][packet["result"]["checks"][0]["log_artifact_id"]]).read_text()
+        self.assertIn("GIT []\n", log)
+
+    def test_sessions_and_checks_inherit_none_of_it_while_the_controllers_git_calls_do(self):
+        from .checks import check_environment
+        bare = without_git_config(os.environ)
+        operator = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Operator"}
+        ours = {"GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/dev/null", "GIT_CONFIG_KEY_2": "core.fsmonitor", "GIT_CONFIG_VALUE_2": "false"}
+        with patch.dict(os.environ, clear=True):
+            os.environ.update({**bare, **operator})
+            controller_git_config(os.environ)
+            controller_git_config(os.environ)  # A child controller (automatic-step) inherits the entries: never added twice.
+            self.assertEqual({key: value for key, value in os.environ.items() if key.startswith("GIT_CONFIG")}, {**operator, **ours, "GIT_CONFIG_COUNT": "3"})
+            # The controller's own Git calls inherit them; the operator's own entry still applies.
+            self.assertEqual(git(self.repo, "config", "--show-scope", "--get", "core.hooksPath"), "command\t/dev/null")
+            self.assertEqual(git(self.repo, "config", "--get", "core.fsmonitor"), "false")
+            self.assertEqual(git(self.repo, "config", "--get", "user.name"), "Operator")
+            # Claude processes (and so Claude Code's shared background service) and the checks get exactly the operator's.
+            for environment in (claude_env(), claude_env(dict(os.environ)), check_environment(os.environ)[0]):
+                self.assertEqual({key: value for key, value in environment.items() if key.startswith("GIT_CONFIG")}, operator)
+            # A copy without exactly those entries; the controller keeps its own.
+            self.assertEqual(without_controller_git_config(os.environ), {**bare, **operator})
+            self.assertEqual(os.environ["GIT_CONFIG_COUNT"], "3")
+        with patch.dict(os.environ, clear=True):
+            os.environ.update(bare)
+            controller_git_config(os.environ)
+            self.assertEqual(os.environ["GIT_CONFIG_COUNT"], "2")
+            for environment in (claude_env(), check_environment(os.environ)[0]):
+                self.assertEqual([key for key in environment if key.startswith("GIT_CONFIG")], [])
+        # An unreadable count is left as it is: Git refuses every command then, so nothing runs a hook either.
+        self.assertEqual(without_controller_git_config({"GIT_CONFIG_COUNT": "x"}), {"GIT_CONFIG_COUNT": "x"})
+        bogus = {"GIT_CONFIG_COUNT": "x"}
+        controller_git_config(bogus)
+        self.assertEqual(bogus, {"GIT_CONFIG_COUNT": "x"})
+
+
+class SharedGitDigest(Repository):
+    """What prepare records of the shared .git and what freeze, review and integrate name when it changed."""
+
+    def test_command_capable_keys_and_files_are_named_and_others_are_not(self):
+        hooks = self.repo / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        (hooks / "post-merge").write_text("#!/bin/sh\nexit 0\n")
+        (hooks / "post-merge").chmod(0o755)
+        (self.repo / ".git" / "info").mkdir(exist_ok=True)
+        (self.repo / ".git" / "info" / "exclude").write_text("# git ls-files --others --exclude-from=.git/info/exclude\n")
+        before = shared_git_state(self.repo)
+        self.assertLessEqual({"hooks/post-merge", "info/exclude"}, set(before))
+        self.assertNotIn("info/attributes", before)
+        # The controller's own entries (command scope) are never part of it, nor is a key that runs nothing.
+        with patch.dict(os.environ):
+            controller_git_config(os.environ)
+            self.assertEqual(shared_git_state(self.repo), before)
+        git(self.repo, "config", "user.name", "Someone else")
+        self.assertEqual(shared_git_changes(before, shared_git_state(self.repo)), [])
+        # A planted key, by scope; a credential inside a URL never reaches the record or the name.
+        git(self.repo, "config", "url.https://user:s3cret@example.invalid/.insteadOf", "https://example.invalid/")
+        git(self.repo, "config", "diff.planted.textconv", "cat")
+        (self.repo / ".git" / "info" / "attributes").write_text("*.md -diff\n")
+        (self.repo / ".git" / "info" / "exclude").write_text("planted.txt\n")
+        (hooks / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+        (hooks / "post-merge").chmod(0o644)  # A hook switched off (or on) is a change too.
+        after = shared_git_state(self.repo)
+        self.assertEqual(shared_git_changes(before, after),
+                         ["hooks/post-merge", "hooks/pre-push", "info/attributes", "info/exclude", "local diff.planted.textconv",
+                          "local url.https://<redacted>@example.invalid/.insteadof"])
+        self.assertNotIn("s3cret", json.dumps(after))
+        self.assertEqual(shared_git_changes(after, after), [])
+        # A removed file is named as well.
+        (self.repo / ".git" / "info" / "exclude").unlink()
+        self.assertIn("info/exclude", shared_git_changes(after, shared_git_state(self.repo)))
+
+    def test_a_worktrees_copy_of_the_main_worktree_config_is_no_change(self):
+        # With extensions.worktreeConfig, `git worktree add` copies the main worktree's config.worktree into the new one:
+        # the verification and candidate worktrees a run adds are not a change; an edited lane copy is.
+        git(self.repo, "config", "extensions.worktreeConfig", "true")
+        git(self.repo, "config", "--worktree", "core.sparseCheckout", "false")
+        lane = self.root / "lane"
+        git_worktree(self.repo, "add", "--detach", str(lane), "HEAD")
+        before = shared_git_state(self.repo)
+        self.assertIn("worktrees/lane/config.worktree", before)
+        git_worktree(self.repo, "add", "--detach", str(self.root / "verification" / "worktree"), "HEAD")
+        after = shared_git_state(self.repo)
+        self.assertIn("worktrees/worktree/config.worktree", after)
+        self.assertEqual(shared_git_changes(before, after), [])
+        with (self.repo / ".git" / "worktrees" / "lane" / "config.worktree").open("a") as handle:
+            handle.write("[core]\n\tfsmonitor = /tmp/planted\n")
+        self.assertEqual(shared_git_changes(before, shared_git_state(self.repo)), ["worktrees/lane/config.worktree"])
 
 
 if __name__ == "__main__":

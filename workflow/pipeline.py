@@ -32,9 +32,9 @@ from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
-                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_effort)
+                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_authority, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
-from .worktrees import git_worktree
+from .worktrees import SHARED_GIT_CHANGED, git_worktree, shared_git_changes, shared_git_state
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 # The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
@@ -458,6 +458,27 @@ class Pipeline:
             if not any(owns(name, safe_path(prefix)) for prefix in worker["owned_paths"]):
                 raise ValueError(f"{node} edited unowned path: {name}")
 
+    def check_shared_git(self, node: str) -> None:
+        """C25's tripwire, a warning and never a refusal: the shared .git against the digest prepare recorded
+        (plan.shared_git), at freeze once the workers stopped, in the review node before the review diff is written, and
+        before integrate. A change is one `warning` event on `node` naming the keys and files that differ from prepare
+        (`Shared .git changed during the run: ...`); a text already recorded is not recorded again, and `status` shows the
+        latest. A run prepared before the digest compares nothing."""
+        pinned = self.plan.get("shared_git")
+        if not isinstance(pinned, dict):
+            return
+        try:
+            changed = shared_git_changes(pinned["entries"], shared_git_state(self.plan["repository"]))
+        except (OSError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as error:
+            message = f"Shared .git not compared: {error}"
+        else:
+            if not changed:
+                return
+            message = SHARED_GIT_CHANGED + ", ".join(changed)
+        if any(event.get("message") == message for event in complete_events(self.directory)):
+            return
+        self.event(node, "warning", message)
+
     def freeze(self) -> dict:
         record = self.directory / "snapshots.json"
         if record.exists():
@@ -474,6 +495,7 @@ class Pipeline:
         from .sidecar import close
         close(self, "freeze")  # The review sidecar ends here, whatever its ledger says; it never raises.
         self.stop_workers()
+        self.check_shared_git("freeze")  # No worker can change the shared .git any more; nothing is captured yet.
         snapshots = {}
         for node in self.workers:
             cwd = Path(self.plan["nodes"][node]["worktree"])
@@ -664,6 +686,7 @@ class Pipeline:
         check_review(review, bundle, digest, require_approved=require_approved, reviewers=reviewer_ids(self.plan))
 
     def integrate(self, approved: str) -> str:
+        self.check_shared_git("integrate")
         bundle, digest = self.validate_bundle()
         review = read_json(self.directory / "review.json")
         self.validate_review(review)
@@ -807,6 +830,7 @@ def build_pipeline(checkpointer, runtime):
         return {"snapshots": runtime.freeze()}
     def candidate(state): return {"bundle": runtime.candidate(state)}
     def review(_state):
+        runtime.check_shared_git("review")  # Before review_candidate writes review.diff, which every reviewer starts from.
         _, digest = runtime.validate_bundle()
         if runtime.plan.get("automatic"):
             from .automatic import review_candidate
@@ -898,6 +922,9 @@ def report(runtime: Pipeline, state) -> Path:
              '<h1>Workflow report</h1><p>' + html.escape(flow) + '</p>',
              '<h2>Current state</h2><pre>' + html.escape(json.dumps({"next": state.next, "interrupts": [str(task.interrupts) for task in state.tasks if task.interrupts], "errors": [str(task.error) for task in state.tasks if task.error], "integrated_commit": state.values.get("integrated_commit")}, indent=2)) + '</pre>',
              '<h2>Timeline</h2><pre>' + html.escape(json.dumps(events, indent=2)) + '</pre>']
+    authority = runtime.plan.get("worker_authority")  # Pinned at prepare; runs prepared before have none.
+    if authority is not None:
+        parts.insert(3, '<h2>Worker authority</h2><pre>' + html.escape(json.dumps(authority, indent=2)) + '</pre>')
     positions, edges, width, height = lane_positions(list(runtime.workers))
     svg = [f'<h2>Execution graph</h2><svg role="img" aria-label="Workflow execution graph" viewBox="0 0 {width} {height}">']
     for left, right in edges:
@@ -1070,6 +1097,9 @@ def run_status(directory: Path) -> tuple[dict, str]:
         status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
     status["next_step"] = next_step(directory, plan, exported)
     events = complete_events(directory)
+    shared_git = [event["message"] for event in events if str(event.get("message", "")).startswith("Shared .git ")]
+    if shared_git:
+        status["shared_git"] = shared_git[-1]  # The latest comparison that found a change (Pipeline.check_shared_git).
     status["last_event"] = events[-1] if events else None
     note = (f"Next, pending and errors are as of the last graph step (run-state.json, updated {exported.get('updated_at')}); the timeline "
             "can be ahead of them, and last_event is its newest entry." if exported else
@@ -1191,8 +1221,10 @@ def main():
                 plan["reviewers"] = reviewers
             drill = policy.get("failure_drill")
             drill_skipped = bool(drill) and drill["node_id"] not in selected
+            # Every launch runs as the operator's account, with no sandbox (C14 slice 1): the run records it with the digest of
+            # the workers' --settings. There is no per-launch choice.
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
-                        failure_drill=None if drill_skipped else drill)
+                        failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory))
             if args.guardrails:
                 pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
             if args.sidecar_brief:

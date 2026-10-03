@@ -49,6 +49,16 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
         for info in nodes.values():
             self.assertEqual(info["observed_start_commit"], self.plan["base_commit"])
 
+    def test_prepare_records_the_shared_git_digest_once_the_worktrees_exist(self):
+        # Freeze, review and integrate compare the shared .git against it (C25). The worker authority is the pipeline's to pin.
+        import hashlib, json
+        from .worktrees import shared_git_state
+        entries = shared_git_state(self.repo)
+        self.assertEqual(self.plan["shared_git"], {"sha256": hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest(), "entries": entries})
+        self.assertIn("info/exclude", entries)
+        self.assertEqual(read_json(self.directory / "plan.json")["shared_git"], self.plan["shared_git"])
+        self.assertNotIn("worker_authority", self.plan)
+
     def test_each_lane_launches_once_and_receipts_are_reused(self):
         self.assertEqual((self.plan["workers"], self.plan["excluded_workers"]), (["ui", "adapter"], []))
         sessions = self.sessions()
@@ -108,6 +118,20 @@ print(json.dumps({'type':'result','session_id':session,'subtype':'success','is_e
         with patch.dict(os.environ, {"HERDR_ENV": "0"}):
             with self.assertRaisesRegex(RuntimeError, "Herdr-managed"):
                 herdr("pane", "current", "--current")
+
+    def test_herdr_runs_without_the_controllers_git_config(self):
+        # A tab or pane Herdr creates may start from the caller's environment: the operator's shell and attach-one there run
+        # Git and Claude Code with their own configuration, never the controller's hooks-off.
+        from .worktrees import controller_git_config
+        with patch.dict(os.environ, {"HERDR_ENV": "1"}), patch("workflow.herdr.subprocess.run") as run:
+            for key in [key for key in os.environ if key.startswith("GIT_CONFIG")]:
+                del os.environ[key]
+            controller_git_config(os.environ)
+            run.return_value.stdout = "{}"
+            herdr("pane", "current", "--current")
+        env = run.call_args.kwargs["env"]
+        self.assertEqual([key for key in env if key.startswith("GIT_CONFIG")], [])
+        self.assertEqual(env["HERDR_ENV"], "1")
 
     def test_missing_terminal_receipt_blocks_even_with_exit_zero(self):
         self.executable.write_text("#!/usr/bin/env python3\nprint('not a terminal receipt')\n")
@@ -206,11 +230,40 @@ class RunClaudeTests(unittest.TestCase):
     def test_a_background_session_gets_the_same_setting_in_its_arguments(self):
         # `claude --bg` only hands its session to the background service, which starts it with the service's own
         # environment: the helper's DISABLE_AUTOUPDATER never reaches it. The helper's arguments do, as --settings.
+        # bgIsolation "none" (and CLAUDE_BG_ISOLATION, which 2.1.288 reads first) drops the --bg system prompt's
+        # EnterWorktree paragraph and its "commit before finishing ... and push" one.
         import json
         from .sessions import background_settings, claude_env
         flag, value = background_settings()
-        self.assertEqual((flag, json.loads(value)), ("--settings", {"env": {"DISABLE_AUTOUPDATER": "1"}}))
-        self.assertEqual(json.loads(value)["env"], claude_env({}))
+        self.assertEqual((flag, json.loads(value)), ("--settings", {"env": {"DISABLE_AUTOUPDATER": "1", "CLAUDE_BG_ISOLATION": "none"},
+                                                                    "worktree": {"bgIsolation": "none"}}))
+        self.assertLessEqual(claude_env({}).items(), json.loads(value)["env"].items())
+
+    def test_a_worker_gets_the_background_settings_plus_its_deny_rules_and_git_variables(self):
+        import json
+        from .sessions import background_settings, worker_settings
+        controller = Path(__file__).resolve().parents[1]
+        run = Path(tempfile.gettempdir()) / "runs" / "run"
+        flag, value = worker_settings(run)
+        settings = json.loads(value)
+        background = json.loads(background_settings()[1])
+        self.assertEqual(flag, "--settings")
+        self.assertEqual(set(settings), {"env", "worktree", "permissions"})
+        self.assertEqual(settings["worktree"], background["worktree"])
+        self.assertEqual(settings["env"], {**background["env"], "HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"})
+        secrets = ["~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/projects/**", "~/.claude/.credentials.json",
+                   "~/.config/vps-wallet.env"]
+        protected = ["~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.claude/settings*.json", f"/{controller}/**"]
+        self.assertEqual(settings["permissions"], {"deny": [*(f"{tool}({path})" for path in secrets for tool in ("Read", "Edit")),
+                                                            *(f"Edit({path})" for path in protected),
+                                                            "Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)"]})
+        # The job's tmp lives under ~/.claude/jobs and pine's worktrees under ~/dev/pine-runs: neither tree is ever denied whole.
+        for rule in settings["permissions"]["deny"]:
+            self.assertNotRegex(rule, r"^(Read|Edit)\((~|/+home/[^/]+)/(dev|\.claude)(/\*\*)?\)$")
+        # A run kept inside the controller checkout keeps its worktrees and completion files writable: that rule is left out.
+        inside = json.loads(worker_settings(controller / "runs" / "run")[1])
+        self.assertEqual(inside["permissions"]["deny"], [rule for rule in settings["permissions"]["deny"] if rule != f"Edit(/{controller}/**)"])
+        self.assertEqual(worker_settings(run), worker_settings(run))  # Deterministic: prepare pins its digest.
 
     def test_a_timeout_is_repeated_only_for_a_command_that_only_reads(self):
         # A listing that hangs while the background service restarts is asked again, each timeout spending its own

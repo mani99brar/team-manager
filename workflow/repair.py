@@ -402,7 +402,7 @@ def save_lanes(runtime, entry: dict, derived: dict) -> None:
     save_entry(runtime.directory, entry)
     with (runtime.directory / f"repair-{entry['n']}.diff").open("wb") as handle:
         for item in entry["lanes"].values():
-            handle.write(subprocess.check_output(["git", "-C", runtime.plan["repository"], "diff", "--binary", item["previous_commit"], item["commit"]]))
+            handle.write(subprocess.check_output(["git", "-C", runtime.plan["repository"], "diff", "--binary", "--no-ext-diff", "--no-textconv", item["previous_commit"], item["commit"]]))
 
 
 def raise_attempts(directory: Path, entry: dict) -> None:

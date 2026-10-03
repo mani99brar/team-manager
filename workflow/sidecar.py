@@ -499,8 +499,8 @@ def write_inputs(runtime, n: int, trigger: str, rows, herdr: Herdr, lanes: dict)
     for lane in plan_workers(plan):
         worktree = Path(plan["nodes"][lane]["worktree"])
         head = lane_git(worktree, "rev-parse", "HEAD").strip()
-        diff = lane_git(worktree, "diff", "--no-color", "--no-ext-diff", plan["base_commit"])
-        numstat = lane_git(worktree, "diff", "--numstat", "--no-renames", "-z", plan["base_commit"])
+        diff = lane_git(worktree, "diff", "--no-color", "--no-ext-diff", "--no-textconv", plan["base_commit"])
+        numstat = lane_git(worktree, "diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", plan["base_commit"])
         binary = sorted(entry.split("\t", 2)[2] for entry in numstat.split("\0") if entry.startswith("-\t-\t"))
         untracked = sorted(filter(None, lane_git(worktree, "ls-files", "--others", "--exclude-standard", "-z").split("\0")))
         diff_file = inputs / f"{lane}.diff"

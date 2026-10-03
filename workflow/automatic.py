@@ -612,7 +612,7 @@ def review_candidate(runtime) -> dict:
     git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), bundle["candidate_commit"])
     patch = runtime.directory / "review.diff"
     with patch.open("w") as handle:
-        subprocess.run(["git", "-C", str(cwd), "diff", "--binary", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
+        subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
     if reviewer_transport(runtime.plan) == "print":
         return _review_print(runtime, bundle, digest, cwd, patch)
     return _review_native(runtime, bundle, digest, patch)

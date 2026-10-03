@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .sessions import git, save_json, terminate
 from .verification import evaluate_worker, policy_digest
-from .worktrees import git_worktree
+from .worktrees import git_worktree, without_controller_git_config
 
 
 def now() -> str:
@@ -305,10 +305,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     # Captured before any check runs, so a check that rewrites a file cannot change what is recorded; the
     # post-check cleanliness rule below invalidates the evidence if one does. The candidate phase captures nothing.
     files_not_captured = capture_changed_files(worktree, changed, capture) if phase == "worker" else None
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
-    for key in list(env):
-        if key.startswith("PLAYWRIGHT_JSON_OUTPUT"):
-            del env[key]  # The runner owns JSON capture, not inherited reporter paths.
+    env, dropped = check_environment(os.environ)
     # Share installed browser executables read-only, not profiles or test caches.
     if sys.platform == "linux":
         env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright"))
@@ -341,12 +338,41 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
               **({"files_not_captured": files_not_captured} if files_not_captured is not None else {})}
     evidence = {"version": "1.0.0", "policy_sha256": policy_digest(policy),
                 **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
+    # The dropped names sit beside the evidence, whose schema is closed: a check that needed one shows why it failed.
     packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,
               "artifact_root": str(artifacts_dir), "artifact_paths": {key: str(path) for key, path in capture.paths.items()},
-              "capture_errors": errors, "scenario_errors": scenario_errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir)}
+              "capture_errors": errors, "scenario_errors": scenario_errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir),
+              "dropped_env_names": dropped}
     packet = recheck_packet(packet, policy, run)
     save_json(packet_path, packet)
     return packet
+
+
+# Secret-like names a check never inherits (C14 slice 1). *_URL names stay, though they may hold a key: pine-chain's fork
+# check reads GNOSIS_RPC_URL. Matched without regard to case.
+SECRET_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+SECRET_PREFIXES = ("GH_", "GITHUB_")
+
+
+def check_environment(environ) -> tuple[dict, list[str]]:
+    """The environment the checks start from, and the secret-like names it dropped (names only, sorted).
+
+    The controller's, without the Herdr variables (a check never targets the controller's pane), inherited Playwright
+    reporter paths (the runner owns JSON capture), the controller's own Git configuration (target suites run their hooks
+    as written: worktrees.without_controller_git_config) and SECRET_SUFFIXES/SECRET_PREFIXES names; with HUSKY=0 and
+    GIT_TERMINAL_PROMPT=0, so no install script switches hooks on and no Git command waits for a password.
+    """
+    env, dropped = {}, []
+    for key, value in without_controller_git_config(environ).items():
+        if key.startswith(("HERDR_", "PLAYWRIGHT_JSON_OUTPUT")):
+            continue
+        name = key.upper()
+        if not name.endswith("_URL") and (name.endswith(SECRET_SUFFIXES) or name.startswith(SECRET_PREFIXES)):
+            dropped.append(key)
+            continue
+        env[key] = value
+    env.update(HUSKY="0", GIT_TERMINAL_PROMPT="0")
+    return env, sorted(dropped)
 
 
 SOCKET_PATH_LIMIT = 107  # sun_path on Linux, excluding the terminating NUL.

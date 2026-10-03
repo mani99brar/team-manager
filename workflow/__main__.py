@@ -1,7 +1,12 @@
 """`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `sidecar-pass`, `repair` and `check-report`."""
+import os
 import sys
 
 if __name__ == "__main__":
+    # Every Git command the controller runs, and every controller it starts, inherits hooks and fsmonitor off: a lane's
+    # worktree shares the target's .git. Claude sessions and checks get the environment without them (worktrees.py).
+    from .worktrees import controller_git_config
+    controller_git_config(os.environ)
     if len(sys.argv) > 1 and sys.argv[1] == "launch":
         from .launch import main
         main(sys.argv[2:])

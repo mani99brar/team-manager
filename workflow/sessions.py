@@ -20,7 +20,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .worktrees import git_worktree
+from .worktrees import git_worktree, shared_git_record, without_controller_git_config
 
 TERMINAL = {"succeeded", "failed", "blocked"}
 
@@ -205,6 +205,10 @@ def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow
             raise RuntimeError(f"Unclean or mismatched initial worktree: {worktree}")
         plan["nodes"][node]["observed_start_commit"] = observed
         save_json(directory / "plan.json", plan)
+    # Once the lane worktrees exist (a copy of the main worktree's config.worktree is theirs from the start): freeze,
+    # review and integrate compare the shared .git against it and report what changed (Pipeline.check_shared_git).
+    plan["shared_git"] = shared_git_record(repo)
+    save_json(directory / "plan.json", plan)
     return plan
 
 
@@ -230,24 +234,68 @@ AUTOUPDATER_OFF = {"DISABLE_AUTOUPDATER": "1"}
 
 
 def claude_env(env: dict | None = None) -> dict:
-    """The environment of every Claude process the controller starts: `env` (default: this process's) with the auto-updater off.
+    """The environment of every Claude process the controller starts: `env` (default: this process's) with the auto-updater off
+    and without the controller's own Git configuration (worktrees.without_controller_git_config).
 
     An update replaces the binary under every running session and restarts the background service, so a run never
     updates Claude Code underneath itself; operators update between runs. A `claude --bg` session is not started by
     the controller: it takes the setting from background_settings.
     """
-    return {**(os.environ if env is None else env), **AUTOUPDATER_OFF}
+    return {**without_controller_git_config(os.environ if env is None else env), **AUTOUPDATER_OFF}
+
+
+# Claude Code 2.1.288 reads the background isolation from CLAUDE_BG_ISOLATION first, then from worktree.bgIsolation. With
+# "none" the --bg system prompt says to edit files in the working directory: no EnterWorktree paragraph, and none telling
+# the session to commit before finishing and push when the repository has a remote.
+BACKGROUND_ENV = {**AUTOUPDATER_OFF, "CLAUDE_BG_ISOLATION": "none"}
+BACKGROUND_SETTINGS = {"env": BACKGROUND_ENV, "worktree": {"bgIsolation": "none"}}
 
 
 def background_settings() -> list[str]:
-    """`--settings` for every `claude --bg` command: the auto-updater off inside the session it starts.
+    """`--settings` for every `claude --bg` command: the auto-updater and the background isolation off inside the session it starts.
 
     The short `--bg` helper only hands the session to Claude Code's background service, which starts it with the
     service's own environment plus an allowlist of the helper's (provider, model, config, endpoint and PATH variables),
     so claude_env reaches the session only when this run happened to start the service. The helper's arguments do
     reach it, and settings given there are merged over the user's and the project's.
     """
-    return ["--settings", json.dumps({"env": AUTOUPDATER_OFF})]
+    return ["--settings", json.dumps(BACKGROUND_SETTINGS)]
+
+
+# A worker runs as the operator's account (no sandbox on this host yet), so its deny rules keep the session's own file tools
+# off the credentials and off what would outlive the run; they do not stop a Bash `cat` (README "What a worker can reach").
+# Paths are Claude Code's permission syntax: `~/` is the home directory, `//` an absolute path, `/**` everything below.
+# Never all of ~/.claude or ~/dev: the job's $CLAUDE_JOB_DIR/tmp is under ~/.claude/jobs, pine's worktrees under ~/dev/pine-runs.
+WORKER_SECRETS = ("~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/projects/**", "~/.claude/.credentials.json",
+                  "~/.config/vps-wallet.env")  # Read and Edit denied.
+WORKER_PROTECTED = ("~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.claude/settings*.json")  # Edit denied.
+# Hygiene, not a boundary (C19): a pattern kill took another run's verifier once, and freeze refuses a worker that moved HEAD.
+WORKER_DENY = ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)")
+WORKER_ENV = {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def worker_settings(directory: Path) -> list[str]:
+    """`--settings` for a worker's `claude --bg` (InteractiveSessions.run only): background_settings plus HUSKY=0 and
+    GIT_TERMINAL_PROMPT=0 in its environment and the deny rules above, one JSON argument.
+
+    Edit is also denied on the controller checkout (the directory holding this package), unless the run directory
+    `directory` lies inside it: a rule never covers a worker's own worktree or completion file. prepare pins the digest
+    of this exact argument (worker_authority).
+    """
+    controller = Path(__file__).resolve().parents[1]
+    deny = [*(f"{tool}({path})" for path in WORKER_SECRETS for tool in ("Read", "Edit")), *(f"Edit({path})" for path in WORKER_PROTECTED)]
+    if not Path(directory).resolve().is_relative_to(controller):
+        deny.append(f"Edit(/{controller}/**)")
+    deny.extend(WORKER_DENY)
+    return ["--settings", json.dumps({**BACKGROUND_SETTINGS, "env": {**BACKGROUND_ENV, **WORKER_ENV}, "permissions": {"deny": deny}})]
+
+
+def worker_authority(directory: Path) -> dict:
+    """What prepare pins as plan.worker_authority: the digest of the workers' --settings, no sandbox, the operator's account.
+
+    Every launch runs this way; there is no per-launch choice. A sandboxed profile is a later change (C14 slice 2).
+    """
+    return {"worker_settings_sha256": hashlib.sha256(worker_settings(directory)[1].encode()).hexdigest(), "sandbox": False, "authority": "account"}
 
 
 WORKER_EFFORT_ENV = "WORKFLOW_WORKER_EFFORT"
@@ -458,7 +506,7 @@ class ClaudeSessions:
             try:
                 record["git_status"] = git(cwd, "status", "--porcelain")
                 with (self.directory / f"{node}.patch").open("w") as patch:
-                    subprocess.run(["git", "-C", str(cwd), "diff", "--binary", self.plan["base_commit"]], stdout=patch, check=True)
+                    subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", self.plan["base_commit"]], stdout=patch, check=True)
             except Exception as error:
                 record["evidence_error"] = str(error)
                 record["status"] = "blocked"
