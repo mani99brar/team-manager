@@ -39,6 +39,24 @@ class CompletionTests(unittest.TestCase):
         return {"version": "1.0.0", "run_id": "test", "node_id": node, "launch_token": node + "-token",
                 "status": "completed", "summary": "Synthetic work", "open_assumptions": []}
 
+    def test_the_worker_prompt_states_the_lanes_deadline_in_utc(self):
+        # C16 step 6: the receipt's launch_requested_at (saved before the prompt is built) plus worker_timeout_seconds and any
+        # answered question's pause: the deadline wait_handoffs holds the lane to. Without a readable receipt, the bound only.
+        from .automatic import completion_prompt, lane_deadline
+        prompt = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn("Your deadline is 1970-01-01T04:00:00Z (UTC), 4 hours after this launch: write your completion file before it; "
+                      "past it the controller stops the run and relaunches nothing.", prompt)
+        self.assertEqual(lane_deadline(self.runtime, "ui"), 4 * 3600)
+        save_json(self.root / "ui.deadline.json", {"node_id": "ui", "paused_seconds": 600.0, "paused_at": None})
+        self.assertIn("Your deadline is 1970-01-01T04:10:00Z (UTC), 4 hours after this launch", completion_prompt(self.root, self.plan, "ui"))
+        self.assertEqual(lane_deadline(self.runtime, "ui"), 4 * 3600 + 600)
+        self.plan["automatic"]["worker_timeout_seconds"] = 5400
+        self.assertIn("Your deadline is 1970-01-01T01:30:00Z (UTC), 90 minutes after this launch", completion_prompt(self.root, self.plan, "adapter"))
+        (self.root / "adapter.interactive.json").unlink()
+        prompt = completion_prompt(self.root, self.plan, "adapter")
+        self.assertIn("Your deadline is 90 minutes after this launch: write your completion file before it", prompt)
+        self.assertNotIn("(UTC)", prompt)
+
     def test_a_1_1_0_worker_is_asked_to_end_its_summary_with_a_proof_table(self):
         # C34 (decision 4): coverage verifies each row and files every gap that is not a shown failure, a contradiction or a
         # disclosed failure as a P2 quoting the line. A 1.0.0 run's completion prompt is unchanged.

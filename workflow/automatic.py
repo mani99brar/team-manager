@@ -99,7 +99,31 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
             "then finish your turn and do not modify more files. Controller checks and independent review "
-            "still determine acceptance.\n" + json.dumps(example) + evidence)
+            "still determine acceptance." + deadline_sentence(directory, plan, node) + "\n" + json.dumps(example) + evidence)
+
+
+def duration(seconds: int) -> str:
+    """`4 hours`, `90 minutes`, `45 seconds`: in the largest unit that divides it."""
+    for size, unit in ((3600, "hour"), (60, "minute"), (1, "second")):
+        if seconds % size == 0:
+            return f"{seconds // size} {unit}{'' if seconds // size == 1 else 's'}"
+
+
+def deadline_sentence(directory: Path, plan: dict, node: str) -> str:
+    """The worker prompt's deadline (C16 step 6): the lane deadline in UTC, from the receipt the launch saves before it builds the
+    prompt (interactive.py), so what the worker reads is what wait_handoffs holds it to. Only the bound when no receipt is
+    readable; nothing for a plan without a worker timeout."""
+    from .guardrails import iso
+    seconds = (plan.get("automatic") or {}).get("worker_timeout_seconds")
+    if type(seconds) is not int:
+        return ""
+    bound = f"{duration(seconds)} after this launch"
+    try:
+        deadline = deadline_at(directory, plan, node)
+    except (OSError, ValueError, KeyError, TypeError):
+        deadline = None
+    when = f"{iso(int(deadline))} (UTC), {bound}" if deadline is not None else bound
+    return f" Your deadline is {when}: write your completion file before it; past it the controller stops the run and relaunches nothing."
 
 
 COMPLETION_KEYS = frozenset({"version", "run_id", "node_id", "launch_token", "status", "summary", "open_assumptions"})
@@ -204,14 +228,19 @@ class Stalls:
                                                     "accepted once the state is idle or done, or the status idle")
 
 
-def lane_deadline(runtime, node: str) -> float | None:
-    """The lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
+def deadline_at(directory: Path, plan: dict, node: str) -> float | None:
+    """A lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
     from .guardrails import deadline_extension
-    extension = deadline_extension(runtime.directory, node)
+    extension = deadline_extension(directory, node)
     if extension is None:
         return None
-    receipt = read_json(runtime.directory / f"{node}.interactive.json")
-    return datetime.fromisoformat(receipt["launch_requested_at"]).timestamp() + runtime.plan["automatic"]["worker_timeout_seconds"] + extension
+    receipt = read_json(directory / f"{node}.interactive.json")
+    return datetime.fromisoformat(receipt["launch_requested_at"]).timestamp() + plan["automatic"]["worker_timeout_seconds"] + extension
+
+
+def lane_deadline(runtime, node: str) -> float | None:
+    """The lane's own deadline (deadline_at); None while a question waits."""
+    return deadline_at(runtime.directory, runtime.plan, node)
 
 
 def latest_deadline(runtime, workers: list[str]) -> float | None:

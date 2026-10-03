@@ -349,7 +349,7 @@ Nothing launches a Claude session without `--live`. Nothing ever pushes or merge
 | `--workers a,b` | launch only these declared lanes (unknown ids, duplicates and an empty list are refused before any Git action); pinned in `plan.json` | every declared lane |
 | `--live` | authorize Claude usage | off |
 | `--automatic` | run-scoped permission bypass for workers, automatic freeze, checks, reviewers, verified feature branch | off, manual gates |
-| `--worker-timeout-seconds N` | per-worker deadline from launch to completion signal, automatic only | 4 h, max 24 h |
+| `--worker-timeout-seconds N` | per-worker deadline from launch to completion signal, automatic only; the worker prompt states it in UTC | 4 h, max 24 h |
 | `--review-timeout-seconds N` | reviewer deadline from its launch to its completion file, automatic only | 30 min, max 24 h |
 | `--reviewer-transport native\|print` | attachable reviewer session, or headless `claude --print`, automatic only | `native` |
 | `--no-herdr` | omit terminal attachments | attaches |
