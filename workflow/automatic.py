@@ -420,16 +420,17 @@ def reviewer_status_path(runtime, reviewer_id: str) -> Path:
 
 
 class ReviewStatus:
-    """The combined review status plus one status per reviewer, persisted together.
+    """The combined review status plus one status per reviewer, persisted together: the controller's restart state.
 
-    The default reviewer keeps today's single file: its own keys (launch token, session, decision) are
-    merged into `automatic-review.json`, whose combined `status` wins. Declared reviewers each get
-    `automatic-review-<id>.json` beside the combined file.
+    `review.json` is the review's record; these files only let a controller that stops carry on. The default reviewer keeps
+    today's single file: its own keys (launch token, session, accepted decision) are merged into `automatic-review.json`,
+    whose combined `status` wins. Declared reviewers each get `automatic-review-<id>.json` beside the combined file.
     """
 
     def __init__(self, runtime, combined: dict, statuses: dict):
         self.runtime, self.combined, self.statuses = runtime, combined, statuses
-        # Accepted decisions live here until the combined decision persists them (or a deadline/rejection retains them).
+        # The decisions accepted so far, by reviewer id: review.json records them, and each status keeps its own as
+        # `accepted_decision` for a restart.
         self.decisions: dict = {}
 
     @property
@@ -455,10 +456,6 @@ class ReviewStatus:
             else:
                 save_json(path, status)
         save_json(combined_status_path(self.runtime), {**merged, **self.combined})
-
-    def record_decisions(self) -> None:
-        for reviewer_id, decision in self.decisions.items():
-            self.statuses[reviewer_id]["decision"] = decision
 
     def supersede_running(self) -> None:
         """A reviewer still working when the run is decided is stopped; its status records why nothing waited for it."""
@@ -539,8 +536,8 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
             state.save()
             raise
         decisions[reviewer_id] = decision
-        # What was accepted is saved with its time (a status without it, from an older controller, is read again); `decision`
-        # stays the one the combined decision records.
+        # What was accepted is saved with its time, for a restart (a status without it, from an older controller, is read
+        # again); review.json is the record.
         status.update(status="accepted", accepted_at=accepted or now(), accepted_decision=decision, completion_sha256=digest_file(path))
         state.save()
         return decision
@@ -692,7 +689,6 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
     """Persist review.json for any verdict; only unanimous approval without blocking findings passes."""
     review = combined_review(runtime, bundle, digest, state, decisions)
     save_json(runtime.directory / "review.json", review)
-    state.record_decisions()
     blockers = [reviewer_id for reviewer_id in state.ids if reviewer_id in decisions and decision_blocks(decisions[reviewer_id])]
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
     if blockers or undecided:
@@ -711,8 +707,6 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
 def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> None:
     """A run blocked by one reviewer's deadline or rejected file still records the verdicts it accepted, tagged by reviewer."""
     if state.decisions and not (runtime.directory / "review.json").exists():
-        state.record_decisions()
-        state.save()
         save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
 
 
@@ -802,6 +796,13 @@ def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None
         sleep(2)
 
 
+def worktree_changed(cwd: Path, bundle: dict) -> bool:
+    """The shared review worktree is no longer the clean candidate checkout: HEAD moved, or `git status` lists a change, an
+    untracked file or an ignored one (project configuration planted under an ignore rule, such as .claude/, which a plain
+    `git status --porcelain` never lists)."""
+    return git(cwd, "rev-parse", "HEAD") != bundle["candidate_commit"] or bool(git(cwd, "status", "--porcelain", "--ignored"))
+
+
 def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> dict:
     from .pipeline import digest_file
     cwd = runtime.directory / "review-worktree"
@@ -812,7 +813,7 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
         decisions = wait_reviews(runtime, state)
         waited = True  # From here a failure refuses the whole review: nothing accepted so far is trusted.
         check_independence(runtime, bundle, state)
-        if git(cwd, "rev-parse", "HEAD") != bundle["candidate_commit"] or git(cwd, "status", "--porcelain"):
+        if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
             raise RuntimeError("Evidence changed during review")
@@ -913,12 +914,12 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
                 status.update(status="blocked", error=str(error))
                 raise
             decisions[reviewer_id] = decision
-            status.update(status="accepted", accepted_at=now())
+            status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
             state.save()
             if decision_blocks(decision):
                 break  # The first block decides; the other reviewers are stopped below.
         waited = True
-        if git(cwd, "rev-parse", "HEAD") != bundle["candidate_commit"] or git(cwd, "status", "--porcelain"):
+        if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
             raise RuntimeError("Evidence changed during review")

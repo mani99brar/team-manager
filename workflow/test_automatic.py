@@ -980,6 +980,7 @@ class GraphFixture(unittest.TestCase):
         self.verdict = f.root / "review-verdict"
         self.verdict.write_text("approved")
         self.findings = f.root / "review-findings.json"  # Optional: the findings the fake print reviewer reports.
+        self.plant = f.root / "review-plant"  # Optional: text the fake print reviewer writes to .claude/settings.json in its checkout.
         f.sessions.reviewer_verdict_file = self.verdict
         executable = f.root / "fake-reviewer"
         executable.write_text(f'''#!/usr/bin/env python3
@@ -995,6 +996,10 @@ with counter.open('a') as handle:  # One appended line per launch: parallel jobs
 verdict = Path({str(self.verdict)!r}).read_text()
 findings_file = Path({str(self.findings)!r})
 findings = json.loads(findings_file.read_text()) if findings_file.exists() else []
+plant = Path({str(self.plant)!r})
+if plant.exists():  # The job runs in the review worktree.
+    Path('.claude').mkdir(exist_ok=True)
+    Path('.claude/settings.json').write_text(plant.read_text())
 print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
                   "structured_output": {{"verdict": verdict, "findings": findings}}}}))
 ''')
@@ -1023,6 +1028,22 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
     def untagged(self, findings: list) -> list:
         return [{key: value for key, value in finding.items() if key != "reviewer"} for finding in findings]
 
+    PLANTED = '{"permissions": {"allow": ["Bash"]}}'
+
+    def ignore_claude_config(self):
+        """The target repository ignores .claude/ (many do), so a plain `git status --porcelain` never lists a file planted there."""
+        exclude = self.fixture.repo / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        with exclude.open("a") as handle:
+            handle.write(".claude/\n")
+
+    def plant_config(self):
+        """What a reviewer could leave in the shared review worktree: project configuration under that ignored path."""
+        target = self.fixture.directory / "review-worktree" / ".claude" / "settings.json"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(self.PLANTED)
+        self.assertEqual(git(target.parents[1], "status", "--porcelain"), "")  # Invisible without --ignored.
+
 
 class SharedGraphTests:
     """Behaviour that must hold for both reviewer transports, with one and with two reviewers."""
@@ -1047,7 +1068,11 @@ class SharedGraphTests:
                          [(reviewer_id, "approved", self.status(reviewer_id)["session_id"]) for reviewer_id in self.ids])
         self.assertTrue(all(isinstance(entry["accepted_at"], str) for entry in review["reviewers"]))
         for reviewer_id in self.ids:
-            self.assertEqual((self.status(reviewer_id)["status"], self.status(reviewer_id)["decision"]["verdict"]), ("succeeded", "approved"))
+            # review.json is the record; a status file is restart state, holding the raw decision once, as accepted_decision.
+            status = self.status(reviewer_id)
+            self.assertEqual((status["status"], status["accepted_decision"]["verdict"]), ("succeeded", "approved"))
+            self.assertIsInstance(status["accepted_at"], str)
+            self.assertNotIn("decision", status)
         self.assertEqual(drive(f.runtime), commit)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
         self.assertFalse(git(f.repo, "remote"))
@@ -1118,11 +1143,11 @@ sys.exit(0 if commit else 75)
         self.assertEqual((review["verdict"], review["reviewer"]), ("blocked", self.sessions_joined()))
         # The first reviewer's block decides; nobody waits for the others, whose status records that.
         first = self.ids[0]
-        self.assertEqual((self.status(first)["status"], self.status(first)["decision"]["verdict"]), ("blocked", "blocked"))
+        self.assertEqual((self.status(first)["status"], self.status(first)["accepted_decision"]["verdict"]), ("blocked", "blocked"))
         self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["blocked"] + [None] * (len(self.ids) - 1))
         for other in self.ids[1:]:
             self.assertEqual(self.status(other)["status"], "superseded")
-            self.assertNotIn("decision", self.status(other))
+            self.assertNotIn("accepted_decision", self.status(other))
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
@@ -1436,7 +1461,7 @@ class PrintReviewerTests(SharedGraphTests):
         self.assertEqual([(item["worker"], item["requirement"]) for item in review["findings"]], [("ui", "UI"), ("adapter", None), ("none", None)] * len(self.ids))
         for reviewer_id in self.ids:
             receipt = self.status(reviewer_id)
-            self.assertEqual((receipt["transport"], receipt["status"], receipt["decision"]["findings"]), ("print", "succeeded", findings))
+            self.assertEqual((receipt["transport"], receipt["status"], receipt["accepted_decision"]["findings"]), ("print", "succeeded", findings))
         exported = read_json(f.directory / "run-state.json")
         self.assertEqual(exported["review"]["transport"], "print")
         self.assertEqual(self.untagged(exported["review"]["findings"]), findings * len(self.ids))
@@ -1454,7 +1479,8 @@ class PrintReviewerTests(SharedGraphTests):
         self.assertEqual((receipt["transport"], receipt["status"]), ("print", "blocked"))
         self.assertIn("'worker' is a required property", receipt["error"])
         for reviewer_id in self.ids:
-            self.assertNotIn("decision", self.status(reviewer_id))
+            # Nothing was accepted: no status keeps a verdict, and there is no record.
+            self.assertFalse({"accepted_at", "accepted_decision"} & set(self.status(reviewer_id)))
         self.assertFalse((f.directory / "review.json").exists())
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
         # The first rejection stops the other jobs, which under load may be killed before the fake records itself,
@@ -1465,6 +1491,21 @@ class PrintReviewerTests(SharedGraphTests):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), launched)
         self.assertEqual([node for node in f.sessions.starts if node.startswith("review")], [])
+
+    def test_ignored_configuration_planted_in_the_review_worktree_is_refused(self):
+        # Every print job approves, but one left project configuration under an ignored path in the shared checkout.
+        f = self.fixture
+        self.ignore_claude_config()
+        self.plant.write_text(self.PLANTED)
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        receipt = self.combined()
+        self.assertEqual((receipt["transport"], receipt["status"]), ("print", "blocked"))
+        self.assertIn("Reviewer worktree changed", receipt["error"])
+        self.assertEqual((f.directory / "review-worktree" / ".claude" / "settings.json").read_text(), self.PLANTED)
+        self.assertFalse((f.directory / "review.json").exists())
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        self.assertEqual(self.reviewer_launches(), len(self.ids))
 
 
 class PrintReviewerGraphTests(PrintReviewerTests, GraphFixture):
@@ -1630,7 +1671,7 @@ sys.exit(0 if commit else 75)
         review = read_json(self.fixture.directory / "review.json")
         first = self.ids[0]  # The first accepted file already blocks; the combined record keeps the reviewer's raw approval.
         self.assertEqual((review["verdict"], review["findings"]), ("blocked", [{**finding, "reviewer": first}]))
-        self.assertEqual(self.status(first)["decision"]["verdict"], "approved")
+        self.assertEqual(self.status(first)["accepted_decision"]["verdict"], "approved")
         self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["approved"] + [None] * (len(self.ids) - 1))
 
     # ---- Launch window and post-acceptance stop -----------------------------------------------------
@@ -1788,7 +1829,9 @@ sys.exit(0 if commit else 75)
         self.assert_rejected(None, error)
         self.assertFalse((self.fixture.directory / "review.json").exists())
         for reviewer_id in self.ids:
-            self.assertNotIn("decision", self.status(reviewer_id))
+            # The wait accepted every file, and its status keeps that for a restart; the refusal leaves no record (no review.json).
+            status = self.status(reviewer_id)
+            self.assertEqual((status["accepted_decision"]["verdict"], "decision" in status), ("approved", False))
 
     def test_reviewer_identity_changed_after_the_file_is_refused(self):
         self.fixture.sessions.reviewer_row_after_file = {"sessionId": "44444444-4444-4444-8444-444444444444"}
@@ -1808,6 +1851,13 @@ sys.exit(0 if commit else 75)
         f = self.fixture
         f.sessions.reviewer_after_file = lambda: (f.directory / "review.diff").write_text("rewritten during review\n")
         self.assert_refused_after_wait("Evidence changed during review")
+
+    def test_ignored_configuration_planted_in_the_review_worktree_is_refused(self):
+        # Project configuration under an ignore rule (.claude/settings.json) is invisible to `git status --porcelain`; the check
+        # lists ignored files too.
+        self.ignore_claude_config()
+        self.fixture.sessions.reviewer_after_file = self.plant_config
+        self.assert_refused_after_wait("Reviewer worktree changed")
 
     def test_reviewer_deadline_without_a_file_stops_the_reviewers_and_launches_no_second(self):
         f = self.fixture
@@ -1883,7 +1933,7 @@ class ParallelReviewerScenarios(GraphFixture):
             self.assertEqual([call.args[0] for call in stop.call_args_list], ["general", "coverage"])
         self.assertEqual((self.combined()["status"], self.status("general")["status"], self.status("coverage")["status"]), ("blocked", "superseded", "blocked"))
         self.assertIn("blocked the candidate (coverage)", self.combined()["error"])
-        self.assertNotIn("decision", self.status("general"))
+        self.assertNotIn("accepted_decision", self.status("general"))
         review = read_json(f.directory / "review.json")
         self.assertEqual(review["verdict"], "blocked")
         self.assertEqual(self.review_entries(), [("general", None, self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
@@ -1908,7 +1958,7 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertEqual(self.review_entries(), [("general", "approved", self.uuid("general")), ("coverage", "approved", self.uuid("coverage"))])
         self.assertEqual(review["findings"], [{**self.GENERAL[0], "reviewer": "general"}, {**open_p1, "reviewer": "coverage"}])
         self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("accepted", "blocked"))
-        self.assertEqual(self.status("coverage")["decision"]["verdict"], "approved")  # B's raw decision is kept.
+        self.assertEqual(self.status("coverage")["accepted_decision"]["verdict"], "approved")  # B's raw decision is kept.
         self.assertIn("blocked the candidate (coverage)", self.combined()["error"])
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
         self.assertEqual(self.reviewer_launches(), 2)
@@ -1930,7 +1980,7 @@ class ParallelReviewerScenarios(GraphFixture):
             self.assertEqual([call.args[0] for call in stop.call_args_list], ["general", "coverage"])
         self.assertIn("Reviewer coverage deadline exhausted; no second reviewer", self.combined()["error"])
         self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("accepted", "blocked"))
-        self.assertEqual(self.status("general")["decision"]["verdict"], "approved")  # A's accepted verdict is retained.
+        self.assertEqual(self.status("general")["accepted_decision"]["verdict"], "approved")  # A's accepted verdict is retained.
         review = read_json(f.directory / "review.json")
         self.assertEqual(review["verdict"], "blocked")
         self.assertEqual(self.review_entries(), [("general", "approved", self.uuid("general")), ("coverage", None, self.uuid("coverage"))])

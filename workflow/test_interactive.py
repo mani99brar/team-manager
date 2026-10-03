@@ -431,6 +431,11 @@ class InteractiveTests(unittest.TestCase):
             with patch("workflow.interactive.git", side_effect=[candidate, " M file"]):
                 with self.assertRaisesRegex(RuntimeError, "candidate"):
                     self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
+            # Ignored files count too: project configuration planted under an ignore rule (.claude/) is not a clean checkout.
+            with patch("workflow.interactive.git", side_effect=[candidate, "!! .claude/"]) as listed:
+                with self.assertRaisesRegex(RuntimeError, "candidate"):
+                    self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
+            self.assertEqual(listed.call_args_list[1].args[1:], ("status", "--porcelain", "--ignored"))
             with patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                     patch.object(self.sessions, "inventory", return_value=[self.reviewer_row()]):
                 with self.assertRaisesRegex(RuntimeError, "launch name"):
