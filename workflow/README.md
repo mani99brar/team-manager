@@ -102,7 +102,7 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair, `test_attention.py` the attention record; `testdata/` holds copies of finished features' files the tests read. The test modules whose runs can record attention point `MD_MANAGER_PROJECTS_CONFIG` at a temporary registry, so `attention.jsonl` never lands beside yours.
+The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair, `test_attention.py` the attention record, `test_replay.py` the review replay (a fake print job); `testdata/` holds copies of finished features' files the tests read. The test modules whose runs can record attention point `MD_MANAGER_PROJECTS_CONFIG` at a temporary registry, so `attention.jsonl` never lands beside yours.
 
 ## Files
 
@@ -116,6 +116,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
 - `repair.py`: `repair`, lane repair after freeze: `repairs.json`, the deterministic snapshot commits, the attempt floors, the checkpoint fork at the freeze boundary and `--workspace`.
 - `automatic.py`: unattended supervision, completion signals, the native/print reviewers (one per declared reviewer, each one's verdict derived from its findings, unanimous) and the severity rubric every reviewer gets; `prompts/review.md` is the built-in brief, `prompts/reviewers/` the bundled ones.
+- `replay.py`: `python -m workflow.replay`, the review replay: past runs' reviewers rerun with this checkout's prompt on scratch copies without their recorded verdicts, the print reviewer's own prompt, command and schema, at most two jobs at a time, and a tally of raw and derived verdicts.
 - `verification.py`, `checks.py`: policy validation against the bundled `contracts/workflow/` schemas and isolated check execution; `checks.py` also holds the browser scenario rules that the verifier and `check-report` share.
 - `export_state.py`: the versioned `run-state.json` export (1.6.0).
 - `worktrees.py`: every `git worktree` change, one at a time per repository, retrying Git's own lock errors.

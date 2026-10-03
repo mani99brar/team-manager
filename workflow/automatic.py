@@ -1297,10 +1297,13 @@ def print_command(executable: str, session_id: str, schema: dict, add_dirs: list
     return command + ["--json-schema", json.dumps(schema)]
 
 
-def print_verdict(runtime, reviewer_id: str, process: subprocess.Popen, status: dict) -> dict:
-    """A finished print job's decision: exit 0, its own session, a success result, structured output valid against the schema."""
+def print_verdict(runtime, reviewer_id: str, process: subprocess.Popen, status: dict, output: Path | None = None) -> dict:
+    """A finished print job's decision: exit 0, its own session, a success result, structured output valid against the schema.
+
+    `output` is the job's stdout file: the reviewer's `<node>.stdout.json` in the run directory unless given (a replay keeps
+    each sample's output outside the copy its jobs read)."""
     from jsonschema import validate
-    result = read_json(runtime.directory / f"{review_node(reviewer_id)}.stdout.json")
+    result = read_json(output or runtime.directory / f"{review_node(reviewer_id)}.stdout.json")
     if process.returncode != 0 or result.get("session_id") != status["session_id"] or result.get("is_error") is not False or result.get("subtype") != "success":
         raise RuntimeError(f"Reviewer {reviewer_id} did not succeed; inspect retained output. No automatic retry/provider switch.")
     decision = result.get("structured_output")
