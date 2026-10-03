@@ -404,8 +404,10 @@ class InteractiveTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--settings") + 1], worker_settings(self.directory)[1])
                 settings = json.loads(command[command.index("--settings") + 1])
                 for rule in ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)", "Read(~/.ssh/**)",
-                             "Edit(~/.ssh/**)", "Read(~/.config/vps-wallet.env)", "Read(~/.claude/.credentials.json)", "Edit(~/.gitconfig)"):
+                             "Edit(~/.ssh/**)", "Read(~/.config/vps-wallet.env)", "Read(~/.claude/.credentials.json)", "Edit(~/.gitconfig)",
+                             "Edit(~/.config/git/**)", "Read(~/.claude/projects/**/*.jsonl)", "Edit(~/.claude/projects/**)"):
                     self.assertIn(rule, settings["permissions"]["deny"])
+                self.assertNotIn("Read(~/.claude/projects/**)", settings["permissions"]["deny"])  # A worker Reads its saved tool output.
                 self.assertEqual({key: settings["env"][key] for key in ("HUSKY", "GIT_TERMINAL_PROMPT", "CLAUDE_BG_ISOLATION")},
                                  {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0", "CLAUDE_BG_ISOLATION": "none"})
                 self.assertEqual(command[-1], prompt.read_text())

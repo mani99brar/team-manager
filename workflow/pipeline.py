@@ -34,7 +34,7 @@ from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, at
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
                        run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_authority, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
-from .worktrees import SHARED_GIT_CHANGED, git_worktree, shared_git_changes, shared_git_state
+from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 # The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
@@ -1108,6 +1108,7 @@ def run_status(directory: Path) -> tuple[dict, str]:
 
 
 def main():
+    controller_git_config(os.environ)  # As `python -m workflow` does, for `python -m workflow.pipeline`; added once only.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
                         help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar) and repair have their own "

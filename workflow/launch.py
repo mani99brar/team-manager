@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from .registry import merge_registry, read_registry, register, registry_entry, r
 from .sessions import read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
 from .verification import validate_schema
+from .worktrees import controller_git_config
 
 # The repository this tool lives in: the fallback target, and the working directory of every
 # `python -m workflow` command a launch runs (it locates the tool, not the target).
@@ -256,6 +258,7 @@ def command_cwd(command: list[str], target: Path, tool: Path = TOOL) -> Path:
 
 
 def main(argv=None):
+    controller_git_config(os.environ)  # As `python -m workflow` does, for `python -m workflow.launch`; added once only.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("feature", help="A directory under <target>/features/ that holds a feature.json")
     parser.add_argument("--repo", type=Path, help="Target Git repository (default: the current directory when it is a Git repository "

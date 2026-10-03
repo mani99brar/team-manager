@@ -251,12 +251,17 @@ class RunClaudeTests(unittest.TestCase):
         self.assertEqual(set(settings), {"env", "worktree", "permissions"})
         self.assertEqual(settings["worktree"], background["worktree"])
         self.assertEqual(settings["env"], {**background["env"], "HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"})
-        secrets = ["~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/projects/**", "~/.claude/.credentials.json",
-                   "~/.config/vps-wallet.env"]
-        protected = ["~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.claude/settings*.json", f"/{controller}/**"]
+        secrets = ["~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/.credentials.json", "~/.config/vps-wallet.env"]
+        # Under ~/.claude/projects only the transcripts and memory are unreadable: Claude Code saves a large tool output in the
+        # session's tool-results/ there and tells the worker to Read it. Nothing under it is editable.
+        transcripts = ["~/.claude/projects/**/*.jsonl", "~/.claude/projects/**/memory/**"]
+        protected = ["~/.claude/projects/**", "~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.config/git/**",
+                     "~/.claude/settings*.json", f"/{controller}/**"]
         self.assertEqual(settings["permissions"], {"deny": [*(f"{tool}({path})" for path in secrets for tool in ("Read", "Edit")),
+                                                            *(f"Read({path})" for path in transcripts),
                                                             *(f"Edit({path})" for path in protected),
                                                             "Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)"]})
+        self.assertNotIn("Read(~/.claude/projects/**)", settings["permissions"]["deny"])
         # The job's tmp lives under ~/.claude/jobs and pine's worktrees under ~/dev/pine-runs: neither tree is ever denied whole.
         for rule in settings["permissions"]["deny"]:
             self.assertNotRegex(rule, r"^(Read|Edit)\((~|/+home/[^/]+)/(dev|\.claude)(/\*\*)?\)$")

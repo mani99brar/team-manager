@@ -266,9 +266,14 @@ def background_settings() -> list[str]:
 # off the credentials and off what would outlive the run; they do not stop a Bash `cat` (README "What a worker can reach").
 # Paths are Claude Code's permission syntax: `~/` is the home directory, `//` an absolute path, `/**` everything below.
 # Never all of ~/.claude or ~/dev: the job's $CLAUDE_JOB_DIR/tmp is under ~/.claude/jobs, pine's worktrees under ~/dev/pine-runs.
-WORKER_SECRETS = ("~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/projects/**", "~/.claude/.credentials.json",
+WORKER_SECRETS = ("~/.ssh/**", "~/.config/gh/**", "~/.git-credentials", "~/.pi/**", "~/.claude/.credentials.json",
                   "~/.config/vps-wallet.env")  # Read and Edit denied.
-WORKER_PROTECTED = ("~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.claude/settings*.json")  # Edit denied.
+# Read denied: the transcripts and the memory under ~/.claude/projects, not the whole tree. Claude Code saves a tool output too
+# large to show in the session's tool-results/ there and tells the session to Read it. Any session's stays readable: no rule
+# can name the worker's own.
+WORKER_TRANSCRIPTS = ("~/.claude/projects/**/*.jsonl", "~/.claude/projects/**/memory/**")
+WORKER_PROTECTED = ("~/.claude/projects/**", "~/.bashrc", "~/.profile", "~/.config/systemd/**", "~/.gitconfig", "~/.config/git/**",
+                    "~/.claude/settings*.json")  # Edit denied.
 # Hygiene, not a boundary (C19): a pattern kill took another run's verifier once, and freeze refuses a worker that moved HEAD.
 WORKER_DENY = ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)")
 WORKER_ENV = {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"}
@@ -283,7 +288,8 @@ def worker_settings(directory: Path) -> list[str]:
     of this exact argument (worker_authority).
     """
     controller = Path(__file__).resolve().parents[1]
-    deny = [*(f"{tool}({path})" for path in WORKER_SECRETS for tool in ("Read", "Edit")), *(f"Edit({path})" for path in WORKER_PROTECTED)]
+    deny = [*(f"{tool}({path})" for path in WORKER_SECRETS for tool in ("Read", "Edit")), *(f"Read({path})" for path in WORKER_TRANSCRIPTS),
+            *(f"Edit({path})" for path in WORKER_PROTECTED)]
     if not Path(directory).resolve().is_relative_to(controller):
         deny.append(f"Edit(/{controller}/**)")
     deny.extend(WORKER_DENY)

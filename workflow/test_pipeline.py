@@ -854,11 +854,12 @@ class BundleTests(unittest.TestCase):
 
 
 def pipeline_cli(*arguments: str) -> tuple[int, str, str]:
-    """`python -m workflow <action> ...` in this process: (exit code, stdout, stderr)."""
+    """`python -m workflow <action> ...` in this process: (exit code, stdout, stderr). The controller's Git configuration
+    main() adds to the environment stays with the call, as it would with its own process."""
     from . import pipeline
     out, err = io.StringIO(), io.StringIO()
     code = 0
-    with patch.object(sys, "argv", ["workflow", *arguments]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with patch.object(sys, "argv", ["workflow", *arguments]), patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             pipeline.main()
         except SystemExit as exit_:
