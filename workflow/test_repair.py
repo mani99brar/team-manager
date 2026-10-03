@@ -725,6 +725,11 @@ class ReviewFailedBeforeALaunch(RepairFixture):
             drive(self.runtime)
         self.assertTrue(worktree.exists())
         self.assertNotIn("review", self.sessions.starts)
+        # Said on the timeline first, with the removal (C44).
+        events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["message"] for event in events if (event["node"], event["status"]) == ("controller", "blocked")],
+                         [f"Controller blocked: Partial review worktree {worktree} left by the failed review; remove it with git worktree remove "
+                          f"--force {worktree}, then rerun: python -m workflow automatic {directory} --live"])
 
 
 class InterruptedCheckOnAManualRun(RepairFixture):

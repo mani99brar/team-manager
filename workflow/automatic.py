@@ -1641,8 +1641,8 @@ def restart_review(runtime, state) -> bool:
         return False
     worktree = runtime.directory / "review-worktree"
     if worktree.exists():
-        raise RuntimeError(f"Partial review worktree {worktree} left by the failed review; remove it with "
-                           f"git worktree remove --force {worktree}, then rerun: python -m workflow automatic {runtime.directory} --live")
+        raise stop_error(runtime, f"Partial review worktree {worktree} left by the failed review; remove it with "
+                                  f"git worktree remove --force {worktree}, then rerun: python -m workflow automatic {runtime.directory} --live")
     marker = runtime.directory / REVIEW_RESTART
     if marker.exists():
         return False  # Re-entered once already under this supervisor: the same failure again stops it.
@@ -1712,16 +1712,24 @@ def step_error(error) -> str:
     return text
 
 
-def record_blocked(runtime, state) -> None:
-    """The `controller` `blocked` event before drive stops at a failure it does not retry (C44): each failed step with its
-    error, so the timeline's last word says why. At most once per controller process and run; a later `automatic --live` is
-    a new process and says it again."""
+def record_blocked(runtime, state=None, *, reason: str | None = None) -> None:
+    """The `controller` `blocked` event before drive stops at a failure it does not retry (C44), so the timeline's last word
+    says why: `reason` for a stop of its own (a failed freeze, a review worktree left behind, a changed source branch, an
+    unexpected manual gate, ...), else each failed step of `state` with its error. At most once per controller process and
+    run; a later `automatic --live` is a new process and says it again."""
     if str(runtime.directory) in BLOCKED_RUNS:
         return
     BLOCKED_RUNS.add(str(runtime.directory))
-    failed = [task for task in state.tasks if task.error and task.name in state.next] or [task for task in state.tasks if task.error]
-    runtime.event("controller", "blocked", "Controller blocked: " + "; ".join(f"the {task.name} step failed: {step_error(task.error)}" for task in failed)
-                  + "; not retried, inspect retained evidence")
+    if reason is None:
+        failed = [task for task in state.tasks if task.error and task.name in state.next] or [task for task in state.tasks if task.error]
+        reason = "; ".join(f"the {task.name} step failed: {step_error(task.error)}" for task in failed) + "; not retried, inspect retained evidence"
+    runtime.event("controller", "blocked", f"Controller blocked: {reason}")
+
+
+def stop_error(runtime, message: str) -> RuntimeError:
+    """A stop drive does not retry, said on the timeline first (record_blocked): the error to raise."""
+    record_blocked(runtime, reason=message)
+    return RuntimeError(message)
 
 
 def drive(runtime, *, single_step=False) -> str | None:
@@ -1731,7 +1739,7 @@ def drive(runtime, *, single_step=False) -> str | None:
     validate_automatic(runtime.plan)
     refuse_recorded(runtime.directory)
     if git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD") != runtime.plan["source_branch"]:
-        raise RuntimeError("Source feature branch changed; no automatic continuation")
+        raise stop_error(runtime, "Source feature branch changed; no automatic continuation")
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
     while True:
@@ -1739,16 +1747,16 @@ def drive(runtime, *, single_step=False) -> str | None:
             graph = build_pipeline(saver, runtime)
             state = graph.get_state(config)
             if not state.values or any(name.startswith("launch_") for name in state.next):
-                raise RuntimeError("Automatic supervision requires a completed start; reconcile uncertain launches explicitly")
+                raise stop_error(runtime, "Automatic supervision requires a completed start; reconcile uncertain launches explicitly")
             frozen = freeze_failure(state)
             if frozen and not (runtime.directory / FREEZE_INTERRUPTED).exists():
                 # A stop that failed, an ownership violation, a moved HEAD: never re-entered, or the supervisor would loop.
-                raise RuntimeError(f"Freeze failed: {frozen}; non-retryable graph failure, inspect retained evidence")
+                raise stop_error(runtime, f"Freeze failed: {step_error(frozen)}; non-retryable graph failure, inspect retained evidence")
             if not state.next and not frozen:
                 commit = state.values.get("integrated_commit")
                 if (not commit or git(Path(runtime.plan["repository"]), "rev-parse", "HEAD") != commit
                         or git(Path(runtime.plan["repository"]), "status", "--porcelain")):
-                    raise RuntimeError("No verified feature-branch completion")
+                    raise stop_error(runtime, "No verified feature-branch completion")
                 runtime.validate_review(read_json(runtime.directory / "review.json"))
                 report(runtime, state)
                 return commit
@@ -1785,7 +1793,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                     resume_interrupted_freeze(runtime)
                 value = Command(resume={"freeze": True})
             elif pending:
-                raise RuntimeError("Unexpected manual gate in automatic run; inspect state")
+                raise stop_error(runtime, "Unexpected manual gate in automatic run; inspect state")
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
                 if not restart_review(runtime, state):

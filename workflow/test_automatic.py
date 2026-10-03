@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -341,6 +342,12 @@ class ControllerBlockedTests(unittest.TestCase):
             ("controller", "blocked", "Controller blocked: the verify_ui step failed: Check ui-unit left no packet; the verify_adapter step "
                                       "failed: OSError(28, 'No space left on device'); not retried, inspect retained evidence"),
             ("controller", "blocked", "Controller blocked: the review step failed: Reviewer stop not confirmed; not retried, inspect retained evidence")])
+        # A stop of the controller's own (a failed freeze, a changed source branch, ...) is said with its reason, under the same rule.
+        events.clear()
+        with patch("workflow.automatic.BLOCKED_RUNS", set()):
+            record_blocked(runtime, reason="Source feature branch changed; no automatic continuation")
+            record_blocked(runtime, state, reason="Unexpected manual gate in automatic run; inspect state")
+        self.assertEqual(events, [("controller", "blocked", "Controller blocked: Source feature branch changed; no automatic continuation")])
 
 
 class SupervisorTimelineTests(unittest.TestCase):
@@ -2247,6 +2254,41 @@ class ClaudeUnavailableTests(GraphFixture):
                     drive(f.runtime)
         stop.assert_called_once()
         self.assertFalse((f.directory / "snapshots.json").exists())
+        # Said first, with the step's error as text, once per controller process (C44).
+        self.assertEqual([event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", "blocked")],
+                         [f"Controller blocked: Freeze failed: {failure}; non-retryable graph failure, inspect retained evidence"])
+
+
+class ControllerStopTests(GraphFixture):
+    """C44: drive says every stop it does not retry on the timeline before it raises, once per controller process, so the
+    timeline's last word is why the run stopped rather than the controller's PID row."""
+
+    def said(self) -> list:
+        return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", "blocked")]
+
+    def test_a_changed_source_branch_is_said_before_drive_stops(self):
+        f = self.fixture
+        git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, r"^Source feature branch changed; no automatic continuation$"):
+                drive(f.runtime)
+        self.assertEqual(self.said(), ["Controller blocked: Source feature branch changed; no automatic continuation"])
+
+    def test_a_manual_gate_an_unfinished_start_or_an_unverified_finish_is_said_before_drive_stops(self):
+        values = {"run_id": "run"}
+        gate = SimpleNamespace(values=values, next=("review",), tasks=[
+            SimpleNamespace(name="review", error=None, interrupts=[SimpleNamespace(value={"kind": "independent_review"})])])
+        for message, state in (("Unexpected manual gate in automatic run; inspect state", gate),
+                               ("Automatic supervision requires a completed start; reconcile uncertain launches explicitly", SimpleNamespace(values={}, next=(), tasks=[])),
+                               ("No verified feature-branch completion", SimpleNamespace(values=values, next=(), tasks=[]))):
+            with self.subTest(stop=message):
+                before = len(self.said())
+                graph = SimpleNamespace(get_state=lambda config, state=state: state)
+                with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()):
+                    for _ in range(2):
+                        with self.assertRaisesRegex(RuntimeError, f"^{re.escape(message)}$"):
+                            drive(self.fixture.runtime)
+                self.assertEqual(self.said()[before:], [f"Controller blocked: {message}"])
 
 
 class AutomaticGraphTests(SharedGraphTests, GraphFixture):
