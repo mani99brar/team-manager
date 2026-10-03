@@ -258,6 +258,11 @@ const QUESTION_EVENT = /^Worker (\S+) asked question (\d+) of \d+;[^`]*`[^`]*`: 
 const FOURTH_QUESTION = /^Worker (\S+) asked question \d+; at most \d+ are answered, so it is treated as blocked: ([\s\S]*)$/
 const ATTEMPT = /\battempt (\d+)/i
 const COMMIT = /\b[0-9a-f]{40}\b/
+/**
+ * pipeline.py's second event of a lane's candidate verdict: the gate's reasons (`Candidate gate blocked on attempt <k>: …`),
+ * or a pass after the attempt before failed. A note on the verdict before it, carrying its status: never a verdict itself.
+ */
+const CANDIDATE_NOTE = /^(?:\[[a-z][a-z0-9-]*\] )?Candidate gate /
 const CONTROLLER_LANE_NODE = 'launch_controller'
 /**
  * The review sidecar's node (docs/PRD_REVIEW_SIDECAR.md 4.8): an advisor beside the lanes, never what the run is doing. It
@@ -319,8 +324,11 @@ const PHRASES: Phrase[] = [
   [/^Launching or reconciling the exact native session$/, () => 'launching the native session'],
   [PID_ROW, pid => `controller started (PID ${pid})`],
   [/^Attempt (\d+); revision (\S+)$/, (k, revision) => `attempt ${k} started · revision ${revision}`],
-  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+)$/, checks => `passed · ${checks} gated at the candidate`],
+  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+?)(?:; (passed on attempt \d+ after attempt \d+ failed))?$/,
+    (checks, retry) => `passed · ${checks} gated at the candidate${retry ? ` · ${retry}` : ''}`],
   [/^Combined revision (\S+)$/, revision => `combined revision ${revision}`],
+  [/^Candidate gate blocked on attempt (\d+): (.+)$/, (k, reasons) => `gate blocked on attempt ${k}: ${reasons}`],
+  [/^Candidate gate passed on attempt (\d+) after attempt (\d+) failed$/, (k, before) => `gate passed on attempt ${k} after attempt ${before} failed`],
   [/^Fast-forwarded to (\S+); no push performed$/, commit => `fast-forwarded to ${commit} · no push performed`],
   [/^Immutable snapshots captured; worker-reported checks are not trusted$/, () => 'snapshots captured (worker-reported checks are not trusted)'],
   [/^Native workers stopped before snapshot capture: (.+)$/, lanes => `workers stopped before snapshot capture: ${lanes}`],
@@ -498,7 +506,11 @@ function computeTimeline(run: RunData): Timeline {
   for (const row of rows) {
     const node = row.node
     if (!node || !row.status || row.marker || receiptWorkers.has(node)) continue
-    if (node === 'candidate') { candidateRows.push(row); continue }
+    if (node === 'candidate') {
+      // A gate note restates the verdict before it: matched to no lane result, never "reused", no span of its own.
+      if (!CANDIDATE_NOTE.test(row.event.message)) candidateRows.push(row)
+      continue
+    }
     const current = open.get(node)
     const previous = last.get(node)
     if (row.status === 'running' || row.status === 'awaiting_approval') {
@@ -1501,7 +1513,7 @@ function unmatchedNow(context: Context): Draft {
     reason: row ? [clock(row.at), ` ${row.message}`] : null,
     next: {
       action: 'unknown', label: 'No known next step matched.', runbook: [RUNBOOK.recovery], caveat: null,
-      steps: [command(workflow('status'), 'Reports the run\'s state and changes no run progress; it refreshes report.html in the run directory:')],
+      steps: [command(workflow('status'), 'Reports the run\'s state and its next step and changes no run progress; it writes nothing (export refreshes report.html):')],
     },
   }
 }

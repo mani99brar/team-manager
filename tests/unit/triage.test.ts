@@ -374,6 +374,48 @@ describe('buildTimeline', () => {
       assert.deepEqual(candidate.filter(span => span.status === 'succeeded').map(span => [span.lane, span.attempt]), [['controller', 1]], '#30 restates the reused controller lane')
       assert.equal(run.runEnd?.at, eventAt(guardrails, 31).occurred_at, 'the trailing PID row is controller activity')
     })
+
+    /**
+     * The run as pipeline.py records a candidate verdict now: a second `[<lane>] Candidate gate …` row right after it, with
+     * the verdict's status. Here after #28 and #31 (ui blocked), and, only to exercise a passing note, after #30 (the
+     * captured controller lane passed at once). Sequences are renumbered; nothing else changes.
+     */
+    function withGateNotes(bundle: RunData): RunData {
+      const notes: Record<number, string> = {
+        28: '[ui] Candidate gate blocked on attempt 1: Executed check failed: project-workflows-browser',
+        30: '[controller] Candidate gate passed on attempt 2 after attempt 1 failed',
+        31: '[ui] Candidate gate blocked on attempt 2: Executed check failed: project-workflows-browser',
+      }
+      const events: WorkflowEvent[] = []
+      const add = (event: WorkflowEvent, changes: Partial<WorkflowEvent> = {}) => {
+        const sequence = events.length + 1
+        events.push(eventSchema.parse({ ...event, ...changes, sequence, event_id: `${event.run_id}:${sequence}` }))
+      }
+      for (const event of bundle.events) {
+        add(event)
+        const note = notes[event.sequence]
+        if (note) add(event, { message: note, occurred_at: new Date(Date.parse(event.occurred_at) + 5).toISOString() })
+      }
+      return { ...bundle, events, detail: { ...bundle.detail, snapshot: { ...bundle.detail.snapshot, last_sequence: events.length } } }
+    }
+    const lanesOf = (timeline: ReturnType<typeof buildTimeline>) =>
+      (timeline.byNode.get('candidate') ?? []).map(span => [span.lane, span.attempt, span.status, span.result_uri])
+
+    it('reads the candidate gate notes as notes: never a verdict, never a reused lane result, no span, with results or without', () => {
+      const noted = buildTimeline(withGateNotes(guardrailsFull()))
+      assert.deepEqual(lanesOf(noted), lanesOf(run))
+      const rows = noted.activity.filter(row => row.raw?.includes('Candidate gate '))
+      assert.deepEqual(rows.map(row => [row.kind, row.status, row.text]), [
+        ['update', 'failed', 'gate blocked on attempt 1: Executed check failed: project-workflows-browser'],
+        ['update', 'succeeded', 'gate passed on attempt 2 after attempt 1 failed'],
+        ['update', 'failed', 'gate blocked on attempt 2: Executed check failed: project-workflows-browser'],
+      ])
+      // Without the results (the server's run list, a poll before they load, a result that is missing) each verdict still
+      // opens one span and each note none: the steps keep their attempt counts.
+      const bare = (bundle: RunData) => buildTimeline({ ...bundle, results: new Map() })
+      assert.equal(lanesOf(bare(withGateNotes(guardrailsFull()))).length, lanesOf(bare(guardrailsFull())).length)
+      assert.equal(lanesOf(bare(guardrailsFull())).length, 4)
+    })
   })
 
   it('reads controller_blocked from node-less rows: B1 status failed, and before B1 by the message rule', () => {
@@ -842,6 +884,9 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow status "$RUN"'])
     assert.match(prose(now), /changes no run progress/)
     assert.doesNotMatch(prose(now), /read-only/)
+    // status writes nothing, report.html included: the caption sends a reader who wants a fresh report to export.
+    assert.match(prose(now), /it writes nothing \(export refreshes report\.html\)/)
+    assert.doesNotMatch(prose(now), /it refreshes report\.html/)
   })
 
   it('no_rule_matched: a paused run is never called failed', () => {
@@ -968,6 +1013,17 @@ describe('deriveFocus, humanizeEvent, attemptResultUris, laneLines', () => {
     assert.equal(humanizeEvent(eventAt(guardrails, 6)), "[Errno 2] 'claude' not found")
     assert.equal(humanizeEvent(eventAt(skeleton, 10)), 'controller started (PID 3242976)')
     assert.match(humanizeEvent(eventAt(skeleton, 1)), /session f18dee3c-424c-4e3e-9379-a7ad784c9e37/, 'session UUIDs are not SHAs')
+  })
+
+  it('humanizes the verify message with exit codes and a retry, and the candidate gate notes (pipeline.py)', () => {
+    const recorded = 'Required tests and artifacts passed; recorded for the candidate gate: '
+    assert.equal(humanizeEvent({ message: `${recorded}build (exit 1), lint` }), 'passed · build (exit 1), lint gated at the candidate')
+    assert.equal(humanizeEvent({ message: `${recorded}build (exit 1); passed on attempt 2 after attempt 1 failed` }),
+      'passed · build (exit 1) gated at the candidate · passed on attempt 2 after attempt 1 failed')
+    assert.equal(humanizeEvent({ message: '[ui] Candidate gate blocked on attempt 2: Executed check failed: npm test; unit: exit 1' }),
+      'gate blocked on attempt 2: Executed check failed: npm test; unit: exit 1')
+    assert.equal(humanizeEvent({ message: '[adapter] Candidate gate passed on attempt 3 after attempt 2 failed' }), 'gate passed on attempt 3 after attempt 2 failed')
+    assert.equal(humanizeEvent({ message: '[ui] Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae' }), 'combined revision 1ab6b95', 'the verdict reads as before')
   })
 
   it('lists attempt result URIs per lane, oldest first', () => {

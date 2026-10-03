@@ -602,7 +602,7 @@ Each rule carries its source tag, which the UI shows in a tooltip. Each rule has
 8. **Setup and check split** (node view only): attempt start → first `checks[].started_at` is setup; first `started_at` → last `finished_at` is checks. Example: 42 s + 33 s.
 9. **Worker deadline**: `native_started_at + worker_timeout_seconds + Σ(question waits)`. **Reviewer deadline**: `launched_at + review_timeout_seconds`.
 10. **Run span**: `created_at` → the last non-controller activity (events, `reviewed_at`, `stop.confirmed_at`). For skeleton-001 that is 52m51s ending 09:32:31, not "Updated 09:36:07".
-11. **Lane on candidate events.** Until B1 prefixes the lane, candidate failures are matched to lane results by comparing an event's time with each lane result's last `checks[].finished_at`. Guardrails #28 → `candidate_ui/1`, #31 → `candidate_ui/2`.
+11. **Lane on candidate events.** Until B1 prefixes the lane, candidate failures are matched to lane results by comparing an event's time with each lane result's last `checks[].finished_at`. Guardrails #28 → `candidate_ui/1`, #31 → `candidate_ui/2`. A `[<lane>] Candidate gate …` row (the controller's second event of a verdict: the gate's reasons, or a pass after a failed attempt) is a note on the verdict before it: it is matched to no lane result, never reads as a reused one and opens no span, so it is an Activity update.
 
 ### 5.3 Display rules
 
@@ -630,7 +630,7 @@ Each rule carries its source tag, which the UI shows in a tooltip. Each rule has
 - **Multi-step next steps.** They are a numbered list. Each command line has its own Copy button, and a step that is not a command is plain text ("commit the fix in …").
 - **Copy.** The Copy button's text is exactly "Copy" (aria-label "Copy command"). The command lives in `<code>` outside any button, so `expectNoExecutionControls` (support.ts:32-36) still passes. When the clipboard API is unavailable (a non-secure http origin), Copy selects the `<code>` text instead.
 - **Label.** The block is always labelled "Likely next step" and names its RUNBOOK section. Its one-line caption is the command-block honesty statement: "Run these in your terminal; this viewer never changes a run."
-- **`status` is not described as read-only.** It "reports the run's state and changes no run progress; it refreshes `report.html` in the run directory" (RUNBOOK:268-272).
+- **`status` is described by what it does.** It "reports the run's state and its next step and changes no run progress; it writes nothing (export refreshes report.html)" (RUNBOOK "Status, failures and recovery"). It takes no lock, so it answers while a controller runs; a reader who wants a fresh `report.html` runs `export`.
 
 ### 6.2 Situations
 
