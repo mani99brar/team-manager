@@ -204,6 +204,7 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
         reasons.append(str(error))
     except ValidationError as error:
         reasons.append(error.message)
+    # The gates after this one are the run's, set by its finish policy (plan.automatic): an automatic run approves its own
+    # integration. Packets saved before kept a `pending_gates` list here that nothing read; a recheck recomputes the gate.
     return {"status": "blocked" if reasons else "passed", "reasons": reasons, "deferred_checks": deferred,
-            "pending_gates": ["independent_review", "integration_approval"],
             "integration_allowed": False}

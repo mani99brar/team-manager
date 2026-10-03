@@ -57,7 +57,19 @@ class VerificationTests(unittest.TestCase):
         result = self.evaluate()
         self.assertEqual(result["status"], "passed", result)
         self.assertFalse(result["integration_allowed"])
-        self.assertEqual(result["pending_gates"], ["independent_review", "integration_approval"])
+        # The gates after it are the run's (its finish policy, plan.automatic), not the packet's: an automatic run approves itself.
+        self.assertNotIn("pending_gates", result)
+
+    def test_a_packet_whose_gate_lists_pending_gates_still_rechecks(self):
+        from .checks import recheck_packet
+        # Packets written before the key was dropped keep it in their saved gate; a recheck recomputes the gate without it.
+        packet = {"phase": "worker", "expected": self.expected, "result": self.result, "evidence": self.evidence, "capture_errors": [],
+                  "artifact_root": str(self.root), "artifact_paths": {key: str(path) for key, path in self.paths.items()},
+                  "gate": {"status": "passed", "reasons": [], "deferred_checks": ["frontend-build", "workflow-browser"],
+                           "pending_gates": ["independent_review", "integration_approval"], "integration_allowed": False}}
+        gate = recheck_packet(packet, self.policy, self.root)["gate"]
+        self.assertEqual((gate["status"], gate["reasons"], gate["deferred_checks"]), ("passed", [], ["frontend-build", "workflow-browser"]))
+        self.assertNotIn("pending_gates", gate)
 
     def test_policy_requires_frontend_build_browser_and_backend_unit(self):
         for worker_index, kind in [(0, "build"), (0, "browser"), (1, "unit")]:
