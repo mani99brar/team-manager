@@ -840,10 +840,10 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
     verdict was accepted (so a resumed controller continues the same window), and at most until its own deadline.
 
     At each poll a reviewer's bound file is read whatever its session reads, and recorded late once it validates; one that
-    does not (half written while its session works, or invalid) is read again at the next poll. A reviewer whose own deadline
-    passes or whose session is missing, ended or terminal is no longer waited for and ends superseded, its file unread: the
-    identity check after the wait could not confirm that session. When the grace ends, each reviewer still waited for is
-    read once more; a file that still does not validate is kept as `late_error`. Nothing raised for one replaces the block.
+    does not (half written while its session works, or invalid) is read again at the next poll. A reviewer whose session is
+    missing, ended or terminal is no longer waited for and ends superseded, its file unread: the identity check after the
+    wait could not confirm that session. At the poll its own deadline passes, or when the grace ends, a reviewer still waited
+    for is read once more; a file that still does not validate is kept as `late_error`. Nothing raised for one replaces the block.
 
     A reviewer that needs attention in its pane is said so after every note of the grace: the viewer and the server show it
     only while it is the review node's latest record, and the grace waits for that answer.

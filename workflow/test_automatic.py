@@ -2379,11 +2379,11 @@ class PrintGraceScenarios(GraphFixture):
                 self.assertEqual(self.notes()[-1], f"Reviewer coverage gave no verdict and ends superseded: its print job's output was refused ({coverage['late_error']})")
 
     def test_a_job_still_running_at_its_own_deadline_is_stopped_and_superseded(self):
-        # After a block a print job keeps its own deadline (5 s here): the native reviewers' grace (none here) never cuts it short.
-        started = time.monotonic()
-        with patch("workflow.automatic.REVIEW_GRACE_SECONDS", 0), patch.dict(self.fixture.runtime.plan["automatic"], review_timeout_seconds=5):
-            verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"after": "general", "sleep": 60})
-        self.assertLess(time.monotonic() - started, 50)  # Stopped at its deadline, not waited for.
+        # After a block a print job keeps its own deadline (30 s here, so general's job has time to start under load): the native
+        # reviewers' grace (none here) never cuts it short. coverage would sleep 5 minutes; waited for, it would be recorded
+        # approved, so the verdicts and the note below show that it was stopped at its deadline, whatever the host's load.
+        with patch("workflow.automatic.REVIEW_GRACE_SECONDS", 0), patch.dict(self.fixture.runtime.plan["automatic"], review_timeout_seconds=30):
+            verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"after": "general", "sleep": 300})
         self.assertEqual(verdicts, {"general": "blocked", "coverage": None})
         self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general)")
         coverage = self.status("coverage")
