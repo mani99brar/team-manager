@@ -676,7 +676,8 @@ def first_sentence(text: str) -> str:
 
 def note_override(runtime, reviewer_id: str, decision: dict) -> bool:
     """One `note` when the verdict the controller derives for an accepted decision is not the one the reviewer wrote; whether
-    it wrote one. Said once, as the decision is accepted: a decision restored after a restart was said already."""
+    it wrote one. Said once, as the decision is accepted (`derived: true` in its status): a decision restored after a restart
+    was said already, unless a controller from before derived verdicts accepted it, which is said as it is restored."""
     derived = derived_verdict(decision)
     if derived == decision["verdict"]:
         return False
@@ -690,7 +691,7 @@ def record_late(runtime, state: ReviewStatus, reviewer_id: str, decision: dict, 
     """A verdict accepted after another reviewer's block: recorded with `late`, its status accepted or blocked."""
     state.decisions[reviewer_id] = decision
     state.statuses[reviewer_id].update(status="blocked" if decision_blocks(decision) else "accepted", accepted_at=accepted_at,
-                                       accepted_decision=decision, late=True, **keys)
+                                       accepted_decision=decision, derived=True, late=True, **keys)
     state.save()
     runtime.event("review", NOTE, f"Reviewer {reviewer_id}'s late verdict recorded: {decision['verdict']}, {open_counts(decision['findings'])}")
     note_override(runtime, reviewer_id, decision)
@@ -750,6 +751,13 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 runtime.event("review", "running", f"Reviewer {reviewer_id}'s completion file changed after its {decision['verdict']} verdict was accepted "
                               f"at {accepted}; that verdict stands, as for a controller that never stopped, and the file is not read again")
             decisions[reviewer_id] = decision
+            if not status.get("derived"):
+                # Accepted by a controller from before derived verdicts, which took the verdict as written: judged by its
+                # findings now, and a change is said once (the marker).
+                if note_override(runtime, reviewer_id, decision):
+                    attention.clear()
+                status["derived"] = True
+                state.save()
             return decision
         try:
             decision = read_review_completion(runtime, reviewer_id)
@@ -759,8 +767,9 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
             raise
         decisions[reviewer_id] = decision
         # What was accepted is saved with its time, for a restart (a status without it, from an older controller, is read
-        # again); review.json is the record.
-        status.update(status="accepted", accepted_at=accepted or iso(clock()), accepted_decision=decision, completion_sha256=digest_file(path))
+        # again); review.json is the record. `derived`: this controller judged it by its findings and said any override.
+        status.update(status="accepted", accepted_at=accepted or iso(clock()), accepted_decision=decision, completion_sha256=digest_file(path),
+                      derived=True)
         state.save()
         if note_override(runtime, reviewer_id, decision):
             attention.clear()  # The note hides a pane attention said before it (the viewer reads the latest record): said again.
@@ -1290,7 +1299,7 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
                 failure = failure or error  # The verdicts of the others that exited are kept: _record_partial writes them.
                 continue
             decisions[reviewer_id] = decision
-            status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
+            status.update(status="accepted", accepted_at=now(), accepted_decision=decision, derived=True)
             state.save()
             note_override(runtime, reviewer_id, decision)
             if decision_blocks(decision):

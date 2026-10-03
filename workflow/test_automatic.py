@@ -511,7 +511,7 @@ class ReviewCompletionTests(unittest.TestCase):
     def never_accepted(self, reviewer_id):
         """Its status as before its first acceptance: a verdict accepted once stands whatever its session or file does."""
         path = self.root / f"automatic-{self.node(reviewer_id)}.json"
-        save_json(path, {key: value for key, value in read_json(path).items() if key not in {"accepted_at", "accepted_decision", "completion_sha256"}})
+        save_json(path, {key: value for key, value in read_json(path).items() if key not in {"accepted_at", "accepted_decision", "completion_sha256", "derived"}})
 
     def test_completion_prompt_spells_out_every_enum_the_schema_enforces(self):
         # Seen live: a reviewer given only an example invented severity "P3" and its whole file was
@@ -972,6 +972,31 @@ class ReviewCompletionTests(unittest.TestCase):
         self.write(first, verdict="blocked", findings=[])
         self.events.clear()
         self.assertEqual(wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))[first], accepted)
+        self.assertEqual(self.events, [])
+
+    def test_a_decision_an_older_controller_accepted_is_judged_by_its_findings_and_the_change_is_said_once(self):
+        # Upgrade (C34): a controller from before derived verdicts took the first reviewer's `blocked` with one P2 as a block, and
+        # saved it without the `derived` marker. A newer controller restores it after a restart: judged by its findings it counts
+        # as approved, one note says so, and the marker keeps a later restore from saying it again. Every decision this
+        # controller accepts carries the marker.
+        from .automatic import ReviewStatus, combined_review, wait_reviews
+        from .pipeline import digest_file
+        first, others = self.ids[0], self.ids[1:]
+        p2 = [{"severity": "P2", "message": "The empty state has no test.", "disposition": "open", "worker": "ui", "requirement": None}]
+        self.write(first, verdict="blocked", findings=p2)
+        path = self.root / f"automatic-{self.node(first)}.json"
+        save_json(path, {**read_json(path), "status": "accepted", "accepted_at": "1970-01-01T00:01:40Z", "accepted_decision": {"verdict": "blocked", "findings": p2},
+                         "completion_sha256": digest_file(self.root / f"{self.node(first)}.completion.json")})
+        for reviewer_id in others:
+            self.write(reviewer_id)
+        resumed = dict(clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, **resumed)
+        self.assertEqual(combined_review(self.runtime, self.bundle, self.digest, state, decisions)["verdict"], "approved")
+        self.assertEqual(self.events, [("review", "note", f"Reviewer {first} wrote blocked, which counts as approved: 1 finding, no open P0/P1")])
+        self.assertEqual([read_json(self.root / f"automatic-{self.node(reviewer_id)}.json").get("derived") for reviewer_id in self.ids], [True] * len(self.ids))
+        self.events.clear()
+        wait_reviews(self.runtime, ReviewStatus.load(self.runtime), **resumed)
         self.assertEqual(self.events, [])
 
 
