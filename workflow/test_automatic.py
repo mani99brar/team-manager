@@ -95,6 +95,48 @@ class CompletionTests(unittest.TestCase):
             wait_handoffs(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
         self.assertFalse((self.root / "ui.handoff.json").exists())
 
+    def test_completion_with_stale_working_state_but_idle_status_is_accepted(self):
+        # Claude Code 2.1.288 never lists state idle, and a finished session can keep state working (a routine, one that wakes
+        # itself, a session cron in flight, a /loop, a lagging job state) while its status says idle: the turn is over.
+        for node in self.plan["nodes"]:
+            save_json(self.root / f"{node}.completion.json", self.completion(node))
+        self.runtime.sessions.locate = lambda node, rows: {"state": "working", "status": "idle"}
+        wait_handoffs(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual(read_json(self.root / "adapter.handoff.json")["summary"], "Synthetic work")
+
+    def test_completion_while_busy_status_is_not_accepted(self):
+        for node in self.plan["nodes"]:
+            save_json(self.root / f"{node}.completion.json", self.completion(node))
+        self.runtime.sessions.locate = lambda node, rows: {"state": "working", "status": "busy"}
+        ticks = iter([1, 1, DEFAULTS["worker_timeout_seconds"] + 1])
+        with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
+            wait_handoffs(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
+        self.assertFalse((self.root / "ui.handoff.json").exists())
+
+    def test_a_completion_signal_waiting_for_a_turn_to_end_is_reported_once_per_lane(self):
+        # A CLI that reported a finished turn in a state and status the controller does not read as over would hold the lane
+        # until its deadline. After 2 minutes one event per lane names the raw state and status the registry lists.
+        for node in self.plan["nodes"]:
+            save_json(self.root / f"{node}.completion.json", self.completion(node))
+        rows = {"ui": {"state": "working", "status": "waiting"}, "adapter": {"state": "working"}}
+        self.runtime.sessions.locate = lambda node, _: rows[node]
+        now, polls = [1.0], []
+
+        def sleep(_):
+            polls.append(now[0])
+            now[0] += 50
+            if len(polls) == 6:  # The turns end 300 seconds after the signals were first seen.
+                rows.update(ui={"state": "working", "status": "idle"}, adapter={"state": "done"})
+        wait_handoffs(self.runtime, clock=lambda: now[0], sleep=sleep)
+        self.assertEqual(len(polls), 6)
+        self.assertEqual({node: read_json(self.root / f"{node}.handoff.json")["summary"] for node in self.plan["nodes"]},
+                         {"ui": "Synthetic work", "adapter": "Synthetic work"})
+        self.assertEqual([event[:2] for event in self.events], [("ui", "interactive"), ("adapter", "interactive")])
+        for (node, _, message), listed in zip(self.events, ("state='working', status='waiting'", "state='working', status=None")):
+            self.assertTrue(message.startswith(f"Worker {node}'s completion signal has waited over 2 minutes for its turn to end"), message)
+            self.assertIn(f"its session reads {listed}", message)
+            self.assertNotIn("needs attention in its pane", message)
+
     def test_stop_intent_recovery_uses_existing_validated_handoffs(self):
         for node in self.plan["nodes"]:
             save_json(self.root / f"{node}.completion.json", self.completion(node))
@@ -542,6 +584,23 @@ class ReviewCompletionTests(unittest.TestCase):
         self.never_accepted(last)
         with self.assertRaisesRegex(RuntimeError, f"Native reviewer {last} missing; reconciliation"):
             wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
+
+    def test_a_reviewer_whose_row_still_reads_working_with_an_idle_status_is_accepted(self):
+        # The stale row seen for workers (C18): state working with status idle is a turn that is over. A busy status is a turn
+        # in progress, and a blocked reviewer is not accepted whatever its status (it needs attention in its pane).
+        from .automatic import wait_reviews
+        for reviewer_id in self.ids:
+            self.write(reviewer_id)
+            self.rows[reviewer_id].update(state="working", status="idle")
+        self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), self.ids)
+        last = self.ids[-1]
+        for row in ({"state": "working", "status": "busy"}, {"state": "blocked", "status": "idle"}):
+            with self.subTest(row=row):
+                self.never_accepted(last)
+                self.rows[last].update(row)
+                ticks = iter([1, 1, DEFAULTS["review_timeout_seconds"] + 1])
+                with self.assertRaisesRegex(RuntimeError, f"Reviewer {last} deadline exhausted"):
+                    wait_reviews(self.runtime, clock=lambda: next(ticks), sleep=lambda _: None)
 
     def test_an_update_respawn_gap_is_waited_out_not_a_missing_reviewer(self):
         # A reviewer that wrote its file and went idle is what an update respawns under a new PID. While the listing omits it,

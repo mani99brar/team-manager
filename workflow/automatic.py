@@ -157,6 +157,49 @@ def lanes(runtime) -> list[str]:
     return list(getattr(runtime, "workers", None) or plan_workers(runtime.plan))
 
 
+def turn_over(row: dict) -> bool:
+    """Whether a native session's turn is over, so a completion file it wrote is final.
+
+    The registry lists `state` and `status`. Claude Code 2.1.288 never lists state idle: a background row's state is working,
+    done, failed, stopped or blocked, and its status (idle, waiting or busy) is present whenever a live process exists. A
+    finished session can keep state working (a routine, one that wakes itself, a session cron in flight, one begun with
+    /loop, a job state that lags) while its status says idle, so either field may say the turn is over.
+    """
+    return row.get("state") in {"idle", "done"} or row.get("status") == "idle"
+
+
+def busy(row: dict) -> bool:
+    """Whether a native session is in a turn: status busy, or state working on a row that lists no status (an older CLI)."""
+    return row.get("status") == "busy" or (row.get("status") is None and row.get("state") == "working")
+
+
+STALL_SECONDS = 120  # A lane's completion signal that has waited this long for its turn to end is reported, once.
+
+
+class Stalls:
+    """Completion signals waiting for a turn that does not end: each lane's is reported once, after STALL_SECONDS.
+
+    The event names the raw state and status the registry lists, so a CLI that reports a finished turn in some other way
+    shows on the timeline instead of as a silent wait until the deadline.
+    """
+
+    def __init__(self, runtime):
+        self.runtime = runtime
+        self.since: dict[str, float] = {}  # When each lane's signal was first seen waiting.
+        self.reported: set[str] = set()
+
+    def check(self, node: str, row: dict, stalled: bool, at: float | None) -> None:
+        if not stalled:
+            self.since.pop(node, None)
+            return
+        since = self.since.setdefault(node, at)
+        if node not in self.reported and at - since > STALL_SECONDS:
+            self.reported.add(node)
+            self.runtime.event(node, "interactive", f"Worker {node}'s completion signal has waited over {STALL_SECONDS // 60} minutes for its turn "
+                                                    f"to end: its session reads state={row.get('state')!r}, status={row.get('status')!r}; it is "
+                                                    "accepted once the state is idle or done, or the status idle")
+
+
 def lane_deadline(runtime, node: str) -> float | None:
     """The lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
     from .guardrails import deadline_extension
@@ -219,14 +262,15 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     answered = {(node, entry["n"]) for node in workers for entry in load_questions(runtime.directory, node) if entry["answer"] is not None}
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
     sidecar = Scheduler(runtime, workers, clock) if has_sidecar(runtime.plan) else None
+    stalls = Stalls(runtime)
     try:
-        _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, clock, sleep)
+        _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, stalls, clock, sleep)
     finally:
         if sidecar is not None:
             sidecar.abandon()
 
 
-def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, clock, sleep) -> None:
+def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, stalls, clock, sleep) -> None:
     """wait_handoffs' poll loop."""
     from .guardrails import (PANE_ANSWER, iso, load_questions, mark_deadline_met, record_pane_answer, record_question,
                              waiting_question)
@@ -241,13 +285,15 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
             if row is None:
                 raise RuntimeError("Native worker missing; reconciliation required")
             path = runtime.directory / f"{node}.completion.json"
-            # The turn is over, so the file is final. A turn that ends on a question reports idle, done or, waiting on
-            # the operator, blocked; a `completed` or `blocked` file is still accepted only once idle or done, as before.
-            item = read_signal(runtime, node) if row["state"] in {"idle", "done", "blocked"} and path.exists() else None
+            # The turn is over (turn_over), so the file is final. A turn that ends on a question reports its turn over or,
+            # waiting on the operator, blocked; a `completed` or `blocked` file is still accepted only once the turn is over
+            # and the session is not blocked, as before.
+            item = read_signal(runtime, node) if (turn_over(row) or row["state"] == "blocked") and path.exists() else None
             waiting = waiting_question(runtime.directory, node)
-            if waiting and (row["state"] == "working" or item):
-                # Working again while the question waits: its deadline runs again. A reply typed in the pane may never show
-                # `working` (the registry can report the whole reply turn as blocked, or keep done), so the next completion
+            if waiting and (busy(row) or item):
+                # Working again while the question waits: its deadline runs again. Only a busy session is: a stale `working`
+                # row whose status says idle is the turn that asked, still over. A reply typed in the pane may never show
+                # busy (the registry can report the whole reply turn as blocked, or keep done), so the next completion
                 # signal proves it too, before it is recorded or accepted. `answer` may have landed meanwhile (then nothing
                 # is recorded); until that next signal it still records and delivers an answer.
                 record_pane_answer(runtime.directory, node, clock)
@@ -285,7 +331,11 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
                 bounds[node] = deadline
                 runtime.event(node, "interactive", f"Worker {node} is {row['state']} again after its completion signal was accepted, and so was "
                                                    f"every other lane's: the run waits for its turn to end until {iso(deadline)}, the latest lane deadline")
-            if deadline is not None and clock() >= deadline:
+            # A signal waiting for a turn that does not end (a blocked lane has its own attention event; a met one was accepted).
+            stalled = node not in met and path.exists() and not turn_over(row) and row["state"] != "blocked"
+            at = clock() if deadline is not None or stalled else None
+            stalls.check(node, row, stalled, at)
+            if deadline is not None and at >= deadline:
                 raise RuntimeError(f"Worker {node} deadline exhausted; no automatic relaunch")
             if row["state"] == "blocked" and not waiting and node not in attention:
                 # A native session reports `blocked` when its turn ended needing a human: a question,
@@ -570,7 +620,8 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 # it cannot answer itself. The operator may answer in the pane; the deadline bounds it.
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the deadline")
-            if row["state"] in {"idle", "done"} and (runtime.directory / f"{node}.completion.json").exists():
+            # Its turn is over (turn_over); a blocked session needs attention in its pane and is not accepted, whatever its status.
+            if turn_over(row) and row["state"] != "blocked" and (runtime.directory / f"{node}.completion.json").exists():
                 if decision_blocks(accept(reviewer_id, None)):
                     return decisions  # The first block decides; nobody waits for the other reviewers.
                 continue  # Its file met the deadline, also when first read after it (a controller resumed late).
