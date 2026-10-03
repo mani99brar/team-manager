@@ -83,7 +83,7 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
                     "be empty), falsifying_check names the check that would fail if your implementation were wrong (a check id from "
                     "your approved checks, or the exact command), verify_yourself names one assumption the operator should verify "
                     "independently, and question is null; a completed file without them is refused. The commands you ran are not "
-                    "evidence by themselves: the controller reruns the checks. End summary with a Proof table: one row per line of "
+                    "evidence by themselves: the controller reruns the checks. End your summary with a Proof table: one row per line of "
                     "your task's ## Acceptance section and per line under ## Design (settled) in the documents your task cites, each "
                     "naming its proof: a test (file::name), a check id, a self-report, or none. Keep the rows short: a completion "
                     "file over 64 KiB is refused.\n"

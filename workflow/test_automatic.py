@@ -65,7 +65,7 @@ class CompletionTests(unittest.TestCase):
         self.plan["completion_version"] = "1.1.0"
         self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
         prompt = " ".join(completion_prompt(self.root, self.plan, "ui").split())
-        self.assertIn("End summary with a Proof table: one row per line of your task's ## Acceptance section and per line under "
+        self.assertIn("End your summary with a Proof table: one row per line of your task's ## Acceptance section and per line under "
                       "## Design (settled) in the documents your task cites, each naming its proof: a test (file::name), a check id, "
                       "a self-report, or none.", prompt)
 
