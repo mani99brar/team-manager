@@ -635,7 +635,56 @@ describe('deriveNow', () => {
     assert.doesNotMatch(prose(now), /Failed/)
   })
 
-  const REVIEWED = { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded' } as const
+  // automatic.py resumable_stop, as the server serves its rows (interrupted is paused, node-less). Each used to be a
+  // `Controller blocked:` row, which rule 6 answered with a new run while the run could go on.
+  const BRANCH_STOP = 'Source feature branch changed: <path> is on feature/elsewhere, not feature/skeleton/skeleton-001. Nothing was stopped or relaunched: switch it back with: git -C <path> switch feature/skeleton/skeleton-001, then resume with: python -m workflow automatic <path> --live'
+  const RECONCILE_STOP = 'Automatic supervision requires a completed start: launch_game did not complete. Nothing was stopped or relaunched: inspect its receipt and `claude agents --json`, reconcile with: python -m workflow reconcile <path>, then resume with: python -m workflow automatic <path> --live'
+  const NEVER_STARTED_STOP = 'Automatic supervision requires a completed start: the run was never started, so no worker was launched. Start it with: python -m workflow start <path> --live, then resume with: python -m workflow automatic <path> --live'
+
+  it('interrupted (a): a changed source branch is resumed once the checkout is switched back, never with a new run', () => {
+    const now = checked(synthetic({ status: 'paused', nodes: { ...WORKING, handoff: 'paused' }, events: [...LAUNCHED, [1800, null, 'paused', BRANCH_STOP]] }))
+    assert.equal(now.situation, 'interrupted')
+    assert.equal(now.interruption, 'a')
+    assert.equal(now.reasonSource, 0)
+    assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs · 10:30: the controller stopped; sessions keep running/)
+    assert.equal(now.next.label, 'Switch the target checkout back to feature/skeleton/skeleton-001, then resume the controller: it relaunches nothing')
+    assert.deepEqual(now.next.steps, [{ kind: 'text', text: 'In the target repository: git switch feature/skeleton/skeleton-001' },
+      { kind: 'command', text: '"$PY" -m workflow automatic "$RUN" --live' }])
+    assert.deepEqual(now.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Source feature branch changed' }])
+    assert.doesNotMatch(prose(now), /new run|Blocked/)
+  })
+
+  it('interrupted (a): a start that did not complete is reconciled, or started when the run never was, then resumed', () => {
+    const reconcile = checked(synthetic({
+      status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'failed' },
+      events: [[0, 'launch_game', 'running', 'Launching or reconciling the exact native session'], [5, null, 'running', 'Automatic checkpoint controller PID 4242'], [6, null, 'paused', RECONCILE_STOP]],
+    }))
+    assert.equal(reconcile.situation, 'interrupted')
+    assert.equal(reconcile.interruption, 'a')
+    assert.deepEqual(commands(reconcile), ['"$PY" -m workflow reconcile "$RUN"', '"$PY" -m workflow automatic "$RUN" --live'])
+    assert.equal(reconcile.next.label, 'Reconcile the launches that did not complete, then resume the controller: nothing is relaunched')
+    assert.deepEqual(reconcile.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Ambiguous startup' }])
+    assert.doesNotMatch(prose(reconcile), /new run|Blocked before freeze/)
+    const never = checked(synthetic({ status: 'running', nodes: { challenge: 'succeeded' }, events: [[5, null, 'running', 'Automatic checkpoint controller PID 4242'], [6, null, 'paused', NEVER_STARTED_STOP]] }))
+    assert.equal(never.situation, 'interrupted')
+    assert.equal(never.interruption, 'a')
+    assert.deepEqual(commands(never), ['"$PY" -m workflow start "$RUN" --live', '"$PY" -m workflow automatic "$RUN" --live'])
+  })
+
+  it('interrupted (a): on a lane named controller, a resumable stop belongs to the run, not to the lane', () => {
+    // As a server before B1 serves the row: aliased onto the lane's launch node, which CONTROLLER_LANE_ROWS undoes.
+    const now = checked(synthetic({
+      base: guardrails, status: 'paused', nodes: { launch_controller: 'running', launch_ui: 'running', handoff: 'paused' },
+      events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [1, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
+        [5, 'launch_controller', 'running', 'Automatic checkpoint controller PID 4242'], [1800, 'launch_controller', 'paused', BRANCH_STOP]],
+    }))
+    assert.equal(now.situation, 'interrupted')
+    assert.equal(now.interruption, 'a')
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.match(now.next.label, /^Switch the target checkout back to feature\/workflow-guardrails\/workflow-guardrails-001,/)
+  })
+
+  const REVIEWED ={ challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded' } as const
   const REVIEW_NOTE = 'Controller interrupted while waiting for the reviewers. The native reviewer sessions were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live'
   const REVIEW_LAUNCH: EventSpec = [0, 'review', 'running', 'Launching the native reviewer session general']
 

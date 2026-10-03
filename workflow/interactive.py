@@ -239,7 +239,8 @@ class InteractiveSessions(ClaudeSessions):
         cwd = self.node_worktree(node)
         if not cwd.is_dir():
             raise RuntimeError("Review worktree is missing; the review node creates it before launching a reviewer")
-        if git(cwd, "rev-parse", "HEAD") != candidate_commit or git(cwd, "status", "--porcelain"):
+        # --ignored: project configuration planted under an ignore rule (.claude/) is not a clean checkout either.
+        if git(cwd, "rev-parse", "HEAD") != candidate_commit or git(cwd, "status", "--porcelain", "--ignored"):
             raise RuntimeError("Review worktree is not at the clean candidate commit")
         if any(row.get("name") == self.launch_name(node) for row in self.inventory()):
             raise RuntimeError("Unowned session already exists with this launch name")

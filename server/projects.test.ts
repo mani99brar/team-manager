@@ -1968,6 +1968,30 @@ test('[B1] on a lane named controller, PID and Errno rows belong to the run whil
   })
 })
 
+test('[B1] on a lane named controller, the controller\'s resumable stops belong to the run, never pausing the lane', async () => {
+  // automatic.py resumable_stop: drive stops before any step and records a `controller` `interrupted` row naming what comes
+  // before `automatic --live`; on md-manager's own features a lane may be named `controller` too.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T1, node: 'controller', status: 'interrupted', message: 'Source feature branch changed: /srv/repo is on feature/elsewhere, not feature/lane. Nothing was stopped or relaunched: switch it back with: git -C /srv/repo switch feature/lane, then resume with: python -m workflow automatic /srv/runs/lane --live' },
+      { sequence: 4, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 2088885' },
+      { sequence: 5, time: T2, node: 'controller', status: 'interrupted', message: 'Automatic supervision requires a completed start: launch_ui did not complete. Nothing was stopped or relaunched: inspect its receipt and `claude agents --json`, reconcile with: python -m workflow reconcile /srv/runs/lane, then resume with: python -m workflow automatic /srv/runs/lane --live' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [
+      [1, 'launch_controller', 'running', 'status_changed'], [2, 'launch_ui', 'running', 'status_changed'],
+      [3, null, 'paused', 'log'], [4, null, 'running', 'log'], [5, null, 'paused', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the controller\'s stop never pauses the lane')
+  })
+})
+
 test('[B1] candidate events name the lane whose combined check they report', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'combined', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets })

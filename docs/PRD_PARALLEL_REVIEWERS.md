@@ -10,7 +10,7 @@ Success: a feature with a general reviewer and a test-coverage reviewer runs bot
 
 ## 2. Confirmed decisions
 
-- Unanimous verdict. Every declared reviewer must write an accepted `approved` file. Any `blocked`, any unresolved P0/P1 from any reviewer, any rejected file, or any reviewer reaching `review_timeout_seconds` blocks the run. No advisory reviewers, no quorum.
+- Unanimous verdict. Every declared reviewer's accepted file must count as approved. Since C34 (decision 4, 3 Oct 2026) the controller derives each reviewer's verdict from its findings: any unresolved P0/P1, or a `blocked` verdict with no findings at all, blocks; a `blocked` verdict whose findings hold no unresolved P0/P1 counts as approved, and the verdict the reviewer wrote stays in its status file. Any rejected file, or any reviewer reaching `review_timeout_seconds`, blocks the run. No advisory reviewers, no quorum.
 - Findings are unioned. Each finding gains `reviewer` (the reviewer id). Duplicate findings from different reviewers are kept, not merged.
 - Reviewers run in parallel, all launched by the one `review` graph node, all over the same shared `review-worktree` at the candidate commit. Their tools stay Read, Glob, Grep plus exactly one allowed write, their own completion file.
 - One review per bundle per reviewer. Nothing is relaunched. A blocked run means a new run.
@@ -43,13 +43,13 @@ Rules: at least one entry; ids match `^[a-z][a-z0-9-]{0,31}$`, are unique, and a
 | Verdict file | `review.json` | `review.json` stays the single accepted record for `approve` and the viewer: combined `verdict`, `reviewers: [{reviewer_id, session_id, verdict, accepted_at}]`, unioned `findings` each with `reviewer` |
 | Bundle binding | run id, node, launch token, bundle hash, candidate | same, with a launch token per reviewer |
 | Independence | reviewer UUID differs from every worker | differs from every worker and every other reviewer |
-| Deadline | from the reviewer's launch | from each reviewer's own launch; the first expiry blocks the run |
+| Deadline | from the reviewer's launch | from each reviewer's own launch; before any block, the first expiry blocks the run |
 | Pane | `Claude: reviewer` right of the last worker | `Claude: reviewer <id>` panes in declared order, each split right of the previous |
 | Stop | identity re-checked stop after acceptance or block | every reviewer stopped after the combined decision; a stop that cannot be confirmed is retried by `automatic --live` as today |
 | Interruption | resume waits for the same session | resume rebinds every reviewer receipt; a reviewer whose launch was interrupted before the receipt exists goes to `needs_reconciliation` and no other reviewer is relaunched |
 | Manual mode | `review --review-file` imports one review | `review --reviewer <id> --review-file` imports one per reviewer; `approve` requires every declared reviewer imported and approved |
 
-Decision: after the last completion file is accepted or the first block or rejection is recorded, the controller writes `review.json` with the combined verdict, then stops every reviewer. A block does not wait for the other reviewers' files; their sessions are stopped and their status files record `superseded`.
+Decision: after the last completion file is accepted, a rejection or an expired deadline is recorded, or the wait after the first accepted block ends, the controller writes `review.json` with the combined verdict, then stops every reviewer. A block decides the run, but the other reviewers keep their verdicts. A native reviewer's bound file is read whatever its session reports until 10 minutes after the block was accepted (never past its own deadline). A print job, which already runs in parallel, has until its own deadline. Either is recorded as a late verdict that can add blockers but never approve. A reviewer with no verdict by then is stopped and its status file records `superseded`. The recorded session UUIDs are checked before any `review.json` is written, whatever the verdict: a missing one, a worker's or one two reviewers share refuses the verdict and leaves no `review.json`, since such a record fails the run's own validation. Once the review is blocked, `review.json` is written before each session is listed again, which only protects an approval: a session the controller can no longer confirm is noted, never an error that replaces the block. (Changed on 3 Oct 2026: the first block used to decide without waiting, and finished verdicts with P0/P1 findings were dropped.)
 
 ### Export 1.4.0 and projects contract 1.4.0
 
@@ -72,11 +72,11 @@ Additive. The `review` section gains `reviewers` (one entry per reviewer: id, tr
 | Scenario id | Asserts |
 | --- | --- |
 | two-approve | two fake reviewers approve; `review.json` has `verdict: approved`, both entries in `reviewers`, unioned findings tagged by reviewer; the run reaches a verified branch |
-| one-blocks | the second reviewer writes `blocked` while the first is still running; the run blocks, the first reviewer is stopped, its status is `superseded`, no relaunch |
-| p1-anywhere | reviewer A approves, reviewer B approves with an unresolved P1; the combined verdict is `blocked` with B's raw decision kept |
+| one-blocks | the second reviewer writes `blocked` while the first is still running; the run blocks. The first reviewer's bound file is still read in the grace, whatever its session reports, and recorded as a late verdict; without a file when the grace ends it is stopped and its status is `superseded`. No relaunch |
+| p1-anywhere | reviewer A approves, reviewer B approves with an unresolved P1; the combined verdict is `blocked`, B's entry reads `blocked` (C34) and B's raw decision is kept in its status file |
 | one-times-out | reviewer B never writes a file; at its deadline the run blocks with A's accepted verdict retained |
 | wrong-node | a file with `node_id: review-general` in `review-coverage.completion.json` is rejected and blocks the run |
-| shared-identity | two reviewer receipts with the same session UUID fail the independence check |
+| shared-identity | two reviewer receipts with the same session UUID, or one with a worker's, fail the independence check, with or without a block: no `review.json` is written, and the run still exports |
 | interrupted-launch | the controller is interrupted after the first reviewer's `claude --bg` and before the second's; resume reconciles the first and launches nothing |
 | default-reviewer | a feature without `reviewers` behaves exactly as slice A: same file names, same `review.json` shape plus a one-entry `reviewers` list |
 | manual-import | `review --reviewer general --review-file a.json` then `approve` is refused until `coverage` is imported too |
@@ -87,7 +87,7 @@ Additive. The `review` section gains `reviewers` (one entry per reviewer: id, tr
 
 - Whether a reviewer may be scoped to a subset of lanes (review only the `ui` diff). Out of scope now; the `requirement` lookup already names a lane, so scoping could be added to the brief without a contract change.
 - Whether reviewers should see one another's findings. Default: no, independence is the point.
-- Whether a blocked reviewer should let the others finish so their findings are recorded. Default: no, stop them; the retained transcripts hold whatever they found.
+- Whether a blocked reviewer should let the others finish so their findings are recorded. Decided on 3 Oct 2026: yes. A native reviewer has up to 10 minutes after the block was accepted, and a print job has until its own deadline. Their late verdicts are recorded and can add blockers, never approve.
 
 ## 8. How to run
 

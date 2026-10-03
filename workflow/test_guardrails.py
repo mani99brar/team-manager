@@ -1709,6 +1709,32 @@ class WorkerQuestion(unittest.TestCase):
         self.assertEqual(read_json(self.root / "ui.questions.json")["questions"][1]["answer"], "Use option C")
         self.assertIn(("ui", "interactive", "Worker ui question 2 answered; its deadline runs again"), self.events)
 
+    def test_a_stale_working_row_with_an_idle_status_is_no_pane_answer_and_a_busy_status_is(self):
+        # Claude Code 2.1.288 can list a session whose turn ended as state working while its status says idle (C18). Read as the
+        # session working again, that would record a pane answer nobody typed and restart the paused deadline. Only a busy
+        # status is the session working again.
+        statuses = {"ui": "waiting", "adapter": "busy"}
+        self.runtime.sessions.locate = lambda node, rows: {"state": self.states[node], "status": statuses[node], "pid": os.getpid()}
+        self.ask("Option A or B?")
+        self.states.update(ui="blocked", adapter="working")  # The question's turn ends waiting on the operator.
+        steps = iter([lambda: (self.states.update(ui="working"), statuses.update(ui="idle")),  # The stale row.
+                      lambda: None,
+                      lambda: setattr(self, "now", self.TIMEOUT + 5)])
+        with self.assertRaises(RuntimeError) as raised:
+            self.wait(on_sleep=lambda: next(steps)())
+        self.assertEqual([(entry["n"], entry["answer"]) for entry in read_json(self.root / "ui.questions.json")["questions"]], [(1, None)])
+        self.assertEqual(read_json(self.root / "ui.deadline.json")["paused_at"], "1970-01-01T00:00:10Z")  # Still paused.
+        self.assertEqual(str(raised.exception), "Worker adapter deadline exhausted; no automatic relaunch")
+        self.assertEqual([message.split(";")[0] for _, _, message in self.events], ["Worker ui asked question 1 of 3"])
+        # A busy status is the session at work again: the pane answer is recorded and the deadline runs again.
+        statuses["ui"] = "busy"
+        with self.assertRaisesRegex(RuntimeError, "Worker adapter deadline exhausted"):
+            self.wait()
+        entry = read_json(self.root / "ui.questions.json")["questions"][0]
+        self.assertEqual((entry["answer"], entry["answered_at"]), (PANE_ANSWER, iso(self.TIMEOUT + 5)))
+        self.assertIsNone(read_json(self.root / "ui.deadline.json")["paused_at"])
+        self.assertIn("Worker ui is working again while question 1 waits", self.events[-1][2])
+
     def test_a_completion_signal_written_while_a_question_waits_shows_the_session_worked_again(self):
         # A reply typed in the pane may never show `working`: the registry can report the whole reply turn as blocked, or
         # keep done. The next completion signal proves the session worked again: the waiting question gets the placeholder

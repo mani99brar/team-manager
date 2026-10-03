@@ -13,7 +13,7 @@ Success: on the next automatic run, a third pane labelled `Claude: reviewer` app
 ## 2. Confirmed decisions
 
 - Same session interaction and lifecycle as workers (pane, human input, completion protocol, automatic wait, resumable transcript), with restricted reviewer tools.
-- One review per bundle. A blocked verdict ends the run; fixing findings means a new run with a new bundle.
+- One review per bundle. A block ends the run (since C34: an unresolved P0/P1, or a blocked verdict with no findings); fixing findings means a new run with a new bundle.
 - Print mode stays available behind `--reviewer-transport print` for environments without Herdr. Default is the native session.
 
 ## 3. Design
@@ -25,7 +25,7 @@ The review node launches `claude --bg --name workflow-<run>-reviewer` in `review
 | Completion file | `<run>/review.completion.json` |
 | Bound to | run id, `review` node, bundle SHA-256, candidate commit, and a controller-issued launch token (the session UUID does not exist when the prompt is composed; the reviewer session identity is verified separately from the launch receipt against `claude agents --json`, decided 2026-09-21) |
 | Payload | verdict `approved` or `blocked`, findings `[{severity, message, disposition, worker, requirement}]` |
-| Accepted when | file validates against the schema and the native session is `idle` or `done` |
+| Accepted when | file validates against the schema and the native session's turn is over: state `idle` or `done`, or registry status `idle` (Claude Code 2.1.288 can keep a finished session's state `working`) |
 | Timeout | `review_timeout_seconds` from launch of the reviewer session, default 30 minutes |
 | Independence | reviewer UUID must differ from both worker UUIDs; verified from `claude agents --json` |
 | Human input | allowed in the pane, as for workers; the transcript is the record; the verdict is only the file |
