@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals
+from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals, resume_command
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -325,6 +325,11 @@ def main(argv=None):
                     print(f"\nLaunch paused at the design challenge; no worker was launched. Run: {run}")
                     return
         except KeyboardInterrupt:
+            if (run / "challenge.running.json").is_file() and not any(run.glob("*.interactive.json")):
+                # Interrupted while the design challenge's job ran: no worker exists, and `automatic` would refuse the run.
+                parser.exit(130, f"Launch interrupted during the design challenge; no worker was launched and nothing was rolled back.\n"
+                                 f"inspect with: {sys.executable} -m workflow status {run}\n"
+                                 f"run the design challenge and launch the workers with:  {resume_command(run, herdr=not args.no_herdr)}\n")
             parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
                              f"inspect with: {sys.executable} -m workflow status {run}\n"
                              + (f"resume with:  {sys.executable} -m workflow automatic {run} --live\n" if args.automatic else ""))

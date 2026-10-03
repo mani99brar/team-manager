@@ -53,6 +53,7 @@ MAX_QUESTIONS = 3
 CHALLENGE = "challenge"
 BLOCKING = frozenset({"P0", "P1"})
 DEFAULT_CHALLENGE_TIMEOUT = 1800
+CHALLENGE_HEARTBEAT_SECONDS = 60  # How often the terminal hears that the challenge's job still runs (never the timeline).
 CHALLENGE_SCHEMA = CONTRACTS / "challenge.schema.json"
 REVISION_INTENT = "challenge-revision.json"  # `resume` is moving the run to revised feature files; see commit_revision.
 UNFINISHED_REVISION = f"An interrupted resume has not finished moving this run to the revised feature files ({REVISION_INTENT})"
@@ -331,6 +332,22 @@ def challenge_timeout(plan: dict) -> int:
     return automatic["review_timeout_seconds"] if isinstance(automatic, dict) else DEFAULT_CHALLENGE_TIMEOUT
 
 
+def wait_challenge(process, attempt: int, timeout: float, *, clock=time.monotonic) -> None:
+    """Wait for the challenge's print job, printing `Design challenge attempt <n> still running (<m> min)` to stdout once
+    per CHALLENGE_HEARTBEAT_SECONDS: the supervising terminal sees the job is alive, the timeline gets nothing. Raises
+    subprocess.TimeoutExpired once the job has run for `timeout` seconds."""
+    started = clock()
+    while True:
+        try:
+            process.wait(timeout=max(0.0, min(CHALLENGE_HEARTBEAT_SECONDS, timeout - (clock() - started))))
+            return
+        except subprocess.TimeoutExpired:
+            elapsed = clock() - started
+            if elapsed >= timeout:
+                raise
+            print(f"Design challenge attempt {attempt} still running ({int(elapsed // 60)} min)", flush=True)
+
+
 def challenge_worktree(runtime) -> Path:
     """A detached checkout at the base commit; the job gets only Read, Glob and Grep, and a change to it refuses the result.
 
@@ -377,10 +394,18 @@ def run_challenge(runtime, attempt: int) -> dict:
         with prompt_path.open() as stdin, stdout.open("w") as output, (directory / f"challenge-{attempt}.stderr.log").open("w") as errors:
             process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
         try:
-            process.wait(timeout=challenge_timeout(plan))
+            wait_challenge(process, attempt, challenge_timeout(plan))
         except subprocess.TimeoutExpired:
             terminate(process)
             raise RuntimeError(f"Design challenge attempt {attempt} deadline exhausted; no worker was launched") from None
+        except KeyboardInterrupt:
+            # Said first: a `launch` interrupted with it may not wait long for this process. The job has its own session, so
+            # the terminal's Ctrl-C never reached it.
+            print(f"Design challenge attempt {attempt} interrupted; no worker was launched. Run the challenge again and launch the "
+                  f"workers with:\n  {resume_command(directory)}\n(add --herdr for the worker panes, as launch opens them unless --no-herdr)",
+                  flush=True)
+            terminate(process)
+            raise
         except BaseException:
             terminate(process)
             raise

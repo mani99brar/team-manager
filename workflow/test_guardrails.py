@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ from unittest.mock import patch
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
-from . import pipeline
+from . import guardrails, pipeline
 from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wait_handoffs
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
@@ -311,6 +312,8 @@ elif mode == 'schema':
     output['concerns'] = [{{"severity": "P3", "kind": "assumption", "message": "m", "consequence": "c"}}]
 elif mode == 'timeout':
     time.sleep(60)
+elif mode == 'slow':
+    time.sleep(0.6)
 elif mode == 'worktree':
     Path('stray.txt').write_text('A read-only job changed its checkout')
 if mode == 'not-an-object':
@@ -432,6 +435,93 @@ class ChallengeCheckoutFails(FailingChallenge):
         # Supervised once, after the workers launched: `start` alone would have left them unsupervised.
         self.assertEqual(supervised, [(directory, ["challenge", "adapter", "ui"])])
         self.assertIn("Automatic run reached a verified feature branch", output)
+
+
+class ChallengeHeartbeat(FailingChallenge):
+    """A challenge job runs for minutes: the terminal hears from it once a minute, and Ctrl-C says how to go on."""
+
+    def test_a_running_challenge_prints_a_heartbeat_line_to_the_terminal_and_none_to_the_timeline(self):
+        self.mode.write_text("slow")
+        directory = self.prepare("heartbeat-001")
+        with patch("workflow.guardrails.CHALLENGE_HEARTBEAT_SECONDS", 0.1):
+            output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        beats = re.findall(r"^Design challenge attempt 1 still running \(\d+ min\)$", output, re.MULTILINE)
+        self.assertGreaterEqual(len(beats), 2, output)
+        self.assertNotIn("still running", (directory / "events.jsonl").read_text())
+        self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+
+    def test_the_wait_prints_the_minutes_once_per_heartbeat_and_ends_at_the_deadline(self):
+        from .guardrails import wait_challenge
+        clock = SimpleNamespace(now=1000.0)
+
+        class Job:
+            """A print job that is still running for `beats` waits, then exits."""
+            def __init__(self, beats: int):
+                self.beats, self.waits = beats, []
+
+            def wait(self, timeout):
+                self.waits.append(timeout)
+                if len(self.waits) <= self.beats:
+                    clock.now += timeout
+                    raise subprocess.TimeoutExpired("claude", timeout)
+                return 0
+
+        job = Job(3)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            wait_challenge(job, 2, 1800, clock=lambda: clock.now)
+        self.assertEqual(output.getvalue().splitlines(), [f"Design challenge attempt 2 still running ({minutes} min)" for minutes in (1, 2, 3)])
+        self.assertEqual(job.waits, [60, 60, 60, 60])
+        # The last wait is what is left of the deadline; then the job's deadline is exhausted.
+        job = Job(10)
+        with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(subprocess.TimeoutExpired):
+            wait_challenge(job, 1, 150, clock=lambda: clock.now)
+        self.assertEqual(job.waits, [60, 60, 30])
+        self.assertEqual(output.getvalue().splitlines(), [f"Design challenge attempt 1 still running ({minutes} min)" for minutes in (1, 2)])
+
+    def test_ctrl_c_during_the_challenge_prints_the_resume_command_and_stops_the_job(self):
+        self.mode.write_text("timeout")  # A job that would run for a minute.
+        directory = self.prepare("interrupt-001")
+        output = io.StringIO()
+        # Ctrl-C reaches the controller while it waits for the job.
+        with patch("workflow.guardrails.wait_challenge", side_effect=KeyboardInterrupt), \
+                patch("workflow.guardrails.terminate", wraps=guardrails.terminate) as stop, \
+                patch("workflow.pipeline.InteractiveSessions", side_effect=lambda directory, timeout: self.sessions(directory)), \
+                patch.object(sys, "argv", ["workflow", "start", str(directory), "--live"]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            with self.assertRaises(KeyboardInterrupt):
+                pipeline.main()
+        self.assertIn(f"Design challenge attempt 1 interrupted; no worker was launched. Run the challenge again and launch the workers with:\n"
+                      f"  {PY} -m workflow resume {directory}\n", output.getvalue())
+        self.assertEqual(stop.call_count, 1)  # The job was stopped, not left running.
+        self.assertEqual((read_json(directory / "challenge.running.json")["attempt"], (directory / "challenge.json").exists()), (1, False))
+        self.assertEqual([event[1:] for event in self.events(directory) if event[0] == "challenge"][-1], ("blocked", "KeyboardInterrupt"))
+        self.assertFalse(any(directory.glob("*.interactive.json")))
+        # The command it names runs the challenge as attempt 2, then launches the workers.
+        self.mode.write_text("pass")
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 2))
+
+    def test_ctrl_c_during_a_launchs_challenge_names_resume_not_the_supervisor(self):
+        runs = []
+
+        def run(command, cwd, check):
+            if command[3:4] == ["start"]:  # Interrupted while its challenge job runs.
+                directory = Path(command[4])
+                directory.mkdir(parents=True, exist_ok=True)
+                save_json(directory / "challenge.running.json", {"attempt": 1, "session_id": "s", "started_at": "2026-10-03T12:00:00Z"})
+                runs.append(directory)
+                raise KeyboardInterrupt
+
+        from .launch import main as launch_main
+        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as exit_:
+                launch_main([FEATURE, "--repo", str(self.repo), "--live", "--automatic", "--run-root", str(self.runs)])
+        self.assertEqual(exit_.exception.code, 130)
+        self.assertIn(f"run the design challenge and launch the workers with:  {PY} -m workflow resume {runs[0]} --herdr\n", errors.getvalue())
+        self.assertNotIn("-m workflow automatic", errors.getvalue())
 
 
 class LaneNamedLikeARunFile(GuardedFeature):
