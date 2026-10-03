@@ -49,6 +49,7 @@ GUARDED_VERSION = "2.2.0"
 GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
 DECISIONS = "decisions.md"
+PLACEHOLDER = "TODO:"  # What launch refuses in the files `init` writes, and resume in the tasks and decisions.md it re-pins.
 COMPLETION_VERSION = "1.1.0"
 LEGACY_COMPLETION_VERSION = "1.0.0"
 MAX_QUESTIONS = 3
@@ -531,8 +532,17 @@ def paused_message(directory: Path, herdr: bool = False) -> str:
     return "\n".join(lines)
 
 
+def refuse_placeholders(path: Path, text: str) -> None:
+    """Refuse a Markdown feature file with a line that begins with `TODO:`, as launch refuses one (launch.placeholders): a
+    placeholder, or a question the grill asked and never had answered (`TODO: Q<n> <question>`)."""
+    left = [f"{path}:{number}: {line.strip()}" for number, line in enumerate(text.splitlines(), 1) if line.strip().startswith(PLACEHOLDER)]
+    if left:
+        raise ValueError(f"{'; '.join(left)} (launch refuses it too: answer or remove each line that begins with {PLACEHOLDER}, then rerun resume)")
+
+
 def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
-    """The lanes' tasks and decisions.md as the paths pinned at prepare hold them now; refused as prepare refuses them."""
+    """The lanes' tasks and decisions.md as the paths pinned at prepare hold them now; refused as prepare refuses them, and
+    as launch refuses a line that begins with `TODO:` in them (`resume` calls it before it commits anything)."""
     tasks = {}
     for node in plan_workers(plan):
         path = Path(plan["task_files"][node])
@@ -540,11 +550,13 @@ def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
         problems = brief_problems(text)
         if problems:
             raise ValueError(f"{path}: {', '.join(problems)}")
+        refuse_placeholders(path, text)
         tasks[node] = text
     decisions = Path(plan["decisions"]["path"])
     text = decisions.read_text()
     if not text.strip():
         raise ValueError(f"{decisions} is empty")
+    refuse_placeholders(decisions, text)
     if plan.get("prd") and not Path(plan["prd"]["path"]).is_file():
         raise ValueError(f"PRD {plan['prd']['path']} does not exist")
     return tasks, text

@@ -1021,6 +1021,38 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual((exported["base_commit"], exported["inputs"]["challenge"]["status"], exported["inputs"]["challenge"]["attempts"]), (revision, "paused", 2))
         self.assertEqual(self.launches(directory), ["challenge", "challenge"])
 
+    def test_resume_refuses_a_todo_line_in_decisions_or_a_task_before_anything_is_committed_or_re_pinned(self):
+        """C5: a grill question never answered (`TODO: Q<n>`) or any line that begins with `TODO:`, as launch refuses it."""
+        directory, base = self.paused("todo-001")
+        plan = (directory / "plan.json").read_bytes()
+
+        def refused(path: Path, line: str) -> None:
+            output, code = self.cli(resume_main, [str(directory)])
+            self.assertEqual(code, 1, output)
+            number = path.read_text().splitlines().index(line) + 1
+            self.assertIn(f"{path.resolve()}:{number}: {line.strip()}", output)
+            self.assertIn("launch refuses it too", output)
+            # Nothing was committed, moved or re-pinned, the challenge did not rerun and the edit stays in the checkout.
+            self.assertEqual((git(self.repo, "rev-parse", "HEAD"), (directory / "plan.json").read_bytes()), (base, plan))
+            self.assertFalse((directory / guardrails.REVISION_INTENT).exists())
+            self.assertEqual(len(self.challenge_calls()), 1)
+            self.assertIn(line, path.read_text())
+
+        decisions = self.folder / "decisions.md"
+        decisions.write_text(SPLIT_DECISIONS.replace("## Grill defaults", "TODO: Q2 Who owns contracts/?\n\n## Grill defaults"))
+        refused(decisions, "TODO: Q2 Who owns contracts/?")
+        git(self.repo, "checkout", "--", f"features/{FEATURE}/decisions.md")
+        task = self.edit_task()
+        task.write_text(task.read_text() + "  TODO: name the adapter's port.\n")  # Indented, as launch reads it: stripped.
+        refused(task, "  TODO: name the adapter's port.")
+        # Answered, resume commits the task and reruns the challenge on it.
+        task.write_text(task.read_text().replace("  TODO: name the adapter's port.\n", "The adapter listens on port 8080.\n"))
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertIn("port 8080", read_json(directory / "plan.json")["nodes"]["ui"]["task"])
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
     def test_accept_challenge_refuses_edited_pinned_files_and_accepts_on_a_clean_checkout(self):
         directory, base = self.paused("accept-edited-001")
         decisions = self.folder / "decisions.md"

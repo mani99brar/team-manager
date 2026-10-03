@@ -13,7 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, LEGACY_DECISIONS_NOTE, has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resume_command
+from .guardrails import (DECISIONS, LEGACY_DECISIONS_NOTE, PLACEHOLDER, has_operator_decisions, is_guarded, migration_note, prd_path, refusals,
+                         resume_command)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -25,7 +26,6 @@ from .verification import validate_schema
 TOOL = Path(__file__).resolve().parents[1]
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
 BUILTIN_PREFIX = "builtin:"
-PLACEHOLDER = "TODO:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
