@@ -382,9 +382,15 @@ class InitScaffold(Isolated):
         task = (folder / "main-task.md").read_text()
         for heading in ("## Goal", "## Acceptance", "## Stop"):
             self.assertIn(heading, task)
-        # The Acceptance template asks the worker for the Proof table coverage verifies row by row (C34, decision 4).
-        from .guardrails import sections
-        self.assertIn("end your completion summary with a Proof table", " ".join(sections(task)["Acceptance"].split()))
+        # The Acceptance TODO line asks for a proof per result, which the worker's Proof table names (C34, decision 4). Deleting that
+        # line and the browser paragraph, as the template allows, leaves an empty Acceptance that launch refuses: no boilerplate
+        # line stays behind as an acceptance item for the worker and coverage to map.
+        from .guardrails import brief_problems, sections
+        acceptance = sections(task)["Acceptance"]
+        todo = acceptance[:acceptance.index("Browser checks")].strip()
+        self.assertEqual(todo, "TODO: the observable results and the checks that prove them (the worker's Proof table names a proof for each).")
+        edited = task.replace(acceptance[acceptance.index("Browser checks"):], "").replace(todo, "")
+        self.assertEqual(brief_problems(edited), ["empty ## Acceptance"])
         # Never overwrites: a second init is refused and changes nothing; CLAUDE.md is written only when missing.
         snapshot = {path: path.read_bytes() for path in [*folder.iterdir(), target / "CLAUDE.md"]}
         result = subprocess.run([PY, "-m", "workflow", "init", "skeleton", "--repo", str(target)], cwd=TOOL, capture_output=True, text=True, timeout=60)
