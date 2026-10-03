@@ -986,6 +986,32 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         self.assertEqual((late["status"], late["late"], late["accepted_at"], "late_error" in late), ("blocked", True, "1970-01-01T00:06:40Z", False))
         self.assertEqual(self.events[-1][1:], ("note", "Reviewer general's late verdict recorded: blocked, 1 open P1"))
 
+    def test_a_reviewer_waiting_in_its_pane_is_named_again_after_each_note_of_the_grace(self):
+        # The viewer and the server show a pane that needs attention only while it is the review node's latest record. Each note
+        # of the grace (its start, another reviewer's late verdict) is a later record, so the attention is said again after it.
+        from .automatic import ReviewStatus, wait_reviews
+        self.reviewers = ["general", "coverage", "security"]
+        self.setUp()
+        self.rows["general"]["state"] = "blocked"  # A question in its pane, seen before the block.
+        self.rows["security"]["state"] = "working"
+        self.write("coverage", verdict="blocked")
+
+        def finishes(now):
+            if now == 160:
+                self.write("security")
+            if now == 280:  # Answered in its pane.
+                self.write("general")
+                self.rows["general"]["state"] = "idle"
+        clock, sleep, _ = self.ticking(100, 60, finishes)
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+        self.assertEqual(sorted(decisions), sorted(self.ids))
+        pane = "Reviewer general needs attention in its pane (native state blocked); waiting until the grace after the block ends, or its deadline"
+        self.assertEqual([(status, message if status == "interactive" else message.split(";")[0].split(":")[0]) for _, status, message in self.events], [
+            ("interactive", "Reviewer general needs attention in its pane (native state blocked); waiting until the deadline"),
+            ("note", "Reviewer coverage blocked the candidate"), ("interactive", pane),
+            ("note", "Reviewer security's late verdict recorded"), ("interactive", pane),
+            ("note", "Reviewer general's late verdict recorded")])
+
     def test_a_reviewer_still_working_at_the_end_of_the_grace_ends_superseded_without_a_verdict(self):
         from .automatic import REVIEW_GRACE_SECONDS, ReviewStatus, wait_reviews
         general, coverage = self.ids
@@ -1020,13 +1046,26 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         ended = subprocess.Popen(["sleep", "60"])
         ended.kill()
         ended.wait()
-        cases = {"missing": lambda: self.rows.pop(general), "stopped": lambda: self.rows[general].update(state="stopped"),
-                 "failed": lambda: self.rows[general].update(state="failed"), "ended": lambda: self.rows[general].update(pid=ended.pid)}
+
+        def stop():
+            self.rows[general].update(state="stopped")
+        cases = {"missing": lambda: self.rows.pop(general), "stopped": stop, "failed": lambda: self.rows[general].update(state="failed"),
+                 "ended": lambda: self.rows[general].update(pid=ended.pid), "stopped, refused": stop, "stopped, refused, bound": stop}
         for name, lose in cases.items():
             with self.subTest(session=name):
                 self.setUp()
-                if name == "ended":
+                if name in {"ended", "stopped, refused, bound"}:
                     self.bind_live()  # A bound receipt: an ended process is waited out as an update's respawn gap first.
+                if name.startswith("stopped, refused"):
+                    # What InteractiveSessions.locate does with a stopped or failed row: it refuses it rather than return it.
+                    located = self.runtime.sessions.locate
+
+                    def locate(node, rows, located=located):
+                        row = located(node, rows)
+                        if row is not None and row["state"] not in {"idle", "working", "blocked", "done"}:
+                            raise RuntimeError(f"Session is not attachable: {row['state']!r}; reconcile manually")
+                        return row
+                    self.runtime.sessions.locate = locate
                 self.rows[general]["state"] = "working"
                 self.write(general)  # A valid file, never read: the session that wrote it is gone.
                 self.write(coverage, verdict="blocked")
@@ -1044,6 +1083,9 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
                 self.assertEqual(self.status_of(general)["status"], "superseded")
                 self.assertEqual(len(sleeps), DEAD_PID_GRACE_SECONDS // 10 if name == "ended" else 0)
                 self.assertTrue(self.events[-1][2].startswith("Reviewer general gave no verdict and ends superseded: its session "), self.events[-1])
+                if name.startswith("stopped, refused"):
+                    self.assertEqual(self.events[-1][2], "Reviewer general gave no verdict and ends superseded: its session is refused "
+                                                         "(Session is not attachable: 'stopped'; reconcile manually)")
 
     def test_a_malformed_late_file_stores_late_error_and_ends_superseded(self):
         from .automatic import ReviewStatus, wait_reviews
@@ -1225,6 +1267,88 @@ sys.exit({exit_code})
         self.assertEqual((execs, waits, self.starts()), (["1"], [], ["1", "1"]))
 
 
+class FakeJob:
+    """A print job on a test's clock (`test.now`): it exits at `exits_at` (None: never) with `code`; a wait moves the clock."""
+
+    def __init__(self, test, exits_at, code=0):
+        self.test, self.exits_at, self.code, self.returncode, self.pid = test, exits_at, code, None, 0
+
+    def poll(self):
+        if self.returncode is None and self.exits_at is not None and self.test.now >= self.exits_at:
+            self.returncode = self.code
+        return self.returncode
+
+    def wait(self, timeout):
+        if self.exits_at is not None and self.exits_at <= self.test.now + timeout:
+            self.test.now = max(self.test.now, self.exits_at)
+            return self.poll()
+        self.test.now += timeout
+        raise subprocess.TimeoutExpired("claude", timeout)
+
+
+class PrintCollectionTests(unittest.TestCase):
+    """collect_print on a fake clock: every job launched at 0 with the default 1800 s deadline, exiting when a test says."""
+
+    P0 = {"severity": "P0", "message": "Forged GitHub provenance is marked verified.", "disposition": "open", "worker": "ui", "requirement": None}
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.now, self.events, self.terminated = 0.0, [], []
+
+    def collect(self, jobs: dict):
+        """Run collect_print over `jobs` (reviewer id: (exits_at, structured output)); the state it leaves."""
+        from .automatic import ReviewStatus, collect_print
+        plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS, reviewer_transport="print"),
+                "reviewers": [{"reviewer_id": reviewer_id, "prompt": f"Check {reviewer_id}."} for reviewer_id in jobs]}
+        runtime = SimpleNamespace(directory=self.root, plan=plan, event=lambda node, status, message: self.events.append((node, status, message)))
+        statuses, processes = {}, {}
+        for n, (reviewer_id, (exits_at, output)) in enumerate(jobs.items()):
+            session = f"{n + 1:08d}-4444-4444-8444-444444444444"
+            statuses[reviewer_id] = {"reviewer_id": reviewer_id, "node_id": review_node(reviewer_id), "transport": "print", "session_id": session, "status": "running"}
+            save_json(self.root / f"{review_node(reviewer_id)}.stdout.json", {"session_id": session, "is_error": False, "subtype": "success", "structured_output": output})
+            processes[reviewer_id] = (FakeJob(self, exits_at), 0.0)
+        state = ReviewStatus(runtime, {"transport": "print", "status": "running", "reviewers": list(jobs)}, statuses)
+        self.jobs = {reviewer_id: process for reviewer_id, (process, _) in processes.items()}
+        with patch("workflow.automatic.time", SimpleNamespace(monotonic=lambda: self.now, time=lambda: self.now)), \
+                patch("workflow.automatic.terminate", side_effect=self.terminated.append):
+            collect_print(runtime, state, processes, DEFAULTS["review_timeout_seconds"])
+        return state
+
+    def test_after_a_block_a_running_job_has_until_its_own_deadline_not_a_grace(self):
+        # The operator's decision (3 Oct 2026): print jobs already run in parallel, so after a block each one still running
+        # has until its own deadline; the 10-minute grace is the native reviewers'. coverage exits 14 minutes after general's
+        # block with a P0 and is recorded; security never exits and is stopped at its deadline.
+        state = self.collect({"general": (60, {"verdict": "blocked", "findings": []}), "coverage": (900, {"verdict": "approved", "findings": [self.P0]}),
+                              "security": (None, None)})
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in state.decisions.items()}, {"general": "blocked", "coverage": "approved"})
+        coverage = state.statuses["coverage"]
+        self.assertEqual((coverage["status"], coverage["late"], coverage["accepted_decision"]["findings"]), ("blocked", True, [self.P0]))
+        self.assertEqual((state.statuses["security"]["status"], self.terminated, self.now), ("superseded", [self.jobs["security"]], 1800))
+        self.assertEqual(self.events, [
+            ("review", "note", "Reviewer general blocked the candidate; coverage and security have until their deadlines (the latest "
+                               "1970-01-01T00:30:00Z) to finish: a verdict written by then is recorded, and can add blockers but never approve"),
+            ("review", "note", "Reviewer coverage's late verdict recorded: approved, 1 open P0"),
+            ("review", "note", "Reviewer security gave no verdict and ends superseded: its deadline passed")])
+
+    def test_a_job_that_exited_is_read_before_an_earlier_declared_deadline_is_checked(self):
+        # general (declared first) reaches its deadline during the wait in which coverage exits with a block: the pass reads
+        # coverage's verdict first, so the block is recorded and general, past its deadline, ends superseded.
+        state = self.collect({"general": (None, None), "coverage": (1799.5, {"verdict": "blocked", "findings": [self.P0]})})
+        self.assertEqual(({reviewer_id: decision["verdict"] for reviewer_id, decision in state.decisions.items()}, self.now), ({"coverage": "blocked"}, 1800))
+        self.assertEqual((state.statuses["general"]["status"], self.terminated), ("superseded", [self.jobs["general"]]))
+        self.assertEqual([event[2] for event in self.events], [
+            "Reviewer coverage blocked the candidate; general has until its deadline (1970-01-01T00:30:00Z) to finish: a verdict written by then is "
+            "recorded, and can add blockers but never approve",
+            "Reviewer general gave no verdict and ends superseded: its deadline passed"])
+        # Before any block an expired deadline still ends the review at once.
+        self.setUp()
+        with self.assertRaisesRegex(RuntimeError, r"^Reviewer general deadline exhausted; no second reviewer is launched$"):
+            self.collect({"general": (None, None), "coverage": (1800.5, {"verdict": "blocked", "findings": []})})
+        self.assertEqual((self.now, self.events), (1800, []))
+
+
 class GraphFixture(unittest.TestCase):
     """Automatic graph over the offline pipeline fixture; subclasses pick the reviewer transport and the reviewers."""
 
@@ -1273,7 +1397,8 @@ class GraphFixture(unittest.TestCase):
         self.verdict.write_text("approved")
         self.findings = f.root / "review-findings.json"  # Optional: the findings the fake print reviewer reports.
         self.plant = f.root / "review-plant"  # Optional: text the fake print reviewer writes to .claude/settings.json in its checkout.
-        # Optional: per reviewer id, what its fake print job does instead: {"verdict", "findings", "sleep" (seconds), "exit", "output"}.
+        # Optional: per reviewer id, what its fake print job does instead: {"verdict", "findings", "sleep" (seconds), "exit", "output"},
+        # and "after" (another reviewer id): the job starts its sleep only once the controller accepted that reviewer's verdict.
         self.knobs = f.root / "review-knobs.json"
         f.sessions.reviewer_verdict_file = self.verdict
         executable = f.root / "fake-reviewer"
@@ -1297,6 +1422,10 @@ if plant.exists():  # The job runs in the review worktree.
 declared = re.match(r'Review only the (\\S+) aspects', sys.stdin.read())  # The brief GraphFixture gives a declared reviewer.
 knobs = Path({str(self.knobs)!r})
 knob = json.loads(knobs.read_text()).get(declared[1] if declared else 'review', {{}}) if knobs.exists() else {{}}
+if 'after' in knob:  # Read after that reviewer whatever the load: its accepted_at is saved before this job exits.
+    status, give_up = Path({str(f.directory)!r}) / f"automatic-review-{{knob['after']}}.json", time.monotonic() + 60
+    while 'accepted_at' not in json.loads(status.read_text()) and time.monotonic() < give_up:
+        time.sleep(0.05)
 time.sleep(knob.get('sleep', 0))
 if 'output' in knob:
     print(knob['output'])
@@ -1823,8 +1952,9 @@ class PrintTwoReviewerGraphTests(PrintReviewerTests, GraphFixture):
 
 
 class PrintGraceScenarios(GraphFixture):
-    """The print jobs after an accepted block (C33): every job that exited is read, a running one has until the grace ends,
-    and nothing that happens to a late job replaces the block."""
+    """The print jobs after an accepted block (C33): every job that exited is read, a running one has until its own deadline,
+    and nothing that happens to a late job replaces the block. A late job waits for general's acceptance (the `after` knob),
+    so it is read after the block however slowly general's job starts."""
 
     transport = "print"
     reviewers = ["general", "coverage"]
@@ -1849,7 +1979,7 @@ class PrintGraceScenarios(GraphFixture):
     def test_a_job_that_exited_after_an_earlier_block_is_read_and_recorded(self):
         # The pine runs: the declared-order loop stopped at an earlier reviewer's block and marked security, whose job had
         # already exited with P0/P1 findings, superseded. Every job that exited is read now, its verdict recorded late.
-        verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"verdict": "approved", "findings": [self.P0], "sleep": 1})
+        verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"verdict": "approved", "findings": [self.P0], "after": "general"})
         self.assertEqual(verdicts, {"general": "blocked", "coverage": "approved"})
         self.assertEqual(read_json(self.fixture.directory / "review.json")["findings"], [{**self.P0, "reviewer": "coverage"}])
         coverage = self.status("coverage")
@@ -1862,7 +1992,7 @@ class PrintGraceScenarios(GraphFixture):
                          [("general", "blocked", "blocked", 0), ("coverage", "approved", "blocked", 1)])
 
     def test_a_late_job_that_fails_never_replaces_the_block(self):
-        for name, knob in (("exit 1", {"exit": 1, "sleep": 1}), ("no JSON", {"output": "not json", "sleep": 1})):
+        for name, knob in (("exit 1", {"exit": 1, "after": "general"}), ("no JSON", {"output": "not json", "after": "general"})):
             with self.subTest(job=name):
                 if name != "exit 1":
                     self.setUp()  # A fresh run.
@@ -1874,16 +2004,17 @@ class PrintGraceScenarios(GraphFixture):
                 self.assertTrue(coverage["late_error"], coverage)
                 self.assertEqual(self.notes()[-1], f"Reviewer coverage gave no verdict and ends superseded: its print job's output was refused ({coverage['late_error']})")
 
-    def test_a_job_still_running_when_the_grace_ends_is_stopped_and_superseded(self):
+    def test_a_job_still_running_at_its_own_deadline_is_stopped_and_superseded(self):
+        # After a block a print job keeps its own deadline (5 s here): the native reviewers' grace (none here) never cuts it short.
         started = time.monotonic()
-        with patch("workflow.automatic.REVIEW_GRACE_SECONDS", 1):
-            verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"sleep": 60})
-        self.assertLess(time.monotonic() - started, 50)  # Stopped at the end of the grace, not waited for.
+        with patch("workflow.automatic.REVIEW_GRACE_SECONDS", 0), patch.dict(self.fixture.runtime.plan["automatic"], review_timeout_seconds=5):
+            verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"after": "general", "sleep": 60})
+        self.assertLess(time.monotonic() - started, 50)  # Stopped at its deadline, not waited for.
         self.assertEqual(verdicts, {"general": "blocked", "coverage": None})
         self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general)")
         coverage = self.status("coverage")
         self.assertEqual((coverage["status"], "late_error" in coverage, "accepted_decision" in coverage), ("superseded", False, False))
-        self.assertEqual(self.notes()[-1], "Reviewer coverage gave no verdict and ends superseded: its print job was still running at the end of the grace")
+        self.assertEqual(self.notes()[-1], "Reviewer coverage gave no verdict and ends superseded: its deadline passed")
 
 
 class NativeReviewerTests:

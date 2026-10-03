@@ -49,7 +49,7 @@ Rules: at least one entry; ids match `^[a-z][a-z0-9-]{0,31}$`, are unique, and a
 | Interruption | resume waits for the same session | resume rebinds every reviewer receipt; a reviewer whose launch was interrupted before the receipt exists goes to `needs_reconciliation` and no other reviewer is relaunched |
 | Manual mode | `review --review-file` imports one review | `review --reviewer <id> --review-file` imports one per reviewer; `approve` requires every declared reviewer imported and approved |
 
-Decision: after the last completion file is accepted, a rejection or an expired deadline is recorded, or the grace after the first accepted block ends, the controller writes `review.json` with the combined verdict, then stops every reviewer. A block decides the run, but the other reviewers keep their verdicts: until 10 minutes after the block was accepted (never past a reviewer's own deadline) each one's bound file is read whatever its session reports, and recorded as a late verdict that can add blockers but never approve. A reviewer with no verdict by then is stopped and its status file records `superseded`. (Changed on 3 Oct 2026: the first block used to decide without waiting, and finished verdicts with P0/P1 findings were dropped.)
+Decision: after the last completion file is accepted, a rejection or an expired deadline is recorded, or the wait after the first accepted block ends, the controller writes `review.json` with the combined verdict, then stops every reviewer. A block decides the run, but the other reviewers keep their verdicts. A native reviewer's bound file is read whatever its session reports until 10 minutes after the block was accepted (never past its own deadline). A print job, which already runs in parallel, has until its own deadline. Either is recorded as a late verdict that can add blockers but never approve. A reviewer with no verdict by then is stopped and its status file records `superseded`. (Changed on 3 Oct 2026: the first block used to decide without waiting, and finished verdicts with P0/P1 findings were dropped.)
 
 ### Export 1.4.0 and projects contract 1.4.0
 
@@ -87,7 +87,7 @@ Additive. The `review` section gains `reviewers` (one entry per reviewer: id, tr
 
 - Whether a reviewer may be scoped to a subset of lanes (review only the `ui` diff). Out of scope now; the `requirement` lookup already names a lane, so scoping could be added to the brief without a contract change.
 - Whether reviewers should see one another's findings. Default: no, independence is the point.
-- Whether a blocked reviewer should let the others finish so their findings are recorded. Decided on 3 Oct 2026: yes, for up to 10 minutes after the block was accepted; their late verdicts are recorded and can add blockers, never approve.
+- Whether a blocked reviewer should let the others finish so their findings are recorded. Decided on 3 Oct 2026: yes. A native reviewer has up to 10 minutes after the block was accepted, and a print job has until its own deadline. Their late verdicts are recorded and can add blockers, never approve.
 
 ## 8. How to run
 

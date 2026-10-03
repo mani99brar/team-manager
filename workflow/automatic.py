@@ -547,8 +547,9 @@ def decision_blocks(decision: dict) -> bool:
     return decision["verdict"] != "approved" or bool(blocking_findings(decision["findings"]))
 
 
-# After the first accepted block, how long the other reviewers have to finish. A verdict they write by then is recorded as a
-# late one (`late` in its status): it can add blockers, never approve. The run is blocked whatever they say.
+# After the first accepted block, how long the other native reviewers have to finish. A verdict they write by then is recorded
+# as a late one (`late` in its status): it can add blockers, never approve. The run is blocked whatever they say. Print jobs
+# get no grace: they already run in parallel, and each one still running has until its own deadline (collect_print).
 REVIEW_GRACE_SECONDS = 600
 NOTE = "note"  # The status of a plain timeline record: none the viewer reads, so it never moves the review node.
 
@@ -590,12 +591,15 @@ def supersede_late(runtime, state: ReviewStatus, reviewer_id: str, reason: str) 
     runtime.event("review", NOTE, f"Reviewer {reviewer_id} gave no verdict and ends superseded: {reason}")
 
 
-def announce_grace(runtime, state: ReviewStatus, remaining: list[str], grace_end: float) -> None:
-    """The timeline says who blocked and until when (`grace_end`, epoch seconds) the other reviewers may still finish."""
-    blockers =[reviewer_id for reviewer_id in state.ids if reviewer_id in state.decisions and decision_blocks(state.decisions[reviewer_id])]
+def announce_grace(runtime, state: ReviewStatus, remaining: list[str], until: float, *, deadlines: bool = False) -> None:
+    """The timeline says who blocked and until when (`until`, epoch seconds) the other reviewers may still finish: the end of
+    the grace, or with `deadlines` (print jobs) the latest of their own deadlines."""
+    blockers = [reviewer_id for reviewer_id in state.ids if reviewer_id in state.decisions and decision_blocks(state.decisions[reviewer_id])]
+    one = len(remaining) == 1
+    when = (f"until {'its deadline' if one else 'their deadlines'} ({'' if one else 'the latest '}{iso(until)})" if deadlines else f"until {iso(until)}")
     runtime.event("review", NOTE, f"Reviewer{'s' if len(blockers) > 1 else ''} {listing(blockers)} blocked the candidate; {listing(remaining)} "
-                                  f"{'has' if len(remaining) == 1 else 'have'} until {iso(grace_end)} to finish: a verdict written by then is "
-                                  "recorded, and can add blockers but never approve")
+                                  f"{'has' if one else 'have'} {when} to finish: a verdict written by then is recorded, and can add blockers "
+                                  "but never approve")
 
 
 def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, sleep=None) -> dict:
@@ -688,11 +692,11 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
             return decisions
         if not blocked:
             sleep(2)
-    wait_grace(runtime, state, started, timeout, attention, gaps, clock, sleep)
+    wait_grace(runtime, state, started, timeout, gaps, clock, sleep)
     return decisions
 
 
-def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attention: set, gaps: UpdateGaps, clock, sleep) -> None:
+def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: UpdateGaps, clock, sleep) -> None:
     """After an accepted block: every other reviewer gets until the grace ends, REVIEW_GRACE_SECONDS after the earliest blocking
     verdict was accepted (so a resumed controller continues the same window), and at most until its own deadline.
 
@@ -701,6 +705,9 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attent
     passes or whose session is missing, ended or terminal is no longer waited for and ends superseded, its file unread: the
     identity check after the wait could not confirm that session. When the grace ends, each reviewer still waited for is
     read once more; a file that still does not validate is kept as `late_error`. Nothing raised for one replaces the block.
+
+    A reviewer that needs attention in its pane is said so after every note of the grace: the viewer and the server show it
+    only while it is the review node's latest record, and the grace waits for that answer.
     """
     from .pipeline import digest_file
     decisions = state.decisions
@@ -708,6 +715,13 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attent
     grace_end = blocked_at + REVIEW_GRACE_SECONDS
     # Superseded already (by this window, before a restart): no longer waited for.
     remaining = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions and state.statuses[reviewer_id].get("status") != "superseded"]
+    attention = set()  # The reviewers whose pane attention was said since the last note on the review node.
+
+    def ended(reviewer_id: str) -> None:
+        """No longer waited for; the note that follows hides any pane attention said before it, so it is said again."""
+        remaining.remove(reviewer_id)
+        attention.clear()
+
     if remaining and clock() < grace_end:
         announce_grace(runtime, state, remaining, grace_end)
     while remaining:
@@ -719,15 +733,15 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attent
                 row = gaps.row(node, rows)
             except SessionGap as gap:
                 if final:
-                    remaining.remove(reviewer_id)
+                    ended(reviewer_id)
                     supersede_late(runtime, state, reviewer_id, f"its session is not listed live ({gap})")
                 continue  # An update may be respawning it: looked at again at the next poll.
             except Exception as error:  # A respawn gap that outlasted its grace, a terminal state, a changed identity.
-                remaining.remove(reviewer_id)
+                ended(reviewer_id)
                 supersede_late(runtime, state, reviewer_id, f"its session is {'not listed live' if isinstance(error, TransientInfraError) else 'refused'} ({error})")
                 continue
             if row is None or row.get("state") in TERMINAL_STATES:
-                remaining.remove(reviewer_id)
+                ended(reviewer_id)
                 supersede_late(runtime, state, reviewer_id, f"its session is {row['state']}" if row else "its session is not listed")
                 continue
             path = runtime.directory / f"{node}.completion.json"
@@ -739,12 +753,12 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attent
                 except Exception as error:
                     refused = str(error)  # Half written while its session works, or invalid: read again at the next poll.
                 else:
-                    remaining.remove(reviewer_id)
+                    ended(reviewer_id)
                     record_late(runtime, state, reviewer_id, decision, iso(clock()), completion_sha256=digest)
                     continue
             expired = clock() >= started[reviewer_id] + timeout
             if expired or final:
-                remaining.remove(reviewer_id)
+                ended(reviewer_id)
                 if refused:
                     state.statuses[reviewer_id]["late_error"] = refused
                     reason = f"its completion file could not be read {'by its deadline' if expired else 'at the end of the grace'} ({refused})"
@@ -1088,51 +1102,54 @@ PRINT_POLL_SECONDS = 1.0  # How long the collection waits on one running print j
 def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -> None:
     """Read every print job as it exits, whatever the declared order; each deadline counts from that job's own launch.
 
-    Before any block, a job that failed or an expired deadline ends the review at once. The first accepted block starts the
-    grace: every other job has until it ends (REVIEW_GRACE_SECONDS) or its own deadline, whichever comes first. One that
-    exits by then is read and recorded late (it can add blockers, never approve); a late job that failed is kept as
-    `late_error` and never raised; a job still running then is stopped and ends superseded.
+    Each pass reads every job that exited before it looks at a deadline, so a deadline that passed while another job
+    finished never drops that job's verdict. Before any block, a job that failed or an expired deadline ends the review at
+    once. After the first accepted block every other job still has until its own deadline: the jobs already run in
+    parallel, so there is no grace (REVIEW_GRACE_SECONDS is the native reviewers'). One that exits by then is read and
+    recorded late (it can add blockers, never approve); a late job that failed is kept as `late_error` and never raised;
+    one still running at its deadline is stopped and ends superseded.
     """
     decisions = state.decisions
     pending = list(state.ids)
-    grace_end = None  # On time.monotonic(), as the deadlines.
+    blocked = False
     while pending:
-        for reviewer_id in list(pending):
-            process, launched = processes[reviewer_id]
+        for reviewer_id in [reviewer_id for reviewer_id in pending if processes[reviewer_id][0].poll() is not None]:
+            process = processes[reviewer_id][0]
             status = state.statuses[reviewer_id]
-            if process.poll() is not None:
-                pending.remove(reviewer_id)
-                if grace_end is not None:
-                    try:
-                        decision = print_verdict(runtime, reviewer_id, process, status)
-                    except Exception as error:
-                        status["late_error"] = str(error)
-                        supersede_late(runtime, state, reviewer_id, f"its print job's output was refused ({error})")
-                        continue
-                    record_late(runtime, state, reviewer_id, decision, now())
-                    continue
+            pending.remove(reviewer_id)
+            if blocked:
                 try:
                     decision = print_verdict(runtime, reviewer_id, process, status)
-                except BaseException as error:
-                    status.update(status="blocked", error=str(error))
-                    raise
-                decisions[reviewer_id] = decision
-                status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
-                state.save()
-                if decision_blocks(decision):
-                    grace_end = time.monotonic() + REVIEW_GRACE_SECONDS
-                    if pending:
-                        announce_grace(runtime, state, pending, time.time() + REVIEW_GRACE_SECONDS)
+                except Exception as error:
+                    status["late_error"] = str(error)
+                    supersede_late(runtime, state, reviewer_id, f"its print job's output was refused ({error})")
+                    continue
+                record_late(runtime, state, reviewer_id, decision, now())
                 continue
-            deadline = launched + timeout
-            if grace_end is None and time.monotonic() >= deadline:
+            try:
+                decision = print_verdict(runtime, reviewer_id, process, status)
+            except BaseException as error:
+                status.update(status="blocked", error=str(error))
+                raise
+            decisions[reviewer_id] = decision
+            status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
+            state.save()
+            if decision_blocks(decision):
+                blocked = True
+                if pending:  # Their deadlines, on the timeline's clock: each launch was taken on time.monotonic().
+                    until = time.time() + max(processes[other][1] for other in pending) + timeout - time.monotonic()
+                    announce_grace(runtime, state, pending, until, deadlines=True)
+        for reviewer_id in list(pending):
+            process, launched = processes[reviewer_id]
+            if time.monotonic() < launched + timeout or process.poll() is not None:
+                continue  # Within its deadline, or it exited since this pass began: read at the next pass.
+            if not blocked:
                 error = f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched"
-                status.update(status="blocked", error=error)
+                state.statuses[reviewer_id].update(status="blocked", error=error)
                 raise RuntimeError(error)
-            if grace_end is not None and time.monotonic() >= min(deadline, grace_end):
-                pending.remove(reviewer_id)
-                terminate(process)
-                supersede_late(runtime, state, reviewer_id, "its deadline passed" if deadline <= grace_end else "its print job was still running at the end of the grace")
+            pending.remove(reviewer_id)
+            terminate(process)
+            supersede_late(runtime, state, reviewer_id, "its deadline passed")
         if pending:
             try:
                 processes[pending[0]][0].wait(timeout=PRINT_POLL_SECONDS)  # Returns as soon as that job exits.
