@@ -24,7 +24,7 @@ from . import pipeline
 from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wait_handoffs
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
-from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, repin, resume_main
+from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, iso, pinned_task, repin, resume_main, stop_rule
 from .interactive import worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
@@ -1034,6 +1034,23 @@ class OverrideFromAnotherController(GuardedFeature):
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
 
 
+class StopRule(unittest.TestCase):
+    def test_the_stop_rule_of_a_pinned_task_is_the_authored_section_without_the_approved_checks_or_browser_rules(self):
+        # ## Stop is the last section of most briefs, and the pinned task appends the approved ownership and checks after it
+        # (and the browser rules for a browser lane): every guarded worker prompt used to repeat them in its Stop line.
+        worker = two_lane_policy()["workers"][0]
+        browser = {**worker, "checks": [*worker["checks"], {"id": "ui-browser", "kind": "browser", "argv": ["npx", "--no-install", "playwright", "test"],
+                                                            "timeout_seconds": 10, "scenarios": [{"id": "alpha", "description": "alpha works"}]}]}
+        for lane, appended in ((worker, "Approved ownership and checks:"), (browser, "Browser scenarios:")):
+            with self.subTest(appended):
+                task = pinned_task(BRIEF.format(lane="ui"), lane)
+                self.assertIn(appended, task)
+                self.assertEqual(stop_rule(task), "After three failed fixes, report blocked.")
+        # The task file as written, and a Stop section before other sections, read as before.
+        self.assertEqual(stop_rule(BRIEF.format(lane="ui")), "After three failed fixes, report blocked.")
+        self.assertEqual(stop_rule(pinned_task("## Stop\n\nAt once.\n\n## Goal\n\nChange ui.\n", worker)), "At once.")
+
+
 class CompletionEvidence(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -1169,8 +1186,11 @@ class WorkerQuestion(unittest.TestCase):
             if len(rounds) == 1:
                 calls, output, code = self.answer("ui", "Use option B")
                 self.assertEqual(code, 0, output)
-                # A fake Herdr shows the worker's session attached in its pane, then receives the text, then Enter.
-                self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", "Use option B"],
+                # A fake Herdr shows the worker's session attached in its pane, then receives the text, then Enter. The text
+                # restates the lane's deadline in UTC as the wait moved it: launch + 4 h + the 43190 s the question waited.
+                self.assertEqual(iso(extended), "1970-01-01T15:59:50Z")
+                typed = "Use option B [Controller: your deadline is now 1970-01-01T15:59:50Z (UTC); the time your question waited was added to it.]"
+                self.assertEqual(calls, [["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", typed],
                                          ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
             else:
                 self.now = extended + 1  # The deadline runs again from the answer: past the extended deadline, ui expires.
@@ -1735,6 +1755,30 @@ class AnswerDelivery(unittest.TestCase):
         calls, output, code = self.answer("ui", "Use option B")
         self.assertEqual((calls, code), ([], 1), output)
         self.assertIn("no unanswered question", output)
+
+    def test_in_an_automatic_run_the_typed_text_restates_the_lanes_new_deadline_in_utc(self):
+        # Both lanes launched at t=0 with a one-hour deadline and asked at t=10. ui is answered at t=100: its deadline moves
+        # by the 90 s its question waited. Only the typed text carries the deadline; the recorded answer is the operator's.
+        save_json(self.root / "plan.json", {**read_json(self.root / "plan.json"), "automatic": {**DEFAULTS, "worker_timeout_seconds": 3600}})
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        typed = "Use option B [Controller: your deadline is now 1970-01-01T01:01:30Z (UTC); the time your question waited was added to it.]"
+        calls, output, code = self.answer("ui", "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
+        self.assertEqual((calls, code), ([["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", typed],
+                                          ["herdr", "pane", "send-keys", "pane-ui", "Enter"]], 1), output)
+        self.assertEqual((self.entry()["answer"], self.entry()["typed"]), ("Use option B", True))
+        # Later, the rerun finds the same text in the session's input (the deadline has not moved since the answer) and presses
+        # Enter; the bare answer alone is not the text that was typed.
+        self.now = 500.0
+        calls, output, code = self.answer("ui", "Use option B", screen=claude_screen("Use option B"))
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "read"], 1), output)
+        calls, output, code = self.answer("ui", "Use option B", screen=claude_screen(typed[:50], typed[50:]))
+        self.assertEqual(code, 0, output)
+        self.assertEqual([call[2] for call in calls], ["process-info", "read", "send-keys"])
+        # --no-herdr prints the text to type: adapter answered at t=500 has 490 s more.
+        calls, output, code = self.answer("adapter", "Keep the adapter", "--no-herdr")
+        self.assertEqual((calls, code), ([], 0), output)
+        self.assertIn("Type the answer in the worker's session: claude attach bg-adapter\nThe text to type, with the lane's new deadline: Keep the "
+                      "adapter [Controller: your deadline is now 1970-01-01T01:08:10Z (UTC); the time your question waited was added to it.]", output)
 
     def test_a_rerun_types_nothing_once_the_worker_went_on(self):
         # The delivery failed and the operator typed the answer in the pane: the worker went on. Its next completion

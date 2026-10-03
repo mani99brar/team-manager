@@ -34,6 +34,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from .checks import now
 from .sessions import TransientInfraError, git, plan_workers, popen_claude, read_json, run_lock, save_json, stale_claude_warning, terminate
@@ -96,8 +97,9 @@ def brief_problems(text: str) -> list[str]:
 
 
 def stop_rule(text: str) -> str | None:
-    """The body of the task's `## Stop` section, which the worker prompt repeats as its bound."""
-    body = sections(text).get("Stop", "").strip()
+    """The body of the task's `## Stop` section, which the worker prompt repeats as its bound. Only the authored text
+    counts: in a pinned task the approved ownership and checks (and a browser lane's rules) follow a last `## Stop`."""
+    body = sections(text.partition(APPROVED)[0]).get("Stop", "").strip()
     return body or None
 
 
@@ -885,6 +887,20 @@ def input_shown(screen: str, text: str) -> str | None:
     return f"its input line shows {held!r}" if held else "its input line is empty"
 
 
+def answer_text(directory: Path, node: str, answer: str) -> str:
+    """What `answer` types into the worker's pane: the answer, then, in an automatic run, the lane's deadline in UTC as the
+    question's wait moved it (automatic.lane_deadline). Recorded files decide it, and the answer was recorded before, so a
+    rerun after a failed Enter looks for the same text in the session's input."""
+    plan = read_json(directory / "plan.json")
+    if not isinstance(plan.get("automatic"), dict):
+        return answer  # Only an automatic run has a lane deadline.
+    from .automatic import lane_deadline
+    deadline = lane_deadline(SimpleNamespace(directory=directory, plan=plan), node)
+    if deadline is None:  # Never once the answer is recorded: a question's wait ends there.
+        return answer
+    return f"{answer} [Controller: your deadline is now {iso(deadline)} (UTC); the time your question waited was added to it.]"
+
+
 def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = True) -> str:
     """Type the answer into the worker's Herdr pane (send-text, then Enter), or say how to type it after `claude attach`.
 
@@ -892,15 +908,18 @@ def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = Tr
     the pane is a shell, which would run the text, and between two attaches the text would wait for whatever reads the
     terminal next. `typed` is recorded once the text is in the pane, so a rerun after a failed Enter presses Enter only,
     and only while the pane shows the text in the session's input: a session an update respawned (a new PID) has an
-    empty one, and Enter there would submit nothing while the answer counted as delivered.
+    empty one, and Enter there would submit nothing while the answer counted as delivered. The text is answer_text's:
+    in an automatic run the answer and the lane's new deadline.
     """
     receipt = read_json(directory / f"{node}.interactive.json")
     background_id = receipt.get("background_id")
+    text = answer_text(directory, node, entry["answer"])
     if not use_herdr:
+        to_type = "" if text == entry["answer"] else f"\nThe text to type, with the lane's new deadline: {text}"
         if entry.get("typed"):
             return (f"The answer is typed in the worker's session but not submitted: claude attach {background_id}, then press Enter "
-                    "(type it first if the session's input does not hold it)")
-        return f"Type the answer in the worker's session: claude attach {background_id}"
+                    "(type it first if the session's input does not hold it)" + to_type)
+        return f"Type the answer in the worker's session: claude attach {background_id}" + to_type
     from .herdr import herdr, herdr_text
     terminals = directory / "terminals.json"
     mapping = read_json(terminals) if terminals.exists() else {}  # A run started without --herdr has none.
@@ -916,14 +935,14 @@ def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = Tr
                            f"Attach it again in that pane ({attach}) and rerun answer, or type the answer yourself after "
                            f"`claude attach {background_id}` (--no-herdr)")
     if entry.get("typed"):
-        held = input_shown(herdr_text("pane", "read", pane, "--source", "visible"), entry["answer"])
+        held = input_shown(herdr_text("pane", "read", pane, "--source", "visible"), text)
         if held:
             raise RuntimeError(f"Pane {pane} ({node}) does not show the answer typed before in its session's input: {held}; Enter is not "
                                "pressed. Look at the pane: the input may have lost it (a session an update respawned starts with an empty one)")
         herdr("pane", "send-keys", pane, "Enter")
         return f"Enter pressed in pane {pane} ({node}), whose session's input showed the answer typed before"
     try:
-        herdr("pane", "send-text", pane, entry["answer"])
+        herdr("pane", "send-text", pane, text)
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"Herdr did not confirm the text within {error.timeout:g}s, so it may be in pane {pane}'s input already: look "
                            "before rerunning answer, and if the input holds the text, press Enter there instead") from error
