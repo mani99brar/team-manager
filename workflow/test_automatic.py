@@ -1284,6 +1284,63 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
                          sleep=lambda _: self.fail("Unexpected wait"))
         self.assertEqual([event for event in self.events if event[1] == "note"], [])
 
+    P0 = {"severity": "P0", "message": "Forged provenance is marked verified. The signature is never checked.",
+          "disposition": "open", "worker": "ui", "requirement": None}
+
+    def test_every_ready_file_is_accepted_before_another_reviewers_deadline_or_session_ends_the_review(self):
+        # The probe: general works without a file, and coverage's blocked file with a P0 waits behind an idle row while the
+        # controller is away past both deadlines. Resumed at t=1860, general (declared first) used to end the review on its
+        # deadline, or its missing or refused session, before coverage's file was read: no verdict was kept, and coverage's P0
+        # appeared nowhere. Each poll now accepts every reviewer whose turn is over and whose file is there first, then checks
+        # the others' deadlines and sessions; here the block starts the grace, in which general ends superseded.
+        from .automatic import ReviewStatus, _decide, wait_reviews
+        general, coverage = self.ids
+        for gone, reason in (("deadline", "its deadline passed"), ("missing", "its session is not listed"),
+                             ("stopped", "its session is refused (Session is not attachable: 'stopped'; reconcile manually)")):
+            with self.subTest(general=gone):
+                self.setUp()
+                self.rows[general]["state"] = "working"
+                self.write(coverage, verdict="blocked", findings=[self.P0])
+                if gone == "missing":
+                    del self.rows[general]
+                if gone == "stopped":
+                    self.rows[general]["state"] = "stopped"
+                    located = self.runtime.sessions.locate
+
+                    def locate(node, rows, located=located):  # As InteractiveSessions.locate: a stopped row is refused.
+                        row = located(node, rows)
+                        if row is not None and row["state"] not in {"idle", "working", "blocked", "done"}:
+                            raise RuntimeError(f"Session is not attachable: {row['state']!r}; reconcile manually")
+                        return row
+                    self.runtime.sessions.locate = locate
+                state = ReviewStatus.load(self.runtime)
+                decisions = wait_reviews(self.runtime, state, clock=lambda: 1860, sleep=lambda _: self.fail("Unexpected wait"))
+                self.assertEqual(list(decisions), [coverage])
+                self.assertEqual((self.status_of(coverage)["status"], self.status_of(general)["status"]), ("accepted", "superseded"))
+                self.assertEqual(self.events[-1][1:], ("note", f"Reviewer general gave no verdict and ends superseded: {reason}"))
+                with self.assertRaisesRegex(RuntimeError, r"^Independent reviewer blocked the candidate \(coverage\): \[P0 coverage\] Forged provenance is marked verified\.$"):
+                    _decide(self.runtime, self.bundle, self.digest, state, decisions)
+                review = read_json(self.root / "review.json")
+                self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["findings"]), ([None, "blocked"], [{**self.P0, "reviewer": coverage}]))
+
+    def test_a_file_rejected_before_any_block_ends_the_review_once_the_poll_read_every_other_ready_file(self):
+        # general's file is refused (a stale launch token) in the poll that finds coverage's blocked file with a P0: the refusal
+        # still ends the review at once, after coverage's verdict is accepted, so the record keeps the P0 (_record_partial).
+        from .automatic import ReviewStatus, _record_partial, wait_reviews
+        general, coverage = self.ids
+        self.write(general, launch_token="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        self.write(coverage, verdict="blocked", findings=[self.P0])
+        state = ReviewStatus.load(self.runtime)
+        with self.assertRaisesRegex(RuntimeError, r"^Stale or foreign review completion signal \(general\)$"):
+            wait_reviews(self.runtime, state, clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual((self.status_of(general)["status"], self.status_of(general)["error"]), ("blocked", "Stale or foreign review completion signal (general)"))
+        self.assertEqual((self.status_of(coverage)["status"], self.status_of(coverage)["accepted_decision"]), ("accepted", {"verdict": "blocked", "findings": [self.P0]}))
+        _record_partial(self.runtime, self.bundle, self.digest, state)
+        review = read_json(self.root / "review.json")
+        self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["verdict"], review["findings"]),
+                         ([None, "blocked"], "blocked", [{**self.P0, "reviewer": coverage}]))
+        self.assertFalse([event for event in self.events if event[1] == "note" and "blocked the candidate" in event[2]])  # No grace starts.
+
     def test_the_identity_check_lists_only_the_reviewers_with_a_verdict(self):
         # A reviewer superseded during the grace (its session gone) has no verdict to refuse, so its listing is not checked; its
         # recorded session id still is, as every reviewer's.

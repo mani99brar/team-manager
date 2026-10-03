@@ -719,8 +719,10 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
 
     Returns the accepted decisions by reviewer id (also kept in `state.decisions`) as soon as every reviewer approved, or,
     once an accepted file blocks, when the grace after it ends (wait_grace): the other reviewers' verdicts are kept too.
-    Before any block, a rejected file, an expired deadline or a missing session raises. A verdict accepted before a
-    controller restart is read again and stays accepted, and a grace it started goes on until its original end.
+    Each poll first accepts every reviewer whose turn is over and whose file is there, then checks the others: before any
+    block, a rejected file (once the poll read every other ready file), an expired deadline or a missing session raises.
+    A verdict accepted before a controller restart is read again and stays accepted, and a grace it started goes on until
+    its original end.
     """
     clock = clock or time.time
     sleep = sleep or time.sleep
@@ -776,36 +778,59 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
     blocked = any(decision_blocks(decision) for decision in decisions.values())
     while not blocked:
         rows = runtime.sessions.inventory()
+        # First every reviewer whose turn is over and whose file is there, whatever the declared order: a verdict ready at this
+        # poll is never lost to another reviewer's deadline or session (the second pass). A refused file ends the review once the
+        # others are read, unless a block came first: the first block starts the grace, which reads the remaining files.
+        looked, failure = {}, None  # Each reviewer's row (or the error its lookup raised) for the second pass; the first refusal.
         for reviewer_id in state.ids:
             if reviewer_id in decisions:
                 continue
             node = review_node(reviewer_id)
-            status = state.statuses[reviewer_id]
             try:
-                row = gaps.row(node, rows)
+                row = looked[reviewer_id] = gaps.row(node, rows)
             except SessionGap:
                 continue  # An update is respawning this reviewer's session; no verdict.
+            except Exception as error:  # A terminal or changed session, a respawn gap that outlasted its grace: the second pass.
+                looked[reviewer_id] = error
+                continue
             if row is None:
-                raise RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required")
+                continue
             if row["state"] == "blocked" and reviewer_id not in attention:
                 # A native session reports `blocked` when it needs a human: a question or a prompt
                 # it cannot answer itself. The operator may answer in the pane; the deadline bounds it.
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the deadline")
             # Its turn is over (turn_over); a blocked session needs attention in its pane and is not accepted, whatever its status.
+            # Its file met the deadline, also when first read after it (a controller resumed late).
             if turn_over(row) and row["state"] != "blocked" and (runtime.directory / f"{node}.completion.json").exists():
-                blocked = decision_blocks(accept(reviewer_id, None))
-                if blocked:
-                    break  # The first block decides the run; the grace below waits for the other reviewers' verdicts.
-                continue  # Its file met the deadline, also when first read after it (a controller resumed late).
+                try:
+                    decision = accept(reviewer_id, None)
+                except RuntimeError as error:
+                    failure = failure or error
+                    continue
+                if decision_blocks(decision):
+                    blocked = True
+                    if failure is None:
+                        break  # The first block decides the run; the grace below waits for the other reviewers' verdicts.
+        if failure is not None:
+            raise failure
+        if blocked:
+            break
+        # Then the others: a session that is gone, or an expired deadline, ends the review at once.
+        for reviewer_id, row in looked.items():
+            if reviewer_id in decisions:
+                continue
+            if isinstance(row, Exception):
+                raise row
+            if row is None:
+                raise RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required")
             if clock() >= started[reviewer_id] + timeout:
-                status.update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
+                state.statuses[reviewer_id].update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
                 state.save()
                 raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
         if set(decisions) == set(state.ids):
             return decisions
-        if not blocked:
-            sleep(2)
+        sleep(2)
     wait_grace(runtime, state, started, timeout, gaps, clock, sleep)
     return decisions
 
