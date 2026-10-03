@@ -2169,10 +2169,58 @@ class GrillSkill(unittest.TestCase):
         self.assertEqual(fields["name"], "workflow-grill")
         self.assertGreater(len(fields["description"]), 40)
         for rule in ("at most five questions", "one at a time", "recommended default", "consequence", "features/<feature>/decisions.md",
-                     "## Decisions", "## Assumptions", "## Deferred", "never writes code"):
+                     "## Operator decisions", "## Grill defaults", "## Changes after launch", "## Deferred", "never writes code"):
             self.assertIn(rule.lower(), (fields["description"] + body).lower(), rule)
         readme = (TOOL / "workflow/README.md").read_text()
         self.assertIn('ln -s "$HOME/dev/md-manager/workflow/skills/workflow-grill" ~/.claude/skills/workflow-grill', readme)
+
+    def test_the_skill_plays_back_limits_commits_no_riders_records_answers_verbatim_and_always_reads_back_before_launch(self):
+        """C1-C5 (slice 2): phrases only; whether a model follows them needs a live grill, which belongs to a replay case (C39)."""
+        body = " ".join((TOOL / "workflow/skills/workflow-grill/SKILL.md").read_text().split("\n---\n", 1)[1].split())
+        intro, read, ask, write, back = (body[body.index(start):body.index(end)] for start, end in (
+            ("You interview", "## 1."), ("## 1.", "## 2."), ("## 2.", "## 3."), ("## 3.", "## 4."), ("## 4.", "The design challenge then")))
+        # Line 10: both guarded versions, and only the operator's answers bind (C4, decision 8).
+        self.assertIn("A `feature.json` 2.2.0 or 2.3.0 feature cannot launch without a non-empty `decisions.md`", intro)
+        self.assertIn("Only the operator's answers bind the run", intro)
+        self.assertNotIn("binds the whole run", body)
+        # §1: the target's CLAUDE.md, values kept by hand that the repository records (C3), and every limit played back (C1).
+        self.assertIn("Read the target's `CLAUDE.md`, `feature.json`", read)
+        self.assertIn("values the drafts or your defaults keep by hand that the repository already records (ids, routes, address lists; "
+                      "cite the file that records them)", read)
+        self.assertIn("A limit on what the feature delivers (only, never, except, excluded, deferred), one that excludes data or behaviour, "
+                      "never counts as settled by the documents, even when it quotes the operator's own words. Ownership lines are not limits.", read)
+        self.assertIn('Question 1 plays them all back in one question: "You wrote X; the drafts read it as Y, so Z is excluded. Correct?"', read)
+        # §2: no riders (C2), the repository's own mechanism and run limits (C3), restated answers, scoped delegations, open questions (C5).
+        self.assertIn("Options differ only on the dimension the question asks.", ask)
+        self.assertIn("The `decisions.md` bullet an answer writes commits to nothing its option did not state (the plain-text line, or an "
+                      "AskUserQuestion option's label and description).", ask)
+        self.assertIn("(an interface, a data shape or field, a rule about another file, a scope change) becomes its own question, or a "
+                      "Grill default tagged `[added, not asked]`.", ask)
+        self.assertIn("offer the repository's own mechanism for the analogous artifact as an option, citing its file", ask)
+        self.assertIn("is a run limit, not a product reason: label it as a run limit and name the setup that would lift it.", ask)
+        self.assertIn("restate the answer in one sentence at the start of your next message", ask)
+        self.assertIn("record it as a Grill default that names the items it covers", ask)
+        self.assertIn("A question asked but not answered, including a \"clarify\" reply that was never settled, stays open: write it as "
+                      "`TODO: Q<n> <question>` under `## Operator decisions`.", ask)
+        # §3: four sections in order; each Operator decision with its question number, the option's text and the words verbatim (C2, C4).
+        template = write[write.index("```markdown"):write.index("``` -")]
+        self.assertEqual([heading for heading in re.findall(r"## [A-Z][a-z]+(?: [a-z]+)*", template)],
+                         ["## Operator decisions", "## Grill defaults", "## Changes after launch", "## Deferred"])
+        self.assertIn('- [O1] Q1: <the chosen option\'s text>. Operator: "<the operator\'s words, verbatim>".', template)
+        self.assertIn("## Changes after launch None yet.", template)
+        self.assertIn("Each `[O<n>]` records its question number, the chosen option's text and the operator's words verbatim", write)
+        self.assertIn("Never edit one in place: a later reading or change is a new bullet that cites the id it changes.", write)
+        self.assertIn("riders tagged `[added, not asked]`", write)
+        self.assertIn("`## Changes after launch` holds `[L<n>]` items, each with the run id and attempt", write)
+        self.assertNotIn("No `TODO:` line may remain", body)
+        self.assertNotIn("## Assumptions", body)
+        self.assertIn("Do not edit the tasks, the policy, the PRD or any code.", write)
+        # §4: the read-back always runs before the hand-back, the bullets the operator did not choose first, then one short question (C1).
+        self.assertIn("Always read back before the hand-back, also when the operator asked up front to grill and launch.", back)
+        self.assertIn("lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, "
+                      "every Deferred bullet and any `TODO:` line), then each Operator decision on one line.", back)
+        self.assertIn("End it with one short question: confirm, or say what to change.", back)
+        self.assertLess(back.index("Always read back"), back.index("--dry-run"))
 
 if __name__ == "__main__":
     unittest.main()
