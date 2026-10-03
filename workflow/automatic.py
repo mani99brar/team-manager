@@ -455,18 +455,21 @@ def review_brief(reviewer: dict | None) -> str:
     return " ".join(text.split())
 
 
-# What every reviewer reads right after its brief, whatever the transport (C34, decision 4): what each severity means, and how
-# the controller derives the reviewer's verdict from its findings (derived_verdict).
+# What every reviewer reads right after its brief, whatever the transport (C34): what each severity means, and how the controller
+# derives the reviewer's verdict from its findings (derived_verdict). Decision 4's stricter bar (a gap is P1 only when shown on the
+# candidate, or in the brief's other cases) is coverage's, in its brief: a general or security reviewer that cannot state the
+# inputs of a defect it read in the code still rates it P1.
 REVIEW_RUBRIC = ("Severity, the same for every reviewer. P0: the candidate must not merge at all: a security hole, data loss, or a "
-                 "required path that fails for everyone. P1: a defect to fix before merge, shown on the candidate with the inputs, the "
-                 "expected behaviour (quoted when a task, a document a task cites or decisions.md states it), the actual behaviour and "
-                 "path:line. A candidate behaviour that contradicts a quoted line of a task, of a document a task cites or of "
-                 "decisions.md is P1 at least, and so is a failure a worker's completion discloses (quote it). P2: anything else worth "
-                 "recording, such as a missing or weak test for behaviour that works; P2 is the lowest, there is no P3. A worker's "
+                 "required path that fails for everyone. P1: a defect or a contradicted requirement to fix before merge; give the inputs, "
+                 "the expected behaviour (quoted when a task, a document a task cites or decisions.md states it), the actual behaviour "
+                 "and path:line when you can. A candidate behaviour that contradicts a quoted line of a task, of a document a task cites "
+                 "or of decisions.md is P1 at least, and so is a failure a worker's completion discloses (quote it). P2: anything else "
+                 "worth recording, such as a missing or weak test for behaviour that works; P2 is the lowest, there is no P3. A worker's "
                  "disclosure, the literal wording of a task or \"not a regression\" never lowers a severity. End each P1 and P2 message "
-                 "with \"Consequence: \" and what goes wrong, for whom. Your brief may name further items that block: rate those P1. "
-                 "The controller derives your verdict from your findings: an open or accepted P0 or P1 blocks the candidate, P2 findings "
-                 "never do, and a blocked verdict blocks on its own only when it lists no finding.")
+                 "with \"Consequence: \" and what goes wrong, for whom. Your brief may name further items that block: rate those P1. It "
+                 "may also set a stricter bar for its own findings: keep to it. The controller derives your verdict from your findings: "
+                 "an open or accepted P0 or P1 blocks the candidate, P2 findings never do, and a blocked verdict blocks on its own only "
+                 "when it lists no finding.")
 # What a print-transport reviewer job reads after review_prompt: its structured output is review_schema.
 PRINT_REVIEW_SUFFIX = " Return the requested JSON schema."
 
