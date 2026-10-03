@@ -415,21 +415,36 @@ class InitScaffold(Isolated):
         self.assertIn('"sidecar": {"prompt": "builtin:senior-review"}', (folder / "README.md").read_text())
         self.assertEqual((manifest["version"], manifest["branch_prefix"], manifest["reviewers"]),
                          ("2.3.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
-        decisions = (folder / "decisions.md").read_text()
-        for heading in ("## Decisions", "## Assumptions", "## Deferred"):
-            self.assertIn(heading, decisions)
+        # decisions.md has the grill's four sections in order (C4): the operator's answers, which alone bind, apart from the grill's own
+        # defaults. Changes after launch starts as "None yet", not a placeholder; the grill fills the other three.
+        from .guardrails import OPERATOR_DECISIONS, brief_problems, has_operator_decisions, sections
+        decisions = sections((folder / "decisions.md").read_text())
+        self.assertEqual(list(decisions), ["Operator decisions", "Grill defaults", "Changes after launch", "Deferred"])
+        self.assertEqual(decisions["Changes after launch"].strip(), "None yet.")
+        self.assertEqual([heading for heading, body in decisions.items() if body.strip().startswith("TODO:")], ["Operator decisions", "Grill defaults", "Deferred"])
+        self.assertTrue(has_operator_decisions((folder / "decisions.md").read_text()))
+        # The starter CLAUDE.md ends with the operator-notes heading, the cut point for what sessions may get (C15), and no longer
+        # claims that workers read it: every workflow session runs with --safe-mode, which does not load it.
+        claude = (target / "CLAUDE.md").read_text()
+        self.assertEqual([line for line in claude.splitlines() if line.startswith("## ")][-1], "## Workflow (operator notes; workers skip this section)")
+        self.assertIn("--safe-mode", claude)
+        self.assertNotIn("read this file", claude)
+        self.assertNotIn(OPERATOR_DECISIONS, claude)
         task = (folder / "main-task.md").read_text()
         for heading in ("## Goal", "## Acceptance", "## Stop"):
             self.assertIn(heading, task)
-        # The Acceptance TODO line asks for a proof per result, which the worker's Proof table names (C34, decision 4). Deleting that
-        # line and the browser paragraph, as the template allows, leaves an empty Acceptance that launch refuses: no boilerplate
-        # line stays behind as an acceptance item for the worker and coverage to map.
-        from .guardrails import brief_problems, sections
+        # The Acceptance TODO line asks for a proof per result, which the worker's Proof table names (C34, decision 4). After it, one
+        # default line says how the lane runs its checks (C16 step 8). Deleting the TODO line and the browser paragraph, as the template
+        # allows, leaves that line only; deleting it as well leaves an empty Acceptance that launch refuses: no other boilerplate line
+        # stays behind as an acceptance item for the worker and coverage to map.
         acceptance = sections(task)["Acceptance"]
-        todo = acceptance[:acceptance.index("Browser checks")].strip()
+        todo, default = acceptance[:acceptance.index("Browser checks")].strip().split("\n\n")
         self.assertEqual(todo, "TODO: the observable results and the checks that prove them (the worker's Proof table names a proof for each).")
+        self.assertEqual(default, "Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; "
+                                  "run browser specs only through check-report on this lane's own specs.")
         edited = task.replace(acceptance[acceptance.index("Browser checks"):], "").replace(todo, "")
-        self.assertEqual(brief_problems(edited), ["empty ## Acceptance"])
+        self.assertEqual(sections(edited)["Acceptance"].strip(), default)
+        self.assertEqual(brief_problems(edited.replace(default, "")), ["empty ## Acceptance"])
         # Never overwrites: a second init is refused and changes nothing; CLAUDE.md is written only when missing.
         snapshot = {path: path.read_bytes() for path in [*folder.iterdir(), target / "CLAUDE.md"]}
         result = subprocess.run([PY, "-m", "workflow", "init", "skeleton", "--repo", str(target)], cwd=TOOL, capture_output=True, text=True, timeout=60)
@@ -445,15 +460,17 @@ class InitScaffold(Isolated):
         errors = self.refused("skeleton", "--repo", str(target), "--dry-run")
         expected = [f"{name}:{number}:" for name in ("README.md", "decisions.md", "feature.json", "main-task.md", "policy.json")
                     for number, line in enumerate((folder / name).read_text().splitlines(), 1) if "TODO:" in line]
-        self.assertEqual(len(expected), 15)
+        self.assertEqual(len(expected), 15)  # decisions.md still has three: Changes after launch says "None yet".
+        self.assertEqual(len([item for item in expected if item.startswith("decisions.md:")]), 3)
         self.assertIn(f"still has {len(expected)} placeholder(s)", errors)
         for item in expected:
             self.assertIn(item, errors)
-        # Filled in, the dry run passes.
+        # Filled in as the grill writes it, the dry run passes with no note (DecisionsNote has the Note for an older decisions.md).
         manifest["name"] = "Skeleton of project B"
         manifest["prd"] = "app.txt"
         save_json(folder / "feature.json", manifest)
-        (folder / "decisions.md").write_text("# Decisions\n\n## Decisions\n\n- One lane.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n")
+        (folder / "decisions.md").write_text("# Decisions: skeleton\n\n## Operator decisions\n\n- [O1] Q1: One lane. Operator: \"yes\".\n\n"
+                                             "## Grill defaults\n\nNone.\n\n## Changes after launch\n\nNone yet.\n\n## Deferred\n\nNothing.\n")
         policy = read_json(folder / "policy.json")
         policy["feature"] = "Skeleton"
         policy["workers"][0].update(role="backend", owned_paths=["app.txt"])
@@ -462,7 +479,7 @@ class InitScaffold(Isolated):
         (folder / "main-task.md").write_text("## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n")
         (folder / "README.md").write_text("# skeleton\n\nThe first feature.\n")
         printed = self.dry_run("skeleton", "--repo", str(target))
-        self.assertEqual((printed["workers"], printed["reviewers"]), (["main"], ["general", "coverage"]))
+        self.assertEqual((printed["workers"], printed["reviewers"], printed["notes"]), (["main"], ["general", "coverage"], []))
 
 
 class BuiltinBriefs(Isolated):
