@@ -10,7 +10,7 @@ Success: a feature with a general reviewer and a test-coverage reviewer runs bot
 
 ## 2. Confirmed decisions
 
-- Unanimous verdict. Every declared reviewer must write an accepted `approved` file. Any `blocked`, any unresolved P0/P1 from any reviewer, any rejected file, or any reviewer reaching `review_timeout_seconds` blocks the run. No advisory reviewers, no quorum.
+- Unanimous verdict. Every declared reviewer's accepted file must count as approved. Since C34 (decision 4, 3 Oct 2026) the controller derives each reviewer's verdict from its findings: any unresolved P0/P1, or a `blocked` verdict with no findings at all, blocks; a `blocked` verdict whose findings hold no unresolved P0/P1 counts as approved, and the verdict the reviewer wrote stays in its status file. Any rejected file, or any reviewer reaching `review_timeout_seconds`, blocks the run. No advisory reviewers, no quorum.
 - Findings are unioned. Each finding gains `reviewer` (the reviewer id). Duplicate findings from different reviewers are kept, not merged.
 - Reviewers run in parallel, all launched by the one `review` graph node, all over the same shared `review-worktree` at the candidate commit. Their tools stay Read, Glob, Grep plus exactly one allowed write, their own completion file.
 - One review per bundle per reviewer. Nothing is relaunched. A blocked run means a new run.

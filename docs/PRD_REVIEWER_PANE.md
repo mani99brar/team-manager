@@ -13,7 +13,7 @@ Success: on the next automatic run, a third pane labelled `Claude: reviewer` app
 ## 2. Confirmed decisions
 
 - Same session interaction and lifecycle as workers (pane, human input, completion protocol, automatic wait, resumable transcript), with restricted reviewer tools.
-- One review per bundle. A blocked verdict ends the run; fixing findings means a new run with a new bundle.
+- One review per bundle. A block ends the run (since C34: an unresolved P0/P1, or a blocked verdict with no findings); fixing findings means a new run with a new bundle.
 - Print mode stays available behind `--reviewer-transport print` for environments without Herdr. Default is the native session.
 
 ## 3. Design

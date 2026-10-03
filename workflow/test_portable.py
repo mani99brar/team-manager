@@ -382,6 +382,9 @@ class InitScaffold(Isolated):
         task = (folder / "main-task.md").read_text()
         for heading in ("## Goal", "## Acceptance", "## Stop"):
             self.assertIn(heading, task)
+        # The Acceptance template asks the worker for the Proof table coverage verifies row by row (C34, decision 4).
+        from .guardrails import sections
+        self.assertIn("end your completion summary with a Proof table", " ".join(sections(task)["Acceptance"].split()))
         # Never overwrites: a second init is refused and changes nothing; CLAUDE.md is written only when missing.
         snapshot = {path: path.read_bytes() for path in [*folder.iterdir(), target / "CLAUDE.md"]}
         result = subprocess.run([PY, "-m", "workflow", "init", "skeleton", "--repo", str(target)], cwd=TOOL, capture_output=True, text=True, timeout=60)

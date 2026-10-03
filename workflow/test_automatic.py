@@ -39,6 +39,18 @@ class CompletionTests(unittest.TestCase):
         return {"version": "1.0.0", "run_id": "test", "node_id": node, "launch_token": node + "-token",
                 "status": "completed", "summary": "Synthetic work", "open_assumptions": []}
 
+    def test_a_1_1_0_worker_is_asked_to_end_its_summary_with_a_proof_table(self):
+        # C34 (decision 4): coverage verifies each row and files every gap that is not a shown failure, a contradiction or a
+        # disclosed failure as a P2 quoting the line. A 1.0.0 run's completion prompt is unchanged.
+        from .automatic import completion_prompt
+        self.assertNotIn("Proof table", completion_prompt(self.root, self.plan, "ui"))
+        self.plan["completion_version"] = "1.1.0"
+        self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        prompt = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn("End summary with a Proof table: one row per line of your task's ## Acceptance section and per line under "
+                      "## Design (settled) in the documents your task cites, each naming its proof: a test (file::name), a check id, "
+                      "a self-report, or none.", prompt)
+
     def test_idle_without_signal_times_out_not_completes(self):
         ticks = iter([1, 1, DEFAULTS["worker_timeout_seconds"] + 1])
         with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
@@ -464,11 +476,16 @@ class ReviewCompletionTests(unittest.TestCase):
     def test_completion_prompt_spells_out_every_enum_the_schema_enforces(self):
         # Seen live: a reviewer given only an example invented severity "P3" and its whole file was
         # rejected; the prompt must name every allowed value rather than rely on one example.
-        from .automatic import completion_protocol_prompt
+        from .automatic import completion_protocol_prompt, review_prompt
         for reviewer_id in self.ids:
             prompt = completion_protocol_prompt(self.runtime, self.token(reviewer_id), self.digest, "c" * 40, reviewer_id)
-            for value in ("P0, P1 or P2", "no P3", "open, resolved or accepted", "ui, adapter, multiple or none", "never both", "approved or blocked", "no other keys"):
-                self.assertIn(value, prompt)
+            native = review_prompt(self.runtime, self.root / "review.diff") + prompt  # What a native reviewer is given.
+            for value in ("P0, P1 or P2", "there is no P3", "open, resolved or accepted", "ui, adapter, multiple or none", "never both",
+                          "approved or blocked", "no other keys"):
+                self.assertIn(value, native)
+            # The severity rule is the rubric's (C34), the same for both transports: the protocol only spells out the field.
+            for severity in ("P2 is the lowest", "no P3", "ends the run"):
+                self.assertNotIn(severity, prompt)
             self.assertIn(self.token(reviewer_id), prompt)
             self.assertIn(self.digest, prompt)
             self.assertIn(f'"node_id": "{self.node(reviewer_id)}"', prompt)
@@ -481,18 +498,55 @@ class ReviewCompletionTests(unittest.TestCase):
                          completion_protocol_prompt(self.runtime, self.TOKEN, self.digest, "c" * 40, "review"))
 
     def test_review_prompt_is_the_brief_plus_the_fixed_blocks(self):
-        from .automatic import BUILTIN_REVIEW_BRIEF, review_brief, review_prompt
+        from .automatic import BUILTIN_REVIEW_BRIEF, REVIEW_RUBRIC, review_brief, review_prompt
         builtin = review_prompt(self.runtime, self.root / "review.diff")
         self.assertTrue(builtin.startswith(review_brief(None)))
         self.assertIn("Do not infer approval merely from test success.", BUILTIN_REVIEW_BRIEF.read_text())
         custom = review_prompt(self.runtime, self.root / "review.diff", {"reviewer_id": "coverage", "prompt": "Only look at\n test coverage. "})
-        self.assertTrue(custom.startswith("Only look at test coverage. Diff: "))
+        self.assertTrue(custom.startswith(f"Only look at test coverage. {REVIEW_RUBRIC} Diff: "))
         self.assertNotIn("Do not infer approval", custom)
-        # The fixed blocks (bundle paths, task locations, lane vocabulary) are identical for every brief.
+        # The fixed blocks (the rubric, bundle paths, task locations, lane vocabulary) are identical for every brief.
         fixed = builtin[len(review_brief(None)):]
         self.assertEqual(custom[len("Only look at test coverage."):], fixed)
         for expected in (str(self.root / "review.diff"), str(self.root / "review-bundle.json"), "nodes.<worker>.task", "worker lanes are: ui, adapter.", "(ui, adapter, multiple or none:"):
             self.assertIn(expected, fixed)
+
+    def test_every_reviewer_gets_the_rubric_after_its_brief_in_both_transports(self):
+        # C34: one rubric for every reviewer and both transports, right after the brief. It says what each severity means
+        # (a contradicted task line is P1 at least), asks for the consequence, lets a brief name further blocking items and
+        # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own.
+        from .automatic import PRINT_REVIEW_SUFFIX, REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_brief, review_prompt
+        for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3", "contradicts a quoted line of a task, of a document a task cites or of decisions.md",
+                      "a failure a worker's completion discloses", "never lowers a severity", 'End each P1 and P2 message with "Consequence: "',
+                      "Your brief may name further items that block", "The controller derives your verdict from your findings",
+                      "a blocked verdict blocks on its own only when it lists no finding"):
+            self.assertIn(value, REVIEW_RUBRIC)
+        for reviewer in [None, *self.runtime.plan.get("reviewers", [])]:
+            brief = review_brief(reviewer)
+            with self.subTest(reviewer=(reviewer or {}).get("reviewer_id", "review")):
+                printed = print_review_prompt(self.runtime, self.root / "review.diff", reviewer)
+                self.assertEqual(printed, review_prompt(self.runtime, self.root / "review.diff", reviewer) + PRINT_REVIEW_SUFFIX)
+                self.assertTrue(printed.endswith(" Return the requested JSON schema."))
+                native = review_prompt(self.runtime, self.root / "review.diff", reviewer) + completion_protocol_prompt(self.runtime, self.TOKEN, self.digest, "c" * 40)
+                for prompt in (printed, native):
+                    self.assertTrue(prompt.startswith(f"{brief} {REVIEW_RUBRIC} Diff: "), prompt[:300])
+
+    def test_the_coverage_briefs_block_only_on_a_shown_failure_a_contradicted_line_or_a_disclosed_failure(self):
+        # Decision 4 (C34): every other gap, a missing or weak test that an Acceptance line names included, is a P2 row. md-manager's
+        # own feature briefs follow the same rule; their lists of untested items rated P1 are gone.
+        tool = Path(__file__).resolve().parents[1]
+        briefs = [tool / "workflow/prompts/reviewers/coverage.md",
+                  *(path for path in (tool / "features/review-sidecar/reviewers/coverage.md", tool / "features/viewer-revamp/reviewers/coverage.md") if path.exists())]
+        self.assertEqual(len(briefs), 3)
+        for path in briefs:
+            text = " ".join(path.read_text().split())
+            with self.subTest(brief=str(path.relative_to(tool))):
+                self.assertNotIn("Approve only when every required behaviour has a real test", text)
+                self.assertNotIn("safety rule of the PRD", text)
+                for value in ("A gap is P1 only when", "a failure on the candidate", "contradicts a quoted line of a task, of a document a task cites",
+                              "decisions.md", "a worker's disclosure, quoted, that something fails", "Every other gap is one P2 finding per line",
+                              "Proof table", "## Design (settled)", "leads, not as the limit of your search", "could not read"):
+                    self.assertIn(value, text)
 
     def test_valid_completion_is_reduced_to_the_decision(self):
         from .automatic import read_review_completion
@@ -574,7 +628,7 @@ class ReviewCompletionTests(unittest.TestCase):
             self.assertEqual(read_json(self.root / f"automatic-{self.node(last)}.json")["status"], "blocked")
             # One accepted block starts the grace: the other reviewers are waited for until it ends, and a bound file is read
             # whatever their session reads (first still works) and recorded late, a verdict that can add blockers, never approve.
-            self.write(last, verdict="blocked")
+            self.write(last, verdict="blocked", findings=[])
             self.rows[first]["state"] = "working"
             self.never_accepted(first)
             self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), [last, first])
@@ -847,7 +901,7 @@ class ReviewCompletionTests(unittest.TestCase):
         # controller decides on the verdict it accepted, as one that never stopped would have, and says the file changed.
         from .automatic import ReviewStatus, combined_review, wait_reviews
         first, others = self.ids[0], self.ids[1:]
-        self.write(first, verdict="blocked")
+        self.write(first, verdict="blocked", findings=[])
         for reviewer_id in others:
             self.write(reviewer_id)  # Bound files the grace after the block reads at once, though their sessions still work.
             self.rows[reviewer_id]["state"] = "working"
@@ -875,7 +929,7 @@ class ReviewCompletionTests(unittest.TestCase):
                 self.assertEqual(self.events, [("review", "running", f"Reviewer {first}'s completion file changed after its blocked verdict was accepted "
                                                 f"at {accepted_at}; that verdict stands, as for a controller that never stopped, and the file is not read again")])
         # Its file unchanged since, the verdict it accepted is decided without a word.
-        self.write(first, verdict="blocked")
+        self.write(first, verdict="blocked", findings=[])
         self.events.clear()
         self.assertEqual(wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 200, sleep=lambda _: self.fail("Unexpected wait"))[first], accepted)
         self.assertEqual(self.events, [])
@@ -893,7 +947,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         self.write(second)
         self.rows[first]["state"] = "working"
         def blocks(_seconds):
-            self.write(first, verdict="blocked")
+            self.write(first, verdict="blocked", findings=[])
             self.rows[first]["state"] = "idle"
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=blocks)
         self.assertEqual(set(decisions), {first, second})
@@ -971,7 +1025,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         from .automatic import ReviewStatus, wait_reviews
         general, coverage = self.ids
         self.rows[general]["state"] = "working"
-        self.write(coverage, verdict="blocked")
+        self.write(coverage, verdict="blocked", findings=[])
         path = self.root / f"{self.node(general)}.completion.json"
 
         def writes(now):
@@ -994,7 +1048,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         self.setUp()
         self.rows["general"]["state"] = "blocked"  # A question in its pane, seen before the block.
         self.rows["security"]["state"] = "working"
-        self.write("coverage", verdict="blocked")
+        self.write("coverage", verdict="blocked", findings=[])
 
         def finishes(now):
             if now == 160:
@@ -1016,7 +1070,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         from .automatic import REVIEW_GRACE_SECONDS, ReviewStatus, wait_reviews
         general, coverage = self.ids
         self.rows[general]["state"] = "working"
-        self.write(coverage, verdict="blocked")
+        self.write(coverage, verdict="blocked", findings=[])
         clock, sleep, sleeps = self.ticking(100, 60)
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
         self.assertEqual(list(decisions), [coverage])
@@ -1030,7 +1084,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         timeout = DEFAULTS["review_timeout_seconds"]
         general, coverage = self.ids
         self.rows[general]["state"] = "working"
-        self.write(coverage, verdict="blocked")
+        self.write(coverage, verdict="blocked", findings=[])
         clock, sleep, sleeps = self.ticking(timeout - 120, 60)
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
         self.assertEqual((list(decisions), sleeps[-1]), ([coverage], timeout))
@@ -1068,7 +1122,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
                     self.runtime.sessions.locate = locate
                 self.rows[general]["state"] = "working"
                 self.write(general)  # A valid file, never read: the session that wrote it is gone.
-                self.write(coverage, verdict="blocked")
+                self.write(coverage, verdict="blocked", findings=[])
                 listing, calls = self.runtime.sessions.inventory, []
 
                 def inventory():
@@ -1092,7 +1146,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         general, coverage = self.ids
         self.rows[general]["state"] = "working"
         self.write(general, findings=[{"severity": "P3", "message": "Not a severity", "disposition": "open", "worker": "ui", "requirement": None}])
-        self.write(coverage, verdict="blocked")
+        self.write(coverage, verdict="blocked", findings=[])
         clock, sleep, sleeps = self.ticking(100, 120)
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
         self.assertEqual((list(decisions), sleeps[-1]), ([coverage], 700))  # Read at every poll, and its error kept only at the end.
@@ -1113,7 +1167,7 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
             with self.subTest(after_the_grace=after_the_grace):
                 self.setUp()
                 self.rows[general]["state"] = "working"
-                self.write(coverage, verdict="blocked")
+                self.write(coverage, verdict="blocked", findings=[])
                 with self.assertRaises(TransientInfraError):
                     wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=away)
                 self.assertEqual((self.status_of(coverage)["accepted_at"], self.status_of(general)["status"]), ("1970-01-01T00:01:40Z", "running"))
@@ -1129,6 +1183,40 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
                     decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 5000, sleep=lambda _: self.fail("Unexpected wait"))
                     self.assertEqual(sorted(decisions), sorted(self.ids))
                     self.assertTrue(self.status_of(general)["late"])
+
+    def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved_and_starts_no_grace(self):
+        # C34: the controller derives each reviewer's verdict from its findings. coverage writes blocked with one P2 while general
+        # waits on a question in its pane: nothing blocks, so no grace starts. One note names the override, and general's pane
+        # attention, which that note hides in the viewer, is said again. general then approves and the review is approved.
+        from .automatic import ReviewStatus, combined_review, wait_reviews
+        general, coverage = self.ids
+        self.rows[general]["state"] = "blocked"
+        self.write(coverage, verdict="blocked")  # Its only finding is the default P2.
+
+        def answers(now):
+            if now == 220:
+                self.write(general)
+                self.rows[general]["state"] = "idle"
+        clock, sleep, sleeps = self.ticking(100, 60, answers)
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, clock=clock, sleep=sleep)
+        self.assertEqual(({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, sleeps),
+                         ({coverage: "blocked", general: "approved"}, [160, 220]))
+        self.assertEqual((self.status_of(coverage)["status"], self.status_of(coverage)["accepted_decision"]["verdict"]), ("accepted", "blocked"))
+        pane = ("review", "interactive", "Reviewer general needs attention in its pane (native state blocked); waiting until the deadline")
+        self.assertEqual(self.events, [pane, ("review", "note", "Reviewer coverage wrote blocked, which counts as approved: 1 finding, no open P0/P1"), pane])
+        review = combined_review(self.runtime, self.bundle, self.digest, state, decisions)
+        self.assertEqual((review["verdict"], [entry["verdict"] for entry in review["reviewers"]]), ("approved", ["approved", "approved"]))
+        # Written blocked without any finding, the verdict still blocks, and nothing overrides it.
+        self.setUp()
+        self.write(coverage, verdict="blocked", findings=[])
+        self.write(general)
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, {coverage: "blocked", general: "approved"})
+        self.assertFalse([event for event in self.events if "counts as" in event[2]])
+        review = combined_review(self.runtime, self.bundle, self.digest, state, decisions)
+        self.assertEqual((review["verdict"], [entry["verdict"] for entry in review["reviewers"]]), ("blocked", ["approved", "blocked"]))
 
     def test_late_approvals_never_make_the_combined_review_approved(self):
         from .automatic import ReviewStatus, combined_review
@@ -1187,7 +1275,8 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         self.assertEqual(str(raised.exception), "Independent reviewer blocked the candidate (general, coverage): [P0 general] The guard is bypassed! "
                                                 "[P0 general] Keys leak into logs. [P1 general] No test covers the replay path. (+2 more open P0/P1 in review.json)")
         self.assertEqual(self.events, [("review", "blocked", "Review blocked by general (late approved, 2 open P0 and 2 open P1) and coverage (blocked, 1 open P1)")])
-        self.assertEqual([entry["verdict"] for entry in read_json(self.root / "review.json")["reviewers"]], ["approved", "blocked"])
+        # review.json holds the controller's verdict for each reviewer (C34): general's approval leaves open P0/P1, so it reads blocked.
+        self.assertEqual([entry["verdict"] for entry in read_json(self.root / "review.json")["reviewers"]], ["blocked", "blocked"])
         self.assertEqual([self.status_of(reviewer_id)["status"] for reviewer_id in self.ids], ["blocked", "blocked"])
         # A reviewer without a verdict is named too; a blocked verdict without an open P0/P1 still blocks.
         self.events.clear()
@@ -1330,7 +1419,18 @@ class PrintCollectionTests(unittest.TestCase):
             ("review", "note", "Reviewer general blocked the candidate; coverage and security have until their deadlines (the latest "
                                "1970-01-01T00:30:00Z) to finish: a verdict written by then is recorded, and can add blockers but never approve"),
             ("review", "note", "Reviewer coverage's late verdict recorded: approved, 1 open P0"),
+            ("review", "note", "Reviewer coverage wrote approved, which counts as blocked: 1 open P0"),
             ("review", "note", "Reviewer security gave no verdict and ends superseded: its deadline passed")])
+
+    def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
+        # C34: derived from its findings, general's block counts as approved: no grace starts, each job is read in time as
+        # before, and one note names the override.
+        p2 = {"severity": "P2", "message": "The empty state has no test.", "disposition": "open", "worker": "ui", "requirement": None}
+        state = self.collect({"general": (60, {"verdict": "blocked", "findings": [p2]}), "coverage": (900, {"verdict": "approved", "findings": []})})
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in state.decisions.items()}, {"general": "blocked", "coverage": "approved"})
+        self.assertEqual([(status["status"], "late" in status) for status in state.statuses.values()], [("accepted", False), ("accepted", False)])
+        self.assertEqual((self.events, self.terminated, self.now),
+                         ([("review", "note", "Reviewer general wrote blocked, which counts as approved: 1 finding, no open P0/P1")], [], 900))
 
     def test_a_job_that_exited_is_read_before_an_earlier_declared_deadline_is_checked(self):
         # general (declared first) reaches its deadline during the wait in which coverage exits with a block: the pass reads
@@ -1585,6 +1685,46 @@ sys.exit(0 if commit else 75)
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
+
+    def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
+        # C34: the controller derives each reviewer's verdict from its findings. Every reviewer writes blocked with P2 findings
+        # only: the run reaches its verified branch, review.json's entries read approved, each status file keeps the verdict
+        # the reviewer wrote, and one note per reviewer names the override.
+        f = self.fixture
+        minor = [{"severity": "P2", "message": "No test asserts the empty state.", "disposition": "open", "worker": "ui", "requirement": None},
+                 {"severity": "P2", "message": "Log wording.", "disposition": "accepted", "worker": "adapter", "requirement": None}]
+        self.verdict.write_text("blocked")
+        self.findings.write_text(json.dumps(minor))
+        f.sessions.reviewer_findings = minor
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(f.runtime)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), commit)
+        review = read_json(f.directory / "review.json")
+        self.assertEqual((review["verdict"], [entry["verdict"] for entry in review["reviewers"]]), ("approved", ["approved"] * len(self.ids)))
+        for reviewer_id in self.ids:
+            self.assertEqual((self.status(reviewer_id)["status"], self.status(reviewer_id)["accepted_decision"]), ("succeeded", {"verdict": "blocked", "findings": minor}))
+        notes = sorted(event["message"] for event in self.events() if (event["node"], event["status"]) == ("review", "note"))
+        self.assertEqual(notes, sorted(f"Reviewer {reviewer_id} wrote blocked, which counts as approved: 2 findings, no open P0/P1" for reviewer_id in self.ids))
+        exported = read_json(f.directory / "run-state.json")
+        self.assertEqual([entry["verdict"] for entry in exported["review"]["reviewers"]], ["approved"] * len(self.ids))
+
+    def test_an_approval_with_an_open_p1_blocks_and_its_entry_reads_blocked(self):
+        # C34: an approved verdict that leaves an open P1 counts as blocked, and review.json's entry now says so; the status file
+        # keeps the approval the reviewer wrote. With two reviewers the second is recorded late (the grace, or its own deadline).
+        f = self.fixture
+        p1 = {"severity": "P1", "message": "The retry loop never ends. It spins forever.", "disposition": "open", "worker": "adapter", "requirement": None}
+        self.findings.write_text(json.dumps([p1]))
+        f.sessions.reviewer_findings = [p1]
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        review = read_json(f.directory / "review.json")
+        self.assertEqual((review["verdict"], [entry["verdict"] for entry in review["reviewers"]]), ("blocked", ["blocked"] * len(self.ids)))
+        for reviewer_id in self.ids:
+            self.assertEqual((self.status(reviewer_id)["status"], self.status(reviewer_id)["accepted_decision"]["verdict"]), ("blocked", "approved"))
+        overrides = sorted(event["message"] for event in self.events() if event["status"] == "note" and "counts as" in event["message"])
+        self.assertEqual(overrides, sorted(f"Reviewer {reviewer_id} wrote approved, which counts as blocked: 1 open P1" for reviewer_id in self.ids))
+        self.assertIn("[P1 " + self.ids[0] + "] The retry loop never ends.", self.combined()["error"])
 
 
 class ClaudeUnavailableTests(GraphFixture):
@@ -1980,16 +2120,18 @@ class PrintGraceScenarios(GraphFixture):
         # The pine runs: the declared-order loop stopped at an earlier reviewer's block and marked security, whose job had
         # already exited with P0/P1 findings, superseded. Every job that exited is read now, its verdict recorded late.
         verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"verdict": "approved", "findings": [self.P0], "after": "general"})
-        self.assertEqual(verdicts, {"general": "blocked", "coverage": "approved"})
+        self.assertEqual(verdicts, {"general": "blocked", "coverage": "blocked"})  # coverage's approval leaves an open P0 (C34).
         self.assertEqual(read_json(self.fixture.directory / "review.json")["findings"], [{**self.P0, "reviewer": "coverage"}])
         coverage = self.status("coverage")
         self.assertEqual((coverage["status"], coverage["late"], coverage["accepted_decision"]["findings"]), ("blocked", True, [self.P0]))
         self.assertNotIn("late", self.status("general"))
         self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general, coverage): [P0 coverage] Forged GitHub provenance is marked verified.")
-        self.assertEqual(self.notes()[-1], "Reviewer coverage's late verdict recorded: approved, 1 open P0")
+        self.assertEqual(self.notes()[-2:], ["Reviewer coverage's late verdict recorded: approved, 1 open P0",
+                                             "Reviewer coverage wrote approved, which counts as blocked: 1 open P0"])
         exported = read_json(self.fixture.directory / "run-state.json")
+        # The entries hold the controller's verdict for each reviewer (C34); the status file keeps coverage's approval.
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], len(entry["findings"])) for entry in exported["review"]["reviewers"]],
-                         [("general", "blocked", "blocked", 0), ("coverage", "approved", "blocked", 1)])
+                         [("general", "blocked", "blocked", 0), ("coverage", "blocked", "blocked", 1)])
 
     def test_a_late_job_that_fails_never_replaces_the_block(self):
         for name, knob in (("exit 1", {"exit": 1, "after": "general"}), ("no JSON", {"output": "not json", "after": "general"})):
@@ -2021,6 +2163,7 @@ class NativeReviewerTests:
     """The native completion protocol, with one and with two reviewers."""
 
     def test_native_reviewer_session_findings_and_stop_are_recorded(self):
+        from .automatic import REVIEW_RUBRIC, review_brief
         f = self.fixture
         f.sessions.reviewer_findings = [
             {"severity": "P2", "message": "Table lacks a disposition column", "disposition": "open", "worker": "ui", "requirement": "UI"},
@@ -2053,8 +2196,9 @@ class NativeReviewerTests:
                              completion["candidate_commit"], '"worker"', '"requirement"', "nodes.<worker>.task", "human", f'"node_id": "{node}"'):
                 self.assertIn(expected, prompt)
             if self.reviewers:
-                self.assertTrue(prompt.startswith(f"Review only the {reviewer_id} aspects of this candidate. Diff: "))
+                self.assertTrue(prompt.startswith(f"Review only the {reviewer_id} aspects of this candidate. {REVIEW_RUBRIC} Diff: "))
             else:
+                self.assertTrue(prompt.startswith(f"{review_brief(None)} {REVIEW_RUBRIC} Diff: "))
                 self.assertTrue(prompt.startswith("Independently review this immutable candidate"))
             self.assertTrue(any(self.uuid(reviewer_id) in event["message"] and event["status"] == "interactive" for event in self.events() if event["node"] == "review"))
         # Every session UUID is distinct: from the workers' and from the other reviewers'.
@@ -2170,11 +2314,12 @@ sys.exit(0 if commit else 75)
         self.assert_rejected(lambda item: {**item, "findings": [finding]}, "blocked the candidate")
         review = read_json(self.fixture.directory / "review.json")
         # The first accepted file already blocks; the others, read during the grace after it, are recorded late. The combined
-        # record keeps each reviewer's raw approval and every reviewer's P1.
+        # record keeps every reviewer's P1, and each entry the controller's verdict for that reviewer (C34): blocked. The status
+        # files keep the approvals the reviewers wrote.
         self.assertEqual((review["verdict"], review["findings"]), ("blocked", [{**finding, "reviewer": reviewer_id} for reviewer_id in self.ids]))
         for reviewer_id in self.ids:
             self.assertEqual(self.status(reviewer_id)["accepted_decision"]["verdict"], "approved")
-        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["approved"] * len(self.ids))
+        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["blocked"] * len(self.ids))
         self.assertIn("[P1 " + self.ids[0] + "] Unresolved defect.", self.combined()["error"])
 
     # ---- Launch window and post-acceptance stop -----------------------------------------------------
@@ -2524,10 +2669,13 @@ class ParallelReviewerScenarios(GraphFixture):
             drive(f.runtime)
         review = read_json(f.directory / "review.json")
         self.assertEqual(review["verdict"], "blocked")
-        self.assertEqual(self.review_entries(), [("general", "approved", self.uuid("general")), ("coverage", "approved", self.uuid("coverage"))])
+        # coverage's approval leaves an open P1: review.json holds the controller's verdict for it, blocked (C34).
+        self.assertEqual(self.review_entries(), [("general", "approved", self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
         self.assertEqual(review["findings"], [{**self.GENERAL[0], "reviewer": "general"}, {**open_p1, "reviewer": "coverage"}])
         self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("accepted", "blocked"))
         self.assertEqual(self.status("coverage")["accepted_decision"]["verdict"], "approved")  # B's raw decision is kept.
+        self.assertIn(("note", "Reviewer coverage wrote approved, which counts as blocked: 1 open P1"),
+                      [(event["status"], event["message"]) for event in self.events() if event["node"] == "review"])
         self.assertIn("blocked the candidate (coverage)", self.combined()["error"])
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
         self.assertEqual(self.reviewer_launches(), 2)

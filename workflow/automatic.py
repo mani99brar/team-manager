@@ -82,7 +82,10 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
                     "be empty), falsifying_check names the check that would fail if your implementation were wrong (a check id from "
                     "your approved checks, or the exact command), verify_yourself names one assumption the operator should verify "
                     "independently, and question is null; a completed file without them is refused. The commands you ran are not "
-                    "evidence by themselves: the controller reruns the checks.\n"
+                    "evidence by themselves: the controller reruns the checks. End summary with a Proof table: one row per line of "
+                    "your task's ## Acceptance section and per line under ## Design (settled) in the documents your task cites, each "
+                    "naming its proof: a test (file::name), a check id, a self-report, or none. Keep the rows short: a completion "
+                    "file over 64 KiB is refused.\n"
                     "Questions: when a decision you cannot make yourself blocks the work, write the same file with status question, "
                     "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
                     "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
@@ -422,10 +425,27 @@ def review_brief(reviewer: dict | None) -> str:
     return " ".join(text.split())
 
 
+# What every reviewer reads right after its brief, whatever the transport (C34, decision 4): what each severity means, and how
+# the controller derives the reviewer's verdict from its findings (derived_verdict).
+REVIEW_RUBRIC = ("Severity, the same for every reviewer. P0: the candidate must not merge at all: a security hole, data loss, or a "
+                 "required path that fails for everyone. P1: a defect to fix before merge, shown on the candidate with the inputs, the "
+                 "expected behaviour (quoted when a task, a document a task cites or decisions.md states it), the actual behaviour and "
+                 "path:line. A candidate behaviour that contradicts a quoted line of a task, of a document a task cites or of "
+                 "decisions.md is P1 at least, and so is a failure a worker's completion discloses (quote it). P2: anything else worth "
+                 "recording, such as a missing or weak test for behaviour that works; P2 is the lowest, there is no P3. A worker's "
+                 "disclosure, the literal wording of a task or \"not a regression\" never lowers a severity. End each P1 and P2 message "
+                 "with \"Consequence: \" and what goes wrong, for whom. Your brief may name further items that block: rate those P1. "
+                 "The controller derives your verdict from your findings: an open or accepted P0 or P1 blocks the candidate, P2 findings "
+                 "never do, and a blocked verdict blocks on its own only when it lists no finding.")
+# What a print-transport reviewer job reads after review_prompt: its structured output is review_schema.
+PRINT_REVIEW_SUFFIX = " Return the requested JSON schema."
+
+
 def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
-    """The brief followed by the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the lane repairs."""
+    """The brief, then the rubric and the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the
+    lane repairs. Both transports build on it (print_review_prompt; the native completion protocol), so a replay can too."""
     from .repair import repair_note
-    return (review_brief(reviewer) + " "
+    return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
             f"Requirements: each worker's task text pinned in {runtime.directory / 'plan.json'} under nodes.<worker>.task, "
             "and the documents those tasks cite, read in the candidate checkout. "
@@ -434,6 +454,11 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
             + repair_note(runtime.directory) + decisions_block(runtime.plan))
+
+
+def print_review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
+    """A print reviewer job's stdin: review_prompt and the request for review_schema's structured output."""
+    return review_prompt(runtime, patch, reviewer) + PRINT_REVIEW_SUFFIX
 
 
 def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidate_commit: str, reviewer_id: str = DEFAULT_REVIEWER) -> str:
@@ -452,13 +477,13 @@ def completion_protocol_prompt(runtime, launch_token: str, digest: str, candidat
             f"(schema: {REVIEW_COMPLETION_SCHEMA}):\n" + json.dumps(example) + "\n"
             "Keep version, run_id, node_id, launch_token, bundle_sha256 and candidate_commit exactly as shown; the controller "
             "rejects any other binding without launching another reviewer. verdict is approved or blocked. Each finding "
-            "has severity P0, P1 or P2 (P2 is the lowest; there is no P3, use P2 for minor items), disposition open, "
+            "has severity P0, P1 or P2 (the rubric above), disposition open, "
             f"resolved or accepted, worker ({worker_vocabulary(runtime)}; never both) and requirement (a verbatim quote from that "
             "worker's task text in plan.json under nodes.<worker>.task, or null); no other keys. A file that does not "
             "match this shape exactly is rejected as a whole. This completion file is the only write you are allowed. It cannot "
             "be written under a temporary name and renamed, so write it once, complete, as your last action, then end your "
-            "turn and do not modify it afterwards. The controller accepts it only when your session is idle. A blocked verdict "
-            "or any unresolved P0/P1 finding ends the run; no second reviewer is launched." + independence)
+            "turn and do not modify it afterwards. The controller accepts it only when your session is idle; no second "
+            "reviewer is launched." + independence)
 
 
 def combined_status_path(runtime) -> Path:
@@ -541,10 +566,19 @@ def read_review_completion(runtime, reviewer_id: str = DEFAULT_REVIEWER) -> dict
     return {"verdict": item["verdict"], "findings": item["findings"]}
 
 
-def decision_blocks(decision: dict) -> bool:
-    """A blocked verdict or an unresolved P0/P1 from any one reviewer blocks the run."""
+def derived_verdict(decision: dict) -> str:
+    """The controller's verdict for one reviewer, derived from its findings (C34, decision 4): blocked with an unresolved P0/P1,
+    or when it wrote blocked without any finding; approved otherwise, whatever it wrote. review.json records this one; the
+    verdict the reviewer wrote stays in its status file (`accepted_decision`). Manual imports keep their own rule (pipeline)."""
     from .pipeline import blocking_findings
-    return decision["verdict"] != "approved" or bool(blocking_findings(decision["findings"]))
+    if blocking_findings(decision["findings"]) or (decision["verdict"] == "blocked" and not decision["findings"]):
+        return "blocked"
+    return "approved"
+
+
+def decision_blocks(decision: dict) -> bool:
+    """An unresolved P0/P1, or a blocked verdict without any finding, from any one reviewer blocks the run."""
+    return derived_verdict(decision) == "blocked"
 
 
 # After the first accepted block, how long the other native reviewers have to finish. A verdict they write by then is recorded
@@ -575,6 +609,18 @@ def first_sentence(text: str) -> str:
     return sentence if sentence.endswith((".", "!", "?", "…")) else sentence + "."
 
 
+def note_override(runtime, reviewer_id: str, decision: dict) -> bool:
+    """One `note` when the verdict the controller derives for an accepted decision is not the one the reviewer wrote; whether
+    it wrote one. Said once, as the decision is accepted: a decision restored after a restart was said already."""
+    derived = derived_verdict(decision)
+    if derived == decision["verdict"]:
+        return False
+    count = len(decision["findings"])
+    reason = open_counts(decision["findings"]) if derived == "blocked" else f"{count} finding{'' if count == 1 else 's'}, no open P0/P1"
+    runtime.event("review", NOTE, f"Reviewer {reviewer_id} wrote {decision['verdict']}, which counts as {derived}: {reason}")
+    return True
+
+
 def record_late(runtime, state: ReviewStatus, reviewer_id: str, decision: dict, accepted_at: str, **keys) -> None:
     """A verdict accepted after another reviewer's block: recorded with `late`, its status accepted or blocked."""
     state.decisions[reviewer_id] = decision
@@ -582,6 +628,7 @@ def record_late(runtime, state: ReviewStatus, reviewer_id: str, decision: dict, 
                                        accepted_decision=decision, late=True, **keys)
     state.save()
     runtime.event("review", NOTE, f"Reviewer {reviewer_id}'s late verdict recorded: {decision['verdict']}, {open_counts(decision['findings'])}")
+    note_override(runtime, reviewer_id, decision)
 
 
 def supersede_late(runtime, state: ReviewStatus, reviewer_id: str, reason: str) -> None:
@@ -648,6 +695,8 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         # again); review.json is the record.
         status.update(status="accepted", accepted_at=accepted or iso(clock()), accepted_decision=decision, completion_sha256=digest_file(path))
         state.save()
+        if note_override(runtime, reviewer_id, decision):
+            attention.clear()  # The note hides a pane attention said before it (the viewer reads the latest record): said again.
         return decision
 
     # Accepted before this controller started (resumed after exit 75 or Ctrl-C), a verdict was final: it is read again
@@ -860,13 +909,14 @@ def stop_reviewers(runtime, ids: list[str]) -> list[str]:
 
 
 def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
-    """review.json over the set: unanimous approval passes; any block, unresolved P0/P1, missing or rejected verdict blocks."""
+    """review.json over the set: it passes only when every reviewer's derived verdict is approved; an unresolved P0/P1, a
+    blocked verdict without findings, a missing or rejected verdict blocks. Each entry holds the derived verdict (C34)."""
     entries, findings = [], []
     for reviewer_id in state.ids:
         status = state.statuses[reviewer_id]
         decision = decisions.get(reviewer_id)
         entries.append({"reviewer_id": reviewer_id, "session_id": status.get("session_id"),
-                        "verdict": decision["verdict"] if decision else None, "accepted_at": status.get("accepted_at") if decision else None})
+                        "verdict": derived_verdict(decision) if decision else None, "accepted_at": status.get("accepted_at") if decision else None})
         if decision:
             findings.extend({**finding, "reviewer": reviewer_id} for finding in decision["findings"])
     blocked = any(reviewer_id not in decisions or decision_blocks(decisions[reviewer_id]) for reviewer_id in state.ids)
@@ -1134,6 +1184,7 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
             decisions[reviewer_id] = decision
             status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
             state.save()
+            note_override(runtime, reviewer_id, decision)
             if decision_blocks(decision):
                 blocked = True
                 if pending:  # Their deadlines, on the timeline's clock: each launch was taken on time.monotonic().
@@ -1178,7 +1229,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
             node = review_node(reviewer_id)
             status = statuses[reviewer_id]
             prompt_path = runtime.directory / f"{node}.prompt.txt"
-            prompt_path.write_text(review_prompt(runtime, patch, reviewer) + " Return the requested JSON schema.")
+            prompt_path.write_text(print_review_prompt(runtime, patch, reviewer))
             os.chmod(prompt_path, 0o600)
             command = print_command(runtime.sessions.executable, status["session_id"], review_schema(runtime), [str(runtime.directory)])
             with prompt_path.open() as stdin, (runtime.directory / f"{node}.stdout.json").open("w") as output, (runtime.directory / f"{node}.stderr.log").open("w") as errors:
