@@ -73,7 +73,7 @@ Additive. The `review` section gains `reviewers` (one entry per reviewer: id, tr
 | --- | --- |
 | two-approve | two fake reviewers approve; `review.json` has `verdict: approved`, both entries in `reviewers`, unioned findings tagged by reviewer; the run reaches a verified branch |
 | one-blocks | the second reviewer writes `blocked` while the first is still running; the run blocks. The first reviewer's bound file is still read in the grace, whatever its session reports, and recorded as a late verdict; without a file when the grace ends it is stopped and its status is `superseded`. No relaunch |
-| p1-anywhere | reviewer A approves, reviewer B approves with an unresolved P1; the combined verdict is `blocked` with B's raw decision kept |
+| p1-anywhere | reviewer A approves, reviewer B approves with an unresolved P1; the combined verdict is `blocked`, B's entry reads `blocked` (C34) and B's raw decision is kept in its status file |
 | one-times-out | reviewer B never writes a file; at its deadline the run blocks with A's accepted verdict retained |
 | wrong-node | a file with `node_id: review-general` in `review-coverage.completion.json` is rejected and blocks the run |
 | shared-identity | two reviewer receipts with the same session UUID fail the independence check |
