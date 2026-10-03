@@ -2,7 +2,9 @@
 
 - Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections.
 - Decisions: the feature directory holds a non-empty `decisions.md` (written by the `workflow-grill` skill); it is
-  pinned into the plan and every worker and reviewer prompt includes it after the task.
+  pinned into the plan and every worker and reviewer prompt includes it after the task. With the `## Operator
+  decisions` heading only those bind and win over the task, and the rest stays open to the challenge; a file without
+  it (every one written before) binds as a whole, as before, and launch prints a note saying so.
 - Design challenge: one read-only `claude --print` job reads the pinned PRD, tasks and decisions before any worker
   starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
@@ -62,6 +64,12 @@ HERDR_HINT = "add --herdr for the worker panes, as launch opens them unless --no
 MIGRATION_NOTE = ("feature.json {version}: no guardrail is enforced (outcome-brief headings, decisions.md, design challenge, "
                   "completion evidence). To migrate, set \"version\": \"2.2.0\", give every task non-empty ## Goal, ## Acceptance "
                   "and ## Stop sections, and write decisions.md with the workflow-grill skill (workflow/README.md).")
+# The heading the workflow-grill skill writes the operator's own answers under (C4). Its presence alone decides how the
+# prompts word decisions.md's precedence; no section is parsed.
+OPERATOR_DECISIONS = "## Operator decisions"
+LEGACY_DECISIONS_NOTE = (f"{DECISIONS} has no '{OPERATOR_DECISIONS}' heading, so all of it binds the run as before and the design "
+                         "challenge may not reopen it. Rerun the workflow-grill skill to bind only the operator's answers and leave "
+                         "its own defaults open (workflow/README.md, Guardrails).")
 
 
 # ---- Outcome briefs and decisions (launch and prepare) -------------------------------------------------------
@@ -209,10 +217,27 @@ def decisions_text(plan: dict) -> str | None:
     return decisions.get("text") if isinstance(decisions, dict) and isinstance(decisions.get("text"), str) else None
 
 
+def has_operator_decisions(text: str) -> bool:
+    """Whether decisions.md has the `## Operator decisions` heading on a line of its own: then only those bind (C4)."""
+    return re.search(rf"^{re.escape(OPERATOR_DECISIONS)}[ \t]*$", text, re.MULTILINE) is not None
+
+
 def decisions_block(plan: dict) -> str:
-    """What every worker and reviewer prompt appends after the task; empty for runs without decisions."""
+    """What every worker and reviewer prompt appends after the task; empty for runs without decisions.
+
+    A file with `## Operator decisions` binds only those; workers follow the rest and may depart from it only as stated.
+    A file without the heading (every one written before C4) binds as a whole, in the wording runs always had.
+    """
     text = decisions_text(plan)
-    return "" if text is None else "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + text.rstrip() + "\n"
+    if text is None:
+        return ""
+    if not has_operator_decisions(text):
+        return "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + text.rstrip() + "\n"
+    return ("\n\nDecisions recorded before launch (decisions.md). Its Operator decisions are the operator's own answers: they bind this "
+            "run and win over the task. Workers follow its other sections too, and may depart from a grill default or a change after "
+            "launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only inside their own "
+            "lane's owned paths; a departure that would change anything another lane reads is a question for the operator instead. "
+            "Each departure is named, with the bullet's id, in the completion's open_assumptions:\n" + text.rstrip() + "\n")
 
 
 def has_challenge(plan: dict) -> bool:
@@ -283,8 +308,12 @@ def changed_since(directory: Path, plan: dict, record: dict) -> list[str]:
 
 def challenge_prompt(directory: Path, plan: dict) -> str:
     """The job's prompt. A rerun after a paused attempt (attempt 2 on) also gets that attempt's P0/P1 concerns and the
-    feature files changed since, and is asked to raise each concern again unless the change resolves it."""
+    feature files changed since, and is asked to raise each concern again unless the change resolves it. What decisions.md
+    settles follows decisions_block: with `## Operator decisions` only those, otherwise all of it."""
     prd = plan.get("prd")
+    settled = ("reopen an Operator decision of decisions.md (the operator's own answer) only by showing it cannot hold, and then as a "
+               "P1; the rest of decisions.md is open to challenge, like the tasks" if has_operator_decisions(decisions_text(plan) or "")
+               else "do not reopen what decisions.md settles unless you show it cannot hold")
     parts = ["You are the design challenge of a workflow run: a skeptical senior engineer who reads the plan before any worker "
              "starts. You only read; you change nothing and launch nothing. Your working directory is the repository at the "
              "run's base commit; read its code when a concern depends on it.\n\n"
@@ -292,9 +321,8 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
              "that could change the choice. Tie every concern to a concrete consequence and give it a severity: P0 when the plan "
              "cannot work as written, P1 when it is likely to produce the wrong result or major rework and must be settled before "
              "any worker starts, P2 when it is worth recording and the run can continue. A P0 or P1 pauses the run for the "
-             "operator, so raise one only for a consequence you can name; do not reopen what decisions.md settles unless you "
-             "show it cannot hold. kind is assumption, failure_mode, complexity or other. Return the requested JSON schema: "
-             "concerns (possibly empty), simpler_alternative and cheap_experiment."]
+             f"operator, so raise one only for a consequence you can name; {settled}. kind is assumption, failure_mode, complexity "
+             "or other. Return the requested JSON schema: concerns (possibly empty), simpler_alternative and cheap_experiment."]
     if prd:
         parts.append(f"\n\nThe PRD this feature implements: {directory / prd['copy']} (read it).")
     else:

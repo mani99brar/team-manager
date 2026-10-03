@@ -367,6 +367,40 @@ class SidecarRegistry(Isolated):
         self.assertEqual(merge_registry(text, printed["registry"]["entry"]), (None, "Registry already has project-b/skeleton"))
 
 
+class DecisionsNote(Isolated):
+    def test_a_decisions_file_without_operator_decisions_launches_binding_as_a_whole_and_the_launch_says_so(self):
+        """C4: a decisions.md written before the grill split it (no `## Operator decisions` heading) still launches and binds as a
+        whole, and launch prints a Note among its notes, in the dry run and live; a split file prints none."""
+        from .guardrails import LEGACY_DECISIONS_NOTE
+        target = make_target(self.root)
+        folder = target / "features/skeleton"
+        (folder / "app-task.md").write_text("## Goal\n\nBuild the app.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n")
+        (folder / "decisions.md").write_text("# Decisions\n\n## Decisions\n\n- One lane.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n")
+        save_json(folder / "feature.json", {**read_json(folder / "feature.json"), "version": "2.2.0"})
+        commit_all(target, "Guarded")
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--dry-run"])
+        command.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["notes"], [LEGACY_DECISIONS_NOTE])
+        self.assertEqual(errors.getvalue(), f"Note: {LEGACY_DECISIONS_NOTE}\n")
+        self.assertIn("## Operator decisions", LEGACY_DECISIONS_NOTE)
+        self.assertIn("workflow-grill", LEGACY_DECISIONS_NOTE)
+        calls = []
+        with patch("workflow.launch.subprocess.run", side_effect=lambda command, cwd, check: calls.append(command)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--live"])
+        self.assertEqual(len(calls), 4)  # Nothing is refused: preflight, the branch, prepare and start run as before.
+        self.assertIn(f"Note: {LEGACY_DECISIONS_NOTE}\n", errors.getvalue())
+        # Split by the grill, it prints no note.
+        (folder / "decisions.md").write_text("# Decisions: skeleton\n\n## Operator decisions\n\n- [O1] Q1: One lane. Operator: \"yes\".\n\n"
+                                             "## Grill defaults\n\nNone.\n\n## Changes after launch\n\nNone yet.\n\n## Deferred\n\nNothing.\n")
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--dry-run", "--run-id", "skeleton-002"])
+        self.assertEqual((json.loads(output.getvalue())["notes"], errors.getvalue()), ([], ""))
+
+
 class InitScaffold(Isolated):
     def test_init_scaffold_writes_the_files_never_overwrites_and_launch_names_every_placeholder(self):
         """Scenario init-scaffold."""

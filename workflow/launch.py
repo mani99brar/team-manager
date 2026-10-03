@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals, resume_command
+from .guardrails import DECISIONS, LEGACY_DECISIONS_NOTE, has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resume_command
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -190,6 +190,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     refused = refusals(repo, folder, manifest, tasks)
     if refused:
         raise ValueError(f"features/{feature} does not meet the 2.2.0 guardrails:\n  " + "\n  ".join(refused))
+    if is_guarded(manifest) and not has_operator_decisions((folder / DECISIONS).read_text()):
+        notes.append(LEGACY_DECISIONS_NOTE)  # Launched as before: the whole file binds, in the prompts' old wording.
     reviewers = {}
     for reviewer in manifest.get("reviewers") or []:
         path = reviewer_brief(folder, reviewer["prompt"])

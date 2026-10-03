@@ -40,6 +40,11 @@ FEATURE = "guarded"
 LANES = ["ui", "adapter"]
 BRIEF = "## Goal\n\nChange {lane}.\n\n## Acceptance\n\nThe {lane} check passes.\n\n## Stop\n\nAfter three failed fixes, report blocked.\n"
 DECISIONS = "# Decisions\n\n## Decisions\n\n- Keep the lanes apart: DECISION-MARKER-42.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n"
+# What the workflow-grill skill writes since C4: the operator's answers apart from the grill's own defaults.
+SPLIT_DECISIONS = ("# Decisions: guarded\n\nFrom the grill session of 3 Oct 2026 with the operator.\n\n## Operator decisions\n\n"
+                   "- [O1] Q1: Keep the lanes apart. Operator: \"yes, DECISION-MARKER-42\".\n\n## Grill defaults\n\n"
+                   "- [G1] The adapter keeps VALUE an integer [added, not asked].\n\n## Changes after launch\n\nNone yet.\n\n"
+                   "## Deferred\n\n- Nothing.\n")
 
 
 def setUpModule():
@@ -280,9 +285,60 @@ class DecisionsRequired(GuardedFeature):
         runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
         for reviewer in [None, *plan["reviewers"]]:
             self.assertIn("DECISION-MARKER-42", review_prompt(runtime, directory / "review.diff", reviewer))
+        # This file has no `## Operator decisions` heading: it binds as a whole, as every decisions.md before C4 did.
+        self.assertIn("Decisions recorded before launch (decisions.md; they bind this run):\n" + DECISIONS, worker_prompt(directory, plan, "ui"))
+        # A split file reaches the same prompts with its precedence: only the Operator decisions bind (DecisionsPrecedence).
+        plan["decisions"]["text"] = SPLIT_DECISIONS
+        for prompt in (worker_prompt(directory, plan, "ui"), *(review_prompt(runtime, directory / "review.diff", reviewer) for reviewer in plan["reviewers"])):
+            self.assertIn(guardrails.decisions_block(plan), prompt)
+            self.assertIn("Its Operator decisions are the operator's own answers: they bind this run and win over the task.", prompt)
         # A run without decisions (every run before slice 2) gets no decisions block.
         plan.pop("decisions")
         self.assertNotIn("Decisions recorded before launch", worker_prompt(directory, plan, "ui") + review_prompt(runtime, directory / "review.diff"))
+
+
+class DecisionsPrecedence(unittest.TestCase):
+    """C4 (decision 8): a decisions.md with the `## Operator decisions` heading binds only those, and they win over the task; the
+    challenge may reopen one only as a P1 that shows it cannot hold, the rest like the tasks. A file without the heading (every
+    one written before) keeps today's wording: all of it binds. Keyed on the heading alone; no section is parsed."""
+
+    def plan(self, text: str) -> dict:
+        return {"run_id": "precedence-001", "workers": ["ui"], "nodes": {"ui": {"task": BRIEF.format(lane="ui")}},
+                "decisions": {"path": "/target/features/guarded/decisions.md", "text": text}}
+
+    def challenge_prompt(self, plan: dict) -> str:
+        with tempfile.TemporaryDirectory() as root:
+            return guardrails.challenge_prompt(Path(root), plan)
+
+    def test_a_split_file_binds_only_the_operator_decisions_and_leaves_the_rest_open_to_the_challenge(self):
+        plan = self.plan(SPLIT_DECISIONS)
+        self.assertEqual(guardrails.decisions_block(plan),
+                         "\n\nDecisions recorded before launch (decisions.md). Its Operator decisions are the operator's own answers: they bind "
+                         "this run and win over the task. Workers follow its other sections too, and may depart from a grill default or a "
+                         "change after launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only "
+                         "inside their own lane's owned paths; a departure that would change anything another lane reads is a question for "
+                         "the operator instead. Each departure is named, with the bullet's id, in the completion's open_assumptions:\n"
+                         + SPLIT_DECISIONS.rstrip() + "\n")
+        prompt = self.challenge_prompt(plan)
+        self.assertIn("raise one only for a consequence you can name; reopen an Operator decision of decisions.md (the operator's own "
+                      "answer) only by showing it cannot hold, and then as a P1; the rest of decisions.md is open to challenge, like the "
+                      "tasks. kind is assumption", prompt)
+        self.assertNotIn("do not reopen what decisions.md settles", prompt)
+        self.assertIn(f"=== decisions.md ===\n{SPLIT_DECISIONS}", prompt)
+        self.assertTrue(guardrails.has_operator_decisions("# D\n\n## Operator decisions  \n\n- [O1] Q1: x.\n"))  # Trailing blanks count.
+
+    def test_a_file_without_the_heading_binds_as_a_whole_with_todays_wording(self):
+        lookalikes = (DECISIONS, DECISIONS + "\n### Operator decisions\n\n- A level-3 heading.\n", DECISIONS + "\nSee ## Operator decisions.\n",
+                      DECISIONS.replace("## Decisions", "## Operator decisions made"), DECISIONS.replace("## Decisions", "## Operator Decisions"))
+        for text in lookalikes:
+            with self.subTest(text=text):
+                plan = self.plan(text)
+                self.assertFalse(guardrails.has_operator_decisions(text))
+                self.assertEqual(guardrails.decisions_block(plan), "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n"
+                                 + text.rstrip() + "\n")
+                self.assertIn("raise one only for a consequence you can name; do not reopen what decisions.md settles unless you show it "
+                              "cannot hold. kind is assumption", self.challenge_prompt(plan))
+        self.assertEqual(guardrails.decisions_block({}), "")  # A run without decisions (every run before slice 2).
 
 
 class FailingChallenge(GuardedFeature):
