@@ -891,6 +891,23 @@ class RecordTests(unittest.TestCase):
         save_json(f.directory / "plan.json", f.plan)
         f.runtime = OfflinePipeline(f.directory, f.sessions)
 
+    def guard(self) -> None:
+        """The feature files of a feature.json 2.2.0 run, pinned as guardrails.pin_guardrails pins them: the lanes' task files
+        and decisions.md, committed in the target at the run's base. A paused challenge's next step compares them."""
+        from .guardrails import pinned_task
+        f = self.fixture
+        folder = f.repo / "features" / "record"
+        folder.mkdir(parents=True)
+        tasks = {worker["node_id"]: folder / f"{worker['node_id']}-task.md" for worker in f.policy["workers"]}
+        for worker in f.policy["workers"]:
+            tasks[worker["node_id"]].write_text(f"## Goal\n\nChange {worker['node_id']}.\n")
+            f.plan["nodes"][worker["node_id"]]["task"] = pinned_task(tasks[worker["node_id"]].read_text(), worker)
+        (folder / "decisions.md").write_text("# Decisions\n\n- Keep the lanes apart.\n")
+        git(f.repo, "add", "features")
+        git(f.repo, "commit", "-qm", "Feature files")
+        self.pin(base_commit=git(f.repo, "rev-parse", "HEAD"), task_files={lane: str(path) for lane, path in tasks.items()},
+                 decisions={"path": str(folder / "decisions.md"), "text": (folder / "decisions.md").read_text()})
+
     @contextlib.contextmanager
     def graph(self):
         """The run's own checkpoint, the one `status`, `export` and `approve` read."""
@@ -1081,7 +1098,10 @@ class RecordTests(unittest.TestCase):
         from .pipeline import next_step
         f = self.fixture
         self.pin()
+        self.guard()
         run = lambda action: f"{sys.executable} -m workflow {action} {f.directory}"
+        # Whether start was given --herdr is not recorded: every start and resume command says to add it for the worker panes.
+        hint = "add --herdr for the worker panes, as launch opens them unless --no-herdr"
         # (c) No run-state.json: a run from before the export, or one whose file is gone. What goes on is unknown until export.
         self.assertFalse((f.directory / "run-state.json").exists())
         printed, _ = self.status()
@@ -1091,12 +1111,12 @@ class RecordTests(unittest.TestCase):
         code, _, err = pipeline_cli("export", str(f.directory))
         self.assertEqual(code, 0, err)
         printed, _ = self.status()
-        self.assertTrue(printed["next_step"].startswith(f"no worker started yet: {run('start')} --live. Then: "), printed["next_step"])
+        self.assertTrue(printed["next_step"].startswith(f"no worker started yet: {run('start')} --live ({hint}). Then: "), printed["next_step"])
         # (a) A challenge job started and never decided (Ctrl-C during it, or start or resume still running it): resume reruns
         # it with no edit, and the override is refused without a paused record, so it is never offered.
         running = f.directory / "challenge.running.json"
         save_json(running, {"attempt": 1, "session_id": "00000000-0000-4000-8000-000000000001", "started_at": now()})
-        rerun = f"if no start or resume is running, {run('resume')} reruns it (no edit needed). Then: "
+        rerun = f"if no start or resume is running, {run('resume')} reruns it (no edit needed; {hint}). Then: "
         printed, _ = self.status()
         self.assertTrue(printed["next_step"].startswith(f"design challenge attempt 1 was started and not decided: {rerun}"), printed["next_step"])
         self.assertNotIn("--accept-challenge", printed["next_step"])
@@ -1107,14 +1127,14 @@ class RecordTests(unittest.TestCase):
         printed, _ = self.status()
         self.assertTrue(printed["next_step"].startswith(
             f"design challenge attempt 1 paused the run: edit the task files, decisions.md or the PRD, then {run('resume')}, "
-            f"or accept it with {run('resume')} --accept-challenge \"<reason>\". Then: "), printed["next_step"])
+            f"or accept it with {run('resume')} --accept-challenge \"<reason>\" ({hint}). Then: "), printed["next_step"])
         # A rerun started after the pause and never decided; a resume that stopped before it pinned the revised files; one that
         # pinned them and failed before its job (its checkout): each is rerun by resume, and the override is refused.
         for state, said in ((lambda: save_json(running, {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()}),
                              f"design challenge attempt 2 was started and not decided: {rerun}"),
                             (lambda: save_json(f.directory / REVISION_INTENT, {"base_commit": f.plan["base_commit"], "paths": []}),
                              f"an interrupted resume has not finished moving the run to the revised feature files: if no resume is running, "
-                             f"{run('resume')} finishes it and reruns the design challenge. Then: "),
+                             f"{run('resume')} finishes it and reruns the design challenge ({hint}). Then: "),
                             (lambda: save_json(f.directory / "challenge.json", {**paused, "pinned": {**paused["pinned"], "tasks_sha256": "0" * 64}}),
                              f"design challenge attempt 1 read other feature files than the plan now pins, and no later attempt was decided: {rerun}")):
             with self.subTest(said.split(":")[0]):
@@ -1136,6 +1156,43 @@ class RecordTests(unittest.TestCase):
         self.assertNotIn("failed", step)
         exported["tasks"][0]["error"] = "RuntimeError('ui verification blocked; see packet.json')"
         self.assertTrue(next_step(f.directory, f.plan, exported).startswith("a step failed (see errors): RUNBOOK"))
+
+    def test_status_offers_no_override_while_edited_feature_files_wait(self):
+        # After a pause the operator edits a pinned feature file. `resume --accept-challenge` refuses then (refuse_unused_edits),
+        # so status names the bare resume, which commits the edit and reruns the challenge, and offers no override until the
+        # edit is reverted. It reads the source checkout without writing its index: that lock is for the resume's commit.
+        from .guardrails import pinned_digests, refuse_unused_edits
+        f = self.fixture
+        self.pin()
+        self.guard()
+        code, _, err = pipeline_cli("export", str(f.directory))
+        self.assertEqual(code, 0, err)
+        save_json(f.directory / "challenge.json", {"status": "paused", "attempt": 1, "pinned": pinned_digests(f.directory, f.plan)})
+        resume = f"{sys.executable} -m workflow resume {f.directory}"
+        hint = "add --herdr for the worker panes, as launch opens them unless --no-herdr"
+        offered = f"or accept it with {resume} --accept-challenge \"<reason>\" ({hint}). Then: "
+        self.assertIn(offered, self.status()[0]["next_step"])
+        decisions = Path(f.plan["decisions"]["path"])
+        pinned = decisions.read_text()
+        decisions.write_text(pinned + "- The adapter owns the format.\n")
+        os.utime(f.repo / "ui.txt", (1_600_000_000, 1_600_000_000))  # Stat data a plain `git status` writes back to the index.
+        index = f.repo / ".git" / "index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        printed, _ = self.status()
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)
+        self.assertTrue(printed["next_step"].startswith(
+            f"design challenge attempt 1 paused the run, and feature files changed since it read them: {resume} commits them and "
+            f"reruns the design challenge ({hint}); --accept-challenge is refused until the changes are reverted. Then: "), printed["next_step"])
+        with self.assertRaisesRegex(ValueError, r"^Feature files changed since they were pinned \(features/record/decisions\.md\)"):
+            refuse_unused_edits(f.directory, f.plan)  # What `resume --accept-challenge` does now.
+        decisions.write_text(pinned)
+        self.assertIn(offered, self.status()[0]["next_step"])
+        # A source checkout that cannot be read (moved, or git fails in it): resume needs it too, so status offers nothing.
+        with patch("workflow.guardrails.dirty_paths", side_effect=subprocess.CalledProcessError(128, ["git", "status"])):
+            printed, _ = self.status()
+        self.assertTrue(printed["next_step"].startswith(
+            f"design challenge attempt 1 paused the run, and its source checkout {f.repo} could not be read (Command '['git', 'status']' "
+            "returned non-zero exit status 128.): resume needs it. Then: "), printed["next_step"])
 
     def test_export_refreshes_report_html(self):
         f = self.fixture

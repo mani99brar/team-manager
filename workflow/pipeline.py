@@ -962,26 +962,37 @@ def untouched_main(repository, branch: str) -> str:
 def challenge_step(directory: Path, plan: dict) -> str | None:
     """What the design challenge waits for before any worker starts, as `resume` acts on it; None when it waits for nothing.
 
-    The override is offered only for a paused attempt that read what the plan pins: `resume` refuses it otherwise, and a
-    bare `resume` reruns the challenge with no edit (guardrails.unchanged_since). A job still running under `start` or
-    `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies.
+    The override is offered only for a paused attempt that read what the plan pins, with no edit waiting: `resume`
+    refuses it otherwise (guardrails.refuse_unused_edits). A bare `resume` reruns the challenge on the edits, or with no
+    edit after a rerun that failed before its job decided (guardrails.unchanged_since). A job still running under `start`
+    or `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies. The run does
+    not record whether its `start` was given --herdr, so the commands come with the hint to add it.
     """
-    from .guardrails import REVISION_INTENT, load_challenge, resume_command, stale_pins
+    from .guardrails import HERDR_HINT, REVISION_INTENT, load_challenge, resume_command, stale_pins, unused_edits
     record = load_challenge(directory)
     running = directory / "challenge.running.json"
     started = read_json(running).get("attempt", 0) if running.exists() else 0
-    rerun = f"if no start or resume is running, {resume_command(directory)} reruns it (no edit needed)"
+    rerun = f"if no start or resume is running, {resume_command(directory)} reruns it (no edit needed; {HERDR_HINT})"
     if (directory / REVISION_INTENT).exists():
         return (f"an interrupted resume has not finished moving the run to the revised feature files: if no resume is running, "
-                f"{resume_command(directory)} finishes it and reruns the design challenge")
+                f"{resume_command(directory)} finishes it and reruns the design challenge ({HERDR_HINT})")
     if started > (record["attempt"] if record else 0):
         return f"design challenge attempt {started} was started and not decided: {rerun}"
     if record is None or record.get("status") != "paused":
         return None
     if stale_pins(directory, plan, record):  # A rerun re-pinned the files, then failed before its job (its checkout, a kill).
         return f"design challenge attempt {record['attempt']} read other feature files than the plan now pins, and no later attempt was decided: {rerun}"
+    try:
+        edits = unused_edits(directory, plan)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:  # `resume` reads the same checkout, with or without the override.
+        return (f"design challenge attempt {record['attempt']} paused the run, and its source checkout {plan['repository']} could not "
+                f"be read ({error}): resume needs it")
+    if edits:
+        return (f"design challenge attempt {record['attempt']} paused the run, and feature files changed since it read them: "
+                f"{resume_command(directory)} commits them and reruns the design challenge ({HERDR_HINT}); --accept-challenge is "
+                "refused until the changes are reverted")
     return (f"design challenge attempt {record['attempt']} paused the run: edit the task files, decisions.md or the PRD, then "
-            f"{resume_command(directory)}, or accept it with {resume_command(directory, accept=True)}")
+            f"{resume_command(directory)}, or accept it with {resume_command(directory, accept=True)} ({HERDR_HINT})")
 
 
 def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
@@ -1000,8 +1011,9 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
         waiting = challenge_step(directory, plan)
         if waiting:
             return f"{waiting}. Then: {finish_policy(automatic, branch)}"
+        from .guardrails import HERDR_HINT
         supervise = f", then supervise them: {run('automatic')} --live" if automatic else ""
-        return f"no worker started yet: {run('start')} --live{supervise}. Then: {finish_policy(automatic, branch)}"
+        return f"no worker started yet: {run('start')} --live ({HERDR_HINT}){supervise}. Then: {finish_policy(automatic, branch)}"
     if automatic:
         return (f"{finish_policy(automatic, branch)}. Its supervisor continues the run; if none is running: {run('automatic')} --live "
                 "(it says why when the run cannot go on)")

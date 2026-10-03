@@ -57,6 +57,8 @@ CHALLENGE_HEARTBEAT_SECONDS = 60  # How often the terminal hears that the challe
 CHALLENGE_SCHEMA = CONTRACTS / "challenge.schema.json"
 REVISION_INTENT = "challenge-revision.json"  # `resume` is moving the run to revised feature files; see commit_revision.
 UNFINISHED_REVISION = f"An interrupted resume has not finished moving this run to the revised feature files ({REVISION_INTENT})"
+# Said beside a `start` or `resume` command named without knowing whether the run's `start` was given --herdr.
+HERDR_HINT = "add --herdr for the worker panes, as launch opens them unless --no-herdr"
 MIGRATION_NOTE = ("feature.json {version}: no guardrail is enforced (outcome-brief headings, decisions.md, design challenge, "
                   "completion evidence). To migrate, set \"version\": \"2.2.0\", give every task non-empty ## Goal, ## Acceptance "
                   "and ## Stop sections, and write decisions.md with the workflow-grill skill (workflow/README.md).")
@@ -361,8 +363,7 @@ def challenge_worktree(runtime) -> Path:
     """
     cwd = runtime.directory / "challenge-worktree"
     base = runtime.plan["base_commit"]
-    then = (f"no job ran; fix it, then run the challenge and launch the workers with: {resume_command(runtime.directory)} "
-            "(add --herdr for the worker panes, as launch opens them unless --no-herdr)")
+    then = f"no job ran; fix it, then run the challenge and launch the workers with: {resume_command(runtime.directory)} ({HERDR_HINT})"
     try:
         if not cwd.exists():
             git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), base)
@@ -407,8 +408,7 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
             # Said first: a `launch` interrupted with it may not wait long for this process. The job has its own session, so
             # the terminal's Ctrl-C never reached it.
             print(f"Design challenge attempt {attempt} interrupted; no worker was launched. Run the challenge again and launch the "
-                  f"workers with:\n  {resume_command(directory)}\n(add --herdr for the worker panes, as launch opens them unless --no-herdr)",
-                  flush=True)
+                  f"workers with:\n  {resume_command(directory)}\n({HERDR_HINT})", flush=True)
             terminate(process)
             raise
         except BaseException:
@@ -548,8 +548,10 @@ def pinned_paths(plan: dict) -> set[str]:
 
 
 def dirty_paths(repo: Path) -> list[str]:
-    """Every path `git status` reports: staged or unstaged changes (a rename as both of its paths) and untracked files."""
-    output = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], text=True)
+    """Every path `git status` reports: staged or unstaged changes (a rename as both of its paths) and untracked files.
+    It never takes the index lock to write back refreshed stat data, so `status` can read the checkout while a `resume` commits in it."""
+    output = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], text=True,
+                                     env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     return sorted({entry[3:] for entry in output.split("\0") if entry})
 
 
@@ -1028,7 +1030,7 @@ def deliver_answer(directory: Path, node: str, entry: dict, use_herdr: bool = Tr
     background_id = receipt.get("background_id")
     text = answer_text(directory, node, entry["answer"])
     if not use_herdr:
-        to_type = "" if text == entry["answer"] else f"\nThe text to type, with the lane's new deadline: {text}"
+        to_type = "" if text == entry["answer"] else f"\nThe text to type, with the controller's deadline note: {text}"
         if entry.get("typed"):
             return (f"The answer is typed in the worker's session but not submitted: claude attach {background_id}, then press Enter "
                     "(type it first if the session's input does not hold it)" + to_type)

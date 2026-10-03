@@ -2016,8 +2016,9 @@ class AnswerDelivery(unittest.TestCase):
         # --no-herdr prints the text to type: adapter answered at t=500 has 490 s more.
         calls, output, code = self.answer("adapter", "Keep the adapter", "--no-herdr")
         self.assertEqual((calls, code), ([], 0), output)
-        self.assertIn("Type the answer in the worker's session: claude attach bg-adapter\nThe text to type, with the lane's new deadline: Keep the "
-                      "adapter [Controller: your deadline is now 1970-01-01T01:08:10Z (UTC); the time your question waited was added to it.]", output)
+        self.assertIn("Type the answer in the worker's session: claude attach bg-adapter\nThe text to type, with the controller's deadline note: "
+                      "Keep the adapter [Controller: your deadline is now 1970-01-01T01:08:10Z (UTC); the time your question waited was added to it.]",
+                      output)
 
     def test_a_lane_whose_completion_was_accepted_is_told_the_deadline_the_controller_applies(self):
         # automatic._poll_handoffs holds a lane whose completion it accepted (met_at) to no deadline while another lane works or
@@ -2045,6 +2046,19 @@ class AnswerDelivery(unittest.TestCase):
         calls, output, code = self.answer("ui", "Use option B", screen=claude_screen(unbounded[:70], unbounded[70:140], unbounded[140:]))
         self.assertEqual(([call[2] for call in calls], code), (["process-info", "read", "send-keys"], 0), output)
         self.assertIs(self.entry()["delivered"], True)
+
+    def test_no_herdr_promises_no_new_deadline_to_a_lane_whose_completion_was_accepted(self):
+        # ui's completion was accepted, then it asked while adapter still works: the note says no deadline applies to ui, and
+        # the label of the text to type promises none either.
+        from .guardrails import mark_deadline_met
+        save_json(self.root / "plan.json", {**read_json(self.root / "plan.json"), "automatic": {**DEFAULTS, "worker_timeout_seconds": 3600}})
+        mark_deadline_met(self.root, "ui", 5.0)
+        calls, output, code = self.answer("ui", "Use option B", "--no-herdr")
+        self.assertEqual((calls, code), ([], 0), output)
+        self.assertIn("Type the answer in the worker's session: claude attach bg-ui\nThe text to type, with the controller's deadline note: Use "
+                      "option B [Controller: your completion was accepted before this question, so no deadline applies to you while another lane "
+                      "works or waits on its answer; after that, the latest lane deadline does.]", output)
+        self.assertNotIn("new deadline", output)
 
     def test_an_answer_the_previous_controller_typed_and_did_not_submit_is_submitted_by_its_bare_text(self):
         # A controller before the deadline note typed the bare answer, and its Enter failed: the entry is typed, not delivered, and
