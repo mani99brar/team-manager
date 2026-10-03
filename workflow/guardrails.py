@@ -68,9 +68,9 @@ MIGRATION_NOTE = ("feature.json {version}: no guardrail is enforced (outcome-bri
 # The heading the workflow-grill skill writes the operator's own answers under (C4). Its presence alone decides how the
 # prompts word decisions.md's precedence; no section is parsed.
 OPERATOR_DECISIONS = "## Operator decisions"
-LEGACY_DECISIONS_NOTE = (f"{DECISIONS} has no '{OPERATOR_DECISIONS}' heading, so all of it binds the run as before and the design "
-                         "challenge may not reopen it. Rerun the workflow-grill skill to bind only the operator's answers and leave "
-                         "its own defaults open (workflow/README.md, Guardrails).")
+LEGACY_DECISIONS_NOTE = (f"{DECISIONS} has no '{OPERATOR_DECISIONS}' heading, so all of it binds the run, as before. Rerun the "
+                         "workflow-grill skill to bind only the operator's answers and leave its own defaults open to the design "
+                         "challenge (workflow/README.md, Guardrails).")
 
 
 # ---- Outcome briefs and decisions (launch and prepare) -------------------------------------------------------
