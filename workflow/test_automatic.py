@@ -321,6 +321,28 @@ class CompletionTests(unittest.TestCase):
             validate_automatic(self.plan)
 
 
+class ControllerBlockedTests(unittest.TestCase):
+    def test_the_event_names_each_failed_step_with_its_error_once_per_controller_process(self):
+        # C44: before drive's non-retryable raise. The checkpoint keeps a step's error as its repr; the event gives its text.
+        from .automatic import record_blocked
+        events = []
+        runtime = SimpleNamespace(directory=Path("/runs/blocked-001"), event=lambda *event: events.append(event))
+        state = SimpleNamespace(next=("verify_ui", "verify_adapter"), tasks=[
+            SimpleNamespace(name="verify_ui", error="RuntimeError('Check ui-unit left no packet')"),
+            SimpleNamespace(name="verify_adapter", error="OSError(28, 'No space left on device')"),
+            SimpleNamespace(name="candidate", error=None),
+            SimpleNamespace(name="handoff", error="RuntimeError('An earlier attempt')")])  # Not pending: it has succeeded since.
+        with patch("workflow.automatic.BLOCKED_RUNS", set()):
+            record_blocked(runtime, state)
+            record_blocked(runtime, state)
+            record_blocked(SimpleNamespace(directory=Path("/runs/other-001"), event=runtime.event),
+                           SimpleNamespace(next=(), tasks=[SimpleNamespace(name="review", error="Reviewer stop not confirmed")]))
+        self.assertEqual(events, [
+            ("controller", "blocked", "Controller blocked: the verify_ui step failed: Check ui-unit left no packet; the verify_adapter step "
+                                      "failed: OSError(28, 'No space left on device'); not retried, inspect retained evidence"),
+            ("controller", "blocked", "Controller blocked: the review step failed: Reviewer stop not confirmed; not retried, inspect retained evidence")])
+
+
 class SupervisorTimelineTests(unittest.TestCase):
     """The supervisor's terminal follows events.jsonl, whoever appends to it, and prints each event once."""
 
@@ -1802,9 +1824,19 @@ sys.exit(0 if commit else 75)
         blocked = [event["message"] for event in self.events() if (event["node"], event["status"]) == ("review", "blocked")]
         self.assertEqual(blocked, ["Review blocked by " + " and ".join(f"{reviewer_id} ({'late ' if status.get('late') else ''}blocked, no open P0/P1)"
                                                                       for reviewer_id, status in zip(self.ids, statuses))])
+        # The controller says why it stops before its non-retryable raise (C44): the failed step with its error, at most once
+        # per controller process. The timeline's last word is that event, not "controller running".
+        stopped = f"Controller blocked: the review step failed: {receipt['error']}; not retried, inspect retained evidence"
+        def controller_blocked():
+            return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", "blocked")]
+        self.assertEqual((controller_blocked(), self.events()[-1]["message"]), ([stopped], stopped))
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
+        self.assertEqual(controller_blocked(), [stopped])  # The same controller process says it once.
+        with patch("workflow.automatic.BLOCKED_RUNS", set()), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)  # A new controller process (`automatic --live` again) says it again.
+        self.assertEqual(controller_blocked(), [stopped, stopped])
 
     def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
         # C34: the controller derives each reviewer's verdict from its findings. Every reviewer writes blocked with P2 findings

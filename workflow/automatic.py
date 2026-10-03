@@ -5,6 +5,7 @@ Claude invocation owned by the graph's review node. No push or main integration.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -1639,6 +1640,35 @@ def settle_interruption(runtime, failed=None) -> None:
             save_json(path, combined)
 
 
+BLOCKED_RUNS: set[str] = set()  # Runs whose non-retryable stop this controller process put on the timeline (record_blocked).
+
+
+def step_error(error) -> str:
+    """A failed step's error as the checkpoint keeps it, `RuntimeError('text')`, reduced to its text; any other shape unchanged."""
+    text = str(error)
+    match = re.fullmatch(r"[A-Za-z_][\w.]*\(('.*'|\".*\")\)", text, flags=re.DOTALL)
+    if match:
+        try:
+            value = ast.literal_eval(match[1])
+        except (ValueError, SyntaxError):
+            return text
+        if isinstance(value, str):
+            return value
+    return text
+
+
+def record_blocked(runtime, state) -> None:
+    """The `controller` `blocked` event before drive stops at a failure it does not retry (C44): each failed step with its
+    error, so the timeline's last word says why. At most once per controller process and run; a later `automatic --live` is
+    a new process and says it again."""
+    if str(runtime.directory) in BLOCKED_RUNS:
+        return
+    BLOCKED_RUNS.add(str(runtime.directory))
+    failed = [task for task in state.tasks if task.error and task.name in state.next] or [task for task in state.tasks if task.error]
+    runtime.event("controller", "blocked", "Controller blocked: " + "; ".join(f"the {task.name} step failed: {step_error(task.error)}" for task in failed)
+                  + "; not retried, inspect retained evidence")
+
+
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import advance, build_pipeline, graph_config, report
@@ -1704,6 +1734,7 @@ def drive(runtime, *, single_step=False) -> str | None:
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
                 if not restart_review(runtime, state):
+                    record_blocked(runtime, state)
                     raise RuntimeError("Non-retryable graph failure; inspect retained evidence")
             try:
                 advance(runtime, graph, value, config)
