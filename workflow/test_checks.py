@@ -1,6 +1,7 @@
 """Worker-phase file capture (PRD_VIEWER_CLARITY 4.1): real Git snapshots, real verification worktrees and checks."""
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -141,6 +142,28 @@ class FileCaptureTests(unittest.TestCase):
         self.assertIn(f"Artifact hash mismatch: {artifact['artifact_id']}", rechecked["gate"]["reasons"])
         # The saved packet is rechecked the same way when verification is asked again for the same revision.
         self.assertEqual(self.verify(commit, changed, policy=policy)["gate"]["status"], "blocked")
+
+    def test_a_cached_packet_of_another_phase_lane_or_attempt_is_refused_not_reused(self):
+        """A passed worker packet at the candidate path once answered a candidate request whose build failed: the cache
+        reuses a packet only when its own phase, lane and attempt are the call's."""
+        commit, changed = self.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        worker = self.verify(commit, changed)
+        self.assertEqual(worker["gate"]["status"], "passed", worker["gate"]["reasons"])
+        lane = json.loads(json.dumps(worker))
+        lane["expected"]["node_id"] = "ui"
+        for phase, attempt, packet, found in (("candidate", 1, worker, "worker packet of adapter attempt 1"),
+                                              ("worker", 2, worker, "worker packet of adapter attempt 1"),
+                                              ("worker", 3, lane, "worker packet of ui attempt 1")):
+            with self.subTest(phase=phase, attempt=attempt):
+                path = self.run_dir / "verification" / phase / "adapter" / str(attempt) / "packet.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(packet))
+                with self.assertRaisesRegex(ValueError, re.escape(f"Existing verification at {path} is the {found}, not the {phase} packet of "
+                                                                  f"adapter attempt {attempt}")):
+                    self.verify(commit, changed, phase=phase, attempt=attempt)
+                self.assertEqual(sorted(item.name for item in path.parent.iterdir()), ["packet.json"])  # Nothing ran.
+        # The packet of the call's own phase, lane and attempt is still reused.
+        self.assertEqual(self.verify(commit, changed), worker)
 
     def test_schema_requires_a_safe_path_exactly_on_file_artifacts(self):
         commit, changed = self.snapshot({"docs/GUIDE.md": b"# Guide\n"})

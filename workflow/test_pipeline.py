@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -744,6 +745,85 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         (Path(self.plan["nodes"]["ui"]["worktree"]) / "backend.py").write_text("UNOWNED = True\n")
         with self.assertRaisesRegex(ValueError, "unowned"):
             self.runtime.freeze()
+
+    def test_freeze_records_non_ascii_and_quoted_names_as_written(self):
+        # Git quotes these names in diff-tree output unless -z ("docs/caf\303\251.md"; a double quote even with
+        # core.quotepath=false), and freeze then refused a snapshot that matched the worktree.
+        self.policy["workers"][0]["owned_paths"].append("docs")
+        self.plan["policy_sha256"] = policy_digest(self.policy)
+        save_json(self.directory / "policy.json", self.policy)
+        save_json(self.directory / "plan.json", self.plan)
+        self.runtime = OfflinePipeline(self.directory, self.sessions)
+        self.sessions.run("ui"); self.sessions.run("adapter")
+        worktree = Path(self.plan["nodes"]["ui"]["worktree"])
+        names = ["docs/café.md", 'docs/say "hi".md']
+        (worktree / "docs").mkdir()
+        for name in names:
+            (worktree / name).write_text(f"# {name}\n")
+        snapshots = self.runtime.freeze()
+        self.assertEqual(snapshots["ui"]["changed_files"], sorted(["ui.txt", *names]))
+        tree = subprocess.check_output(["git", "-C", str(self.repo), "ls-tree", "-r", "-z", "--name-only", snapshots["ui"]["commit"]]).decode()
+        self.assertLessEqual(set(names), set(tree.split("\0")))
+
+
+class BundleTests(unittest.TestCase):
+    """validate_bundle on the bundle the candidate step wrote; the lanes run build and unit checks only (no browser)."""
+
+    def setUp(self):
+        self.fixture = PipelineTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def review_gate(self, drill: dict | None = None) -> Path:
+        """Launch, freeze, verify and combine both lanes up to the review gate; a drill's lane is retried once."""
+        f = self.fixture
+        f.policy.update(version="1.2.0", **({"failure_drill": drill} if drill else {}))
+        f.policy["workers"][0].update(required_check_kinds=["build"], checks=f.policy["workers"][0]["checks"][:1])
+        f.policy["workers"][1]["required_check_kinds"] = ["unit"]
+        f.plan["policy_sha256"] = policy_digest(f.policy)
+        save_json(f.directory / "policy.json", f.policy)
+        save_json(f.directory / "plan.json", f.plan)
+        f.runtime = OfflinePipeline(f.directory, f.sessions)
+        with SqliteSaver.from_conn_string(str(f.directory / "graph.sqlite")) as saver:
+            graph = build_pipeline(saver, f.runtime)
+            graph.invoke({"run_id": "run"}, f.config)
+            if drill:
+                with self.assertRaisesRegex(RuntimeError, f"{drill['node_id']} verification blocked"):
+                    graph.invoke(Command(resume={"freeze": True}), f.config)
+                f.runtime.retry_check("worker", drill["node_id"])
+                outcome = graph.invoke(None, f.config)
+            else:
+                outcome = graph.invoke(Command(resume={"freeze": True}), f.config)
+        self.assertEqual(outcome["__interrupt__"][0].value["kind"], "independent_review")
+        return f.directory / "review-bundle.json"
+
+    def test_validate_bundle_needs_one_worker_and_one_candidate_packet_per_lane_on_the_runs_base(self):
+        path = self.review_gate()
+        runtime = self.fixture.runtime
+        bundle, digest = runtime.validate_bundle()
+        references = {Path(item["path"]).parts[-4:-2]: item for item in bundle["packets"]}
+        self.assertEqual(sorted(references), [("candidate", "adapter"), ("candidate", "ui"), ("worker", "adapter"), ("worker", "ui")])
+        others = [item for key, item in references.items() if key != ("candidate", "adapter")]
+        for change, refusal in (({"packets": []}, "Bundle has no worker packet of ui"),
+                                ({"packets": others}, "Bundle has no candidate packet of adapter"),
+                                ({"packets": [*others, references[("worker", "adapter")]]}, "Bundle has two worker packets of adapter"),
+                                ({"base_commit": "f" * 40}, f"Bundle base {'f' * 40} is not the run's base {bundle['base_commit']}"),
+                                ({"snapshots": {**bundle["snapshots"], "ui": {**bundle["snapshots"]["ui"], "commit": bundle["base_commit"]}}},
+                                 f"Bundle's worker packet of ui is of {bundle['snapshots']['ui']['commit']}, not {bundle['base_commit']}")):
+            with self.subTest(refusal):
+                save_json(path, {**bundle, **change})
+                with self.assertRaisesRegex(ValueError, f"^{re.escape(refusal)}"):
+                    runtime.validate_bundle()
+        save_json(path, bundle)
+        self.assertEqual(runtime.validate_bundle(), (bundle, digest))
+
+    def test_a_failure_drill_bundle_combines_the_retried_attempt(self):
+        path = self.review_gate(drill={"node_id": "adapter", "phase": "worker", "attempt": 1})
+        bundle, _ = self.fixture.runtime.validate_bundle()
+        self.assertEqual(bundle["failure_drill"]["verification_attempts"], {"ui": [1], "adapter": [1, 2]})
+        self.assertEqual(sorted(Path(item["path"]).parts[-4:-1] for item in bundle["packets"]),
+                         [("candidate", "adapter", "1"), ("candidate", "ui", "1"), ("worker", "adapter", "2"), ("worker", "ui", "1")])
+        self.assertEqual(read_json(path), bundle)
 
 
 class AdvanceTests(unittest.TestCase):

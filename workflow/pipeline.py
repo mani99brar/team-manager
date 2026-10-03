@@ -454,9 +454,11 @@ class Pipeline:
             subprocess.run(["git", "-C", str(cwd), "read-tree", self.plan["base_commit"]], env=env, check=True)
             subprocess.run(["git", "-C", str(cwd), "add", "-A", "--", "."], env=env, check=True)
             tree = subprocess.check_output(["git", "-C", str(cwd), "write-tree"], env=env, text=True).strip()
-            # Validate paths from the actual captured tree, including staged renames/deletes.
-            captured = git(cwd, "diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", self.plan["base_commit"], tree).splitlines()
-            if sorted(captured) != changed:
+            # Validate paths from the actual captured tree, including staged renames/deletes. NUL-separated, as changed_files
+            # reads them: without -z Git quotes a name with a non-ASCII byte, a double quote or a backslash.
+            captured = subprocess.check_output(["git", "-C", str(cwd), "diff-tree", "-z", "--no-commit-id", "--no-renames", "--name-only", "-r",
+                                                self.plan["base_commit"], tree]).decode().split("\0")
+            if sorted(filter(None, captured)) != changed:
                 raise ValueError("Files changed during snapshot; refuse inconsistent evidence")
             commit = self.plan["base_commit"]
             if changed:
@@ -584,10 +586,16 @@ class Pipeline:
         return str(path)
 
     def validate_bundle(self) -> tuple[dict, str]:
+        """review-bundle.json as the candidate step writes it, and its digest: this run, policy and base, and per selected lane
+        exactly one passing worker packet of its snapshot and one passing candidate packet of the combined revision, each
+        packet named by its own phase, lane and commit. A lane repair's later candidate generation is bundled the same way."""
         path = self.directory / "review-bundle.json"
         bundle = read_json(path)
         if bundle["run_id"] != self.plan["run_id"] or bundle["policy_sha256"] != policy_digest(self.policy):
             raise ValueError("Bundle identity/policy changed")
+        if bundle.get("base_commit") != self.plan["base_commit"]:
+            raise ValueError(f"Bundle base {bundle.get('base_commit')} is not the run's base {self.plan['base_commit']}")
+        found = {}
         for reference in bundle["packets"]:
             packet_path = Path(reference["path"]).resolve()
             if not packet_path.is_relative_to(self.directory) or digest_file(packet_path) != reference["sha256"]:
@@ -595,6 +603,19 @@ class Pipeline:
             packet = recheck_packet(read_json(packet_path), self.policy, self.directory)
             if packet["gate"]["status"] != "passed":
                 raise ValueError("Review artifact missing, changed or failing")
+            phase, node = packet["phase"], packet["expected"]["node_id"]
+            if (phase, node) in found:
+                raise ValueError(f"Bundle has two {phase} packets of {node}")
+            found[phase, node] = packet["expected"]["output_commit"]
+        for node in self.workers:
+            for phase, commit in (("worker", (bundle["snapshots"].get(node) or {}).get("commit")), ("candidate", bundle["candidate_commit"])):
+                if (phase, node) not in found:
+                    raise ValueError(f"Bundle has no {phase} packet of {node}")
+                verified = found.pop((phase, node))
+                if verified != commit:
+                    raise ValueError(f"Bundle's {phase} packet of {node} is of {verified}, not {commit}")
+        if found:
+            raise ValueError(f"Bundle has packets of no lane it combines: {', '.join(f'{phase} {node}' for phase, node in found)}")
         return bundle, digest_file(path)
 
     def validate_review(self, review: dict, require_approved: bool = True) -> None:

@@ -283,6 +283,12 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     packet_path = directory / "packet.json"
     if packet_path.exists():
         packet = json.loads(packet_path.read_text())
+        # What the packet verified is its own phase, lane and attempt, not its path: a worker packet at the candidate path
+        # would pass a candidate whose checks were never run (recheck_packet gates it with the packet's own phase).
+        found = (packet["phase"], packet["expected"]["node_id"], packet["expected"]["attempt"])
+        if found != (phase, node, attempt):
+            raise ValueError(f"Existing verification at {packet_path} is the {found[0]} packet of {found[1]} attempt {found[2]}, "
+                             f"not the {phase} packet of {node} attempt {attempt}; it is never reused")
         if packet["expected"]["output_commit"] != commit or packet["evidence"]["policy_sha256"] != policy_digest(policy):
             raise ValueError("Existing verification belongs to a different revision/policy")
         return recheck_packet(packet, policy, run)
