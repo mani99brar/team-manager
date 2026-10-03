@@ -2813,6 +2813,59 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertTrue(notes[-1].startswith("Reviewer general gave no verdict and ends superseded: its session is not listed live (Claude Code "
                                              "has not listed a live review-general session"), notes)
 
+    def test_a_blocker_whose_session_is_stopped_or_lost_during_the_grace_keeps_the_block_and_its_record(self):
+        # coverage's block is accepted; during the grace its own session is stopped (by hand, the OOM killer) or leaves the
+        # listing. The identity check after the wait only protects an approval: review.json is written before it, and its failure
+        # is one note. It used to replace the block's error and leave no review.json (stopped), or make every `automatic --live`
+        # exit 75 until the run was reconciled by hand (lost).
+        for lose in ("stopped", "lost"):
+            with self.subTest(session=lose):
+                if lose != "stopped":
+                    self.setUp()  # A fresh run.
+                f = self.fixture
+                f.sessions.reviewer_states = {"general": "working"}
+                f.sessions.reviewer_verdicts = {"coverage": "blocked"}
+                f.sessions.reviewer_writes_file = {"coverage"}
+                listing, located = f.sessions.inventory, f.sessions.locate
+                coverage_status, coverage_row = f.directory / "automatic-review-coverage.json", f.sessions.background_id("review-coverage")
+
+                def inventory(lose=lose, listing=listing):
+                    rows = listing()
+                    if coverage_status.exists() and "accepted_at" in read_json(coverage_status):  # From the block on.
+                        if lose == "stopped":
+                            return [{**row, "state": "stopped"} if row["id"] == coverage_row else row for row in rows]
+                        return [row for row in rows if row["id"] != coverage_row]
+                    return rows
+
+                def locate(node, rows, located=located):  # As InteractiveSessions.locate: a stopped or failed row is refused.
+                    row = located(node, rows)
+                    if row is not None and row["state"] not in {"idle", "working", "blocked", "done"}:
+                        raise RuntimeError(f"Session is not attachable: {row['state']!r}; reconcile manually")
+                    return row
+                f.sessions.inventory, f.sessions.locate = inventory, locate
+                clock = SimpleNamespace(value=time.time())  # Each deadline counts from the reviewer's real launch time.
+                with patch("workflow.automatic.wait_handoffs"), patch("workflow.automatic.time") as fake_time:
+                    fake_time.time.side_effect = lambda: clock.value
+                    fake_time.sleep.side_effect = lambda seconds: setattr(clock, "value", clock.value + seconds)
+                    with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+                        drive(f.runtime)
+                combined = self.combined()
+                self.assertEqual((combined["status"], combined["error"], "interrupted" in combined), ("blocked", "Independent reviewer blocked the candidate (coverage)", False))
+                self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("superseded", "blocked"))
+                self.assertEqual((read_json(f.directory / "review.json")["verdict"], self.review_entries()),
+                                 ("blocked", [("general", None, self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))]))
+                refused = ("Session is not attachable: 'stopped'; reconcile manually" if lose == "stopped"
+                           else "Claude Code has not listed a live review-coverage session")
+                self.assertTrue(combined["identity_error"].startswith(refused), combined["identity_error"])
+                review_events = [(event["status"], event["message"]) for event in self.events() if event["node"] == "review"]
+                self.assertIn(("note", f"Reviewer identity not confirmed after the block: {combined['identity_error']}. Only an approval "
+                                       "depends on it: the block and review.json stand"), review_events)
+                self.assertIn(("blocked", "Review blocked by coverage (blocked, no open P0/P1); no verdict from general"), review_events)
+                self.assertFalse([event for event in review_events if event[0] == "interrupted"])
+                with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+                    drive(f.runtime)  # Nothing is relaunched, and the record stands.
+                self.assertEqual((self.reviewer_launches(), read_json(f.directory / "review.json")["verdict"]), (2, "blocked"))
+
     def test_p1_anywhere(self):
         f = self.fixture
         open_p1 = {"severity": "P1", "message": "Unresolved defect", "disposition": "open", "worker": "adapter", "requirement": None}

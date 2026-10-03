@@ -1147,8 +1147,21 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     waited = False
     try:
         decisions = wait_reviews(runtime, state)
-        waited = True  # From here a failure refuses the whole review: nothing accepted so far is trusted.
-        check_independence(runtime, bundle, state)
+        waited = True  # From here a failure refuses the whole review (nothing accepted so far is trusted), but a blocked one keeps its record.
+        review = combined_review(runtime, bundle, digest, state, decisions)
+        if review["verdict"] == "approved":
+            check_independence(runtime, bundle, state)
+        else:
+            # The identity check only protects an approval. A blocker's or late reviewer's session stopped, killed or gone while
+            # the grace ran must not cost the block its record, or replace its error, or have every resume exit 75 on it.
+            save_json(runtime.directory / "review.json", review)
+            try:
+                check_independence(runtime, bundle, state)
+            except Exception as error:
+                combined["identity_error"] = str(error)
+                state.save()
+                runtime.event("review", NOTE, f"Reviewer identity not confirmed after the block: {error}. Only an approval depends on it: "
+                                              "the block and review.json stand")
         if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
