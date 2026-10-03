@@ -1586,18 +1586,19 @@ class PrintCollectionTests(unittest.TestCase):
         self.now, self.events, self.terminated = 0.0, [], []
 
     def collect(self, jobs: dict):
-        """Run collect_print over `jobs` (reviewer id: (exits_at, structured output)); the state it leaves."""
+        """Run collect_print over `jobs` (reviewer id: (exits_at, structured output[, exit code])); the state it leaves, also in
+        `self.state` when it raises."""
         from .automatic import ReviewStatus, collect_print
         plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS, reviewer_transport="print"),
                 "reviewers": [{"reviewer_id": reviewer_id, "prompt": f"Check {reviewer_id}."} for reviewer_id in jobs]}
-        runtime = SimpleNamespace(directory=self.root, plan=plan, event=lambda node, status, message: self.events.append((node, status, message)))
+        self.runtime = runtime = SimpleNamespace(directory=self.root, plan=plan, event=lambda node, status, message: self.events.append((node, status, message)))
         statuses, processes = {}, {}
-        for n, (reviewer_id, (exits_at, output)) in enumerate(jobs.items()):
+        for n, (reviewer_id, (exits_at, output, *code)) in enumerate(jobs.items()):
             session = f"{n + 1:08d}-4444-4444-8444-444444444444"
             statuses[reviewer_id] = {"reviewer_id": reviewer_id, "node_id": review_node(reviewer_id), "transport": "print", "session_id": session, "status": "running"}
             save_json(self.root / f"{review_node(reviewer_id)}.stdout.json", {"session_id": session, "is_error": False, "subtype": "success", "structured_output": output})
-            processes[reviewer_id] = (FakeJob(self, exits_at), 0.0)
-        state = ReviewStatus(runtime, {"transport": "print", "status": "running", "reviewers": list(jobs)}, statuses)
+            processes[reviewer_id] = (FakeJob(self, exits_at, *code), 0.0)
+        self.state = state = ReviewStatus(runtime, {"transport": "print", "status": "running", "reviewers": list(jobs)}, statuses)
         self.jobs = {reviewer_id: process for reviewer_id, (process, _) in processes.items()}
         with patch("workflow.automatic.time", SimpleNamespace(monotonic=lambda: self.now, time=lambda: self.now)), \
                 patch("workflow.automatic.terminate", side_effect=self.terminated.append):
@@ -1646,6 +1647,28 @@ class PrintCollectionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"^Reviewer general deadline exhausted; no second reviewer is launched$"):
             self.collect({"general": (None, None), "coverage": (1800.5, {"verdict": "blocked", "findings": []})})
         self.assertEqual((self.now, self.events), (1800, []))
+
+    def test_every_job_that_exited_in_a_pass_is_read_before_a_failed_one_ends_the_review(self):
+        # general (declared first) fails and coverage blocks with a P0 in the same poll. collect_print used to raise on general at
+        # once: coverage stayed running, was superseded, and no review.json was written (the pine runs' dropped P0 in its
+        # failure-order form). Every job that exited is read first; the failure still ends the review, and the record keeps
+        # coverage's verdict (_record_partial). No grace is announced for a review that ends now.
+        from .automatic import _record_partial
+        failed = "Reviewer general did not succeed; inspect retained output. No automatic retry/provider switch."
+        with self.assertRaisesRegex(RuntimeError, r"^Reviewer general did not succeed"):
+            self.collect({"general": (60, {"verdict": "approved", "findings": []}, 1), "coverage": (60, {"verdict": "blocked", "findings": [self.P0]}),
+                          "security": (60, {"verdict": "approved", "findings": []})})
+        statuses = self.state.statuses
+        self.assertEqual((statuses["general"]["status"], statuses["general"]["error"], "accepted_decision" in statuses["general"]), ("blocked", failed, False))
+        self.assertEqual((statuses["coverage"]["status"], statuses["coverage"]["accepted_decision"], "late" in statuses["coverage"]),
+                         ("accepted", {"verdict": "blocked", "findings": [self.P0]}, False))
+        self.assertEqual((statuses["security"]["accepted_decision"]["verdict"], statuses["security"]["late"]), ("approved", True))  # Read after the block.
+        self.assertEqual((self.now, self.terminated), (60, []))
+        self.assertEqual(self.events, [("review", "note", "Reviewer security's late verdict recorded: approved, no open P0/P1")])
+        _record_partial(self.runtime, {"run_id": "test", "candidate_commit": "c" * 40}, "b" * 64, self.state)
+        review = read_json(self.root / "review.json")
+        self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["verdict"], review["findings"]),
+                         ([None, "blocked", "approved"], "blocked", [{**self.P0, "reviewer": "coverage"}]))
 
 
 class GraphFixture(unittest.TestCase):

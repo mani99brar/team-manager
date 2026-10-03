@@ -1255,9 +1255,10 @@ PRINT_POLL_SECONDS = 1.0  # How long the collection waits on one running print j
 def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -> None:
     """Read every print job as it exits, whatever the declared order; each deadline counts from that job's own launch.
 
-    Each pass reads every job that exited before it looks at a deadline, so a deadline that passed while another job
-    finished never drops that job's verdict. Before any block, a job that failed or an expired deadline ends the review at
-    once. After the first accepted block every other job still has until its own deadline: the jobs already run in
+    Each pass reads every job that exited before it looks at a deadline or raises for one that failed, so neither a
+    deadline that passed nor a job that failed while another job finished drops that job's verdict. Before any block, a job
+    that failed (once the pass read the others, which the record keeps) or an expired deadline ends the review at once.
+    After the first accepted block every other job still has until its own deadline: the jobs already run in
     parallel, so there is no grace (REVIEW_GRACE_SECONDS is the native reviewers'). One that exits by then is read and
     recorded late (it can add blockers, never approve); a late job that failed is kept as `late_error` and never raised;
     one still running at its deadline is stopped and ends superseded.
@@ -1266,6 +1267,7 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
     pending = list(state.ids)
     blocked = False
     while pending:
+        failure = None  # The first job of this pass that failed before any block: raised once every job that exited is read.
         for reviewer_id in [reviewer_id for reviewer_id in pending if processes[reviewer_id][0].poll() is not None]:
             process = processes[reviewer_id][0]
             status = state.statuses[reviewer_id]
@@ -1283,16 +1285,22 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
                 decision = print_verdict(runtime, reviewer_id, process, status)
             except BaseException as error:
                 status.update(status="blocked", error=str(error))
-                raise
+                if not isinstance(error, Exception):
+                    raise
+                failure = failure or error  # The verdicts of the others that exited are kept: _record_partial writes them.
+                continue
             decisions[reviewer_id] = decision
             status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
             state.save()
             note_override(runtime, reviewer_id, decision)
             if decision_blocks(decision):
                 blocked = True
-                if pending:  # Their deadlines, on the timeline's clock: each launch was taken on time.monotonic().
+                if pending and failure is None:  # Their deadlines, on the timeline's clock: each launch was taken on time.monotonic().
                     until = time.time() + max(processes[other][1] for other in pending) + timeout - time.monotonic()
                     announce_grace(runtime, state, pending, until, deadlines=True)
+        if failure is not None:
+            state.save()
+            raise failure
         for reviewer_id in list(pending):
             process, launched = processes[reviewer_id]
             if time.monotonic() < launched + timeout or process.poll() is not None:
