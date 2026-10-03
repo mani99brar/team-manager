@@ -32,7 +32,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, export_run
 from .sessions import TransientInfraError, git, prepare, read_json, save_json
 from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, pane_process_info, two_lane_policy
-from .test_pipeline import FakeSessions, OfflinePipeline
+from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
 from .test_portable import commit_all
 from .verification import policy_digest, validate_schema
 
@@ -41,6 +41,10 @@ REAL_RUN = subprocess.run  # Patching workflow.herdr.subprocess.run patches it f
 PRD = TOOL / "docs" / "PRD_REVIEW_SIDECAR.md"
 BRIEF = "Review like a senior engineer. BRIEF-MARKER-7."
 SETTINGS = dict(sidecar.DEFAULTS)
+
+
+def setUpModule():
+    isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
 
 
 def appendix_b() -> dict:

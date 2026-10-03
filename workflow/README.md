@@ -102,7 +102,7 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair; `testdata/` holds copies of finished features' files the tests read.
+The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair, `test_attention.py` the attention record; `testdata/` holds copies of finished features' files the tests read. The test modules whose runs can record attention point `MD_MANAGER_PROJECTS_CONFIG` at a temporary registry, so `attention.jsonl` never lands beside yours.
 
 ## Files
 
@@ -110,6 +110,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `sidecar.py`: the review sidecar: its declaration and `plan.sidecar`, the pass inputs, the read-only print job, the ledger merge and its schema checks, the gated message delivery, restart recovery, the scheduler `wait_handoffs` runs and `sidecar-pass`; `prompts/sidecar/` holds the bundled briefs.
 - `guardrails.py`: outcome briefs, decisions pinning, the design challenge and `resume`, worker questions, the persisted deadline pause and `answer`. `skills/workflow-grill/`: the interview skill.
 - `scaffold.py`: `init`. `registry.py`: the Projects registry entry and its atomic merge.
+- `attention.py`: one record per state that needs the operator: `<run>/attention.json` and a line on `attention.jsonl` beside the Projects registry; it never raises.
 - `sessions.py`: run preparation (one worktree per selected lane), lane id rules, receipts, locking, and the `claude` process helpers (`run_claude`, `popen_claude`: the auto-updater off, an update in progress waited out; `background_settings`: the same setting as `--settings` for `claude --bg` sessions) with the stale-process warning.
 - `interactive.py`: native `claude --bg` launches, Herdr panes (one per lane, reviewers to their right), reconciliation, `attach-one`. `herdr.py`: the Herdr CLI helper.
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.

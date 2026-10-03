@@ -25,12 +25,17 @@ from .scaffold import init
 from .sessions import read_json, save_json
 from .test_export import legacy_run
 from .test_lanes import LANES, LaneRun
+from .test_pipeline import isolate_registry
 from .verification import CONTRACTS
 
 PY = sys.executable
 GOLDEN = CONTRACTS / "examples" / "registry-entry.json"
 FOLDED_DOCS = ("CHEATSHEET.md", "LIVE_SESSIONS.md", "INTERACTIVE_SESSIONS.md", "VALIDATION.md", "VERIFICATION.md")
 FINISHED_FEATURES = ("project-workflows", "worker-lanes", "parallel-reviewers", "parallel-reviewers-align")
+
+
+def setUpModule():
+    isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
 
 
 def git(repo: Path, *args: str) -> str:

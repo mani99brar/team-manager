@@ -24,6 +24,22 @@ from .verification import CONTRACTS, policy_digest
 LANE_EDITS = {"ui": ("ui.txt", "after"), "adapter": ("backend.py", "VALUE = 2\n")}
 
 
+def isolate_registry() -> None:
+    """setUpModule of every test module whose runs can record attention (an integration, a paused design challenge, the
+    automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
+    temporary directory, so attention.jsonl never lands beside the operator's registry. Child processes inherit it, and
+    a test that sets the variable itself still wins."""
+    temp = tempfile.TemporaryDirectory()
+    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json")})
+    environment.start()
+    unittest.addModuleCleanup(temp.cleanup)
+    unittest.addModuleCleanup(environment.stop)
+
+
+def setUpModule():
+    isolate_registry()
+
+
 class FakeSessions:
     """Offline stand-in for InteractiveSessions. Receipts on disk are its only cross-process state.
 

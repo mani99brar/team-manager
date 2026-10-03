@@ -21,6 +21,10 @@ from .verification import policy_digest
 from . import test_pipeline as fixtures
 
 
+def setUpModule():
+    fixtures.isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+
+
 class CompletionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -24,7 +24,7 @@ from . import automatic, checks, pipeline, repair
 from .automatic import advance_failed_checks, automatic_settings, drive
 from .pipeline import ExportRuntime, Pipeline, build_pipeline, export_run, graph_config
 from .sessions import git, prepare, read_json, run_lock, save_json
-from .test_pipeline import FakeSessions, OfflinePipeline
+from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
 from .verification import policy_digest
 from .worktrees import WorktreeError
 
@@ -32,6 +32,10 @@ from .worktrees import WorktreeError
 LANES = ["adapter", "ui", "docs"]
 FAN_OUT = {"verify_adapter", "verify_ui"}
 REASON = "the ui build needs the final text"
+
+
+def setUpModule():
+    isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
 
 
 def repair_policy() -> dict:

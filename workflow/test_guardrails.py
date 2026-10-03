@@ -30,7 +30,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline
+from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
 from .test_portable import Isolated, commit_all, git
 from .verification import validate_schema
 
@@ -39,6 +39,10 @@ FEATURE = "guarded"
 LANES = ["ui", "adapter"]
 BRIEF = "## Goal\n\nChange {lane}.\n\n## Acceptance\n\nThe {lane} check passes.\n\n## Stop\n\nAfter three failed fixes, report blocked.\n"
 DECISIONS = "# Decisions\n\n## Decisions\n\n- Keep the lanes apart: DECISION-MARKER-42.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n"
+
+
+def setUpModule():
+    isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
 
 
 def two_lane_policy() -> dict:
