@@ -1054,16 +1054,25 @@ def blocked_event(state: ReviewStatus, decisions: dict, blockers: list[str], und
     return message
 
 
+def mark_blockers(state: ReviewStatus, decisions: dict) -> list[str]:
+    """Each reviewer whose accepted decision blocks reads `blocked` in its status file, wherever review.json records a block:
+    `accepted` is an approval another reviewer's block overruled, and the viewer's review outcome names the blockers by their
+    status. An approval with an unresolved P0/P1 is contradictory, so it reads blocked too. The blockers in declared order;
+    the caller saves."""
+    blockers = [reviewer_id for reviewer_id in state.ids if reviewer_id in decisions and decision_blocks(decisions[reviewer_id])]
+    for reviewer_id in blockers:
+        state.statuses[reviewer_id]["status"] = "blocked"
+    return blockers
+
+
 def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
     """Persist review.json for any verdict; only unanimous approval without blocking findings passes."""
     review = combined_review(runtime, bundle, digest, state, decisions)
     save_json(runtime.directory / "review.json", review)
-    blockers = [reviewer_id for reviewer_id in state.ids if reviewer_id in decisions and decision_blocks(decisions[reviewer_id])]
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
     if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
-        for reviewer_id in blockers:
-            state.statuses[reviewer_id]["status"] = "blocked"  # An approval with an unresolved P0/P1 is contradictory; the run is blocked.
+        blockers = mark_blockers(state, decisions)
         state.save()
         runtime.event("review", "blocked", blocked_event(state, decisions, blockers, undecided))
         raise RuntimeError(blocked_error(blockers or undecided or late, blockers, decisions))
@@ -1076,9 +1085,24 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
 
 
 def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> None:
-    """A run blocked by one reviewer's deadline or rejected file still records the verdicts it accepted, tagged by reviewer."""
-    if state.decisions and not (runtime.directory / "review.json").exists():
-        save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
+    """A run blocked by one reviewer's deadline or rejected file still records the verdicts it accepted, tagged by reviewer, and
+    each one that blocks reads `blocked` in its status (mark_blockers). No record is written when a recorded session UUID is
+    missing, a worker's or another reviewer's (check_recorded_identity): it would fail the run's own validation, and the run
+    could no longer be exported or shown. The error that ended the review stands, and a note says why there is no record."""
+    if not state.decisions:
+        return
+    mark_blockers(state, state.decisions)
+    state.save()
+    if (runtime.directory / "review.json").exists():
+        return
+    try:
+        check_recorded_identity(bundle, state)
+    except RuntimeError as error:
+        state.combined["identity_error"] = str(error)
+        state.save()
+        runtime.event("review", NOTE, f"The verdicts accepted so far are not recorded (no review.json): {error}")
+        return
+    save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
 
 
 def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
@@ -1135,16 +1159,19 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
 
 
 def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None, sleep=None) -> None:
-    """Every reviewer is the session its launch bound, and its UUID differs from every worker's and every other reviewer's.
+    """Every reviewer is the session its launch bound, and its UUID differs from every worker's and every other reviewer's:
+    the recorded UUIDs (check_recorded_identity), then the live listing (check_listed_identity). An approval needs both."""
+    check_recorded_identity(bundle, state)
+    check_listed_identity(runtime, state, clock=clock, sleep=sleep)
 
-    The recorded UUIDs are checked for every reviewer; the listing only for the reviewers with a verdict: one superseded
-    without a verdict (its session gone during the grace after a block) has nothing to refuse, and its absence must not
-    cost the review its record. A reviewer that wrote its file is idle, which is what an update respawns under a new PID:
-    while the listing shows a bound one in that gap (UpdateGaps) it is listed again every 2 seconds, and a gap that
-    outlasts the grace raises TransientInfraError. A changed or shared UUID and every identity refusal fail at once.
+
+def check_recorded_identity(bundle: dict, state: ReviewStatus) -> None:
+    """Every reviewer's recorded session UUID is there and differs from every worker's and every other reviewer's.
+
+    review.json records these UUIDs, and the run's own validation (check_reviewers: `workflow export`, the viewer) refuses a
+    record with a worker's or a shared one, so this is checked before any record is written, whatever the verdict: a failure
+    refuses the verdict and leaves no review.json, blocked or not.
     """
-    clock = clock or time.time
-    sleep = sleep or time.sleep
     worker_ids = {item["session_id"] for item in bundle["snapshots"].values()}
     seen = set()
     for reviewer_id in state.ids:
@@ -1152,6 +1179,20 @@ def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None
         if not session_id or session_id in worker_ids or session_id in seen:
             raise RuntimeError(f"Reviewer identity changed or is not independent ({reviewer_id}); refusing the verdict")
         seen.add(session_id)
+
+
+def check_listed_identity(runtime, state: ReviewStatus, *, clock=None, sleep=None) -> None:
+    """Each reviewer with a verdict is still listed live as the session its launch bound.
+
+    Only the reviewers with a verdict are listed: one superseded without a verdict (its session gone during the grace after a
+    block) has nothing to refuse, and its absence must not cost the review its record. A reviewer that wrote its file is
+    idle, which is what an update respawns under a new PID: while the listing shows a bound one in that gap (UpdateGaps) it
+    is listed again every 2 seconds, and a gap that outlasts the grace raises TransientInfraError. A missing, stopped or
+    failed row, or one listing another UUID, fails at once. Only an approval depends on it: after a block, _accept_native
+    notes a failure.
+    """
+    clock = clock or time.time
+    sleep = sleep or time.sleep
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
     pending = [reviewer_id for reviewer_id in state.ids if reviewer_id in state.decisions]
     while True:
@@ -1185,15 +1226,21 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     try:
         decisions = wait_reviews(runtime, state)
         waited = True  # From here a failure refuses the whole review (nothing accepted so far is trusted), but a blocked one keeps its record.
+        # The recorded UUIDs first, whatever the verdict: a missing, a worker's or a shared one is refused with no review.json, as
+        # a record holding it would fail the run's own validation (export, the viewer).
+        check_recorded_identity(bundle, state)
         review = combined_review(runtime, bundle, digest, state, decisions)
         if review["verdict"] == "approved":
-            check_independence(runtime, bundle, state)
+            check_listed_identity(runtime, state)
         else:
-            # The identity check only protects an approval. A blocker's or late reviewer's session stopped, killed or gone while
-            # the grace ran must not cost the block its record, or replace its error, or have every resume exit 75 on it.
+            # The listing only protects an approval. A blocker's or late reviewer's session stopped, killed or gone while the
+            # grace ran must not cost the block its record, or replace its error, or have every resume exit 75 on it. The
+            # blockers read blocked from here, so a worktree or evidence check that fails below leaves them so beside the record.
             save_json(runtime.directory / "review.json", review)
+            mark_blockers(state, decisions)
+            state.save()
             try:
-                check_independence(runtime, bundle, state)
+                check_listed_identity(runtime, state)
             except Exception as error:
                 combined["identity_error"] = str(error)
                 state.save()

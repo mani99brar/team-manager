@@ -1391,12 +1391,44 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
         with self.assertRaisesRegex(RuntimeError, r"^Stale or foreign review completion signal \(general\)$"):
             wait_reviews(self.runtime, state, clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
         self.assertEqual((self.status_of(general)["status"], self.status_of(general)["error"]), ("blocked", "Stale or foreign review completion signal (general)"))
-        self.assertEqual((self.status_of(coverage)["status"], self.status_of(coverage)["accepted_decision"]), ("accepted", {"verdict": "blocked", "findings": [self.P0]}))
+        self.assertEqual(self.status_of(coverage)["accepted_decision"], {"verdict": "blocked", "findings": [self.P0]})
         _record_partial(self.runtime, self.bundle, self.digest, state)
         review = read_json(self.root / "review.json")
         self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["verdict"], review["findings"]),
                          ([None, "blocked"], "blocked", [{**self.P0, "reviewer": coverage}]))
+        # Its accepted decision blocks, so coverage reads blocked beside the record, as _decide leaves a blocker: the viewer's
+        # review outcome names it among the blockers. `accepted` is an approval another reviewer's block overruled.
+        self.assertEqual((self.status_of(general)["status"], self.status_of(coverage)["status"]), ("blocked", "blocked"))
         self.assertFalse([event for event in self.events if event[1] == "note" and "blocked the candidate" in event[2]])  # No grace starts.
+
+    def test_a_review_that_ended_early_is_not_recorded_when_a_session_uuid_is_missing_shared_or_a_workers(self):
+        # A refused file or a deadline ends the review before any block, and _record_partial records the verdicts accepted so far,
+        # unless a recorded session UUID is missing, a worker's or another reviewer's (C33 review): that record would fail the
+        # run's own validation, and `workflow export` and the viewer could no longer load the run. The error that ended the
+        # review stands; one note says why there is no record, and a blocker still reads blocked.
+        from .automatic import ReviewStatus, _record_partial
+        general, coverage = self.ids
+        decision = {"verdict": "blocked", "findings": [self.P0]}
+        refused = "Reviewer identity changed or is not independent (coverage); refusing the verdict"
+        for case, session in (("missing", None), ("shared", self.uuid(general)), ("a worker's", "ui-session")):
+            with self.subTest(coverage_session=case):
+                self.events.clear()
+                state = ReviewStatus.load(self.runtime)
+                state.decisions[general] = decision
+                state.statuses[general].update(status="accepted", accepted_decision=decision)
+                state.statuses[coverage]["session_id"] = session
+                _record_partial(self.runtime, self.bundle, self.digest, state)
+                self.assertFalse((self.root / "review.json").exists())
+                self.assertEqual(read_json(self.root / "automatic-review.json")["identity_error"], refused)
+                self.assertEqual(self.events, [("review", "note", f"The verdicts accepted so far are not recorded (no review.json): {refused}")])
+                self.assertEqual(self.status_of(general)["status"], "blocked")
+        # Every recorded UUID there and distinct: the record is written.
+        state = ReviewStatus.load(self.runtime)
+        state.decisions[general] = decision
+        state.statuses[coverage]["session_id"] = self.uuid(coverage)
+        _record_partial(self.runtime, self.bundle, self.digest, state)
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"]) for entry in read_json(self.root / "review.json")["reviewers"]],
+                         [(general, "blocked"), (coverage, None)])
 
     def test_the_identity_check_lists_only_the_reviewers_with_a_verdict(self):
         # A reviewer superseded during the grace (its session gone) has no verdict to refuse, so its listing is not checked; its
@@ -1717,15 +1749,19 @@ class PrintCollectionTests(unittest.TestCase):
                           "security": (60, {"verdict": "approved", "findings": []})})
         statuses = self.state.statuses
         self.assertEqual((statuses["general"]["status"], statuses["general"]["error"], "accepted_decision" in statuses["general"]), ("blocked", failed, False))
-        self.assertEqual((statuses["coverage"]["status"], statuses["coverage"]["accepted_decision"], "late" in statuses["coverage"]),
-                         ("accepted", {"verdict": "blocked", "findings": [self.P0]}, False))
+        self.assertEqual((statuses["coverage"]["accepted_decision"], "late" in statuses["coverage"]), ({"verdict": "blocked", "findings": [self.P0]}, False))
         self.assertEqual((statuses["security"]["accepted_decision"]["verdict"], statuses["security"]["late"]), ("approved", True))  # Read after the block.
         self.assertEqual((self.now, self.terminated), (60, []))
         self.assertEqual(self.events, [("review", "note", "Reviewer security's late verdict recorded: approved, no open P0/P1")])
-        _record_partial(self.runtime, {"run_id": "test", "candidate_commit": "c" * 40}, "b" * 64, self.state)
+        bundle = {"run_id": "test", "candidate_commit": "c" * 40, "snapshots": {"ui": {"session_id": "ui-session"}}}
+        _record_partial(self.runtime, bundle, "b" * 64, self.state)
         review = read_json(self.root / "review.json")
         self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["verdict"], review["findings"]),
                          ([None, "blocked", "approved"], "blocked", [{**self.P0, "reviewer": "coverage"}]))
+        # coverage's accepted decision blocks: it reads blocked beside the record, as _decide leaves a blocker, so the viewer's
+        # review outcome names it; security's late approval stays accepted.
+        self.assertEqual([read_json(self.root / f"automatic-{review_node(reviewer_id)}.json")["status"] for reviewer_id in ("general", "coverage", "security")],
+                         ["blocked", "blocked", "accepted"])
 
 
 class GraphFixture(unittest.TestCase):
@@ -3038,6 +3074,27 @@ class ParallelReviewerScenarios(GraphFixture):
                     drive(f.runtime)  # Nothing is relaunched, and the record stands.
                 self.assertEqual((self.reviewer_launches(), read_json(f.directory / "review.json")["verdict"]), (2, "blocked"))
 
+    def test_a_review_worktree_changed_after_a_block_keeps_the_record_and_its_blocker_reads_blocked(self):
+        # coverage blocks with a P0, then the review worktree is found changed. Once the review is blocked, review.json is written
+        # before the worktree and evidence checks, so the record stands beside that error; coverage reads blocked in its status file,
+        # as _decide leaves a blocker, never accepted (an approval another reviewer's block overruled), so the viewer names it.
+        f = self.fixture
+        p0 = {"severity": "P0", "message": "Forged provenance is marked verified", "disposition": "open", "worker": "ui", "requirement": None}
+        f.sessions.reviewer_verdicts = {"coverage": "blocked"}
+        f.sessions.reviewer_findings = {"general": self.GENERAL, "coverage": [p0]}
+        f.sessions.reviewer_after_file = lambda: (f.directory / "review-worktree" / "ui.txt").write_text("edited during review")
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual((self.combined()["status"], self.combined()["error"]), ("blocked", "Reviewer worktree changed"))
+        self.assertEqual((read_json(f.directory / "review.json")["verdict"], self.review_entries()),
+                         ("blocked", [("general", "approved", self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))]))
+        self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("accepted", "blocked"))
+        exported = read_json(f.directory / "run-state.json")
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"]) for entry in exported["review"]["reviewers"]],
+                         [("general", "approved", "accepted"), ("coverage", "blocked", "blocked")])
+        for reviewer_id in self.ids:
+            self.assertTrue(read_json(self.file(reviewer_id, "stop.json"))["stopped"])
+
     def test_p1_anywhere(self):
         f = self.fixture
         open_p1 = {"severity": "P1", "message": "Unresolved defect", "disposition": "open", "worker": "adapter", "requirement": None}
@@ -3099,15 +3156,29 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertEqual(self.reviewer_launches(), 2)
 
     def test_shared_identity(self):
-        f = self.fixture
-        f.sessions.reviewer_session_id = {"coverage": f.sessions.native_id("review-general")}  # Two receipts, one session UUID.
-        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
-            drive(f.runtime)
-        self.assertIn("Reviewer identity changed or is not independent (coverage)", self.combined()["error"])
-        self.assertEqual(read_json(f.directory / "review-general.interactive.json")["session_id"], read_json(f.directory / "review-coverage.interactive.json")["session_id"])
-        self.assertFalse((f.directory / "review.json").exists())
-        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
-        self.assertEqual(self.reviewer_launches(), 2)
+        # Two receipts bound to one session UUID, or a reviewer bound to a worker's: the recorded UUIDs are checked before
+        # review.json is written, whatever the verdict, and refuse it with no review.json. A block changes nothing here (only
+        # the live listing of a session is noted after a block): a record with a shared or a worker's UUID fails the run's own
+        # validation, so `workflow export` and the viewer could no longer load the run.
+        from .pipeline import ExportRuntime, export_run
+        for bound, blocks in (("general", None), ("general", "coverage"), ("ui", "coverage")):
+            with self.subTest(coverage_bound_to=bound, blocks=blocks):
+                if (bound, blocks) != ("general", None):
+                    self.setUp()  # A fresh run.
+                f = self.fixture
+                shared = f.sessions.native_id("review-general") if bound == "general" else f.plan["nodes"][bound]["session_id"]
+                f.sessions.reviewer_session_id = {"coverage": shared}  # Two receipts, one session UUID; or a worker's (the bundle has it).
+                f.sessions.reviewer_verdicts = {blocks: "blocked"} if blocks else {}
+                with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+                    drive(f.runtime)
+                self.assertEqual(self.combined()["error"], "Reviewer identity changed or is not independent (coverage); refusing the verdict")
+                self.assertEqual(read_json(f.directory / "review-coverage.interactive.json")["session_id"], shared)
+                self.assertFalse((f.directory / "review.json").exists())
+                self.assertNotIn("identity_error", self.combined())
+                self.assertIsNone(read_json(f.directory / "run-state.json")["review"])
+                self.assertIsNone(export_run(ExportRuntime(f.directory))["review"])  # The run still loads.
+                self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+                self.assertEqual(self.reviewer_launches(), 2)
 
     def test_interrupted_launch(self):
         f = self.fixture
