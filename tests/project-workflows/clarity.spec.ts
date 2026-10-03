@@ -316,7 +316,7 @@ test(`[scenario:findings-by-reviewer] A two-reviewer run opens with a filter per
   await page.goto(clarityRunUrl(RUN_FILES, 'review'))
   await expect(findings(page)).toHaveAttribute('data-filters', 'all')
 
-  // One toggle and one reviewer card per reviewer in declared order, with its id, own verdict, severity counts and finding count.
+  // One toggle and one reviewer card per reviewer in declared order, with its id, its verdict (the controller's, derived from its findings), severity counts and finding count.
   await expect(reviewerToggles(page)).toHaveCount(2)
   expect(await attributeList(reviewerToggles(page), 'data-filter')).toEqual(TWO_REVIEWERS.map(reviewer => `reviewer:${reviewer}`))
   expect(await attributeList(page.getByTestId('reviewer-entry'), 'data-reviewer')).toEqual([...TWO_REVIEWERS])

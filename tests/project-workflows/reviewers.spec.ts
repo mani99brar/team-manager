@@ -54,7 +54,7 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
   await expect(runList.locator(`[data-run-id="${RUN_REVIEWER_BLOCKED}"]`)).toHaveAttribute('data-status', 'failed')
   await expect(runList.locator(`[data-run-id="${RUN_LEGACY_REVIEWER}"]`)).toHaveAttribute('data-status', 'succeeded')
 
-  // ---- Both reviewers approved: the combined verdict is the headline and the strip lists each reviewer's own verdict. ----
+  // ---- Both reviewers approved: the combined verdict is the headline and the strip lists the controller's verdict for each reviewer. ----
   await page.goto(reviewersRunUrl(RUN_TWO_REVIEWERS, 'review'))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(reviewPanel(page)).toHaveAttribute('data-reviewer-count', '2')
