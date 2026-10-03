@@ -691,9 +691,11 @@ class Pipeline:
         return candidate
 
     def record_finished(self, commit: str) -> None:
-        """The attention record of a run that reached its end (never raises): merging into main and pushing are the operator's."""
-        attention(self.directory, "finished", f"{self.plan['source_branch']} fast-forwarded to {commit}: the run is finished. "
-                                              "Nothing was pushed or merged into main.", node="integrate")
+        """The attention record of a run that reached its end (never raises): pushing is the operator's, and so is merging the
+        branch, unless the run's branch was main itself."""
+        branch = self.plan["source_branch"]
+        attention(self.directory, "finished", f"{branch} fast-forwarded to {commit}: the run is finished. "
+                                              f"Nothing was pushed{untouched_main(self.plan.get('repository'), branch)}.", node="integrate")
 
 
 class ExportRuntime:
@@ -944,20 +946,60 @@ def finish_policy(automatic: dict | None, branch: str) -> str:
     return f"manual: you freeze the workers, import each review and approve the fast-forward of {branch}; nothing is pushed"
 
 
+def untouched_main(repository, branch: str) -> str:
+    """`, and main is untouched` when the source repository has a branch named main other than the run's: approve, and an
+    automatic run's controller, fast-forward the run's own branch only. Empty for a run on main itself (a manual run may
+    be prepared on any named branch) and for a repository without main, whose main line has another name."""
+    if branch == "main":
+        return ""
+    try:
+        found = subprocess.run(["git", "-C", str(repository), "rev-parse", "--verify", "-q", "refs/heads/main"], capture_output=True).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        found = False
+    return ", and main is untouched" if found else ""
+
+
+def challenge_step(directory: Path, plan: dict) -> str | None:
+    """What the design challenge waits for before any worker starts, as `resume` acts on it; None when it waits for nothing.
+
+    The override is offered only for a paused attempt that read what the plan pins: `resume` refuses it otherwise, and a
+    bare `resume` reruns the challenge with no edit (guardrails.unchanged_since). A job still running under `start` or
+    `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies.
+    """
+    from .guardrails import REVISION_INTENT, load_challenge, resume_command, stale_pins
+    record = load_challenge(directory)
+    running = directory / "challenge.running.json"
+    started = read_json(running).get("attempt", 0) if running.exists() else 0
+    rerun = f"if no start or resume is running, {resume_command(directory)} reruns it (no edit needed)"
+    if (directory / REVISION_INTENT).exists():
+        return (f"an interrupted resume has not finished moving the run to the revised feature files: if no resume is running, "
+                f"{resume_command(directory)} finishes it and reruns the design challenge")
+    if started > (record["attempt"] if record else 0):
+        return f"design challenge attempt {started} was started and not decided: {rerun}"
+    if record is None or record.get("status") != "paused":
+        return None
+    if stale_pins(directory, plan, record):  # A rerun re-pinned the files, then failed before its job (its checkout, a kill).
+        return f"design challenge attempt {record['attempt']} read other feature files than the plan now pins, and no later attempt was decided: {rerun}"
+    return (f"design challenge attempt {record['attempt']} paused the run: edit the task files, decisions.md or the PRD, then "
+            f"{resume_command(directory)}, or accept it with {resume_command(directory, accept=True)}")
+
+
 def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
-    """`status`'s next step: the run's finish policy from where its last graph step left it, with the command that goes on."""
-    from .guardrails import resume_command
+    """`status`'s next step: the run's finish policy from where its last graph step left it, with the command that goes on.
+    Without run-state.json it says so rather than guess: `export` writes that file from the run's checkpoint."""
     branch = plan.get("source_branch") or "the source branch"
     run = lambda action: f"{sys.executable} -m workflow {action} {shlex.quote(str(directory))}"
-    automatic, values = plan.get("automatic"), (exported or {}).get("values") or {}
-    gates = {item.get("kind"): item for task in (exported or {}).get("tasks") or [] for item in task.get("interrupts") or [] if isinstance(item, dict)}
-    if values.get("integrated_commit") and not (exported or {}).get("next"):
-        return f"none: {branch} was fast-forwarded to {values['integrated_commit']}; nothing was pushed or merged into main"
-    challenge = (directory / "challenge.json").exists() and read_json(directory / "challenge.json").get("status")
-    if not values and (challenge == "paused" or (directory / "challenge.running.json").exists()):
-        return (f"the design challenge has not passed and no worker started: edit the feature files, then {resume_command(directory)}, "
-                f"or accept it with {resume_command(directory, accept=True)}. Then: {finish_policy(automatic, branch)}")
+    automatic = plan.get("automatic")
+    if exported is None:
+        return f"unknown until `export` writes run-state.json: {run('export')}, then status again. {finish_policy(automatic, branch)}"
+    values, tasks = exported.get("values") or {}, exported.get("tasks") or []
+    gates = {item.get("kind"): item for task in tasks for item in task.get("interrupts") or [] if isinstance(item, dict)}
+    if values.get("integrated_commit") and not exported.get("next"):
+        return f"none: {branch} was fast-forwarded to {values['integrated_commit']}; nothing was pushed{untouched_main(plan.get('repository'), branch)}"
     if not values:
+        waiting = challenge_step(directory, plan)
+        if waiting:
+            return f"{waiting}. Then: {finish_policy(automatic, branch)}"
         supervise = f", then supervise them: {run('automatic')} --live" if automatic else ""
         return f"no worker started yet: {run('start')} --live{supervise}. Then: {finish_policy(automatic, branch)}"
     if automatic:
@@ -971,7 +1013,12 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
     if "worker_handoff" in gates:
         handoffs = " ".join(f"--handoff {lane}=<handoff.json>" for lane in plan_workers(plan))
         return f"freeze the workers with their handoffs: {run('freeze')} {handoffs}; then import each review and approve the fast-forward of {branch}"
-    return f"a step failed or was interrupted (see errors): RUNBOOK \"Status, failures and recovery\" says which `retry` or `reconcile` goes on. {finish_policy(None, branch)}"
+    recovery = f"RUNBOOK \"Status, failures and recovery\" says which `retry` or `reconcile` goes on. {finish_policy(None, branch)}"
+    if any(task.get("error") for task in tasks):
+        return f"a step failed (see errors): {recovery}"
+    # No gate waits and no step failed: a freeze, review, approve or retry is running that step now, or was stopped in it.
+    steps = ", ".join(exported.get("next") or []) or "the next step"
+    return f"{steps}: running now, or stopped mid-step (no step recorded an error). If no workflow command is running on this run, {recovery}"
 
 
 def complete_events(directory: Path) -> list[dict]:

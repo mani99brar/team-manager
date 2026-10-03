@@ -990,12 +990,16 @@ class RecordTests(unittest.TestCase):
 
     def test_a_finished_run_records_attention_once(self):
         f = self.fixture
-        self.pin()
+        # The run's branch beside the repository's main branch, which approve never touches.
+        git(f.repo, "branch", "-m", "main")
+        git(f.repo, "checkout", "-q", "-b", "feature/record")
+        self.pin(source_branch="feature/record")
         with self.graph() as graph:
             decision = self.review_gate(graph)
             graph.invoke(Command(resume=decision), f.config)
             commit = graph.invoke(Command(resume={"approve": decision["bundle_sha256"]}), f.config)["integrated_commit"]
-        text = f"{f.plan['source_branch']} fast-forwarded to {commit}: the run is finished. Nothing was pushed or merged into main."
+        self.assertEqual((git(f.repo, "rev-parse", "main"), git(f.repo, "rev-parse", "feature/record")), (f.plan["base_commit"], commit))
+        text = f"feature/record fast-forwarded to {commit}: the run is finished. Nothing was pushed, and main is untouched."
         [line] = [json.loads(line) for line in self.feed.read_text().splitlines()]
         self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
                          {"run_id": "run", "run_dir": str(f.directory.resolve()), "kind": "finished", "node": "integrate", "text": text})
@@ -1051,7 +1055,87 @@ class RecordTests(unittest.TestCase):
             commit = graph.invoke(Command(resume={"approve": decision["bundle_sha256"]}), f.config)["integrated_commit"]
             report(f.runtime, graph.get_state(f.config))
         printed, _ = self.status()
-        self.assertEqual(printed["next_step"], f"none: {manual['source_branch']} was fast-forwarded to {commit}; nothing was pushed or merged into main")
+        # The fixture's repository has no main branch (its main line is master): the line names none.
+        self.assertEqual(printed["next_step"], f"none: {manual['source_branch']} was fast-forwarded to {commit}; nothing was pushed")
+
+    def test_a_finished_run_on_main_claims_nothing_about_main(self):
+        # A manual run may be prepared on main itself: approve then fast-forwards main, so neither the finished record nor
+        # status may say that main is untouched. Beside a main branch they say so; without one they name none.
+        from .pipeline import next_step
+        f = self.fixture
+        commit = "c" * 40
+        finished = {"values": {"integrated_commit": commit}, "next": [], "tasks": []}
+        git(f.repo, "branch", "-m", "main")
+        plan = {**f.plan, "source_branch": "main"}
+        Pipeline.record_finished(SimpleNamespace(directory=f.directory, plan=plan), commit)
+        self.assertEqual(read_json(f.directory / "attention.json")["text"], f"main fast-forwarded to {commit}: the run is finished. Nothing was pushed.")
+        self.assertEqual(next_step(f.directory, plan, finished), f"none: main was fast-forwarded to {commit}; nothing was pushed")
+        git(f.repo, "checkout", "-q", "-b", "feature/record")
+        self.assertEqual(next_step(f.directory, {**plan, "source_branch": "feature/record"}, finished),
+                         f"none: feature/record was fast-forwarded to {commit}; nothing was pushed, and main is untouched")
+        git(f.repo, "branch", "-m", "main", "master")
+        self.assertEqual(next_step(f.directory, {**plan, "source_branch": "master"}, finished), f"none: master was fast-forwarded to {commit}; nothing was pushed")
+
+    def test_status_names_what_goes_on_from_an_undecided_challenge_a_step_in_progress_or_no_export(self):
+        from .guardrails import REVISION_INTENT, pinned_digests
+        from .pipeline import next_step
+        f = self.fixture
+        self.pin()
+        run = lambda action: f"{sys.executable} -m workflow {action} {f.directory}"
+        # (c) No run-state.json: a run from before the export, or one whose file is gone. What goes on is unknown until export.
+        self.assertFalse((f.directory / "run-state.json").exists())
+        printed, _ = self.status()
+        self.assertEqual(printed["next_step"], f"unknown until `export` writes run-state.json: {run('export')}, then status again. "
+                                               f"manual: you freeze the workers, import each review and approve the fast-forward of "
+                                               f"{f.plan['source_branch']}; nothing is pushed")
+        code, _, err = pipeline_cli("export", str(f.directory))
+        self.assertEqual(code, 0, err)
+        printed, _ = self.status()
+        self.assertTrue(printed["next_step"].startswith(f"no worker started yet: {run('start')} --live. Then: "), printed["next_step"])
+        # (a) A challenge job started and never decided (Ctrl-C during it, or start or resume still running it): resume reruns
+        # it with no edit, and the override is refused without a paused record, so it is never offered.
+        running = f.directory / "challenge.running.json"
+        save_json(running, {"attempt": 1, "session_id": "00000000-0000-4000-8000-000000000001", "started_at": now()})
+        rerun = f"if no start or resume is running, {run('resume')} reruns it (no edit needed). Then: "
+        printed, _ = self.status()
+        self.assertTrue(printed["next_step"].startswith(f"design challenge attempt 1 was started and not decided: {rerun}"), printed["next_step"])
+        self.assertNotIn("--accept-challenge", printed["next_step"])
+        # Paused: an edit then resume, or the override.
+        running.unlink()
+        paused = {"status": "paused", "attempt": 1, "pinned": pinned_digests(f.directory, f.plan)}
+        save_json(f.directory / "challenge.json", paused)
+        printed, _ = self.status()
+        self.assertTrue(printed["next_step"].startswith(
+            f"design challenge attempt 1 paused the run: edit the task files, decisions.md or the PRD, then {run('resume')}, "
+            f"or accept it with {run('resume')} --accept-challenge \"<reason>\". Then: "), printed["next_step"])
+        # A rerun started after the pause and never decided; a resume that stopped before it pinned the revised files; one that
+        # pinned them and failed before its job (its checkout): each is rerun by resume, and the override is refused.
+        for state, said in ((lambda: save_json(running, {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()}),
+                             f"design challenge attempt 2 was started and not decided: {rerun}"),
+                            (lambda: save_json(f.directory / REVISION_INTENT, {"base_commit": f.plan["base_commit"], "paths": []}),
+                             f"an interrupted resume has not finished moving the run to the revised feature files: if no resume is running, "
+                             f"{run('resume')} finishes it and reruns the design challenge. Then: "),
+                            (lambda: save_json(f.directory / "challenge.json", {**paused, "pinned": {**paused["pinned"], "tasks_sha256": "0" * 64}}),
+                             f"design challenge attempt 1 read other feature files than the plan now pins, and no later attempt was decided: {rerun}")):
+            with self.subTest(said.split(":")[0]):
+                state()
+                printed, _ = self.status()
+                self.assertTrue(printed["next_step"].startswith(said), printed["next_step"])
+                self.assertNotIn("--accept-challenge", printed["next_step"])
+                for path in (running, f.directory / REVISION_INTENT):
+                    path.unlink(missing_ok=True)
+                save_json(f.directory / "challenge.json", paused)
+        # (b) A manual step running now (freeze, review, approve, retry), or stopped mid-step: no gate waits and no step recorded
+        # an error, so it is not called failed.
+        exported = {"values": {"lanes": {}}, "next": ["verify_ui", "verify_adapter"],
+                    "tasks": [{"node_id": node, "error": None, "interrupts": [], "result": None} for node in ("verify_ui", "verify_adapter")]}
+        step = next_step(f.directory, f.plan, exported)
+        self.assertTrue(step.startswith("verify_ui, verify_adapter: running now, or stopped mid-step (no step recorded an error). If no workflow "
+                                        "command is running on this run, RUNBOOK \"Status, failures and recovery\" says which `retry` or "
+                                        "`reconcile` goes on."), step)
+        self.assertNotIn("failed", step)
+        exported["tasks"][0]["error"] = "RuntimeError('ui verification blocked; see packet.json')"
+        self.assertTrue(next_step(f.directory, f.plan, exported).startswith("a step failed (see errors): RUNBOOK"))
 
     def test_export_refreshes_report_html(self):
         f = self.fixture
