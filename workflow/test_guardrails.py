@@ -450,6 +450,8 @@ class LaneNamedLikeARunFile(GuardedFeature):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
         self.challenge_says([concern("P2", "Minor")])
+        task = self.folder / "plan-task.md"  # resume reruns the challenge after an edit, and commits it.
+        task.write_text(task.read_text() + "\nOnly the plan lane's files.\n")
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 0, output)
         self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
@@ -602,12 +604,19 @@ class ChallengePauses(GuardedFeature):
         self.assertEqual(code, 1)
         self.assertIn("paused this run", output)
         self.assertEqual(self.launches(directory), ["challenge"])
-        # A resume whose rerun still finds a P0 stays paused, as attempt 2, and launches nothing.
+        # After an edit, a resume whose rerun still finds a P0 stays paused, as attempt 2, and launches nothing. The rerun was
+        # given attempt 1's P1 and the edited file.
+        adapter_task = self.folder / "adapter-task.md"
+        adapter_task.write_text(adapter_task.read_text() + "\nKeep the adapter's interface.\n")
         self.challenge_says([concern("P0", "The lanes cannot merge")])
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), (0, "paused", 2))
         self.assertIn("P0 [assumption] The lanes cannot merge", output)
         self.assertEqual(self.launches(directory), ["challenge", "challenge"])
+        rerun = self.challenge_calls()[-1]["prompt"]
+        self.assertIn("\n- P1 [assumption] The lanes overlap\n", rerun)
+        self.assertNotIn("Minor", rerun)  # Only the P0/P1 concerns.
+        self.assertIn(f"Changed since then: the task of lane adapter (features/{FEATURE}/adapter-task.md).", rerun)
         # The viewer shows attempt 2's concerns, not the ones attempt 1 raised.
         exported = read_json(directory / "run-state.json")["inputs"]["challenge"]
         self.assertEqual((exported["attempts"], [item["message"] for item in exported["concerns"]]), (2, ["The lanes cannot merge"]))
@@ -695,7 +704,9 @@ class ChallengeResumeSupervises(GuardedFeature):
         self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
         supervised = []
         with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):
-            # Paused again: nothing launched, nothing supervised.
+            # After an edit, paused again: nothing launched, nothing supervised.
+            task = self.folder / "ui-task.md"
+            task.write_text(task.read_text() + "\nOnly ui.txt.\n")
             output, code = self.cli(resume_main, [str(directory)])
             self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
             self.assertEqual(supervised, [])
@@ -994,6 +1005,83 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], git(self.repo, "rev-parse", "HEAD")), ("accepted", base))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+    def test_a_bare_resume_on_unchanged_feature_files_is_refused_and_changes_nothing(self):
+        # A rerun on the files attempt 1 read would only sample the same challenge again: a paused P1 could be re-rolled away.
+        directory, base = self.paused("unchanged-001")
+        names = ("plan.json", "challenge.json", "events.jsonl", "run-state.json")
+        before = {name: (directory / name).read_bytes() for name in names}
+        task = self.folder / "ui-task.md"
+        written = task.read_text()
+        for edit in ("none", "reverted"):
+            with self.subTest(edit):
+                if edit == "reverted":  # An edit undone before resume is no change.
+                    self.edit_task()
+                    task.write_text(written)
+                output, code = self.cli(resume_main, [str(directory)])
+                self.assertEqual(code, 1, output)
+                self.assertIn("Blocked: Design challenge attempt 1 paused this run, and nothing it read has changed since", output)
+                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory}\n", output)
+                self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --accept-challenge "<reason>"\n', output)
+                self.assertIn("A concern outside the feature files (the code at the base, the policy) needs a new run.", output)
+                self.assertNotIn("Report:", output)
+                self.assertEqual({name: (directory / name).read_bytes() for name in names}, before)
+                self.assertFalse((directory / "challenge.running.json").exists() or (directory / "challenge-revision.json").exists())
+                self.assertEqual((git(self.repo, "rev-parse", "HEAD"), git(self.repo, "status", "--porcelain")), (base, ""))
+                self.assertEqual((self.launches(directory), len(self.challenge_calls())), (["challenge"], 1))
+        # After an edit the same command reruns the challenge as attempt 2. Its prompt lists attempt 1's P0/P1 concerns and the
+        # changed file, and asks for each again unless the change resolves it.
+        self.edit_task()
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+        rerun = self.challenge_calls()[-1]["prompt"]
+        self.assertIn("\n\n=== Design challenge attempt 1 ===\nIt paused the run on these concerns:\n- P1 [assumption] The lanes overlap\n"
+                      f"Changed since then: the task of lane ui (features/{FEATURE}/ui-task.md). Raise each of these concerns again, at its "
+                      "severity, unless the change resolves it; challenge the rest of the plan as before.", rerun)
+        self.assertNotIn("Design challenge attempt", self.challenge_calls()[0]["prompt"])
+
+    def test_a_rerun_whose_challenge_checkout_failed_after_its_re_pin_is_rerun_by_the_next_bare_resume(self):
+        # The rerun committed and re-pinned the edit, then failed before its job: the checkout could not be made (or the process
+        # was killed). No running file, intent, unused revision or edited file is left, but attempt 1 read other files than
+        # the plan pins now, so the override is refused and a bare resume must rerun, not be refused too.
+        directory, base = self.paused("rerun-checkout-001")
+        self.edit_task()
+        with patch("workflow.guardrails.challenge_worktree", side_effect=RuntimeError("Challenge worktree could not be created")):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: Challenge worktree could not be created", output)
+        revision = git(self.repo, "rev-parse", "HEAD")
+        self.assertNotEqual(revision, base)
+        self.assert_moved(directory, revision)
+        self.assertFalse((directory / "challenge.running.json").exists() or (directory / "challenge-revision.json").exists())
+        self.assertEqual((git(self.repo, "status", "--porcelain"), read_json(directory / "challenge.json")["attempt"]), ("", 1))
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Design challenge attempt 1 read other feature files than the plan now pins (tasks)", output)
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+        # Attempt 1 read the task before the edit: the rerun names it, though nothing was left to commit this time.
+        self.assertIn(f"Changed since then: the task of lane ui (features/{FEATURE}/ui-task.md).", self.challenge_calls()[-1]["prompt"])
+
+    def test_a_bare_resume_reruns_when_a_later_attempt_was_started_and_never_decided(self):
+        # A rerun on these same files started a job that never decided (a controller before this rule, then a kill or a deadline):
+        # challenge.running.json names attempt 2, newer than the paused attempt 1, so the bare resume reruns it as attempt 3.
+        directory, _ = self.paused("undecided-001")
+        save_json(directory / "challenge.running.json", {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()})
+        self.challenge_says([concern("P1", "The lanes still overlap")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), (0, "paused", 3), output)
+        self.assertIn("\n- P1 [assumption] The lanes overlap\nNone of the feature files changed since then. Raise each of these concerns again, "
+                      "at its severity; challenge the rest of the plan as before.", self.challenge_calls()[-1]["prompt"])
+        # Paused by attempt 3 on unchanged files: now a bare resume is refused.
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Design challenge attempt 3 paused this run, and nothing it read has changed since", output)
+        self.assertEqual(len(self.challenge_calls()), 2)
 
 
 class OverrideFromAnotherController(GuardedFeature):

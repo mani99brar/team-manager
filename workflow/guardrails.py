@@ -7,7 +7,8 @@
   starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
   A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
-  that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override.
+  that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override. A `resume` with
+  nothing edited since the paused attempt is refused: it would only re-roll the same challenge.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
   in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane, only while that pane
   shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
@@ -230,6 +231,11 @@ def pinned_digests(directory: Path, plan: dict) -> dict:
             "prd_sha256": digest_bytes((directory / prd["copy"]).read_bytes()) if prd else None}
 
 
+def stale_pins(directory: Path, plan: dict, record: dict) -> list[str]:
+    """What the plan pins otherwise than `record`'s attempt read it, by that attempt's digests: `tasks`, `decisions`, `prd`."""
+    return [key.removesuffix("_sha256") for key, value in pinned_digests(directory, plan).items() if record["pinned"].get(key) != value]
+
+
 def challenge_schema() -> dict:
     return json.loads(CHALLENGE_SCHEMA.read_text())
 
@@ -248,7 +254,29 @@ def validate_output(value) -> None:
     Draft202012Validator({"$defs": challenge_schema()["$defs"], "$ref": "#/$defs/output"}).validate(value)
 
 
+def task_block(plan: dict, node: str) -> str:
+    """A lane's pinned task as the challenge prompt shows it; another block (`\\n\\n=== `) always follows it."""
+    return f"\n\n=== Task of lane {node} ===\n{plan['nodes'][node]['task']}"
+
+
+def changed_since(directory: Path, plan: dict, record: dict) -> list[str]:
+    """The pinned feature files the plan holds otherwise than `record`'s attempt read them, named for the rerun's prompt:
+    decisions.md and the PRD by that attempt's digests, each lane's task when that attempt's own prompt
+    (challenge-<n>.prompt.txt) does not show it as the plan pins it now. Repository-relative where they lie in the target."""
+    stale = stale_pins(directory, plan, record)
+    prompt = directory / f"challenge-{record['attempt']}.prompt.txt"
+    read = prompt.read_text() if "tasks" in stale and prompt.exists() else ""
+    files = [(f"the task of lane {node}", plan["task_files"][node]) for node in plan_workers(plan)
+             if "tasks" in stale and task_block(plan, node) + "\n\n=== " not in read]
+    files += [("decisions.md", plan["decisions"]["path"])] if "decisions" in stale else []
+    files += [("the PRD", plan["prd"]["path"])] if "prd" in stale else []
+    repo = Path(plan["repository"])
+    return [f"{name} ({Path(path).relative_to(repo).as_posix() if Path(path).is_relative_to(repo) else path})" for name, path in files]
+
+
 def challenge_prompt(directory: Path, plan: dict) -> str:
+    """The job's prompt. A rerun after a paused attempt (attempt 2 on) also gets that attempt's P0/P1 concerns and the
+    feature files changed since, and is asked to raise each concern again unless the change resolves it."""
     prd = plan.get("prd")
     parts = ["You are the design challenge of a workflow run: a skeptical senior engineer who reads the plan before any worker "
              "starts. You only read; you change nothing and launch nothing. Your working directory is the repository at the "
@@ -265,8 +293,16 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
     else:
         parts.append("\n\nThe feature names no PRD; challenge the tasks and decisions below.")
     for node in plan_workers(plan):
-        parts.append(f"\n\n=== Task of lane {node} ===\n{plan['nodes'][node]['task']}")
+        parts.append(task_block(plan, node))
     parts.append(f"\n\n=== decisions.md ===\n{decisions_text(plan) or ''}")
+    previous = load_challenge(directory)
+    if previous is not None and previous["status"] == "paused":
+        concerns = "".join(f"- {item['severity']} [{item['kind']}] {item['message']}\n" for item in previous["concerns"] if item["severity"] in BLOCKING)
+        changed = changed_since(directory, plan, previous)
+        ask = (f"Changed since then: {'; '.join(changed)}. Raise each of these concerns again, at its severity, unless the change resolves it"
+               if changed else "None of the feature files changed since then. Raise each of these concerns again, at its severity")
+        parts.append(f"\n\n=== Design challenge attempt {previous['attempt']} ===\nIt paused the run on these concerns:\n{concerns}{ask}; "
+                     "challenge the rest of the plan as before.")
     return "".join(parts)
 
 
@@ -613,20 +649,41 @@ def changed_pins(plan: dict) -> list[Path]:
     return changed
 
 
-def refuse_unused_edits(directory: Path, plan: dict) -> None:
-    """An override launches the workers on the plan's pinned copies at its base; an unfinished resume, an unused revision or a changed pin refuses it."""
+def unused_edits(directory: Path, plan: dict) -> str | None:
+    """Why the plan's pinned copies at its base are not all a rerun would read, or None: an unfinished resume
+    (REVISION_INTENT), revision commits it made that the run does not use yet, or pinned feature files edited since (in
+    the source checkout, committed by hand, or removed). The reason says how to go on instead of an override."""
     repo = Path(plan["repository"])
     if (directory / REVISION_INTENT).exists():
-        raise ValueError(f"{UNFINISHED_REVISION}; rerun resume without --accept-challenge to finish it")
+        return f"{UNFINISHED_REVISION}; rerun resume without --accept-challenge to finish it"
     pending = [commit for commit in commits_after(repo, plan["base_commit"]) or [] if is_revision(repo, commit, plan)]
     if pending:
-        raise ValueError(f"An interrupted resume committed revised feature files ({', '.join(pending)}) that this run does not use yet; "
-                         "rerun resume without --accept-challenge to finish moving the run to them")
+        return (f"An interrupted resume committed revised feature files ({', '.join(pending)}) that this run does not use yet; "
+                "rerun resume without --accept-challenge to finish moving the run to them")
     edited = {path for path in dirty_paths(repo) if path in pinned_paths(plan)}
     edited |= {path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path) for path in changed_pins(plan)}
     if edited:
-        raise ValueError(f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers "
-                         "without them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
+        return (f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers "
+                "without them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
+    return None
+
+
+def refuse_unused_edits(directory: Path, plan: dict) -> None:
+    """An override launches the workers on the plan's pinned copies at its base; an unfinished resume, an unused revision or a changed pin refuses it."""
+    reason = unused_edits(directory, plan)
+    if reason:
+        raise ValueError(reason)
+
+
+def unchanged_since(directory: Path, plan: dict, record: dict) -> bool:
+    """Whether a rerun would read exactly what `record`'s attempt read, and so only sample the same challenge again: the
+    plan pins what that attempt read (its digests), no later attempt was started (a newer challenge.running.json), and
+    no edit waits to be committed, moved to or re-pinned (unused_edits). A rerun that failed after its re-pin, its job
+    failed, its checkout refused or its process killed, leaves other digests or a newer running file: it is rerun.
+    `resume` refuses a bare rerun of a paused attempt while this holds."""
+    running = directory / "challenge.running.json"
+    return (not stale_pins(directory, plan, record) and not (running.exists() and read_json(running)["attempt"] > record["attempt"])
+            and unused_edits(directory, plan) is None)
 
 
 def launched_workers(directory: Path, plan: dict) -> list[str]:
@@ -641,7 +698,8 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
     Only before any worker launch. Edited feature files are committed on the run's branch first and the run moves to
     that commit, so the source checkout stays clean for integration. A challenge that already passed or was accepted
     is returned as it is. The override accepts only an attempt that read what the plan pins now: a rerun that failed
-    after its re-pin leaves the paused record of the previous attempt, which read other files.
+    after its re-pin leaves the paused record of the previous attempt, which read other files. A rerun of a paused
+    attempt is refused while nothing changed since it (unchanged_since): it would only re-roll the same challenge.
     """
     directory, plan = runtime.directory, runtime.plan
     if not has_challenge(plan):
@@ -658,7 +716,7 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
         if current is None or current["status"] != "paused":
             raise ValueError("Only a paused design challenge can be accepted")
         refuse_unused_edits(directory, plan)
-        changed = [key.removesuffix("_sha256") for key, value in pinned_digests(directory, plan).items() if current["pinned"].get(key) != value]
+        changed = stale_pins(directory, plan, current)
         if changed:
             raise ValueError(f"Design challenge attempt {current['attempt']} read other feature files than the plan now pins ({', '.join(changed)}): "
                              "a later resume re-pinned them and its challenge decided nothing. The override would launch the workers on "
@@ -667,6 +725,12 @@ def resume_challenge(runtime, accept_reason: str | None = None) -> dict:
         save_challenge(directory, record)
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by the operator: {record['accepted_reason']}")
         return record
+    if current is not None and current["status"] == "paused" and unchanged_since(directory, plan, current):
+        raise ValueError(f"Design challenge attempt {current['attempt']} paused this run, and nothing it read has changed since: a rerun "
+                         "would only sample the same challenge again. Edit the task files, decisions.md or the PRD, then rerun the "
+                         f"challenge: {resume_command(directory)}\nOr record an override and launch the workers: "
+                         f"{resume_command(directory, accept=True)}\nA concern outside the feature files (the code at the base, the "
+                         "policy) needs a new run.")
     running = directory / "challenge.running.json"
     attempt = max(current["attempt"] if current else 0, read_json(running)["attempt"] if running.exists() else 0) + 1
     read_pinned(plan)  # A brief that lost a required section is refused before anything is committed.
