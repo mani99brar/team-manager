@@ -404,8 +404,10 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
 /**
  * The controller process's own rows. `controller` is not a reserved lane ID (C6), so on a lane of that name the raw
  * `controller` node would alias these onto the lane's launch node; they concern the run, so they stay node-less (B1).
+ * The last two are automatic.py's resumable stops (resumable_stop): a changed source branch, a start that did not complete.
  */
-const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/]
+const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
+  /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
 /** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
 const QUESTIONS_BYTE_LIMIT = 256 * 1024

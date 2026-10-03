@@ -9,6 +9,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -1745,7 +1746,7 @@ def settle_interruption(runtime, failed=None) -> None:
             save_json(path, combined)
 
 
-BLOCKED_RUNS: set[str] = set()  # Runs whose non-retryable stop this controller process put on the timeline (record_blocked).
+BLOCKED_RUNS: set[str] = set()  # Runs whose stop this controller process put on the timeline (record_blocked, resumable_stop).
 
 
 def step_error(error) -> str:
@@ -1764,9 +1765,9 @@ def step_error(error) -> str:
 
 def record_blocked(runtime, state=None, *, reason: str | None = None) -> None:
     """The `controller` `blocked` event before drive stops at a failure it does not retry (C44), so the timeline's last word
-    says why: `reason` for a stop of its own (a failed freeze, a review worktree left behind, a changed source branch, an
-    unexpected manual gate, ...), else each failed step of `state` with its error. At most once per controller process and
-    run; a later `automatic --live` is a new process and says it again."""
+    says why: `reason` for a stop of its own (a failed freeze, a review worktree left behind, an unexpected manual gate, ...),
+    else each failed step of `state` with its error. At most once per controller process and run; a later `automatic --live`
+    is a new process and says it again. A stop the operator can resume is resumable_stop's instead."""
     if str(runtime.directory) in BLOCKED_RUNS:
         return
     BLOCKED_RUNS.add(str(runtime.directory))
@@ -1782,14 +1783,52 @@ def stop_error(runtime, message: str) -> RuntimeError:
     return RuntimeError(message)
 
 
+def resumable_stop(runtime, message: str) -> RuntimeError:
+    """A stop drive makes before any step that the operator can resume (C44 review): the target checkout is off the run's source
+    branch (source_branch_note), or the start did not complete (start_note). Nothing is stopped or relaunched. It is said on the
+    timeline first as a `controller` `interrupted` event that names what comes before `automatic --live`, never `Controller
+    blocked:`, so the viewer offers that resume rather than a new run. Once per controller process and run, as record_blocked.
+    The error to raise."""
+    if str(runtime.directory) not in BLOCKED_RUNS:
+        BLOCKED_RUNS.add(str(runtime.directory))
+        runtime.event("controller", "interrupted", message)
+    return RuntimeError(message)
+
+
+def resume_note(runtime) -> str:
+    """How a resumable stop's message ends: the resume, once the step it names first is done."""
+    return f"then resume with: python -m workflow automatic {runtime.directory} --live"
+
+
+def source_branch_note(runtime, branch: str) -> str:
+    """The target checkout is on `branch`, not the run's source branch (which integration fast-forwards): switching it back
+    continues the run."""
+    repository, source = shlex.quote(runtime.plan["repository"]), runtime.plan["source_branch"]
+    return (f"Source feature branch changed: {repository} is on {branch}, not {source}. Nothing was stopped or relaunched: switch it "
+            f"back with: git -C {repository} switch {source}, {resume_note(runtime)}")
+
+
+def start_note(runtime, state) -> str:
+    """A start that did not complete: its launches are reconciled (RUNBOOK, Ambiguous startup: reconcile binds the sessions their
+    receipts name and launches nothing), or a run whose graph never started is started."""
+    if not state.values:
+        return (f"Automatic supervision requires a completed start: the run was never started, so no worker was launched. Start it "
+                f"with: python -m workflow start {runtime.directory} --live, {resume_note(runtime)}")
+    steps = [name for name in state.next if name.startswith("launch_")]
+    return (f"Automatic supervision requires a completed start: {listing(steps)} did not complete. Nothing was stopped or relaunched: "
+            f"inspect {'its receipt' if len(steps) == 1 else 'their receipts'} and `claude agents --json`, reconcile with: "
+            f"python -m workflow reconcile {runtime.directory}, {resume_note(runtime)}")
+
+
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import advance, build_pipeline, graph_config, report
     from .repair import refuse_recorded
     validate_automatic(runtime.plan)
     refuse_recorded(runtime.directory)
-    if git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD") != runtime.plan["source_branch"]:
-        raise stop_error(runtime, "Source feature branch changed; no automatic continuation")
+    branch = git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD")
+    if branch != runtime.plan["source_branch"]:
+        raise resumable_stop(runtime, source_branch_note(runtime, branch))
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
     while True:
@@ -1797,7 +1836,7 @@ def drive(runtime, *, single_step=False) -> str | None:
             graph = build_pipeline(saver, runtime)
             state = graph.get_state(config)
             if not state.values or any(name.startswith("launch_") for name in state.next):
-                raise stop_error(runtime, "Automatic supervision requires a completed start; reconcile uncertain launches explicitly")
+                raise resumable_stop(runtime, start_note(runtime, state))
             frozen = freeze_failure(state)
             if frozen and not (runtime.directory / FREEZE_INTERRUPTED).exists():
                 # A stop that failed, an ownership violation, a moved HEAD: never re-entered, or the supervisor would loop.

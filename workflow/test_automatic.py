@@ -342,12 +342,12 @@ class ControllerBlockedTests(unittest.TestCase):
             ("controller", "blocked", "Controller blocked: the verify_ui step failed: Check ui-unit left no packet; the verify_adapter step "
                                       "failed: OSError(28, 'No space left on device'); not retried, inspect retained evidence"),
             ("controller", "blocked", "Controller blocked: the review step failed: Reviewer stop not confirmed; not retried, inspect retained evidence")])
-        # A stop of the controller's own (a failed freeze, a changed source branch, ...) is said with its reason, under the same rule.
+        # A stop of the controller's own (a failed freeze, an unexpected manual gate, ...) is said with its reason, under the same rule.
         events.clear()
         with patch("workflow.automatic.BLOCKED_RUNS", set()):
-            record_blocked(runtime, reason="Source feature branch changed; no automatic continuation")
-            record_blocked(runtime, state, reason="Unexpected manual gate in automatic run; inspect state")
-        self.assertEqual(events, [("controller", "blocked", "Controller blocked: Source feature branch changed; no automatic continuation")])
+            record_blocked(runtime, reason="Unexpected manual gate in automatic run; inspect state")
+            record_blocked(runtime, state, reason="No verified feature-branch completion")
+        self.assertEqual(events, [("controller", "blocked", "Controller blocked: Unexpected manual gate in automatic run; inspect state")])
 
 
 class SupervisorTimelineTests(unittest.TestCase):
@@ -2322,25 +2322,67 @@ class ClaudeUnavailableTests(GraphFixture):
 
 class ControllerStopTests(GraphFixture):
     """C44: drive says every stop it does not retry on the timeline before it raises, once per controller process, so the
-    timeline's last word is why the run stopped rather than the controller's PID row."""
+    timeline's last word is why the run stopped rather than the controller's PID row. The two stops the operator can resume, a
+    target checkout off the run's source branch and a start that did not complete, are a `controller` `interrupted` event that
+    names what comes before `automatic --live`, never `Controller blocked:`: the viewer offers that resume, not a new run."""
 
-    def said(self) -> list:
-        return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", "blocked")]
+    def said(self, status="blocked") -> list:
+        return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", status)]
 
-    def test_a_changed_source_branch_is_said_before_drive_stops(self):
+    def test_a_changed_source_branch_is_an_interruption_that_names_the_switch_back_and_the_resume(self):
+        import shlex
         f = self.fixture
         git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        repository = shlex.quote(f.plan["repository"])
+        stop = (f"Source feature branch changed: {repository} is on feature/elsewhere, not feature/automatic-test. Nothing was stopped "
+                f"or relaunched: switch it back with: git -C {repository} switch feature/automatic-test, then resume with: "
+                f"python -m workflow automatic {f.directory} --live")
         for _ in range(2):
-            with self.assertRaisesRegex(RuntimeError, r"^Source feature branch changed; no automatic continuation$"):
+            with self.assertRaisesRegex(RuntimeError, f"^{re.escape(stop)}$"):
                 drive(f.runtime)
-        self.assertEqual(self.said(), ["Controller blocked: Source feature branch changed; no automatic continuation"])
+        self.assertEqual((self.said("interrupted"), self.said()), ([stop], []))
+        # Switched back, the next controller (a new process) passes the check and waits on the workers again (Ctrl-C here).
+        git(f.repo, "switch", "-q", "feature/automatic-test")
+        with patch("workflow.automatic.BLOCKED_RUNS", set()), patch("workflow.automatic.wait_handoffs", side_effect=KeyboardInterrupt) as wait, \
+                self.assertRaises(KeyboardInterrupt):
+            drive(f.runtime)
+        wait.assert_called_once()
+        self.assertRegex(self.said("running")[-1], r"^Automatic checkpoint controller PID \d+$")
 
-    def test_a_manual_gate_an_unfinished_start_or_an_unverified_finish_is_said_before_drive_stops(self):
+    def test_a_start_that_did_not_complete_is_an_interruption_that_names_reconcile_or_start(self):
+        # Launches that did not complete are reconciled (RUNBOOK, Ambiguous startup), and a run that was never started is started;
+        # then `automatic --live` continues it. Nothing was stopped or relaunched, so nothing says `Controller blocked:`.
+        f = self.fixture
+        resume = f"then resume with: python -m workflow automatic {f.directory} --live"
+        never = (f"Automatic supervision requires a completed start: the run was never started, so no worker was launched. Start it "
+                 f"with: python -m workflow start {f.directory} --live, {resume}")
+
+        def launches(*steps):
+            return SimpleNamespace(values={"run_id": "run"}, next=steps, tasks=[
+                SimpleNamespace(name=step, error="RuntimeError('Claude launch exited 1')" if index == 0 else None, interrupts=[])
+                for index, step in enumerate(steps)])
+
+        def reconcile(steps, receipts):
+            return (f"Automatic supervision requires a completed start: {steps} did not complete. Nothing was stopped or relaunched: "
+                    f"inspect {receipts} and `claude agents --json`, reconcile with: python -m workflow reconcile {f.directory}, {resume}")
+        for message, state in ((never, SimpleNamespace(values={}, next=(), tasks=[])),  # Prepared, and `start` never ran the graph.
+                               (reconcile("launch_ui", "its receipt"), launches("launch_ui")),
+                               (reconcile("launch_ui and launch_adapter", "their receipts"), launches("launch_ui", "launch_adapter"))):
+            with self.subTest(stop=message):
+                before = len(self.said("interrupted"))
+                graph = SimpleNamespace(get_state=lambda config, state=state: state)
+                with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()):
+                    for _ in range(2):
+                        with self.assertRaisesRegex(RuntimeError, f"^{re.escape(message)}$"):
+                            drive(f.runtime)
+                self.assertEqual(self.said("interrupted")[before:], [message])
+        self.assertEqual(self.said(), [])
+
+    def test_a_manual_gate_or_an_unverified_finish_is_said_before_drive_stops(self):
         values = {"run_id": "run"}
         gate = SimpleNamespace(values=values, next=("review",), tasks=[
             SimpleNamespace(name="review", error=None, interrupts=[SimpleNamespace(value={"kind": "independent_review"})])])
         for message, state in (("Unexpected manual gate in automatic run; inspect state", gate),
-                               ("Automatic supervision requires a completed start; reconcile uncertain launches explicitly", SimpleNamespace(values={}, next=(), tasks=[])),
                                ("No verified feature-branch completion", SimpleNamespace(values=values, next=(), tasks=[]))):
             with self.subTest(stop=message):
                 before = len(self.said())
