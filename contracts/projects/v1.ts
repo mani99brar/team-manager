@@ -152,7 +152,10 @@ export const reviewerEntrySchema = z.strictObject({
   transport: z.enum(REVIEW_TRANSPORTS),
   /** The Claude session UUID (native/print) or the operator-stated identity (manual); null only when the reviewer never got a session. */
   session_id: z.string().min(1).nullable(),
-  /** The reviewer's own verdict; null when it produced none (deadline, superseded, or still working). */
+  /**
+   * The controller's verdict for this reviewer, derived from its findings (C34); the verdict the reviewer wrote is `accepted_decision`
+   * in its status file (a manual import keeps the imported file's verdict). Null when it produced none (deadline, superseded, or still working).
+   */
   verdict: z.enum(['approved', 'blocked']).nullable(),
   findings: z.array(reviewFindingSchema),
   launched_at: timestamp.nullable(),

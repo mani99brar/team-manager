@@ -222,6 +222,8 @@ const RUNBOOK = {
   changedCode: { section: 'Status, failures and recovery', topic: 'Changed code' },
   unavailable: { section: 'Status, failures and recovery', topic: 'Claude Code unavailable (exit 75)' },
   stopping: { section: 'Status, failures and recovery', topic: 'Stopping an unfinished run' },
+  sourceBranch: { section: 'Status, failures and recovery', topic: 'Source feature branch changed' },
+  ambiguousStartup: { section: 'Status, failures and recovery', topic: 'Ambiguous startup' },
   repair: { section: 'Blocked after freeze: repair a lane', topic: null },
 } satisfies Record<string, RunbookRef>
 
@@ -246,10 +248,18 @@ const UNAVAILABLE = /Claude Code (?:was |is )?unavailable|Claude session invento
 /** REVIEW_RESUME_NOTE (:337) and FREEZE_RESUME_NOTE (:1194), recorded on the review node or the freeze. */
 const NODE_RESUME_NOTE = /interrupted|resume with: python -m workflow automatic/
 const FREEZE_NOTE = /The freeze was stopping the workers/
+/**
+ * automatic.py resumable_stop: drive stops before any step, stops and relaunches nothing, and records a `controller`
+ * `interrupted` row naming what comes before `automatic --live`: the target checkout switched back to the run's source branch
+ * (source_branch_note), or a start that did not complete reconciled, or started when the run never was (start_note).
+ */
+const BRANCH_CHANGED = /^Source feature branch changed\b/
+const START_INCOMPLETE = /^Automatic supervision requires a completed start\b/
+const NEVER_STARTED = /\bthe run was never started\b/
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
 const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE]
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/
@@ -1163,6 +1173,29 @@ function moving(context: Context): boolean {
   return context.automatic && retryPlan(context) !== null
 }
 
+/**
+ * Rule 5 (a)'s next step after a resumable stop of the controller's own (BRANCH_CHANGED, START_INCOMPLETE): the step its row
+ * names, then the resume. Null for every other interrupted row.
+ */
+function resumableStopNext(context: Context, raw: string): NextStep | null {
+  const resume = command(workflow('automatic', '--live'))
+  if (BRANCH_CHANGED.test(raw)) {
+    const branch = context.run.inputs?.source_branch ?? '<source branch>'
+    return {
+      action: 'required', label: `Switch the target checkout back to ${branch}, then resume the controller: it relaunches nothing`,
+      runbook: [RUNBOOK.sourceBranch], steps: [prose(`In the target repository: git switch ${branch}`), resume], caveat: null,
+    }
+  }
+  if (!START_INCOMPLETE.test(raw)) return null
+  if (NEVER_STARTED.test(raw)) {
+    return { action: 'required', label: 'Start the run, then resume the controller', runbook: [RUNBOOK.ambiguousStartup], steps: [command(workflow('start', '--live')), resume], caveat: null }
+  }
+  return {
+    action: 'required', label: 'Reconcile the launches that did not complete, then resume the controller: nothing is relaunched', runbook: [RUNBOOK.ambiguousStartup],
+    steps: [prose('Inspect each lane\'s launch receipt (<lane>.interactive.json) and claude agents --json.'), command(workflow('reconcile')), resume], caveat: null,
+  }
+}
+
 function interruptedNow(context: Context): Draft | null {
   // A failed run too: a freeze or review interrupted by an outage, and a check being retried, keep their task's graph
   // error until they are re-entered, so the server serves the node and the run failed (projectSnapshot ranks task.error first).
@@ -1183,7 +1216,8 @@ function interruptedNow(context: Context): Draft | null {
       ...base, interruption: 'a', since: row.at, reasonSource: 0,
       headline: [`‖ Interrupted at ${where} · `, clock(row.at), unavailable ? ': Claude Code was unavailable; sessions keep running' : ': the controller stopped; sessions keep running'],
       reason: [clock(row.at), ` ${row.message}`],
-      next: { action: 'required', label, runbook: unavailable ? [RUNBOOK.unavailable] : [RUNBOOK.launch, RUNBOOK.reviewInterruption], steps: resume(unavailable ? claudeWorks : undefined), caveat: null },
+      next: resumableStopNext(context, row.raw)
+        ?? { action: 'required', label, runbook: unavailable ? [RUNBOOK.unavailable] : [RUNBOOK.launch, RUNBOOK.reviewInterruption], steps: resume(unavailable ? claudeWorks : undefined), caveat: null },
     }
   }
   // (b) The review or the freeze recorded the interruption on its own node, and no controller has resumed it since.

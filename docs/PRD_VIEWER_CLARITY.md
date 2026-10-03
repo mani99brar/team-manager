@@ -51,7 +51,7 @@ The task disclosure: `TaskPanel` is wrapped in `<details data-testid="task-detai
 
 ### 4.5 Findings by reviewer (ui)
 
-`ReviewDetail.tsx`: `GroupBy` gains `'reviewer'`; groups are the run's reviewers in declared order, each labelled with the reviewer id, its own verdict and its severity counts, plus a trailing group for findings whose `reviewer` matches no entry (the contract forbids this, so the group is a guard that stays hidden when empty). Initial state is `'reviewer'` when `review.reviewers.length > 1`, else `'disposition'`. The per-reviewer filter continues to hide rows in every grouping.
+`ReviewDetail.tsx`: `GroupBy` gains `'reviewer'`; groups are the run's reviewers in declared order, each labelled with the reviewer id, the controller's verdict for that reviewer (derived from its findings since C34; the verdict the reviewer wrote is `accepted_decision` in its status file) and its severity counts, plus a trailing group for findings whose `reviewer` matches no entry (the contract forbids this, so the group is a guard that stays hidden when empty). Initial state is `'reviewer'` when `review.reviewers.length > 1`, else `'disposition'`. The per-reviewer filter continues to hide rows in every grouping.
 
 ## 5. Work items
 

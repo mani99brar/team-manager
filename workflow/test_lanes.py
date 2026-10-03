@@ -24,7 +24,8 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from .attention import feed_path
-from .automatic import DEFAULTS, advance_failed_checks, automatic_settings, check_finding_lanes, drive, read_review_completion, review_prompt, review_schema
+from .automatic import (DEFAULTS, REVIEW_RUBRIC, advance_failed_checks, automatic_settings, check_finding_lanes, drive, read_review_completion, review_prompt,
+                        review_schema)
 from .export_state import graph_nodes
 from .interactive import InteractiveSessions, attach_panels
 from .guardrails import migration_note
@@ -484,7 +485,7 @@ class DeclaredReviewers(LaneRun):
             receipt = read_json(self.directory / f"review-{reviewer_id}.interactive.json")
             self.assertEqual((receipt["node_id"], receipt["worktree"]), (f"review-{reviewer_id}", str(self.directory / "review-worktree")))
             prompt = (self.directory / f"review-{reviewer_id}.prompt.txt").read_text()
-            self.assertTrue(prompt.startswith(f"Review the {reviewer_id} aspects. Diff: "))
+            self.assertTrue(prompt.startswith(f"Review the {reviewer_id} aspects. {REVIEW_RUBRIC} Diff: "))  # The rubric follows the brief (C34).
             self.assertIn("ui, adapter, docs, multiple or none", prompt)
             self.assertIn(f'"node_id": "review-{reviewer_id}"', prompt)
         self.assertFalse((self.directory / "review.interactive.json").exists())

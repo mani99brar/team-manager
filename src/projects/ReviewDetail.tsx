@@ -143,7 +143,10 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
   )
 }
 
-/** A reviewer's own verdict; a reviewer superseded before deciding, still pending, or blocked by the deadline or a rejected file has none. */
+/**
+ * The controller's verdict for a reviewer, derived from its findings (C34); the verdict the reviewer wrote is `accepted_decision` in
+ * its status file. A reviewer superseded before deciding, still pending, or blocked by the deadline or a rejected file has none.
+ */
 function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
   if (verdict === null) return <span className="projects-muted" data-testid="reviewer-verdict" data-status="none">No verdict</span>
   const approved = verdict === 'approved'
@@ -175,8 +178,8 @@ function ReviewerTime({ reviewer }: { reviewer: Reviewer }) {
 }
 
 /**
- * One entry per reviewer of the run, in declared order: id, own verdict, how it ended (with its blocking reason) and how
- * long it took, then its finding counts by severity and its recorded times.
+ * One entry per reviewer of the run, in declared order: id, the controller's verdict for it (derived from its findings, C34),
+ * how it ended (with its blocking reason) and how long it took, then its finding counts by severity and its recorded times.
  */
 function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
   return (

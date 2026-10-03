@@ -108,6 +108,11 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("ui.completion.json", command[-1])
         self.assertIn(self.plan["nodes"]["ui"]["session_id"], command[-1])
         self.assertNotIn("manual", command)
+        # The receipt is saved before the prompt is built, so the prompt states the lane's deadline in UTC (C16 step 6).
+        from datetime import datetime
+        from .guardrails import iso
+        launched = datetime.fromisoformat(read_json(self.directory / "ui.interactive.json")["launch_requested_at"]).timestamp()
+        self.assertIn(f"Your deadline is {iso(int(launched + DEFAULTS['worker_timeout_seconds']))} (UTC), 4 hours after this launch", command[-1])
 
     def test_ambiguous_launch_never_retries_when_session_missing(self):
         with patch.object(self.sessions, "inventory", return_value=[]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 45)) as launch:
@@ -476,6 +481,11 @@ class InteractiveTests(unittest.TestCase):
             with patch("workflow.interactive.git", side_effect=[candidate, " M file"]):
                 with self.assertRaisesRegex(RuntimeError, "candidate"):
                     self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
+            # Ignored files count too: project configuration planted under an ignore rule (.claude/) is not a clean checkout.
+            with patch("workflow.interactive.git", side_effect=[candidate, "!! .claude/"]) as listed:
+                with self.assertRaisesRegex(RuntimeError, "candidate"):
+                    self.sessions.run_reviewer("review", "prompt", self.TOKEN, candidate)
+            self.assertEqual(listed.call_args_list[1].args[1:], ("status", "--porcelain", "--ignored"))
             with patch("workflow.interactive.git", side_effect=[candidate, ""]), \
                     patch.object(self.sessions, "inventory", return_value=[self.reviewer_row()]):
                 with self.assertRaisesRegex(RuntimeError, "launch name"):
