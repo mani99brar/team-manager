@@ -545,10 +545,13 @@ class ChallengeAttention(GuardedFeature):
         task = self.folder / "ui-task.md"
         task.write_text(task.read_text() + "\nOnly ui.txt.\n")
         self.challenge_says([concern("P0", "The lanes cannot merge")])
-        output, code = self.cli(resume_main, [str(directory)])
+        output, code = self.cli(resume_main, [str(directory), "--herdr"])
         self.assertEqual((code, [(line["kind"], line["text"].split(":")[0]) for line in lines()]),
                          (0, [("challenge_paused", "Design challenge attempt 1 paused the run before any worker launch"),
                               ("challenge_paused", "Design challenge attempt 2 paused the run before any worker launch")]))
+        # Paused under `resume --herdr`, the record's commands keep the flag, as the printed ones do.
+        self.assertTrue(lines()[-1]["text"].endswith(f"then run: {PY} -m workflow resume {directory} --herdr; or accept it: {PY} -m workflow "
+                                                     f'resume {directory} --accept-challenge "<reason>" --herdr'), lines()[-1]["text"])
         # A challenge that passes needs nobody: no record.
         task.write_text(task.read_text() + "\nThe adapter owns backend.py.\n")
         self.challenge_says([concern("P2", "Minor")])
@@ -1139,16 +1142,18 @@ class ChallengeRevision(GuardedFeature):
         before = {name: (directory / name).read_bytes() for name in names}
         task = self.folder / "ui-task.md"
         written = task.read_text()
-        for edit in ("none", "reverted"):
+        for edit, flags in (("none", []), ("reverted", []), ("none, resumed with --herdr", ["--herdr"])):
             with self.subTest(edit):
                 if edit == "reverted":  # An edit undone before resume is no change.
                     self.edit_task()
                     task.write_text(written)
-                output, code = self.cli(resume_main, [str(directory)])
+                output, code = self.cli(resume_main, [str(directory), *flags])
                 self.assertEqual(code, 1, output)
                 self.assertIn("Blocked: Design challenge attempt 1 paused this run, and nothing it read has changed since", output)
-                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory}\n", output)
-                self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --accept-challenge "<reason>"\n', output)
+                # The commands it suggests keep --herdr, as the paused message does: without it the workers launch with no panes.
+                herdr = " --herdr" if flags else ""
+                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory}{herdr}\n", output)
+                self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --accept-challenge "<reason>"{herdr}\n', output)
                 self.assertIn("A concern outside the feature files (the code at the base, the policy) needs a new run.", output)
                 self.assertNotIn("Report:", output)
                 self.assertEqual({name: (directory / name).read_bytes() for name in names}, before)
@@ -1211,24 +1216,43 @@ class ChallengeRevision(GuardedFeature):
 
 
 class OverrideFromAnotherController(GuardedFeature):
-    """The override compares the feature files as written, not the rules and check-report command the controller appends
-    to a browser lane's pinned task, which name the interpreter and checkout of the process that pinned it."""
+    """The override and the rerun prompt compare the feature files as written, not the rules and check-report command the
+    controller appends to a browser lane's pinned task, which name the interpreter and checkout of the process that pinned it."""
 
-    def test_accept_challenge_from_another_interpreter_and_checkout_accepts_unchanged_files_and_refuses_an_edit(self):
+    def paused_browser_run(self, run_id: str) -> tuple[Path, str]:
+        """A run whose ui lane has a browser check (so its pinned task names this checkout's check-report command), paused by
+        its first challenge on a P1; and that command as another worktree of the tool, with another interpreter, spells it."""
         policy = two_lane_policy()
         policy["workers"][0]["checks"].append({"id": "ui-browser", "kind": "browser", "argv": ["npx", "--no-install", "playwright", "test"],
                                                "timeout_seconds": 10, "scenarios": [{"id": "alpha", "description": "alpha works"}]})
         save_json(self.folder / "policy.json", policy)
         commit_all(self.repo, "A browser check on the ui lane")
-        directory = self.prepare("elsewhere-001")
-        base = read_json(directory / "plan.json")["base_commit"]
+        directory = self.prepare(run_id)
         self.assertIn(CHECK_REPORT, read_json(directory / "plan.json")["nodes"]["ui"]["task"])
         self.challenge_says([concern("P1", "The lanes overlap")])
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
-        # The override runs from another worktree of the tool, with another spelling of the interpreter.
         elsewhere = CHECK_REPORT.replace(str(TOOL), str(self.root / "md-manager-ctl")).replace(PY, PY + "3")
         self.assertNotEqual(elsewhere, CHECK_REPORT)
+        return directory, elsewhere
+
+    def test_a_rerun_from_another_checkout_names_only_the_feature_files_the_operator_changed(self):
+        # Only decisions.md is edited. The resume runs from another checkout of the tool, so the re-pinned ui task carries
+        # another check-report command: that is no change of the task the operator wrote, and the rerun is not told it is.
+        directory, elsewhere = self.paused_browser_run("elsewhere-002")
+        (self.folder / "decisions.md").write_text(DECISIONS + "\n- The ui lane renders first.\n")
+        self.challenge_says([concern("P2", "Minor")])
+        with patch("workflow.guardrails.CHECK_REPORT", elsewhere):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
+        rerun = self.challenge_calls()[-1]["prompt"]
+        self.assertIn(elsewhere, rerun)  # The task as re-pinned from the other checkout.
+        self.assertIn(f"Changed since then: decisions.md (features/{FEATURE}/decisions.md). Raise each of these concerns again", rerun)
+
+    def test_accept_challenge_from_another_interpreter_and_checkout_accepts_unchanged_files_and_refuses_an_edit(self):
+        directory, elsewhere = self.paused_browser_run("elsewhere-001")
+        base = read_json(directory / "plan.json")["base_commit"]
+        # The override runs from another worktree of the tool, with another spelling of the interpreter.
         with patch("workflow.guardrails.CHECK_REPORT", elsewhere):
             # An edit of the browser lane's task, committed by hand, is still refused.
             task = self.folder / "ui-task.md"
@@ -1842,7 +1866,7 @@ class AnswerDelivery(unittest.TestCase):
                                  ["herdr", "pane", "send-keys", "pane-ui", "Enter"]])
         self.assertIn("never delivered; delivering it now", output)
         self.assertNotIn("Recorded the answer", output)
-        self.assertEqual(self.entry(), {**recorded, "typed": True, "delivered": True})
+        self.assertEqual(self.entry(), {**recorded, "typed": True, "typed_text": "Use option B", "delivered": True})
         self.assertEqual(read_json(self.root / "ui.deadline.json"), deadline)
         self.assertEqual(len(read_json(self.root / "ui.questions.json")["questions"]), 1)
         # Delivered: every further answer is refused, with or without Herdr.
@@ -1979,9 +2003,10 @@ class AnswerDelivery(unittest.TestCase):
         calls, output, code = self.answer("ui", "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
         self.assertEqual((calls, code), ([["herdr", "pane", "process-info", "--pane", "pane-ui"], ["herdr", "pane", "send-text", "pane-ui", typed],
                                           ["herdr", "pane", "send-keys", "pane-ui", "Enter"]], 1), output)
-        self.assertEqual((self.entry()["answer"], self.entry()["typed"]), ("Use option B", True))
-        # Later, the rerun finds the same text in the session's input (the deadline has not moved since the answer) and presses
-        # Enter; the bare answer alone is not the text that was typed.
+        # The entry keeps the exact text typed, which the Enter-only rerun looks for.
+        self.assertEqual((self.entry()["answer"], self.entry()["typed"], self.entry()["typed_text"]), ("Use option B", True, typed))
+        # Later, the rerun finds the same text in the session's input and presses Enter; the bare answer alone is not the text
+        # that was typed.
         self.now = 500.0
         calls, output, code = self.answer("ui", "Use option B", screen=claude_screen("Use option B"))
         self.assertEqual(([call[2] for call in calls], code), (["process-info", "read"], 1), output)
@@ -1993,6 +2018,49 @@ class AnswerDelivery(unittest.TestCase):
         self.assertEqual((calls, code), ([], 0), output)
         self.assertIn("Type the answer in the worker's session: claude attach bg-adapter\nThe text to type, with the lane's new deadline: Keep the "
                       "adapter [Controller: your deadline is now 1970-01-01T01:08:10Z (UTC); the time your question waited was added to it.]", output)
+
+    def test_a_lane_whose_completion_was_accepted_is_told_the_deadline_the_controller_applies(self):
+        # automatic._poll_handoffs holds a lane whose completion it accepted (met_at) to no deadline while another lane works or
+        # waits on its answer, and to the latest lane deadline once every lane's completion was accepted; never to its own.
+        # ui's completion was accepted at t=5, then its session worked again and asked at t=10; adapter asked at t=10 too.
+        from .guardrails import answer_text, mark_deadline_met
+        save_json(self.root / "plan.json", {**read_json(self.root / "plan.json"), "automatic": {**DEFAULTS, "worker_timeout_seconds": 3600}})
+        save_json(self.root / "terminals.json", {lane: {"pane_id": f"pane-{lane}", "tab_id": "t", "mode": "attach_requested"} for lane in ("ui", "adapter")})
+        mark_deadline_met(self.root, "ui", 5.0)
+        unbounded = ("Use option B [Controller: your completion was accepted before this question, so no deadline applies to you while another "
+                     "lane works or waits on its answer; after that, the latest lane deadline does.]")
+        calls, output, code = self.answer("ui", "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
+        self.assertEqual((calls[1], code), (["herdr", "pane", "send-text", "pane-ui", unbounded], 1), output)
+        # adapter's completion was not accepted: its own deadline, moved by the 390 s its question waited.
+        self.now = 400.0
+        calls, output, code = self.answer("adapter", "Keep the adapter")
+        self.assertEqual((calls[1][-1], code), ("Keep the adapter [Controller: your deadline is now 1970-01-01T01:06:30Z (UTC); the time your "
+                                                "question waited was added to it.]", 0), output)
+        # Once adapter's is accepted too, every lane's is: ui is held to the latest lane deadline, adapter's 01:06:30, not its own 01:01:30.
+        mark_deadline_met(self.root, "adapter", 450.0)
+        self.assertEqual(answer_text(self.root, "ui", "Use option B"), "Use option B [Controller: your deadline is now 1970-01-01T01:06:30Z (UTC), "
+                                                                       "the latest lane deadline: every lane's completion was accepted.]")
+        # The rerun after ui's failed Enter looks for the text that was typed, though the note would read otherwise now.
+        self.now = 500.0
+        calls, output, code = self.answer("ui", "Use option B", screen=claude_screen(unbounded[:70], unbounded[70:140], unbounded[140:]))
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "read", "send-keys"], 0), output)
+        self.assertIs(self.entry()["delivered"], True)
+
+    def test_an_answer_the_previous_controller_typed_and_did_not_submit_is_submitted_by_its_bare_text(self):
+        # A controller before the deadline note typed the bare answer, and its Enter failed: the entry is typed, not delivered, and
+        # holds no typed text. After the upgrade an automatic run's text carries the note, but the session's input holds the bare
+        # answer: the rerun presses Enter under that.
+        from .guardrails import load_questions, record_answer, save_questions
+        save_json(self.root / "plan.json", {**read_json(self.root / "plan.json"), "automatic": {**DEFAULTS, "worker_timeout_seconds": 3600}})
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        record_answer(self.root, "ui", "Use option B", clock=lambda: 100.0, delivered=False)
+        questions = load_questions(self.root, "ui")
+        questions[-1]["typed"] = True
+        save_questions(self.root, "ui", questions)
+        calls, output, code = self.answer("ui", "Use option B", screen=claude_screen("Use option B"))
+        self.assertEqual(code, 0, output)
+        self.assertEqual([call[2] for call in calls], ["process-info", "read", "send-keys"])
+        self.assertIs(self.entry()["delivered"], True)
 
     def test_a_rerun_types_nothing_once_the_worker_went_on(self):
         # The delivery failed and the operator typed the answer in the pane: the worker went on. Its next completion

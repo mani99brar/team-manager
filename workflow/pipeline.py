@@ -1218,7 +1218,7 @@ def main():
                     if warning:
                         print(warning, file=sys.stderr)
                     # A 2.2.0 run's design challenge decides before any worker launch; a pause exits 0 with the resume commands.
-                    if not challenge_gate(runtime):
+                    if not challenge_gate(runtime, args.herdr):
                         print(paused_message(directory, args.herdr))
                         print(f"Report: {report(runtime, state)}")
                         return

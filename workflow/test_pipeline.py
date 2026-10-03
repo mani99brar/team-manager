@@ -829,12 +829,19 @@ class BundleTests(unittest.TestCase):
                                 ({"packets": [*others, references[("worker", "adapter")]]}, "Bundle has two worker packets of adapter"),
                                 ({"base_commit": "f" * 40}, f"Bundle base {'f' * 40} is not the run's base {bundle['base_commit']}"),
                                 ({"snapshots": {**bundle["snapshots"], "ui": {**bundle["snapshots"]["ui"], "commit": bundle["base_commit"]}}},
-                                 f"Bundle's worker packet of ui is of {bundle['snapshots']['ui']['commit']}, not {bundle['base_commit']}")):
+                                 f"Bundle's worker packet of ui is of {bundle['snapshots']['ui']['commit']}, not {bundle['base_commit']}"),
+                                # Candidate packets that verified another combined revision than the one the bundle names.
+                                ({"candidate_commit": bundle["base_commit"]},
+                                 f"Bundle's candidate packet of ui is of {bundle['candidate_commit']}, not {bundle['base_commit']}")):
             with self.subTest(refusal):
                 save_json(path, {**bundle, **change})
                 with self.assertRaisesRegex(ValueError, f"^{re.escape(refusal)}"):
                     runtime.validate_bundle()
         save_json(path, bundle)
+        # Leftover packets of a lane the run does not combine (here the run combines ui alone).
+        with self.subTest("a lane the run does not combine"), patch.object(runtime, "workers", ["ui"]):
+            with self.assertRaisesRegex(ValueError, "^Bundle has packets of no lane it combines: worker adapter, candidate adapter$"):
+                runtime.validate_bundle()
         self.assertEqual(runtime.validate_bundle(), (bundle, digest))
 
     def test_a_failure_drill_bundle_combines_the_retried_attempt(self):
