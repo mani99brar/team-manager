@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -19,8 +20,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from .checks import now
-from .guardrails import decisions_block
-from .interactive import SessionGap, UpdateGaps
+from .guardrails import decisions_block, epoch, iso
+from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
                        run_lock, save_json, terminate)
 from .verification import CONTRACTS
@@ -508,7 +509,8 @@ class ReviewStatus:
         save_json(combined_status_path(self.runtime), {**merged, **self.combined})
 
     def supersede_running(self) -> None:
-        """A reviewer still working when the run is decided is stopped; its status records why nothing waited for it."""
+        """A reviewer without a verdict when the run is decided (still working at the end of the grace after a block, or when a
+        rejected file or a deadline ended the review) is stopped; its status records that nothing waited for it any longer."""
         for status in self.statuses.values():
             if status.get("status") in {"pending", "launching", "running"}:
                 status["status"] = "superseded"
@@ -545,12 +547,64 @@ def decision_blocks(decision: dict) -> bool:
     return decision["verdict"] != "approved" or bool(blocking_findings(decision["findings"]))
 
 
+# After the first accepted block, how long the other reviewers have to finish. A verdict they write by then is recorded as a
+# late one (`late` in its status): it can add blockers, never approve. The run is blocked whatever they say.
+REVIEW_GRACE_SECONDS = 600
+NOTE = "note"  # The status of a plain timeline record: none the viewer reads, so it never moves the review node.
+
+
+def listing(words: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def open_counts(findings: list) -> str:
+    """The unresolved P0/P1 among findings: `2 open P0 and 1 open P1`, or `no open P0/P1`."""
+    from .pipeline import blocking_findings
+    blocking = blocking_findings(findings)
+    counts = [f"{count} open {severity}" for severity in ("P0", "P1") if (count := sum(finding["severity"] == severity for finding in blocking))]
+    return " and ".join(counts) or "no open P0/P1"
+
+
+def first_sentence(text: str) -> str:
+    """A finding's first sentence on one line, at most 200 characters, ending in a stop."""
+    sentence = re.split(r"(?<=[.!?])\s", " ".join(text.split()), maxsplit=1)[0]
+    if len(sentence) > 200:
+        sentence = sentence[:199] + "…"
+    return sentence if sentence.endswith((".", "!", "?", "…")) else sentence + "."
+
+
+def record_late(runtime, state: ReviewStatus, reviewer_id: str, decision: dict, accepted_at: str, **keys) -> None:
+    """A verdict accepted after another reviewer's block: recorded with `late`, its status accepted or blocked."""
+    state.decisions[reviewer_id] = decision
+    state.statuses[reviewer_id].update(status="blocked" if decision_blocks(decision) else "accepted", accepted_at=accepted_at,
+                                       accepted_decision=decision, late=True, **keys)
+    state.save()
+    runtime.event("review", NOTE, f"Reviewer {reviewer_id}'s late verdict recorded: {decision['verdict']}, {open_counts(decision['findings'])}")
+
+
+def supersede_late(runtime, state: ReviewStatus, reviewer_id: str, reason: str) -> None:
+    """A reviewer no longer waited for after a block ends superseded, without a verdict; the reason goes on the timeline."""
+    state.statuses[reviewer_id]["status"] = "superseded"
+    state.save()
+    runtime.event("review", NOTE, f"Reviewer {reviewer_id} gave no verdict and ends superseded: {reason}")
+
+
+def announce_grace(runtime, state: ReviewStatus, remaining: list[str], grace_end: float) -> None:
+    """The timeline says who blocked and until when (`grace_end`, epoch seconds) the other reviewers may still finish."""
+    blockers =[reviewer_id for reviewer_id in state.ids if reviewer_id in state.decisions and decision_blocks(state.decisions[reviewer_id])]
+    runtime.event("review", NOTE, f"Reviewer{'s' if len(blockers) > 1 else ''} {listing(blockers)} blocked the candidate; {listing(remaining)} "
+                                  f"{'has' if len(remaining) == 1 else 'have'} until {iso(grace_end)} to finish: a verdict written by then is "
+                                  "recorded, and can add blockers but never approve")
+
+
 def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, sleep=None) -> dict:
     """Poll every reviewer's receipt. Idle alone never means a verdict; each deadline counts from that reviewer's own launch.
 
-    Returns the accepted decisions by reviewer id (also kept in `state.decisions`) as soon as every reviewer approved,
-    or as soon as one accepted file blocks (the others are not waited for). A rejected file, an expired deadline or
-    a missing session raises. A verdict accepted before a controller restart is read again and stays accepted.
+    Returns the accepted decisions by reviewer id (also kept in `state.decisions`) as soon as every reviewer approved, or,
+    once an accepted file blocks, when the grace after it ends (wait_grace): the other reviewers' verdicts are kept too.
+    Before any block, a rejected file, an expired deadline or a missing session raises. A verdict accepted before a
+    controller restart is read again and stays accepted, and a grace it started goes on until its original end.
     """
     clock = clock or time.time
     sleep = sleep or time.sleep
@@ -588,7 +642,7 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         decisions[reviewer_id] = decision
         # What was accepted is saved with its time, for a restart (a status without it, from an older controller, is read
         # again); review.json is the record.
-        status.update(status="accepted", accepted_at=accepted or now(), accepted_decision=decision, completion_sha256=digest_file(path))
+        status.update(status="accepted", accepted_at=accepted or iso(clock()), accepted_decision=decision, completion_sha256=digest_file(path))
         state.save()
         return decision
 
@@ -600,9 +654,9 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         accepted = state.statuses[reviewer_id].get("accepted_at")
         if accepted and reviewer_id not in decisions:
             accept(reviewer_id, accepted)
-    if any(decision_blocks(decision) for decision in decisions.values()):
-        return decisions  # A block decides; every verdict accepted before it is kept too.
-    while True:
+    # A block accepted before this controller started decides the run; its grace goes on, with the verdicts accepted since.
+    blocked = any(decision_blocks(decision) for decision in decisions.values())
+    while not blocked:
         rows = runtime.sessions.inventory()
         for reviewer_id in state.ids:
             if reviewer_id in decisions:
@@ -622,8 +676,9 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the deadline")
             # Its turn is over (turn_over); a blocked session needs attention in its pane and is not accepted, whatever its status.
             if turn_over(row) and row["state"] != "blocked" and (runtime.directory / f"{node}.completion.json").exists():
-                if decision_blocks(accept(reviewer_id, None)):
-                    return decisions  # The first block decides; nobody waits for the other reviewers.
+                blocked = decision_blocks(accept(reviewer_id, None))
+                if blocked:
+                    break  # The first block decides the run; the grace below waits for the other reviewers' verdicts.
                 continue  # Its file met the deadline, also when first read after it (a controller resumed late).
             if clock() >= started[reviewer_id] + timeout:
                 status.update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
@@ -631,7 +686,78 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
         if set(decisions) == set(state.ids):
             return decisions
-        sleep(2)
+        if not blocked:
+            sleep(2)
+    wait_grace(runtime, state, started, timeout, attention, gaps, clock, sleep)
+    return decisions
+
+
+def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, attention: set, gaps: UpdateGaps, clock, sleep) -> None:
+    """After an accepted block: every other reviewer gets until the grace ends, REVIEW_GRACE_SECONDS after the earliest blocking
+    verdict was accepted (so a resumed controller continues the same window), and at most until its own deadline.
+
+    At each poll a reviewer's bound file is read whatever its session reads, and recorded late once it validates; one that
+    does not (half written while its session works, or invalid) is read again at the next poll. A reviewer whose own deadline
+    passes or whose session is missing, ended or terminal is no longer waited for and ends superseded, its file unread: the
+    identity check after the wait could not confirm that session. When the grace ends, each reviewer still waited for is
+    read once more; a file that still does not validate is kept as `late_error`. Nothing raised for one replaces the block.
+    """
+    from .pipeline import digest_file
+    decisions = state.decisions
+    blocked_at = min(epoch(state.statuses[reviewer_id]["accepted_at"]) for reviewer_id, decision in decisions.items() if decision_blocks(decision))
+    grace_end = blocked_at + REVIEW_GRACE_SECONDS
+    # Superseded already (by this window, before a restart): no longer waited for.
+    remaining = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions and state.statuses[reviewer_id].get("status") != "superseded"]
+    if remaining and clock() < grace_end:
+        announce_grace(runtime, state, remaining, grace_end)
+    while remaining:
+        final = clock() >= grace_end
+        rows = runtime.sessions.inventory()
+        for reviewer_id in list(remaining):
+            node = review_node(reviewer_id)
+            try:
+                row = gaps.row(node, rows)
+            except SessionGap as gap:
+                if final:
+                    remaining.remove(reviewer_id)
+                    supersede_late(runtime, state, reviewer_id, f"its session is not listed live ({gap})")
+                continue  # An update may be respawning it: looked at again at the next poll.
+            except Exception as error:  # A respawn gap that outlasted its grace, a terminal state, a changed identity.
+                remaining.remove(reviewer_id)
+                supersede_late(runtime, state, reviewer_id, f"its session is {'not listed live' if isinstance(error, TransientInfraError) else 'refused'} ({error})")
+                continue
+            if row is None or row.get("state") in TERMINAL_STATES:
+                remaining.remove(reviewer_id)
+                supersede_late(runtime, state, reviewer_id, f"its session is {row['state']}" if row else "its session is not listed")
+                continue
+            path = runtime.directory / f"{node}.completion.json"
+            refused = None
+            if path.exists():
+                try:
+                    decision = read_review_completion(runtime, reviewer_id)
+                    digest = digest_file(path)
+                except Exception as error:
+                    refused = str(error)  # Half written while its session works, or invalid: read again at the next poll.
+                else:
+                    remaining.remove(reviewer_id)
+                    record_late(runtime, state, reviewer_id, decision, iso(clock()), completion_sha256=digest)
+                    continue
+            expired = clock() >= started[reviewer_id] + timeout
+            if expired or final:
+                remaining.remove(reviewer_id)
+                if refused:
+                    state.statuses[reviewer_id]["late_error"] = refused
+                    reason = f"its completion file could not be read {'by its deadline' if expired else 'at the end of the grace'} ({refused})"
+                else:
+                    reason = "its deadline passed" if expired else "still working at the end of the grace"
+                supersede_late(runtime, state, reviewer_id, reason)
+            elif row["state"] == "blocked" and reviewer_id not in attention:
+                # Waiting on a human in its pane: an answer there lets it finish within the grace.
+                attention.add(reviewer_id)
+                runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the "
+                                                       "grace after the block ends, or its deadline")
+        if remaining:
+            sleep(2)
 
 
 def review_candidate(runtime) -> dict:
@@ -730,10 +856,36 @@ def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, dec
         if decision:
             findings.extend({**finding, "reviewer": reviewer_id} for finding in decision["findings"])
     blocked = any(reviewer_id not in decisions or decision_blocks(decisions[reviewer_id]) for reviewer_id in state.ids)
+    # A late verdict, read after another reviewer's block, can add blockers but never makes the review approved.
+    blocked = blocked or any(state.statuses[reviewer_id].get("late") for reviewer_id in decisions)
     sessions = [entry["session_id"] for entry in entries if entry["session_id"]]
     return {"run_id": bundle["run_id"], "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
             "reviewer": ", ".join(sessions), "independent": True, "verdict": "blocked" if blocked else "approved",
             "findings": findings, "reviewers": entries}
+
+
+def blocked_error(names: list[str], blockers: list[str], decisions: dict) -> str:
+    """What the run's error (and `workflow status`) says: every blocker, then the first sentence of each open P0/P1, P0 first,
+    at most 3; review.json holds them all."""
+    from .pipeline import blocking_findings
+    found = sorted(((finding["severity"], reviewer_id, finding["message"]) for reviewer_id in blockers
+                    for finding in blocking_findings(decisions[reviewer_id]["findings"])), key=lambda item: item[0])
+    message = f"Independent reviewer blocked the candidate ({', '.join(names)})"
+    if found:
+        message += ": " + " ".join(f"[{severity} {reviewer_id}] {first_sentence(text)}" for severity, reviewer_id, text in found[:3])
+        if len(found) > 3:
+            message += f" (+{len(found) - 3} more open P0/P1 in review.json)"
+    return message
+
+
+def blocked_event(state: ReviewStatus, decisions: dict, blockers: list[str], undecided: list[str]) -> str:
+    """The timeline's `blocked` record of a review: each blocker with its verdict and open P0/P1, and the reviewers without one."""
+    parts = [f"{reviewer_id} ({'late ' if state.statuses[reviewer_id].get('late') else ''}{decisions[reviewer_id]['verdict']}, "
+             f"{open_counts(decisions[reviewer_id]['findings'])})" for reviewer_id in blockers]
+    message = f"Review blocked by {listing(parts)}" if parts else "Review blocked"
+    if undecided:
+        message += f"{';' if parts else ':'} no verdict from {listing(undecided)}"
+    return message
 
 
 def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
@@ -742,11 +894,13 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
     save_json(runtime.directory / "review.json", review)
     blockers = [reviewer_id for reviewer_id in state.ids if reviewer_id in decisions and decision_blocks(decisions[reviewer_id])]
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
-    if blockers or undecided:
+    if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
+        late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
         for reviewer_id in blockers:
             state.statuses[reviewer_id]["status"] = "blocked"  # An approval with an unresolved P0/P1 is contradictory; the run is blocked.
         state.save()
-        raise RuntimeError(f"Independent reviewer blocked the candidate ({', '.join(blockers or undecided)})")
+        runtime.event("review", "blocked", blocked_event(state, decisions, blockers, undecided))
+        raise RuntimeError(blocked_error(blockers or undecided or late, blockers, decisions))
     runtime.validate_review(review)
     for status in state.statuses.values():
         status["status"] = "succeeded"
@@ -817,9 +971,11 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
 def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None, sleep=None) -> None:
     """Every reviewer is the session its launch bound, and its UUID differs from every worker's and every other reviewer's.
 
-    A reviewer that wrote its file is idle, which is what an update respawns under a new PID: while the listing shows a
-    bound one in that gap (UpdateGaps) it is listed again every 2 seconds, and a gap that outlasts the grace raises
-    TransientInfraError. A changed or shared UUID and every identity refusal fail at once.
+    The recorded UUIDs are checked for every reviewer; the listing only for the reviewers with a verdict: one superseded
+    without a verdict (its session gone during the grace after a block) has nothing to refuse, and its absence must not
+    cost the review its record. A reviewer that wrote its file is idle, which is what an update respawns under a new PID:
+    while the listing shows a bound one in that gap (UpdateGaps) it is listed again every 2 seconds, and a gap that
+    outlasts the grace raises TransientInfraError. A changed or shared UUID and every identity refusal fail at once.
     """
     clock = clock or time.time
     sleep = sleep or time.sleep
@@ -831,7 +987,7 @@ def check_independence(runtime, bundle: dict, state: ReviewStatus, *, clock=None
             raise RuntimeError(f"Reviewer identity changed or is not independent ({reviewer_id}); refusing the verdict")
         seen.add(session_id)
     gaps = UpdateGaps(runtime.sessions, runtime.directory, clock)
-    pending = list(state.ids)
+    pending = [reviewer_id for reviewer_id in state.ids if reviewer_id in state.decisions]
     while True:
         rows = runtime.sessions.inventory()
         for reviewer_id in list(pending):
@@ -914,9 +1070,78 @@ def print_command(executable: str, session_id: str, schema: dict, add_dirs: list
     return command + ["--json-schema", json.dumps(schema)]
 
 
+def print_verdict(runtime, reviewer_id: str, process: subprocess.Popen, status: dict) -> dict:
+    """A finished print job's decision: exit 0, its own session, a success result, structured output valid against the schema."""
+    from jsonschema import validate
+    result = read_json(runtime.directory / f"{review_node(reviewer_id)}.stdout.json")
+    if process.returncode != 0 or result.get("session_id") != status["session_id"] or result.get("is_error") is not False or result.get("subtype") != "success":
+        raise RuntimeError(f"Reviewer {reviewer_id} did not succeed; inspect retained output. No automatic retry/provider switch.")
+    decision = result.get("structured_output")
+    validate(decision, review_schema(runtime))
+    check_finding_lanes(runtime, decision["findings"])
+    return decision
+
+
+PRINT_POLL_SECONDS = 1.0  # How long the collection waits on one running print job before it looks at the others again.
+
+
+def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -> None:
+    """Read every print job as it exits, whatever the declared order; each deadline counts from that job's own launch.
+
+    Before any block, a job that failed or an expired deadline ends the review at once. The first accepted block starts the
+    grace: every other job has until it ends (REVIEW_GRACE_SECONDS) or its own deadline, whichever comes first. One that
+    exits by then is read and recorded late (it can add blockers, never approve); a late job that failed is kept as
+    `late_error` and never raised; a job still running then is stopped and ends superseded.
+    """
+    decisions = state.decisions
+    pending = list(state.ids)
+    grace_end = None  # On time.monotonic(), as the deadlines.
+    while pending:
+        for reviewer_id in list(pending):
+            process, launched = processes[reviewer_id]
+            status = state.statuses[reviewer_id]
+            if process.poll() is not None:
+                pending.remove(reviewer_id)
+                if grace_end is not None:
+                    try:
+                        decision = print_verdict(runtime, reviewer_id, process, status)
+                    except Exception as error:
+                        status["late_error"] = str(error)
+                        supersede_late(runtime, state, reviewer_id, f"its print job's output was refused ({error})")
+                        continue
+                    record_late(runtime, state, reviewer_id, decision, now())
+                    continue
+                try:
+                    decision = print_verdict(runtime, reviewer_id, process, status)
+                except BaseException as error:
+                    status.update(status="blocked", error=str(error))
+                    raise
+                decisions[reviewer_id] = decision
+                status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
+                state.save()
+                if decision_blocks(decision):
+                    grace_end = time.monotonic() + REVIEW_GRACE_SECONDS
+                    if pending:
+                        announce_grace(runtime, state, pending, time.time() + REVIEW_GRACE_SECONDS)
+                continue
+            deadline = launched + timeout
+            if grace_end is None and time.monotonic() >= deadline:
+                error = f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched"
+                status.update(status="blocked", error=error)
+                raise RuntimeError(error)
+            if grace_end is not None and time.monotonic() >= min(deadline, grace_end):
+                pending.remove(reviewer_id)
+                terminate(process)
+                supersede_late(runtime, state, reviewer_id, "its deadline passed" if deadline <= grace_end else "its print job was still running at the end of the grace")
+        if pending:
+            try:
+                processes[pending[0]][0].wait(timeout=PRINT_POLL_SECONDS)  # Returns as soon as that job exits.
+            except subprocess.TimeoutExpired:
+                pass
+
+
 def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) -> dict:
     """Headless fallback (--reviewer-transport print): one `claude --print` job per reviewer, in parallel, no pane, no human input."""
-    from jsonschema import validate
     from .pipeline import digest_file
     declared = reviewers(runtime)
     combined = {"transport": "print", "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
@@ -946,35 +1171,13 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
             state.save()
         combined["status"] = "running"
         state.save()
-        decisions = state.decisions
-        for reviewer_id in state.ids:  # Declared order; each deadline counts from that reviewer's own launch.
-            process, launched = processes[reviewer_id]
-            status = statuses[reviewer_id]
-            try:
-                try:
-                    process.wait(timeout=max(0.0, timeout - (time.monotonic() - launched)))
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched") from None
-                result = read_json(runtime.directory / f"{review_node(reviewer_id)}.stdout.json")
-                if process.returncode != 0 or result.get("session_id") != status["session_id"] or result.get("is_error") is not False or result.get("subtype") != "success":
-                    raise RuntimeError(f"Reviewer {reviewer_id} did not succeed; inspect retained output. No automatic retry/provider switch.")
-                decision = result.get("structured_output")
-                validate(decision, review_schema(runtime))
-                check_finding_lanes(runtime, decision["findings"])
-            except BaseException as error:
-                status.update(status="blocked", error=str(error))
-                raise
-            decisions[reviewer_id] = decision
-            status.update(status="accepted", accepted_at=now(), accepted_decision=decision)
-            state.save()
-            if decision_blocks(decision):
-                break  # The first block decides; the other reviewers are stopped below.
+        collect_print(runtime, state, processes, timeout)
         waited = True
         if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
         if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
             raise RuntimeError("Evidence changed during review")
-        review = _decide(runtime, bundle, digest, state, decisions)
+        review = _decide(runtime, bundle, digest, state, state.decisions)
     except BaseException as error:
         for process, _ in processes.values():
             if process.poll() is None:

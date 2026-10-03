@@ -572,11 +572,13 @@ class ReviewCompletionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, f"Stale or foreign review completion signal \\({last}\\)"):
                 wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
             self.assertEqual(read_json(self.root / f"automatic-{self.node(last)}.json")["status"], "blocked")
-            # One blocked verdict returns at once; the other reviewers are not waited for.
+            # One accepted block starts the grace: the other reviewers are waited for until it ends, and a bound file is read
+            # whatever their session reads (first still works) and recorded late, a verdict that can add blockers, never approve.
             self.write(last, verdict="blocked")
             self.rows[first]["state"] = "working"
             self.never_accepted(first)
-            self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), [last])
+            self.assertEqual(list(wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))), [last, first])
+            self.assertEqual([read_json(self.root / f"automatic-{self.node(reviewer_id)}.json").get("late") for reviewer_id in (first, last)], [True, None])
             self.rows[first]["state"] = "idle"
             self.write(last)
         # A reviewer never accepted whose session is gone is a verdict; an accepted one is read from its file first.
@@ -644,6 +646,7 @@ class ReviewCompletionTests(unittest.TestCase):
         from .sessions import TransientInfraError
         self.bind_live()
         state = ReviewStatus.load(self.runtime)
+        state.decisions.update(dict.fromkeys(self.ids, {"verdict": "approved", "findings": []}))  # As the wait left them.
         first, last = self.ids[0], self.ids[-1]
         listed = [dict(row) for reviewer_id, row in self.rows.items() if reviewer_id != last]
         listings = iter([listed, [*listed, {**self.rows[last], "pid": os.getppid()}]])
@@ -846,6 +849,7 @@ class ReviewCompletionTests(unittest.TestCase):
         first, others = self.ids[0], self.ids[1:]
         self.write(first, verdict="blocked")
         for reviewer_id in others:
+            self.write(reviewer_id)  # Bound files the grace after the block reads at once, though their sessions still work.
             self.rows[reviewer_id]["state"] = "working"
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
         accepted = decisions[first]
@@ -919,6 +923,235 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
                          ([(first, None), (second, "approved")], "blocked"))
         status = read_json(self.root / f"automatic-{self.node(second)}.json")
         self.assertEqual((status["status"], status["accepted_at"]), ("accepted", accepted_at))
+
+    # ---- The grace after an accepted block (C33): every verdict a reviewer wrote is kept -------------------------------
+
+    P1 = {"severity": "P1", "message": "Outcomes do not freeze for a duel in its theft-choice window. The match ends anyway.",
+          "disposition": "open", "worker": "ui", "requirement": None}
+
+    def status_of(self, reviewer_id):
+        return read_json(self.root / f"automatic-{self.node(reviewer_id)}.json")
+
+    def ticking(self, start, step, on_sleep=None):
+        """A clock at `start` that each sleep moves `step` seconds, then calls `on_sleep(now)`; (clock, sleep, sleeps)."""
+        now, sleeps = [float(start)], []
+
+        def sleep(_):
+            now[0] += step
+            sleeps.append(now[0])
+            if on_sleep:
+                on_sleep(now[0])
+        return (lambda: now[0]), sleep, sleeps
+
+    def test_once_a_block_is_accepted_a_bound_file_is_recorded_whatever_its_session_reads(self):
+        # viewer-revamp-004: general's approval (6 P2) was written and bound a minute before coverage's block was accepted,
+        # but its row never read idle, so the run kept no general verdict. Once a block is accepted, the grace reads every
+        # other reviewer's bound file whatever its session reads, and records it as a late verdict.
+        from .automatic import ReviewStatus, combined_review, wait_reviews
+        general, coverage = self.ids
+        p2s = [{"severity": "P2", "message": f"Minor gap {n}", "disposition": "open", "worker": "ui", "requirement": None} for n in range(6)]
+        self.write(general, findings=p2s)
+        self.rows[general]["state"] = "working"  # Its turn ended; the row never says so.
+        self.write(coverage, verdict="blocked", findings=[self.P1])
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual({reviewer_id: decision["verdict"] for reviewer_id, decision in decisions.items()}, {coverage: "blocked", general: "approved"})
+        late = self.status_of(general)
+        self.assertEqual((late["status"], late["late"], late["accepted_decision"]["findings"], late["accepted_at"]),
+                         ("accepted", True, p2s, "1970-01-01T00:01:40Z"))
+        self.assertNotIn("late", self.status_of(coverage))
+        review = combined_review(self.runtime, self.bundle, self.digest, state, decisions)
+        self.assertEqual(([entry["verdict"] for entry in review["reviewers"]], review["verdict"], len(review["findings"])), (["approved", "blocked"], "blocked", 7))
+        self.assertEqual([event[:2] for event in self.events], [("review", "note"), ("review", "note")])
+        self.assertEqual(self.events[0][2], "Reviewer coverage blocked the candidate; general has until 1970-01-01T00:11:40Z to finish: a verdict "
+                                            "written by then is recorded, and can add blockers but never approve")
+        self.assertEqual(self.events[1][2], "Reviewer general's late verdict recorded: approved, no open P0/P1")
+
+    def test_a_reviewer_that_finishes_inside_the_grace_is_recorded_and_a_half_written_file_is_read_again(self):
+        from .automatic import ReviewStatus, wait_reviews
+        general, coverage = self.ids
+        self.rows[general]["state"] = "working"
+        self.write(coverage, verdict="blocked")
+        path = self.root / f"{self.node(general)}.completion.json"
+
+        def writes(now):
+            if now == 160:
+                path.write_text('{"version": "1.2.0", "run_id": "te')  # Still being written: refused, and read again at the next poll.
+            if now == 400:
+                self.write(general, verdict="blocked", findings=[self.P1])
+        clock, sleep, sleeps = self.ticking(100, 60, writes)
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+        self.assertEqual((sorted(decisions), sleeps[-1]), (sorted(self.ids), 400))
+        late = self.status_of(general)
+        self.assertEqual((late["status"], late["late"], late["accepted_at"], "late_error" in late), ("blocked", True, "1970-01-01T00:06:40Z", False))
+        self.assertEqual(self.events[-1][1:], ("note", "Reviewer general's late verdict recorded: blocked, 1 open P1"))
+
+    def test_a_reviewer_still_working_at_the_end_of_the_grace_ends_superseded_without_a_verdict(self):
+        from .automatic import REVIEW_GRACE_SECONDS, ReviewStatus, wait_reviews
+        general, coverage = self.ids
+        self.rows[general]["state"] = "working"
+        self.write(coverage, verdict="blocked")
+        clock, sleep, sleeps = self.ticking(100, 60)
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+        self.assertEqual(list(decisions), [coverage])
+        self.assertEqual(sleeps[-1], 100 + REVIEW_GRACE_SECONDS)  # Its own deadline (launch + 1800 s) is later: the grace ends it.
+        status = self.status_of(general)
+        self.assertEqual((status["status"], "accepted_decision" in status, "late_error" in status), ("superseded", False, False))
+        self.assertEqual(self.events[-1][1:], ("note", "Reviewer general gave no verdict and ends superseded: still working at the end of the grace"))
+
+    def test_a_reviewer_whose_own_deadline_passes_during_the_grace_ends_superseded_then(self):
+        from .automatic import ReviewStatus, wait_reviews
+        timeout = DEFAULTS["review_timeout_seconds"]
+        general, coverage = self.ids
+        self.rows[general]["state"] = "working"
+        self.write(coverage, verdict="blocked")
+        clock, sleep, sleeps = self.ticking(timeout - 120, 60)
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+        self.assertEqual((list(decisions), sleeps[-1]), ([coverage], timeout))
+        self.assertEqual(self.status_of(general)["status"], "superseded")
+        self.assertEqual(self.events[-1][2], "Reviewer general gave no verdict and ends superseded: its deadline passed")
+
+    def test_a_reviewer_whose_session_disappears_turns_terminal_or_ends_during_the_grace_ends_superseded(self):
+        # Nothing raised for a remaining reviewer replaces the block, and its file is not read: the identity check after the
+        # wait could not confirm that session and would refuse the whole review.
+        from .automatic import ReviewStatus, wait_reviews
+        from .interactive import DEAD_PID_GRACE_SECONDS
+        general, coverage = self.ids
+        ended = subprocess.Popen(["sleep", "60"])
+        ended.kill()
+        ended.wait()
+        cases = {"missing": lambda: self.rows.pop(general), "stopped": lambda: self.rows[general].update(state="stopped"),
+                 "failed": lambda: self.rows[general].update(state="failed"), "ended": lambda: self.rows[general].update(pid=ended.pid)}
+        for name, lose in cases.items():
+            with self.subTest(session=name):
+                self.setUp()
+                if name == "ended":
+                    self.bind_live()  # A bound receipt: an ended process is waited out as an update's respawn gap first.
+                self.rows[general]["state"] = "working"
+                self.write(general)  # A valid file, never read: the session that wrote it is gone.
+                self.write(coverage, verdict="blocked")
+                listing, calls = self.runtime.sessions.inventory, []
+
+                def inventory():
+                    calls.append(len(calls))
+                    if len(calls) == 2:  # Right after the block was accepted.
+                        lose()
+                    return listing()
+                self.runtime.sessions.inventory = inventory
+                clock, sleep, sleeps = self.ticking(100, 10)
+                decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+                self.assertEqual(list(decisions), [coverage])
+                self.assertEqual(self.status_of(general)["status"], "superseded")
+                self.assertEqual(len(sleeps), DEAD_PID_GRACE_SECONDS // 10 if name == "ended" else 0)
+                self.assertTrue(self.events[-1][2].startswith("Reviewer general gave no verdict and ends superseded: its session "), self.events[-1])
+
+    def test_a_malformed_late_file_stores_late_error_and_ends_superseded(self):
+        from .automatic import ReviewStatus, wait_reviews
+        general, coverage = self.ids
+        self.rows[general]["state"] = "working"
+        self.write(general, findings=[{"severity": "P3", "message": "Not a severity", "disposition": "open", "worker": "ui", "requirement": None}])
+        self.write(coverage, verdict="blocked")
+        clock, sleep, sleeps = self.ticking(100, 120)
+        decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+        self.assertEqual((list(decisions), sleeps[-1]), ([coverage], 700))  # Read at every poll, and its error kept only at the end.
+        status = self.status_of(general)
+        self.assertEqual((status["status"], "accepted_decision" in status), ("superseded", False))
+        self.assertTrue(status["late_error"].startswith("Review completion signal (general) violates the schema"), status["late_error"])
+        self.assertTrue(self.events[-1][2].startswith("Reviewer general gave no verdict and ends superseded: its completion file could not be "
+                                                      "read at the end of the grace (Review completion signal (general) violates the schema"), self.events[-1])
+
+    def test_a_resumed_controller_waits_only_until_the_original_grace_end(self):
+        from .automatic import ReviewStatus, wait_reviews
+        from .sessions import TransientInfraError
+        general, coverage = self.ids
+
+        def away(_seconds):
+            raise TransientInfraError("Claude session inventory unavailable: timed out")
+        for after_the_grace in (False, True):
+            with self.subTest(after_the_grace=after_the_grace):
+                self.setUp()
+                self.rows[general]["state"] = "working"
+                self.write(coverage, verdict="blocked")
+                with self.assertRaises(TransientInfraError):
+                    wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=away)
+                self.assertEqual((self.status_of(coverage)["accepted_at"], self.status_of(general)["status"]), ("1970-01-01T00:01:40Z", "running"))
+                if not after_the_grace:
+                    # Resumed at t=400: the window still ends 600 seconds after the block was accepted, at t=700, not t=1000.
+                    clock, sleep, sleeps = self.ticking(400, 100)
+                    decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
+                    self.assertEqual((list(decisions), sleeps), ([coverage], [500, 600, 700]))
+                    self.assertEqual(self.status_of(general)["status"], "superseded")
+                else:
+                    # Resumed after it ended: one last read of each reviewer still waited for, and no wait.
+                    self.write(general)
+                    decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 5000, sleep=lambda _: self.fail("Unexpected wait"))
+                    self.assertEqual(sorted(decisions), sorted(self.ids))
+                    self.assertTrue(self.status_of(general)["late"])
+
+    def test_late_approvals_never_make_the_combined_review_approved(self):
+        from .automatic import ReviewStatus, combined_review
+        general, coverage = self.ids
+        approved = {"verdict": "approved", "findings": []}
+        state = ReviewStatus.load(self.runtime)
+        self.assertEqual(combined_review(self.runtime, self.bundle, self.digest, state, {general: approved, coverage: approved})["verdict"], "approved")
+        state.statuses[general]["late"] = True  # Read after another reviewer's block: it can add blockers, never approve.
+        review = combined_review(self.runtime, self.bundle, self.digest, state, {general: approved, coverage: approved})
+        self.assertEqual((review["verdict"], [entry["verdict"] for entry in review["reviewers"]]), ("blocked", ["approved", "approved"]))
+
+    def test_a_rejected_file_or_an_expired_deadline_still_ends_the_review_at_once(self):
+        # Only an accepted block starts the grace: a refused file or a deadline decides at once, as before.
+        from .automatic import ReviewStatus, wait_reviews
+        general, coverage = self.ids
+        self.rows[general]["state"] = "working"
+        self.write(coverage, verdict="blocked", launch_token="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        with self.assertRaisesRegex(RuntimeError, r"^Stale or foreign review completion signal \(coverage\)$"):
+            wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: 100, sleep=lambda _: self.fail("Unexpected wait"))
+        self.setUp()
+        self.rows[general]["state"] = "working"
+        self.rows[coverage]["state"] = "working"
+        with self.assertRaisesRegex(RuntimeError, r"^Reviewer general deadline exhausted; no second reviewer is launched$"):
+            wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=lambda: DEFAULTS["review_timeout_seconds"],
+                         sleep=lambda _: self.fail("Unexpected wait"))
+        self.assertEqual([event for event in self.events if event[1] == "note"], [])
+
+    def test_the_identity_check_lists_only_the_reviewers_with_a_verdict(self):
+        # A reviewer superseded during the grace (its session gone) has no verdict to refuse, so its listing is not checked; its
+        # recorded session id still is, as every reviewer's.
+        from .automatic import ReviewStatus, check_independence
+        general, coverage = self.ids
+        state = ReviewStatus.load(self.runtime)
+        state.decisions[coverage] = {"verdict": "blocked", "findings": []}
+        del self.rows[general]
+        check_independence(self.runtime, self.bundle, state, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))
+        state.statuses[general]["session_id"] = state.statuses[coverage]["session_id"]
+        with self.assertRaisesRegex(RuntimeError, r"^Reviewer identity changed or is not independent \(coverage\)"):
+            check_independence(self.runtime, self.bundle, state, clock=lambda: 1, sleep=lambda _: self.fail("Unexpected wait"))
+
+    def test_a_blocked_review_names_every_blocker_the_open_p0_p1_and_the_reviewers_without_a_verdict(self):
+        # The error `workflow status` prints names every blocker and the first sentence of each open P0/P1 (at most 3); the
+        # timeline gets one `blocked` event with each blocker's counts and the reviewers that gave no verdict.
+        from .automatic import ReviewStatus, _decide
+
+        def finding(severity, message, disposition="open"):
+            return {"severity": severity, "message": message, "disposition": disposition, "worker": "ui", "requirement": None}
+        general, coverage = self.ids
+        state = ReviewStatus.load(self.runtime)
+        state.statuses[general]["late"] = True
+        decisions = {coverage: {"verdict": "blocked", "findings": [self.P1, finding("P1", "Fixed already.", "resolved"), finding("P2", "Minor.")]},
+                     general: {"verdict": "approved", "findings": [finding("P1", "No test covers   the\nreplay path"), finding("P0", "The guard is bypassed! It never runs."),
+                                                                   finding("P0", "Keys leak into logs. Rotate them."), finding("P1", "Accepted is not resolved.", "accepted")]}}
+        with self.assertRaises(RuntimeError) as raised:
+            _decide(self.runtime, self.bundle, self.digest, state, decisions)
+        self.assertEqual(str(raised.exception), "Independent reviewer blocked the candidate (general, coverage): [P0 general] The guard is bypassed! "
+                                                "[P0 general] Keys leak into logs. [P1 general] No test covers the replay path. (+2 more open P0/P1 in review.json)")
+        self.assertEqual(self.events, [("review", "blocked", "Review blocked by general (late approved, 2 open P0 and 2 open P1) and coverage (blocked, 1 open P1)")])
+        self.assertEqual([entry["verdict"] for entry in read_json(self.root / "review.json")["reviewers"]], ["approved", "blocked"])
+        self.assertEqual([self.status_of(reviewer_id)["status"] for reviewer_id in self.ids], ["blocked", "blocked"])
+        # A reviewer without a verdict is named too; a blocked verdict without an open P0/P1 still blocks.
+        self.events.clear()
+        with self.assertRaisesRegex(RuntimeError, r"^Independent reviewer blocked the candidate \(coverage\)$"):
+            _decide(self.runtime, self.bundle, self.digest, ReviewStatus.load(self.runtime), {coverage: {"verdict": "blocked", "findings": []}})
+        self.assertEqual(self.events, [("review", "blocked", "Review blocked by coverage (blocked, no open P0/P1); no verdict from general")])
 
 
 class PrintReviewerLaunchTests(unittest.TestCase):
@@ -1040,10 +1273,12 @@ class GraphFixture(unittest.TestCase):
         self.verdict.write_text("approved")
         self.findings = f.root / "review-findings.json"  # Optional: the findings the fake print reviewer reports.
         self.plant = f.root / "review-plant"  # Optional: text the fake print reviewer writes to .claude/settings.json in its checkout.
+        # Optional: per reviewer id, what its fake print job does instead: {"verdict", "findings", "sleep" (seconds), "exit", "output"}.
+        self.knobs = f.root / "review-knobs.json"
         f.sessions.reviewer_verdict_file = self.verdict
         executable = f.root / "fake-reviewer"
         executable.write_text(f'''#!/usr/bin/env python3
-import json, sys
+import json, re, sys, time
 from pathlib import Path
 args = sys.argv
 assert args[args.index('--tools') + 1] == 'Read,Glob,Grep'
@@ -1059,8 +1294,16 @@ plant = Path({str(self.plant)!r})
 if plant.exists():  # The job runs in the review worktree.
     Path('.claude').mkdir(exist_ok=True)
     Path('.claude/settings.json').write_text(plant.read_text())
-print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
-                  "structured_output": {{"verdict": verdict, "findings": findings}}}}))
+declared = re.match(r'Review only the (\\S+) aspects', sys.stdin.read())  # The brief GraphFixture gives a declared reviewer.
+knobs = Path({str(self.knobs)!r})
+knob = json.loads(knobs.read_text()).get(declared[1] if declared else 'review', {{}}) if knobs.exists() else {{}}
+time.sleep(knob.get('sleep', 0))
+if 'output' in knob:
+    print(knob['output'])
+else:
+    print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
+                      "structured_output": {{"verdict": knob.get('verdict', verdict), "findings": knob.get('findings', findings)}}}}))
+sys.exit(knob.get('exit', 0))
 ''')
         executable.chmod(0o700)
         f.sessions.executable = str(executable)
@@ -1200,13 +1443,16 @@ sys.exit(0 if commit else 75)
         self.assertIn("blocked the candidate", receipt["error"])
         review = read_json(f.directory / "review.json")
         self.assertEqual((review["verdict"], review["reviewer"]), ("blocked", self.sessions_joined()))
-        # The first reviewer's block decides; nobody waits for the others, whose status records that.
-        first = self.ids[0]
-        self.assertEqual((self.status(first)["status"], self.status(first)["accepted_decision"]["verdict"]), ("blocked", "blocked"))
-        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["blocked"] + [None] * (len(self.ids) - 1))
-        for other in self.ids[1:]:
-            self.assertEqual(self.status(other)["status"], "superseded")
-            self.assertNotIn("accepted_decision", self.status(other))
+        # Every reviewer's verdict is kept: the first accepted block starts the grace, and the other reviewers' verdicts, read
+        # during it, are recorded too, as late ones (they can add blockers, never approve).
+        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["blocked"] * len(self.ids))
+        statuses = [self.status(reviewer_id) for reviewer_id in self.ids]
+        self.assertEqual([(status["status"], status["accepted_decision"]["verdict"]) for status in statuses], [("blocked", "blocked")] * len(self.ids))
+        self.assertEqual(sorted(bool(status.get("late")) for status in statuses), [False] + [True] * (len(self.ids) - 1))
+        self.assertTrue(receipt["error"].startswith(f"Independent reviewer blocked the candidate ({', '.join(self.ids)})"), receipt["error"])
+        blocked = [event["message"] for event in self.events() if (event["node"], event["status"]) == ("review", "blocked")]
+        self.assertEqual(blocked, ["Review blocked by " + " and ".join(f"{reviewer_id} ({'late ' if status.get('late') else ''}blocked, no open P0/P1)"
+                                                                      for reviewer_id, status in zip(self.ids, statuses))])
         with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
@@ -1576,6 +1822,70 @@ class PrintTwoReviewerGraphTests(PrintReviewerTests, GraphFixture):
     reviewers = ["general", "coverage"]
 
 
+class PrintGraceScenarios(GraphFixture):
+    """The print jobs after an accepted block (C33): every job that exited is read, a running one has until the grace ends,
+    and nothing that happens to a late job replaces the block."""
+
+    transport = "print"
+    reviewers = ["general", "coverage"]
+    P0 = {"severity": "P0", "message": "Forged GitHub provenance is marked verified. The signature is never checked.",
+          "disposition": "open", "worker": "ui", "requirement": None}
+
+    def blocked(self, **knobs) -> dict:
+        """Drive the run with these per-reviewer knobs for the fake print jobs; it must block. The record, by reviewer id."""
+        f = self.fixture
+        self.knobs.write_text(json.dumps(knobs))
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(self.reviewer_launches(), 2)
+        return {entry["reviewer_id"]: entry["verdict"] for entry in read_json(f.directory / "review.json")["reviewers"]}
+
+    def notes(self) -> list:
+        return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("review", "note")]
+
+    def test_a_job_that_exited_after_an_earlier_block_is_read_and_recorded(self):
+        # The pine runs: the declared-order loop stopped at an earlier reviewer's block and marked security, whose job had
+        # already exited with P0/P1 findings, superseded. Every job that exited is read now, its verdict recorded late.
+        verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"verdict": "approved", "findings": [self.P0], "sleep": 1})
+        self.assertEqual(verdicts, {"general": "blocked", "coverage": "approved"})
+        self.assertEqual(read_json(self.fixture.directory / "review.json")["findings"], [{**self.P0, "reviewer": "coverage"}])
+        coverage = self.status("coverage")
+        self.assertEqual((coverage["status"], coverage["late"], coverage["accepted_decision"]["findings"]), ("blocked", True, [self.P0]))
+        self.assertNotIn("late", self.status("general"))
+        self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general, coverage): [P0 coverage] Forged GitHub provenance is marked verified.")
+        self.assertEqual(self.notes()[-1], "Reviewer coverage's late verdict recorded: approved, 1 open P0")
+        exported = read_json(self.fixture.directory / "run-state.json")
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], len(entry["findings"])) for entry in exported["review"]["reviewers"]],
+                         [("general", "blocked", "blocked", 0), ("coverage", "approved", "blocked", 1)])
+
+    def test_a_late_job_that_fails_never_replaces_the_block(self):
+        for name, knob in (("exit 1", {"exit": 1, "sleep": 1}), ("no JSON", {"output": "not json", "sleep": 1})):
+            with self.subTest(job=name):
+                if name != "exit 1":
+                    self.setUp()  # A fresh run.
+                verdicts = self.blocked(general={"verdict": "blocked"}, coverage=knob)
+                self.assertEqual(verdicts, {"general": "blocked", "coverage": None})
+                self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general)")
+                coverage = self.status("coverage")
+                self.assertEqual((coverage["status"], "accepted_decision" in coverage), ("superseded", False))
+                self.assertTrue(coverage["late_error"], coverage)
+                self.assertEqual(self.notes()[-1], f"Reviewer coverage gave no verdict and ends superseded: its print job's output was refused ({coverage['late_error']})")
+
+    def test_a_job_still_running_when_the_grace_ends_is_stopped_and_superseded(self):
+        started = time.monotonic()
+        with patch("workflow.automatic.REVIEW_GRACE_SECONDS", 1):
+            verdicts = self.blocked(general={"verdict": "blocked"}, coverage={"sleep": 60})
+        self.assertLess(time.monotonic() - started, 50)  # Stopped at the end of the grace, not waited for.
+        self.assertEqual(verdicts, {"general": "blocked", "coverage": None})
+        self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (general)")
+        coverage = self.status("coverage")
+        self.assertEqual((coverage["status"], "late_error" in coverage, "accepted_decision" in coverage), ("superseded", False, False))
+        self.assertEqual(self.notes()[-1], "Reviewer coverage gave no verdict and ends superseded: its print job was still running at the end of the grace")
+
+
 class NativeReviewerTests:
     """The native completion protocol, with one and with two reviewers."""
 
@@ -1728,10 +2038,13 @@ sys.exit(0 if commit else 75)
         finding = {"severity": "P1", "message": "Unresolved defect", "disposition": "open", "worker": "adapter", "requirement": None}
         self.assert_rejected(lambda item: {**item, "findings": [finding]}, "blocked the candidate")
         review = read_json(self.fixture.directory / "review.json")
-        first = self.ids[0]  # The first accepted file already blocks; the combined record keeps the reviewer's raw approval.
-        self.assertEqual((review["verdict"], review["findings"]), ("blocked", [{**finding, "reviewer": first}]))
-        self.assertEqual(self.status(first)["accepted_decision"]["verdict"], "approved")
-        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["approved"] + [None] * (len(self.ids) - 1))
+        # The first accepted file already blocks; the others, read during the grace after it, are recorded late. The combined
+        # record keeps each reviewer's raw approval and every reviewer's P1.
+        self.assertEqual((review["verdict"], review["findings"]), ("blocked", [{**finding, "reviewer": reviewer_id} for reviewer_id in self.ids]))
+        for reviewer_id in self.ids:
+            self.assertEqual(self.status(reviewer_id)["accepted_decision"]["verdict"], "approved")
+        self.assertEqual([entry["verdict"] for entry in review["reviewers"]], ["approved"] * len(self.ids))
+        self.assertIn("[P1 " + self.ids[0] + "] Unresolved defect.", self.combined()["error"])
 
     # ---- Launch window and post-acceptance stop -----------------------------------------------------
 
@@ -1983,19 +2296,24 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertEqual([finding["reviewer"] for finding in exported["review"]["findings"]], ["general", "coverage", "coverage"])
 
     def test_one_blocks_while_the_other_is_still_working(self):
+        # viewer-revamp-004's shape: general's bound approval is on disk while its session still reads working (its row never
+        # says the turn ended), and coverage blocks. The grace after that block reads general's file whatever its session reads
+        # and records its verdict, late: it can add blockers, never approve.
         f = self.fixture
-        f.sessions.reviewer_states = {"general": "working"}  # General never reaches idle: its file, if any, is never read.
+        f.sessions.reviewer_states = {"general": "working"}
         f.sessions.reviewer_verdicts = {"coverage": "blocked"}
+        f.sessions.reviewer_findings = {"general": self.GENERAL}
         with patch("workflow.automatic.wait_handoffs"), patch.object(f.runtime, "stop_reviewer", wraps=f.runtime.stop_reviewer) as stop:
             with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
                 drive(f.runtime)
             self.assertEqual([call.args[0] for call in stop.call_args_list], ["general", "coverage"])
-        self.assertEqual((self.combined()["status"], self.status("general")["status"], self.status("coverage")["status"]), ("blocked", "superseded", "blocked"))
-        self.assertIn("blocked the candidate (coverage)", self.combined()["error"])
-        self.assertNotIn("accepted_decision", self.status("general"))
+        self.assertEqual((self.combined()["status"], self.status("general")["status"], self.status("coverage")["status"]), ("blocked", "accepted", "blocked"))
+        self.assertEqual((self.status("general")["late"], self.status("general")["accepted_decision"]["verdict"]), (True, "approved"))
+        self.assertTrue(self.combined()["error"].startswith("Independent reviewer blocked the candidate (coverage)"), self.combined()["error"])
         review = read_json(f.directory / "review.json")
         self.assertEqual(review["verdict"], "blocked")
-        self.assertEqual(self.review_entries(), [("general", None, self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
+        self.assertEqual(self.review_entries(), [("general", "approved", self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
+        self.assertEqual(review["findings"], [{**self.GENERAL[0], "reviewer": "general"}])
         for reviewer_id in self.ids:
             self.assertTrue(read_json(self.file(reviewer_id, "stop.json"))["stopped"])
         self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
@@ -2004,7 +2322,68 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertEqual(self.reviewer_launches(), 2)
         exported = read_json(f.directory / "run-state.json")
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"]) for entry in exported["review"]["reviewers"]],
+                         [("general", "approved", "accepted"), ("coverage", "blocked", "blocked")])
+        review_events = [(event["status"], event["message"]) for event in self.events() if event["node"] == "review"]
+        self.assertIn(("note", "Reviewer general's late verdict recorded: approved, no open P0/P1"), review_events)
+        self.assertIn(("blocked", "Review blocked by coverage (blocked, no open P0/P1)"), review_events)
+
+    def test_one_blocks_while_the_other_never_writes_its_file(self):
+        # The other reviewer is still working without a file when the grace ends: it is stopped, superseded, with no verdict.
+        f = self.fixture
+        f.sessions.reviewer_states = {"general": "working"}
+        f.sessions.reviewer_verdicts = {"coverage": "blocked"}
+        f.sessions.reviewer_writes_file = {"coverage"}
+        with patch("workflow.automatic.wait_handoffs"), patch("workflow.automatic.REVIEW_GRACE_SECONDS", 0), \
+                patch.object(f.runtime, "stop_reviewer", wraps=f.runtime.stop_reviewer) as stop:
+            with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+                drive(f.runtime)
+            self.assertEqual([call.args[0] for call in stop.call_args_list], ["general", "coverage"])
+        self.assertEqual((self.combined()["status"], self.status("general")["status"], self.status("coverage")["status"]), ("blocked", "superseded", "blocked"))
+        self.assertEqual(self.combined()["error"], "Independent reviewer blocked the candidate (coverage)")
+        self.assertFalse({"accepted_decision", "late", "late_error"} & set(self.status("general")))
+        self.assertEqual(self.review_entries(), [("general", None, self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
+        for reviewer_id in self.ids:
+            self.assertTrue(read_json(self.file(reviewer_id, "stop.json"))["stopped"])
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        self.assertEqual(self.reviewer_launches(), 2)
+        exported = read_json(f.directory / "run-state.json")
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"]) for entry in exported["review"]["reviewers"]],
                          [("general", None, "superseded"), ("coverage", "blocked", "blocked")])
+        review_events = [(event["status"], event["message"]) for event in self.events() if event["node"] == "review"]
+        self.assertIn(("note", "Reviewer general gave no verdict and ends superseded: still working at the end of the grace"), review_events)
+        self.assertIn(("blocked", "Review blocked by coverage (blocked, no open P0/P1); no verdict from general"), review_events)
+
+    def test_a_reviewer_session_lost_during_the_grace_leaves_the_block_and_its_record(self):
+        # General's session leaves the listing after coverage's block was accepted (it ended, or was stopped by hand). It ends
+        # superseded once the respawn grace is over, its listing is not part of the identity check (it has no verdict), and
+        # the block's error and review.json stand.
+        f = self.fixture
+        f.sessions.reviewer_states = {"general": "working"}
+        f.sessions.reviewer_verdicts = {"coverage": "blocked"}
+        f.sessions.reviewer_writes_file = {"coverage"}
+        listing, coverage_status = f.sessions.inventory, f.directory / "automatic-review-coverage.json"
+
+        def inventory():
+            rows = listing()
+            if coverage_status.exists() and "accepted_at" in read_json(coverage_status):
+                rows = [row for row in rows if row["id"] != f.sessions.background_id("review-general")]
+            return rows
+        f.sessions.inventory = inventory
+        clock = SimpleNamespace(value=time.time())  # Each deadline counts from the reviewer's real launch time.
+        with patch("workflow.automatic.wait_handoffs"), patch("workflow.automatic.time") as fake_time, \
+                patch.object(f.runtime, "stop_reviewer", wraps=f.runtime.stop_reviewer) as stop:
+            fake_time.time.side_effect = lambda: clock.value
+            fake_time.sleep.side_effect = lambda seconds: setattr(clock, "value", clock.value + seconds)
+            with self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+                drive(f.runtime)
+            self.assertEqual([call.args[0] for call in stop.call_args_list], ["general", "coverage"])
+        self.assertEqual((self.combined()["status"], self.combined()["error"]), ("blocked", "Independent reviewer blocked the candidate (coverage)"))
+        self.assertEqual((self.status("general")["status"], self.status("coverage")["status"]), ("superseded", "blocked"))
+        self.assertEqual(self.review_entries(), [("general", None, self.uuid("general")), ("coverage", "blocked", self.uuid("coverage"))])
+        notes = [event["message"] for event in self.events() if (event["node"], event["status"]) == ("review", "note")]
+        self.assertTrue(notes[-1].startswith("Reviewer general gave no verdict and ends superseded: its session is not listed live (Claude Code "
+                                             "has not listed a live review-general session"), notes)
 
     def test_p1_anywhere(self):
         f = self.fixture
