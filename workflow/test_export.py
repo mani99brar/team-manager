@@ -383,6 +383,28 @@ class ExportRunTests(unittest.TestCase):
         del plan["automatic"]
         self.assertNotIn("profile", str(inputs_section(directory, plan, read_json(directory / "policy.json"))["automatic"]))  # A manual run: none.
 
+    def test_export_1_7_0_carries_the_hold_of_the_challenge_attempt_shown_and_other_runs_export_none(self):
+        """Within 1.7.0 (C8): inputs.challenge.hold when challenge-hold.json records the attempt challenge.json holds; the status stays passed."""
+        from .export_state import challenge_section
+        directory = legacy_run(self.root)
+        record = {"version": "1.0.0", "run_id": "legacy-001", "status": "passed", "attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002",
+                  "pinned": {"tasks_sha256": "a" * 64, "decisions_sha256": "b" * 64, "prd_sha256": None},
+                  "concerns": [{"severity": "P2", "kind": "assumption", "message": "Naming is loose", "consequence": "Readers guess"}],
+                  "simpler_alternative": "One lane", "cheap_experiment": "Prototype it", "accepted_reason": None, "decided_at": "2026-10-03T10:00:00Z"}
+        save_json(directory / "challenge.json", record)
+        self.assertNotIn("hold", challenge_section(directory))  # No hold record: every run before C8 and every run without the hold.
+        hold = {"attempt": 1, "held_at": "2026-10-03T09:00:00Z", "released_at": None, "released_by": None, "dropped": []}
+        save_json(directory / "challenge-hold.json", hold)
+        self.assertNotIn("hold", challenge_section(directory))  # The hold of an earlier attempt is not this attempt's.
+        save_json(directory / "challenge-hold.json", {**hold, "attempt": 2})
+        section = challenge_section(directory)
+        self.assertEqual((section["status"], section["hold"]),
+                         ("passed", {"held_at": "2026-10-03T09:00:00Z", "released_at": None, "released_by": None, "dropped": []}))
+        save_json(directory / "challenge-hold.json", {**hold, "attempt": 2, "released_at": "2026-10-03T11:00:00Z", "released_by": "operator", "dropped": [1]})
+        exported = export_run(ExportRuntime(directory))["inputs"]["challenge"]
+        self.assertEqual((exported["status"], exported["hold"]),
+                         ("passed", {"held_at": "2026-10-03T09:00:00Z", "released_at": "2026-10-03T11:00:00Z", "released_by": "operator", "dropped": [1]}))
+
     def test_prepared_run_without_checkpoint_exports_the_prepare_shape(self):
         directory = legacy_run(self.root)
         (directory / "run-state.json").unlink()

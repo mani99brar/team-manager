@@ -154,6 +154,16 @@ def open_items(directory: Path, plan: dict, findings: list) -> tuple[list[str], 
     return lines, open_ or bool(blocking or limits or unresolved)
 
 
+def held_line(directory: Path, plan: dict) -> str | None:
+    """A run held after a passing design challenge (C8): what holds it and the command that releases it; None otherwise."""
+    from .guardrails import is_held, load_challenge, resume_command
+    record = load_challenge(directory)
+    if not is_held(directory, plan, record):
+        return None
+    return (f"Outcome: held at design challenge attempt {record['attempt']} (passed, {len(record['concerns'])} P2 concern(s)); no worker "
+            f"launched. Read every concern, then release it: {resume_command(directory, launch=True)}")
+
+
 def outcome_block(directory: Path, open_items_only: bool = False) -> str:
     """The run's outcome as text; "" when the run records nothing to report yet (no review, no lane evidence, no sidecar list).
 
@@ -170,6 +180,9 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         if open_items_only:
             return "\n".join(items)
         if not ids:
+            held = held_line(directory, plan)
+            if held:
+                return held
             return "\n".join(["Outcome: no review recorded yet", *items]) if items else ""
         lines, caveat = reviewer_lines(directory, ids, derived)
         if verdict == "approved":

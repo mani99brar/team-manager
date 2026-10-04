@@ -74,6 +74,10 @@ test('the challenge headline names the outcome, the attempt, the notes, the deci
     lead: 'Passed on attempt 3', notes: '8 P2 notes', decidedAt: '2026-03-05T08:50:49Z', totalMs: 667_000, attempts: 3,
   })
   assert.equal(challengeHeadline(challenge({ concerns: p2(1) }), [])?.notes, '1 P2 note')
+  // C8: a passed attempt the plan holds says so until resume --launch releases it.
+  const hold = { held_at: '2026-09-24T08:50:49Z', released_at: null, released_by: null, dropped: [] }
+  assert.equal(challengeHeadline(challenge({ concerns: p2(1), hold }), [])?.lead, 'Held after passing on attempt 1: no worker launches until the operator releases it')
+  assert.equal(challengeHeadline(challenge({ concerns: p2(1), hold: { ...hold, released_at: '2026-09-24T09:00:00Z', released_by: 'operator' } }), [])?.lead, 'Passed on attempt 1')
   assert.equal(challengeHeadline(challenge({ concerns: [] }), [])?.notes, null)
   assert.equal(challengeHeadline(challenge({}), [])?.totalMs, null)
   const paused = challengeHeadline(challenge({ status: 'paused', concerns: [...p2(1), { severity: 'P1', kind: 'assumption', message: 'm', consequence: 'c' }] }), [])

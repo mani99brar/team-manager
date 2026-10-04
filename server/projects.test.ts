@@ -1392,7 +1392,7 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     const inputs = validateRunInputs(response.json())
     assert.equal(inputs.contract_version, '1.4.0')
     assert.equal(inputs.decisions, '# Decisions\n\n## Decisions\n\n- Serve the fields unchanged; see <path> for the run.\n')
-    assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z',
+    assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z', hold: null,
       concerns: [{ ...challengeSection().concerns[0], message: 'Both lanes write <path>' }, challengeSection().concerns[1]] })
     const [ui, adapter] = inputs.workers
     assert.deepEqual(ui.completion, { version: '1.1.0', status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens'], falsifying_check: 'project-workflows-browser', verify_yourself: 'Open <path>', question: null })
@@ -1413,6 +1413,26 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     assert.deepEqual([accepted.challenge!.status, accepted.challenge!.accepted_reason], ['accepted', 'Split by file.'])
     const acceptedDetail = validateRunDetail((await get(app, url('alpha', 'main', 'accepted'))).json())
     assert.equal(acceptedDetail.snapshot.nodes.find(node => node.node_id === 'challenge')!.status, 'succeeded')
+    // C8: a passed attempt the plan holds is a paused node until resume --launch records its release; the record stays passed.
+    const hold = { held_at: '2026-03-01T10:00:00+00:00', released_at: null, released_by: null, dropped: [] }
+    const passed = { concerns: [challengeSection().concerns[1]], status: 'passed' }
+    const heldEvents = [{ sequence: 1, time: T0, node: 'challenge', status: 'succeeded', message: 'Design challenge attempt 2 passed (1 P2 concern(s)); held for the operator' },
+      { sequence: 2, time: T0, node: 'challenge', status: 'paused', message: 'Design challenge attempt 2 passed (1 P2 concern(s)) and is held for the operator before any worker launch' }]
+    await writeRun(rootDir, { runId: 'held', version: '1.7.0', definition, next: ['launch_ui', 'launch_adapter'], events: heldEvents,
+      inputs: inputsSection({ decisions, challenge: challengeSection({ ...passed, hold }) }) })
+    const held = validateRunInputs((await get(app, url('alpha', 'main', 'held', '/inputs'))).json())
+    assert.deepEqual([held.challenge!.status, held.challenge!.hold], ['passed', { ...hold, held_at: '2026-03-01T10:00:00Z' }])
+    const heldDetail = validateRunDetail((await get(app, url('alpha', 'main', 'held'))).json())
+    assert.deepEqual([heldDetail.snapshot.nodes.find(node => node.node_id === 'challenge')!.status, heldDetail.summary.status], ['paused', 'paused'])
+    const release = { ...hold, released_at: '2026-03-01T10:30:00Z', released_by: 'operator', dropped: [1] }
+    await writeRun(rootDir, { runId: 'released', version: '1.7.0', definition, next: ['launch_ui', 'launch_adapter'], events: heldEvents.slice(0, 1),
+      inputs: inputsSection({ decisions, challenge: challengeSection({ ...passed, hold: release }) }) })
+    const releasedDetail = validateRunDetail((await get(app, url('alpha', 'main', 'released'))).json())
+    assert.equal(releasedDetail.snapshot.nodes.find(node => node.node_id === 'challenge')!.status, 'succeeded')
+    assert.deepEqual(validateRunInputs((await get(app, url('alpha', 'main', 'released', '/inputs'))).json()).challenge!.hold,
+      { ...release, held_at: '2026-03-01T10:00:00Z' })
+    // Every challenge without a hold record serves hold null.
+    assert.equal(accepted.challenge!.hold, null)
     // A 1.5.0 export of a run before 2.2.0 and a 1.4.0 export both serve nulls and [].
     await writeRun(rootDir, { runId: 'unguarded', version: '1.5.0', inputs: inputsSection({ decisions: null, challenge: null }, { ui: { questions: [] }, adapter: { questions: [] } }) })
     await writeRun(rootDir, { runId: 'older', version: '1.4.0', inputs: inputsSection() })

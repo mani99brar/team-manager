@@ -366,6 +366,14 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
     value.challenge!.concerns = [{ severity, kind: 'other', message: 'm', consequence: 'c' }]
     validateRunInputs(value)
   }
+  // C8 (1.7.0): a passed attempt the plan holds carries its hold, released or not; the status stays passed.
+  for (const hold of [{ held_at: '2026-01-01T12:00:00Z', released_at: null, released_by: null, dropped: [] },
+    { held_at: '2026-01-01T12:00:00Z', released_at: '2026-01-01T12:30:00Z', released_by: 'operator', dropped: [2] }] as const) {
+    const held = structuredClone(examples.runInputs)
+    held.challenge = { ...held.challenge!, status: 'passed', accepted_reason: null, concerns: [{ severity: 'P2', kind: 'other', message: 'm', consequence: 'c' }],
+      hold: { ...hold, dropped: [...hold.dropped] } }
+    assert.deepEqual(validateRunInputs(held).challenge!.hold, hold)
+  }
   const disabled = structuredClone(examples.runInputs)
   disabled.challenge = { ...disabled.challenge!, status: 'disabled', attempt: 0, attempts: 0, session_id: null, concerns: [], simpler_alternative: null, cheap_experiment: null, accepted_reason: null }
   validateRunInputs(disabled)
@@ -392,6 +400,9 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
     ['paused without a P0/P1', value => { value.challenge!.status = 'paused'; value.challenge!.accepted_reason = null; value.challenge!.concerns = [] }],
     ['disabled with a job', value => { value.challenge!.status = 'disabled'; value.challenge!.accepted_reason = null; value.challenge!.concerns = [] }],
     ['attempt beyond attempts', value => { value.challenge!.attempt = 2 }],
+    ['hold with an unknown actor', value => { value.challenge!.hold = { held_at: '2026-01-01T12:00:00Z', released_at: '2026-01-01T12:30:00Z', released_by: 'bot' as 'operator', dropped: [] } }],
+    ['hold dropping note 0', value => { value.challenge!.hold = { held_at: '2026-01-01T12:00:00Z', released_at: null, released_by: null, dropped: [0] } }],
+    ['hold without its time', value => { value.challenge!.hold = { released_at: null, released_by: null, dropped: [] } as never }],
     ['unknown concern kind', value => { (value.challenge!.concerns[0] as Record<string, unknown>).kind = 'style' }],
     ['concern without consequence', value => { value.challenge!.concerns[0].consequence = '' }],
     ['question numbering', value => { value.workers[0].questions[0].n = 2 }],

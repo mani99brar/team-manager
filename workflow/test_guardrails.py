@@ -172,13 +172,15 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
     def challenge_calls(self) -> list:
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
-    def prepare(self, run_id: str, automatic: bool = False, restore_from: str | None = None) -> Path:
+    def prepare(self, run_id: str, automatic: bool = False, restore_from: str | None = None, hold: bool = False,
+                profile: str | None = None) -> Path:
         """The exact worktree and prepare commands a launch runs, executed against the target.
 
         The run's own worktree is its source checkout from then on: self.repo and self.folder follow it, as the operator
         edits a paused run's feature files where the paused message says. A later prepare launches from there.
         """
-        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic, restore_from=restore_from)
+        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic, restore_from=restore_from,
+                                           profile=profile, hold_challenge=hold)
         subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1255,6 +1257,227 @@ class ChallengeResumeSupervises(GuardedFeature):
         # The run's branch is in its own worktree: merged from your checkout without switching, then the worktree removed.
         self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, remove its source checkout: "
                       f"git worktree remove {self.repo}", output)
+
+
+class ChallengeHold(GuardedFeature):
+    """C8: an opt-in hold after a passing challenge. The operator reads every concern before any worker starts; `resume --launch`
+    releases it, a plain `resume` after an edit reruns the challenge and holds again."""
+
+    NAMES = ("plan.json", "challenge.json", "challenge-hold.json", "events.jsonl", "run-state.json")
+
+    def events(self, directory: Path) -> list:
+        return [(event["node"], event["status"], event["message"]) for event in map(json.loads, (directory / "events.jsonl").read_text().splitlines())]
+
+    def held(self, run_id: str, automatic: bool = False) -> Path:
+        """A prepared run with the hold pinned whose first challenge passed with two P2 concerns, held at start."""
+        directory = self.prepare(run_id, automatic=automatic, hold=True)
+        self.assertEqual(read_json(directory / "plan.json")["holds"], {"challenge": True})
+        self.challenge_says([concern("P2", "Naming is loose"), concern("P2", "One test is slow")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "passed"), output)
+        return directory
+
+    def edit_task(self) -> None:
+        task = self.folder / "ui-task.md"
+        task.write_text(task.read_text() + "\nOnly ui.txt; the adapter lane owns backend.py.\n")
+
+    def test_a_held_start_exits_0_launches_no_worker_writes_the_hold_and_prints_every_concern(self):
+        feed = self.registry.parent / "attention.jsonl"
+        directory = self.prepare("hold-001", hold=True)
+        self.challenge_says([concern("P2", "Naming is loose"), concern("P2", "One test is slow")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(directory), ["challenge"])
+        self.assertFalse(any(directory.glob("*.interactive.json")))
+        self.assertEqual(self.graph_values(directory), {})
+        hold = read_json(directory / "challenge-hold.json")
+        self.assertEqual({key: hold[key] for key in ("attempt", "released_at", "released_by", "dropped")},
+                         {"attempt": 1, "released_at": None, "released_by": None, "dropped": []})
+        self.assertIsInstance(hold["held_at"], str)
+        events = [event for event in self.events(directory) if event[0] == "challenge"]
+        self.assertFalse(any("launching workers" in message for _, _, message in events), events)
+        [paused] = [message for _, status, message in events if status == "paused"]
+        self.assertIn("held", paused)
+        self.assertNotIn("P0/P1", paused)
+        # Every concern, numbered in challenge.json's order, the alternative, the experiment and both commands; no accept line.
+        self.assertIn("1. P2 [assumption] Naming is loose\n      Consequence: Naming is loose breaks the run\n"
+                      "  2. P2 [assumption] One test is slow\n      Consequence: One test is slow breaks the run", output)
+        self.assertIn("Simpler alternative: One lane instead of two", output)
+        self.assertIn("Cheap experiment: Prototype the ui change first", output)
+        self.assertIn(f"{PY} -m workflow resume {directory} --by operator --launch", output)
+        self.assertIn(f"{PY} -m workflow resume {directory} --by operator\n", output)
+        self.assertNotIn("--accept-challenge", output)
+        [line] = [json.loads(line) for line in feed.read_text().splitlines()]
+        self.assertEqual((line["kind"], line["node"]), ("challenge_paused", "challenge"))
+        self.assertIn("held", line["text"])
+        self.assertIn("--launch", line["text"])
+        # A second start holds again without a second record, a second event or a second attention line.
+        before = (directory / "challenge-hold.json").read_bytes()
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertIn("--launch", output)
+        self.assertEqual(((directory / "challenge-hold.json").read_bytes(), self.launches(directory)), (before, ["challenge"]))
+        self.assertEqual(len([event for event in self.events(directory) if event[:2] == ("challenge", "paused")]), 1)
+        self.assertEqual(len(feed.read_text().splitlines()), 1)
+        # status says held with the attempt, and its next step says what releases it; the export keeps the status passed.
+        status, _ = pipeline.run_status(directory)
+        self.assertEqual((status["challenge"], status["challenge_attempt"]), ("held", 1))
+        self.assertIn(f"resume {directory} --by operator --launch", status["next_step"])
+        self.assertNotIn("--accept-challenge", status["next_step"])
+        self.assertEqual(pipeline.outcome_lines(directory),
+                         "Outcome: held at design challenge attempt 1 (passed, 2 P2 concern(s)); no worker launched. Read every concern, then "
+                         f"release it: {PY} -m workflow resume {directory} --by operator --launch\n")
+        exported = read_json(directory / "run-state.json")["inputs"]["challenge"]
+        self.assertEqual((exported["status"], exported["hold"]),
+                         ("passed", {"held_at": hold["held_at"], "released_at": None, "released_by": None, "dropped": []}))
+
+    def test_launch_with_the_flag_stops_before_automatic_and_a_feature_without_a_challenge_refuses_it(self):
+        calls = []
+
+        def run(command, cwd, check, **options):
+            calls.append(command)
+            if command[3:4] == ["start"]:
+                directory = Path(command[4])
+                directory.mkdir(parents=True, exist_ok=True)
+                save_json(directory / "plan.json", {"challenge": True, "holds": {"challenge": True}})
+                save_json(directory / "challenge.json", {"status": "passed", "attempt": 1})
+
+        from .launch import main as launch_main
+        with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()):
+            launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--hold-challenge", "--run-root", str(self.runs),
+                         "--by", "operator"])
+        self.assertEqual([command[3] if command[0] != "git" else "git" for command in calls], ["preflight", "git", "prepare", "start"])
+        self.assertIn("--hold-challenge", calls[2])
+        run = (self.runs / f"{FEATURE}-001").resolve()
+        self.assertIn(f"Launch held at the design challenge; no worker was launched. Run: {run}\nSource checkout: {run}.source\n", output.getvalue())
+        # Without the flag the prepare command carries none.
+        _, commands, _ = launch_commands(self.repo, FEATURE, "plain-001", self.runs, herdr=False)
+        self.assertNotIn("--hold-challenge", commands[2])
+        # A feature that sets challenge: false has nothing to hold: refused before any command runs.
+        save_json(self.folder / "feature.json", {**self.manifest, "challenge": False})
+        commit_all(self.repo, "No challenge")
+        with self.assertRaisesRegex(ValueError, "--hold-challenge needs the design challenge"):
+            launch_commands(self.repo, FEATURE, "off-001", self.runs, herdr=False, hold_challenge=True)
+        result = subprocess.run([PY, "-m", "workflow", "prepare", str(self.runs / "direct-001"), "--repo", str(self.repo), "--policy",
+                                 str(self.folder / "policy.json"), "--task", f"ui={self.folder / 'ui-task.md'}", "--task",
+                                 f"adapter={self.folder / 'adapter-task.md'}", "--guardrails", "--decisions", str(self.folder / "decisions.md"),
+                                 "--no-challenge", "--hold-challenge"], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--hold-challenge needs the design challenge", result.stderr)
+        self.assertFalse((self.runs / "direct-001").exists())
+
+    def test_resume_launch_on_unchanged_files_records_the_release_drops_notes_launches_and_supervises(self):
+        directory = self.held("release-001", automatic=True)
+        before = {name: (directory / name).read_bytes() for name in self.NAMES}
+        # Releasing a hold is the operator's decision: the maintainer is refused and nothing changes.
+        output, code = self.cli(resume_main, [str(directory), "--launch", "--by", "maintainer"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--by maintainer is refused", output)
+        # A plain resume and an override on unchanged files refuse, naming both commands.
+        for flags in ([], ["--accept-challenge", "fine"]):
+            with self.subTest(flags):
+                output, code = self.cli(resume_main, [str(directory), *flags])
+                self.assertEqual(code, 1, output)
+                self.assertIn("Blocked: Design challenge attempt 1 passed and is held", output)
+                self.assertIn(f"{PY} -m workflow resume {directory} --by operator --launch", output)
+                self.assertIn(f"then rerun the challenge: {PY} -m workflow resume {directory} --by operator", output)
+        # A note number the attempt does not have is refused.
+        output, code = self.cli(resume_main, [str(directory), "--launch", "--drop", "3"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 3", output)
+        output, code = self.cli(resume_main, [str(directory), "--drop", "2"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop applies to resume --launch", output)
+        self.assertEqual({name: (directory / name).read_bytes() for name in self.NAMES}, before)
+        self.assertEqual(self.launches(directory), ["challenge"])
+        supervised = []
+        with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):
+            output, code = self.cli(resume_main, [str(directory), "--launch", "--drop", "2"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(supervised, [(directory, ["challenge", "adapter", "ui"])])
+        hold = read_json(directory / "challenge-hold.json")
+        self.assertEqual((hold["attempt"], hold["released_by"], hold["dropped"]), (1, "operator", [2]))
+        self.assertIsInstance(hold["released_at"], str)
+        self.assertEqual(len(self.challenge_calls()), 1)  # Nothing was rerun.
+        # The workers get note 1 and never the dropped note 2.
+        for lane in LANES:
+            self.assertIn("1. P2 [assumption] Naming is loose", self.given[lane]["prompt"])
+            self.assertNotIn("One test is slow", self.given[lane]["prompt"])
+        self.assertIn(("controller", "note", "Resume by the operator: design challenge attempt 1 hold released (note 2 dropped); launching the workers"),
+                      self.events(directory))
+        exported = read_json(directory / "run-state.json")["inputs"]["challenge"]
+        self.assertEqual((exported["status"], exported["hold"]["released_by"], exported["hold"]["dropped"]), ("passed", "operator", [2]))
+        status, _ = pipeline.run_status(directory)
+        self.assertEqual(status["challenge"], "passed")
+
+    def test_an_edited_hold_with_launch_commits_reruns_and_launches(self):
+        directory = self.held("edit-launch-001")
+        base = read_json(directory / "plan.json")["base_commit"]
+        self.edit_task()
+        # --drop numbers the held attempt's notes; a rerun numbers its own, so it is refused with edits.
+        output, code = self.cli(resume_main, [str(directory), "--launch", "--drop", "1"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop", output)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), base)
+        self.challenge_says([concern("P2", "Still minor")])
+        output, code = self.cli(resume_main, [str(directory), "--launch"])
+        self.assertEqual(code, 0, output)
+        revision = git(self.repo, "rev-parse", "HEAD")
+        self.assertNotEqual(revision, base)
+        self.assertEqual(read_json(directory / "plan.json")["base_commit"], revision)
+        record = read_json(directory / "challenge.json")
+        self.assertEqual((record["status"], record["attempt"]), ("passed", 2))
+        hold = read_json(directory / "challenge-hold.json")
+        self.assertEqual((hold["attempt"], hold["released_by"], hold["dropped"]), (2, "operator", []))
+        self.assertEqual(read_json(directory / "challenge-hold-1.json")["released_at"], None)
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+        # A rerun with --launch that finds a P1 is an ordinary pause.
+        other = self.held("edit-pause-001")
+        self.edit_task()
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(resume_main, [str(other), "--launch"])
+        self.assertEqual((code, read_json(other / "challenge.json")["status"]), (0, "paused"), output)
+        self.assertIn('--accept-challenge "<reason>"', output)
+        self.assertEqual(self.launches(other), ["challenge", "challenge"])
+        # Accepting that pause works as today and counts as the release.
+        output, code = self.cli(resume_main, [str(other), "--accept-challenge", "Known risk"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(other), ["challenge", "challenge", "adapter", "ui"])
+
+    def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):
+        directory = self.held("edit-hold-001")
+        self.edit_task()
+        self.challenge_says([concern("P2", "Still minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        record = read_json(directory / "challenge.json")
+        self.assertEqual((record["status"], record["attempt"]), ("passed", 2))
+        hold = read_json(directory / "challenge-hold.json")
+        self.assertEqual((hold["attempt"], hold["released_at"]), (2, None))
+        self.assertIn("1. P2 [assumption] Still minor", output)
+        self.assertIn(f"{PY} -m workflow resume {directory} --by operator --launch", output)
+        self.assertEqual(self.launches(directory), ["challenge", "challenge"])
+        self.assertFalse(any(directory.glob("*.interactive.json")))
+        self.assertEqual(len([event for event in self.events(directory) if event[:2] == ("challenge", "paused")]), 2)
+
+    def test_profile_attended_holds_and_a_run_without_the_flag_launches_as_before(self):
+        directory = self.prepare("attended-001", automatic=True, profile="attended")
+        self.assertEqual(read_json(directory / "plan.json")["holds"], {"challenge": True})
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(directory), ["challenge"])
+        self.assertTrue((directory / "challenge-hold.json").exists())
+        plain = self.prepare("plain-001", automatic=True)
+        self.assertNotIn("holds", read_json(plain / "plan.json"))
+        output, code = self.cli(pipeline.main, ["start", str(plain), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(plain), ["challenge", "adapter", "ui"])
+        self.assertFalse((plain / "challenge-hold.json").exists())
+        self.assertIn("passed (1 P2 concern(s)); launching workers", "\n".join(message for *_, message in self.events(plain)))
+        output, code = self.cli(resume_main, [str(plain), "--launch"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--launch applies to a run that holds", output)
 
 
 class ChallengeRevision(GuardedFeature):

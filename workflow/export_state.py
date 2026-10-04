@@ -42,7 +42,10 @@ Version 1.7.0 (additive, C52) records what prepare pinned about who runs the run
 `inputs.controller` (the controller checkout's commit, its dirty flag and the
 `claude --version` line, plan.controller) and `inputs.automatic.profile`
 (attended or unattended). Each key is left out for a run prepared before it,
-as it was; everything else is 1.6.0 unchanged.
+as it was; everything else is 1.6.0 unchanged. Within 1.7.0 (C8), `inputs.challenge`
+gains `hold` ({held_at, released_at, released_by, dropped}) when `challenge-hold.json`
+records the attempt shown: a run held after a passing challenge, and its release. The
+status stays `passed`; the key is left out for every other run.
 """
 from __future__ import annotations
 
@@ -53,7 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from .guardrails import MAX_QUESTIONS, decisions_text, has_challenge
+from .guardrails import HOLD, MAX_QUESTIONS, decisions_text, has_challenge
 from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
@@ -243,8 +246,12 @@ def worker_questions(path: Path) -> list:
     return result
 
 
+HOLD_KEYS = ("held_at", "released_at", "released_by", "dropped")
+
+
 def challenge_section(directory: Path) -> dict | None:
-    """The latest `challenge.json` without `run_id` and `version`, plus `attempts`; null when absent or invalid."""
+    """The latest `challenge.json` without `run_id` and `version`, plus `attempts`; null when absent or invalid. With
+    `hold` (C8) when `challenge-hold.json` records that attempt: held, and once released when, by whom and the notes dropped."""
     item = load_optional(directory / "challenge.json")
     if item is None:
         return None
@@ -256,6 +263,9 @@ def challenge_section(directory: Path) -> dict | None:
         return None
     section = {key: value for key, value in item.items() if key not in {"run_id", "version"}}
     section["attempts"] = item["attempt"]
+    hold = load_optional(directory / HOLD)
+    if isinstance(hold, dict) and hold.get("attempt") == item["attempt"]:  # 1.7.0, C8: only the hold of the attempt shown.
+        section["hold"] = {key: hold.get(key) for key in HOLD_KEYS}
     return section
 
 

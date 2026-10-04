@@ -1036,7 +1036,8 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
     or `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies. The run does
     not record whether its `start` was given --herdr, so the commands come with the hint to add it.
     """
-    from .guardrails import HERDR_HINT, REVISION_INTENT, edited_in, load_challenge, resume_command, resume_refusal, stale_pins, unused_edits
+    from .guardrails import (HERDR_HINT, REVISION_INTENT, edited_in, is_held, load_challenge, resume_command, resume_refusal, stale_pins,
+                             unused_edits)
     record = load_challenge(directory)
     running = directory / "challenge.running.json"
     started = read_json(running).get("attempt", 0) if running.exists() else 0
@@ -1046,6 +1047,20 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
                 f"{resume_command(directory)} finishes it and reruns the design challenge ({HERDR_HINT})")
     if started > (record["attempt"] if record else 0):
         return f"design challenge attempt {started} was started and not decided: {rerun}"
+    if is_held(directory, plan, record):
+        held = f"design challenge attempt {record['attempt']} passed and is held for the operator; no worker launched"
+        try:
+            edits = unused_edits(directory, plan)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return f"{held}, and its source checkout {plan['repository']} could not be read ({error}): resume needs it"
+        if edits:
+            return (f"{held}, and feature files changed since it read them: {resume_command(directory, launch=True)} commits them, reruns "
+                    f"the challenge and launches the workers unless it finds a P0/P1; {resume_command(directory)} reruns it and holds "
+                    f"again ({HERDR_HINT})")
+        return (f"{held}: read every concern (start and resume print them, numbered), then release it with "
+                f"{resume_command(directory, launch=True)} (--drop <n>,<m> leaves notes out of the workers' prompts), or edit the task "
+                f"files, decisions.md or the PRD {edited_in(plan)} and rerun it with {resume_command(directory)}, which holds again "
+                f"({HERDR_HINT})")
     if record is None or record.get("status") != "paused":
         return None
     if stale_pins(directory, plan, record):  # A rerun re-pinned the files, then failed before its job (its checkout, a kill).
@@ -1136,7 +1151,11 @@ def run_status(directory: Path) -> tuple[dict, str]:
               "pending": [item.get("kind") if isinstance(item, dict) else None for task in tasks for item in task.get("interrupts") or []] if exported else None,
               "errors": [task["error"] for task in tasks if task.get("error")] if exported else None}
     if (directory / "challenge.json").exists():
-        status["challenge"] = read_json(directory / "challenge.json")["status"]
+        from .guardrails import is_held
+        record = read_json(directory / "challenge.json")
+        status["challenge"] = record["status"]
+        if is_held(directory, plan, record):  # C8: passed, and the plan holds it until `resume --launch`.
+            status.update(challenge="held", challenge_attempt=record["attempt"])
     if (directory / "repairs.json").exists():
         from .repair import load_repairs
         status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry["source_commit"]}
@@ -1191,6 +1210,8 @@ def main():
     parser.add_argument("--decisions", type=Path, help="prepare --guardrails: the feature's decisions.md, pinned into the plan")
     parser.add_argument("--prd", type=Path, help="prepare --guardrails: the PRD the design challenge reads, copied into the run")
     parser.add_argument("--no-challenge", action="store_true", help="prepare --guardrails: the feature sets challenge: false")
+    parser.add_argument("--hold-challenge", action="store_true", help="prepare --guardrails: stop after a passing design challenge until "
+                                                                      "`resume --launch` (pinned as plan.holds; --profile attended pins it too)")
     parser.add_argument("--sidecar-brief", type=Path, help="prepare --guardrails: the review sidecar's brief (feature.json 2.3.0 sidecar.prompt), pinned "
                                                          "into plan.sidecar")
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
@@ -1261,6 +1282,8 @@ def main():
                     raise ValueError(f"PRD does not exist: {args.prd}")
             elif args.decisions or args.prd or args.no_challenge or args.sidecar_brief:
                 parser.error("--decisions, --prd, --no-challenge and --sidecar-brief apply to prepare --guardrails (feature.json 2.2.0 and 2.3.0) only")
+            if args.hold_challenge and (not args.guardrails or args.no_challenge):
+                parser.error("--hold-challenge needs the design challenge: prepare --guardrails without --no-challenge")
             if args.sidecar_settings is not None and not args.sidecar_brief:
                 parser.error("--sidecar-settings applies to prepare --sidecar-brief only")
             sidecar_settings = None
@@ -1305,6 +1328,9 @@ def main():
                         roles=roles, controller=controller_record())
             if args.guardrails:
                 pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
+                # C8: an attended run holds after a passing challenge as --hold-challenge does; one without the challenge holds nothing.
+                if not args.no_challenge and (args.hold_challenge or (args.automatic and args.profile == "attended")):
+                    plan["holds"] = {"challenge": True}
             if args.sidecar_brief:
                 from .sidecar import pin
                 pin(plan, args.sidecar_brief, sidecar_settings)
