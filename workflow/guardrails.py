@@ -847,7 +847,8 @@ def resume_deadline(directory: Path, node: str, at: float) -> None:
 
 
 def record_question(runtime, node: str, item: dict, clock=None) -> dict:
-    """A `question` completion: kept as `<node>.question-<n>.json`, listed, and the lane's deadline paused. A fourth blocks."""
+    """A `question` completion: kept as `<node>.question-<n>.json`, listed, and the lane's deadline paused. A fourth blocks.
+    The event is followed by the run's `question` attention record (C44), on one line; the poll forgets it once answered."""
     directory = runtime.directory
     with question_lock(directory):
         questions = load_questions(directory, node)
@@ -864,6 +865,10 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
         save_json(directory / f"{node}.deadline.json", deadline)
     runtime.event(node, "interactive", f"Worker {node} asked question {number} of {MAX_QUESTIONS}; its deadline is paused until "
                                        f"`python -m workflow answer {directory} {node} \"<text>\"`: {item['question']}")
+    from .attention import attention
+    asked = " ".join(item["question"].split())
+    attention(directory, "question", f"Worker {node} asked question {number} of {MAX_QUESTIONS}: {asked}{'' if asked.endswith(('.', '?', '!')) else '.'} "
+                                     f"Answer: python -m workflow answer {directory} {node} \"<text>\"", node=node)
     return entry
 
 

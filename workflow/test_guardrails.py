@@ -1387,6 +1387,10 @@ class WorkerQuestion(unittest.TestCase):
                 on_sleep()
         wait_handoffs(self.runtime, clock=lambda: self.now, sleep=sleep)
 
+    def said(self) -> list:
+        """The events but each lane's `completion accepted` line (C41), which test_automatic's CompletionAcceptedTests covers."""
+        return [event for event in self.events if not re.match(r"Worker \S+ completion accepted: ", event[2])]
+
     def answer(self, *argv):
         calls = []
         output = io.StringIO()
@@ -1509,7 +1513,8 @@ class WorkerQuestion(unittest.TestCase):
             next(steps)()
         # The answer at T+60 moves ui's deadline to T+660: ui finishes inside it and nothing expires.
         self.wait(on_sleep=poll)
-        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 660.0, "paused_at": None})
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 660.0, "paused_at": None,
+                                                                    "met_at": "1970-01-01T04:10:50Z"})
         for lane in ("ui", "adapter"):
             self.assertEqual(read_json(self.root / f"{lane}.handoff.json"), {"summary": "Work", "open_assumptions": []})
         self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
@@ -1580,7 +1585,8 @@ class WorkerQuestion(unittest.TestCase):
                          "the run waits for its turn to end until 1970-01-01T04:11:00Z, the latest lane deadline")
                 attention = ("Worker adapter needs attention in its pane (native state blocked); its completion signal met its deadline, so "
                              "the run waits for it while another lane works or waits on a question, then until the latest lane deadline")
-                self.assertEqual(messages, [attention, bound] if state == "blocked" else [bound])
+                accepted = "Worker adapter completion accepted: 0 untested, verify_yourself given"
+                self.assertEqual(messages, [accepted, attention, bound] if state == "blocked" else [accepted, bound])
 
     def test_a_finished_lane_that_works_again_and_ends_its_turn_inside_the_latest_lane_deadline_is_handed_off(self):
         self.runtime.stop_workers = lambda: self.fail("No worker is stopped")
@@ -1599,7 +1605,9 @@ class WorkerQuestion(unittest.TestCase):
         self.wait(on_sleep=poll)
         self.assertEqual(read_json(self.root / "adapter.handoff.json"), {"summary": "Follow-up", "open_assumptions": []})
         self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
-        self.assertEqual(self.events, [("adapter", "interactive", "Worker adapter is working again after its completion signal was accepted, and "
+        self.assertEqual(self.events, [("adapter", "interactive", "Worker adapter completion accepted: 0 untested, verify_yourself given"),
+                                       ("ui", "interactive", "Worker ui completion accepted: 0 untested, verify_yourself given"),
+                                       ("adapter", "interactive", "Worker adapter is working again after its completion signal was accepted, and "
                                         "so was every other lane's: the run waits for its turn to end until 1970-01-01T04:00:00Z, the latest lane deadline")])
 
     def test_a_question_written_before_the_deadline_pauses_it_though_the_controller_first_reads_it_after(self):
@@ -1629,7 +1637,8 @@ class WorkerQuestion(unittest.TestCase):
         self.assertEqual([(entry["n"], entry["asked_at"], entry["answer"]) for entry in read_json(self.root / "ui.questions.json")["questions"]],
                          [(1, "1970-01-01T03:55:00Z", PANE_ANSWER), (2, "1970-01-01T04:11:40Z", "Use option C")])
         # Paused from T-300 to T+700, then from T+700 to the answer at T+800: ui's deadline is T+1100 and it finished at T+1050.
-        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 1100.0, "paused_at": None})
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 1100.0, "paused_at": None,
+                                                                    "met_at": "1970-01-01T04:17:30Z"})
         self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
         self.assertFalse([event for event in self.events if "deadline exhausted" in event[2]])
         # A question written after ui's deadline is refused as before: nothing is recorded, and the deadline ends the wait.
@@ -1666,10 +1675,11 @@ class WorkerQuestion(unittest.TestCase):
                 self.wait(on_sleep=lambda: next(steps)())
                 entry = read_json(self.root / "ui.questions.json")["questions"][0]
                 self.assertEqual((entry["answer"], entry["delivered"]), ("Use option B", True))
-                self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 60.0, "paused_at": None})
+                self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 60.0, "paused_at": None,
+                                                                            "met_at": "1970-01-01T00:01:10Z"})
                 self.assertEqual(read_json(self.root / "ui.handoff.json"), {"summary": "Work", "open_assumptions": []})
                 # The question event and its answer; a blocked session waiting on its question needs no other attention event.
-                self.assertEqual([message.split(";")[0] for _, _, message in self.events],
+                self.assertEqual([message.split(";")[0] for _, _, message in self.said()],
                                  ["Worker ui asked question 1 of 3", "Worker ui question 1 answered"])
 
     def test_a_session_working_again_without_an_answer_keeps_the_question_answerable_and_a_concurrent_answer_is_no_error(self):
@@ -1695,10 +1705,11 @@ class WorkerQuestion(unittest.TestCase):
         entry = read_json(self.root / "ui.questions.json")["questions"][0]
         self.assertEqual((entry["answer"], entry["answered_at"], entry["delivered"]), ("Use option B", "1970-01-01T00:00:50Z", True))
         # The deadline ran again from t=40, when the session worked; `answer` moved nothing.
-        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 30.0, "paused_at": None})
+        self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 30.0, "paused_at": None,
+                                                                    "met_at": "1970-01-01T00:00:50Z"})
         self.assertFalse((self.root / "adapter.questions.json").exists())
-        self.assertEqual(len(self.events), 2)
-        self.assertIn("Worker ui is working again while question 1 waits", self.events[1][2])
+        self.assertEqual(len(self.said()), 2)
+        self.assertIn("Worker ui is working again while question 1 waits", self.said()[1][2])
         # `answer` lands between the controller seeing the waiting question and recording the session at work: not an error.
         from . import guardrails
         self.ask("Second?")
@@ -1784,14 +1795,16 @@ class WorkerQuestion(unittest.TestCase):
                                                     "Its deadline runs again, and `answer` is refused for question 1"), self.events)
                 if ending == "question":
                     self.assertEqual([(entry["n"], entry["answer"]) for entry in questions], [(1, PANE_ANSWER), (2, "Use option C")])
-                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 120.0, "paused_at": None})
-                    self.assertEqual([message.split(":")[0].split(";")[0] for _, _, message in self.events],
+                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 120.0, "paused_at": None,
+                                                                                "met_at": "1970-01-01T00:02:10Z"})
+                    self.assertEqual([message.split(":")[0].split(";")[0] for _, _, message in self.said()],
                                      ["Worker ui asked question 1 of 3", "Worker ui wrote its next completion signal while question 1 waited",
                                       "Worker ui asked question 2 of 3", "Worker ui question 2 answered"])
                 else:
                     self.assertEqual([(entry["n"], entry["answer"]) for entry in questions], [(1, PANE_ANSWER)])
-                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 90.0, "paused_at": None})
-                    self.assertEqual(len(self.events), 2)
+                    self.assertEqual(read_json(self.root / "ui.deadline.json"), {"node_id": "ui", "paused_seconds": 90.0, "paused_at": None,
+                                                                                "met_at": "1970-01-01T00:01:40Z"})
+                    self.assertEqual(len(self.said()), 2)
 
     def test_answer_types_nothing_once_the_worker_went_on_from_its_question(self):
         # The operator typed the answer in ui's pane and the controller recorded the placeholder: `answer` may replace it
@@ -1809,8 +1822,8 @@ class WorkerQuestion(unittest.TestCase):
                       lambda: (self.completion("ui"), refused("its next completion signal written")),  # Still working: not read yet.
                       lambda: self.states.update(ui="done")])
         self.wait(on_sleep=lambda: next(steps)())
-        self.assertIn("Worker ui is working again while question 1 waits", self.events[1][2])
-        self.assertIn("until the worker writes its next completion signal", self.events[1][2])
+        self.assertIn("Worker ui is working again while question 1 waits", self.said()[1][2])
+        self.assertIn("until the worker writes its next completion signal", self.said()[1][2])
         refused("its handoff saved")
         # freeze records the stop intent and stops the worker; its pane is back at a shell.
         save_json(self.root / "ui.stop.json", {"background_id": "bg-ui", "session_id": "s", "pid": 1, "stopped": True})
