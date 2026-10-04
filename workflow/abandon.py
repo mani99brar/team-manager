@@ -7,8 +7,9 @@ mechanical recovery, so the maintainer is refused (actor.OPERATOR_ONLY). It take
 (`<node>.interactive.json`) that is still live, by its exact ids through Pipeline.stop_session, so nothing keeps using
 quota: a bound receipt by its ids in the listing, one the launch never bound by the id its launch log printed (locate), and
 an unfinished stop intent by its ids or its process. A listed row counts whatever its PID (a restart's respawn gap, which
-stop_session waits out) unless its state is terminal. A session that is gone is recorded as not running. Then it writes `abandon.json` and one
-`controller` event with the status `cancelled`, which the viewer reads as the run's own status.
+stop_session waits out; a gap past its grace is that stop not confirmed, not a failed listing) unless its state is
+terminal. A session that is gone is recorded as not running. Then it writes `abandon.json` and one `controller` event
+with the status `cancelled`, which the viewer reads as the run's own status.
 
 Afterwards every command that would change the run refuses it (refuse_abandoned): automatic, automatic-step, start,
 attach, freeze, retry, reconcile, review, approve, resume, answer, note, repair, sidecar-pass and tryout. status, export and brief
@@ -18,6 +19,7 @@ ledger reads it like any other run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import subprocess
 from pathlib import Path
@@ -26,7 +28,7 @@ from .actor import actor_record, actor_text, add_actor_argument, require_actor
 from .checks import now
 from .interactive import PROCESS_ENDED, TERMINAL_STATES
 from .pipeline import pid_alive
-from .sessions import TransientInfraError, plan_workers, read_json, review_nodes, run_lock, save_json
+from .sessions import plan_workers, read_json, review_nodes, run_lock, save_json
 
 ABANDON = "abandon.json"
 ABANDON_VERSION = "1.0.0"
@@ -98,6 +100,29 @@ class ListingUnavailable(RuntimeError):
     """`claude agents --json` gave no listing: abandon ends at once, having waited it out once (inventory's grace)."""
 
 
+@contextlib.contextmanager
+def listing_failures(sessions):
+    """While abandon runs, a failure of sessions.inventory, whoever lists (abandon itself, stop_session, stop_row), is
+    ListingUnavailable. Any other refusal of a stop, such as a respawn gap that outlasts its grace (UpdateGaps raises
+    TransientInfraError while the listing works), stays that node's failure, and the other nodes are still stopped."""
+    inventory = sessions.inventory
+    own = "inventory" in vars(sessions)  # A stand-in's attribute, or the class's method an instance attribute shadows.
+
+    def listed() -> list[dict]:
+        try:
+            return inventory()
+        except Exception as error:
+            raise ListingUnavailable(str(error)) from error
+    sessions.inventory = listed
+    try:
+        yield
+    finally:
+        if own:
+            sessions.inventory = inventory
+        else:
+            del sessions.inventory
+
+
 def abandon(runtime, reason: str, actor: str) -> dict:
     """Stop the run's live recorded sessions, then record the abandon. A stop that is not confirmed records neither
     abandon.json nor the event: the error names each one, and the identical command is rerun once they are dealt with
@@ -114,38 +139,37 @@ def abandon(runtime, reason: str, actor: str) -> dict:
         # Listed once, and only when a node needs it: a run that never launched is abandoned while Claude Code is unavailable.
         # A listing that failed is not asked again for the next node: its grace was waited out once.
         if not listing:
-            try:
-                listing.append(runtime.sessions.inventory())
-            except Exception as error:
-                raise ListingUnavailable(str(error)) from error
+            listing.append(runtime.sessions.inventory())
         return listing[0]
-    for node in recorded_nodes(runtime.plan, directory):
-        receipt = read_json(directory / f"{node}.interactive.json")
-        marker = directory / f"{node}.stop.json"
-        try:
-            if marker.exists():
-                intent = read_json(marker)
-                if intent.get("stopped") is True:
-                    not_running.append(node)  # The controller stopped it before.
-                    continue
-                # An unfinished stop intent (a controller stop that failed or was interrupted): completed by stop_session, never
-                # issued twice, while its session or process is still there. Once both are gone there is nothing to stop, and
-                # stop_session would wait out a respawn gap on every attempt.
-                pid = intent.get("pid")
-                if not listed_live(rows(), intent, receipt) and not (isinstance(pid, int) and pid > 0 and pid_alive(pid)):
+    with listing_failures(runtime.sessions):
+        for node in recorded_nodes(runtime.plan, directory):
+            receipt = read_json(directory / f"{node}.interactive.json")
+            marker = directory / f"{node}.stop.json"
+            try:
+                if marker.exists():
+                    intent = read_json(marker)
+                    if intent.get("stopped") is True:
+                        not_running.append(node)  # The controller stopped it before.
+                        continue
+                    # An unfinished stop intent (a controller stop that failed or was interrupted): completed by stop_session, never
+                    # issued twice, while its session or process is still there. Once both are gone there is nothing to stop, and
+                    # stop_session would wait out a respawn gap on every attempt.
+                    pid = intent.get("pid")
+                    if not listed_live(rows(), intent, receipt) and not (isinstance(pid, int) and pid > 0 and pid_alive(pid)):
+                        not_running.append(node)
+                        continue
+                elif not (listed_live(rows(), receipt) if receipt.get("background_id") else unbound_live(runtime, node, rows())):
                     not_running.append(node)
                     continue
-            elif not (listed_live(rows(), receipt) if receipt.get("background_id") else unbound_live(runtime, node, rows())):
-                not_running.append(node)
-                continue
-            runtime.stop_session(node)
-            stopped.append(node)
-        except (ListingUnavailable, TransientInfraError) as error:
-            # A stop's own listing that failed (Claude Code restarting) waited out its grace too: the next node would only wait again.
-            raise RuntimeError(f"Not abandoned: `claude agents --json` gave no session list ({error}), so abandon cannot tell which "
-                               "sessions still run. Rerun the same abandon once `claude --version` works") from error
-        except Exception as error:
-            failures[node] = error
+                runtime.stop_session(node)
+                stopped.append(node)
+            except ListingUnavailable as error:
+                # A listing that failed (Claude Code restarting), abandon's own or a stop's, waited out its grace: the next node
+                # would only wait again. A stop's other refusals, a respawn gap past its grace included, are that node's failure.
+                raise RuntimeError(f"Not abandoned: `claude agents --json` gave no session list ({error}), so abandon cannot tell which "
+                                   "sessions still run. Rerun the same abandon once `claude --version` works") from error
+            except Exception as error:
+                failures[node] = error
     if failures:
         raise RuntimeError("Not abandoned; stops not confirmed: " + "; ".join(f"{node}: {error}" for node, error in failures.items())
                            + ". Inspect `claude agents`, then rerun the same abandon")

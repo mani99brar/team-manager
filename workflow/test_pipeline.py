@@ -1830,6 +1830,19 @@ class AbandonTests(unittest.TestCase):
         self.assertIn("Not abandoned: `claude agents --json` gave no session list", output)
         self.assertFalse((self.directory / "abandon.json").exists())
 
+    def test_a_respawn_that_never_comes_fails_that_stop_and_the_other_sessions_are_still_stopped(self):
+        # The listing works, but ui stays listed without a PID: its respawn gap outlasts the grace. That is ui's stop not
+        # confirmed, not a failed listing, so the reviewer is still stopped and nothing blames `claude agents --json`.
+        self.live["ui"]["pid"] = None
+        with patch("workflow.interactive.DEAD_PID_GRACE_SECONDS", 0), patch("workflow.pipeline.time.sleep", return_value=None):
+            code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertEqual(stops, [["claude", "stop", "id-review"]])
+        self.assertIn("Not abandoned; stops not confirmed: ui: Claude Code has not listed a live ui session (id-ui)", output)
+        self.assertNotIn("gave no session list", output)
+        self.assertNotIn("claude --version", output)
+        self.assertFalse((self.directory / "abandon.json").exists())
+
     def test_an_identity_refusal_is_a_failure_not_a_session_that_is_not_running(self):
         self.live["review"]["name"] = "workflow-other-run-review"
         code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")

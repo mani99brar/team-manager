@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -206,6 +207,35 @@ class CleanTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertFalse(review.exists())
 
+    def refused_while_git_cannot_run(self, code: int, err: str):
+        """Git cannot read the run's checkouts although their repository is there: clean refuses and removes nothing."""
+        self.assertEqual(code, 1, err)
+        lane = self.run / "worktree-ui"
+        gitdir = (lane / ".git").read_text().removeprefix("gitdir:").strip()
+        self.assertIn(f"Git cannot read {lane} although its repository {gitdir} exists", err)
+        self.untouched()
+        for path in (self.run / "candidate-1", self.candidate_passed / "worktree", self.passed / "npm_config_cache"):
+            self.assertTrue(path.exists(), path)
+        self.assertTrue((lane / "work.txt").exists())
+        self.assertIn(str(lane), self.listed())
+
+    def test_a_broken_git_environment_is_refused_and_removes_nothing(self):
+        (self.run / "worktree-ui" / "work.txt").write_text("the worker's only copy\n")
+        with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1"}):
+            code, _, err = self.clean("--by", "operator")
+        self.refused_while_git_cannot_run(code, err)
+
+    def test_an_unparsable_shared_git_config_is_refused_and_removes_nothing(self):
+        (self.run / "worktree-ui" / "work.txt").write_text("the worker's only copy\n")
+        config = self.repo / ".git" / "config"
+        original = config.read_text()
+        config.write_text(original + "[core\n")  # Any lane can write the shared .git/config.
+        try:
+            code, _, err = self.clean("--by", "operator")
+        finally:
+            config.write_text(original)
+        self.refused_while_git_cannot_run(code, err)
+
     def test_a_failure_of_one_removal_does_not_stop_the_rest(self):
         with patch.object(clean, "prune_attempt", side_effect=TypeError("unexpected")):
             code, out, err = self.clean("--by", "operator")
@@ -395,6 +425,14 @@ class LaunchedRunCleanTests(CleanTests):
         self.assertEqual(code, 0, err)
         self.assertTrue((self.source / "README.md").read_text().startswith("# A conflict"))
         self.assertFalse((self.run / "worktree-ui").exists())
+        # status.showUntrackedFiles=no hides an untracked file from plain `git status`: it is still the operator's work.
+        (self.source / "README.md").write_text("# Repo\n")
+        git(self.source, "config", "status.showUntrackedFiles", "no")
+        (self.source / "resolution-notes.txt").write_text("notes\n")
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Kept: {self.source}: 1 uncommitted change; commit or discard it, then rerun clean", out)
+        self.assertTrue((self.source / "resolution-notes.txt").exists())
 
     def test_a_source_checkout_in_the_middle_of_a_rebase_is_kept(self):
         self.finish()

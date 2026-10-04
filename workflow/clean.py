@@ -5,7 +5,8 @@ since C47), then removes the lane, candidate, review and challenge worktrees and
 checkout `<runs root>/<run id>.source`; then `git worktree prune`. Every removal goes through git_worktree, under the
 repository's worktree lock, since running runs add worktrees to the same .git (a leftover Git no longer lists is deleted:
 checks.remove_worktree). The repository is the first checkout of the run Git can still read (worktrees.run_checkouts), since
-a C56 run's plan.repository is that source checkout; with none left, leftovers are deleted and nothing is pruned. The
+a C56 run's plan.repository is that source checkout; with none left, leftovers Git forgot are deleted and nothing is
+pruned, while a folder whose .git file names a gitdir that still exists is refused: Git cannot run there. The
 source checkout goes last, only once every other removal succeeded, and never while it holds uncommitted changes or a
 rebase or merge in progress (the operator integrates there when --ff-only refuses). Failed attempts are kept whole, and so
 are repair workspaces (an operator's fix may sit uncommitted in one), packets, logs, artifacts and every run file.
@@ -112,7 +113,9 @@ def listed_sessions(directory: Path, plan: dict, rows: list[dict]) -> list[str]:
 def uncommitted(path: Path) -> int | None:
     """How many changes `git status` shows in a lane worktree or the source checkout; None when Git cannot tell."""
     try:
-        return len(subprocess.run(["git", "-C", str(path), "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.splitlines())
+        # --untracked-files=all overrides status.showUntrackedFiles=no, which would hide an untracked file of the operator's.
+        return len(subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=all"], capture_output=True, text=True,
+                                  check=True).stdout.splitlines())
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -215,13 +218,32 @@ def readable(path: str) -> bool:
         return False
 
 
+def remembered_gitdir(path: Path) -> Path | None:
+    """The gitdir a worktree's `.git` file names when that gitdir still exists: Git has not forgotten the worktree, so a
+    checkout Git cannot read there means Git cannot run (a broken config or environment), not a leftover. None otherwise."""
+    try:
+        text = (path / ".git").read_text(errors="replace")
+    except OSError:
+        return None
+    named = text.strip().removeprefix("gitdir:").strip() if text.startswith("gitdir:") else ""
+    if not named:
+        return None
+    gitdir = Path(named) if Path(named).is_absolute() else path / named
+    return gitdir if gitdir.exists() else None
+
+
 def remove_leftover(path: Path) -> None:
     """A worktree's folder when no checkout of the repository is left to ask Git with: deleted, as remove_worktree deletes
-    a leftover Git no longer lists. An independent repository (a `.git` directory) is never deleted."""
+    a leftover Git no longer lists, but only when Git forgot it (no `.git` file, or one naming a gitdir that is gone). An
+    independent repository (a `.git` directory) is never deleted."""
     if not (path.exists() or path.is_symlink()):
         return
     if (path / ".git").is_dir():
         raise RuntimeError(f"{path} holds its own repository (a .git directory); clean never deletes one")
+    gitdir = remembered_gitdir(path) if path.is_dir() and not path.is_symlink() else None
+    if gitdir is not None:
+        raise RuntimeError(f"Git cannot read {path} although its repository {gitdir} exists: check `git -C {path} status`, "
+                           "then rerun clean")
     if path.is_symlink() or path.is_file():
         path.unlink()
     else:
@@ -250,7 +272,8 @@ def clean_main(argv=None):
             # Git's common directory itself, which outlives every worktree removed here (a source checkout may be the plan's
             # repository) and is the repository whatever its layout (--separate-git-dir, a bare repository's worktrees). Found
             # from the first checkout of the run Git can still read: a C56 run's plan.repository is its source checkout, which
-            # an earlier clean or the operator may have removed. None when none is left: leftovers are then deleted as such.
+            # an earlier clean or the operator may have removed. None when none is left: leftovers Git forgot are then deleted
+            # as such, and a folder whose .git file still names an existing gitdir is refused (Git cannot run here).
             repository = next((common_dir(path) for path in run_checkouts(plan, directory) if Path(path).exists() and readable(path)), None)
             attempts, kept_attempts = passed_attempts(directory)
             worktrees, kept = run_worktrees(directory, plan)
