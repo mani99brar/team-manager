@@ -337,6 +337,60 @@ def became_blocking(before: dict | None, after: dict) -> bool:
     return before is None or before["disposition"] not in OPEN or RANK[after["severity"]] > RANK.get(before["severity"], -1)
 
 
+# ---- Paging the operator (C41, decision 12) --------------------------------------------------------------------------
+# A finding a pass made an open P0/P1 that no message of that pass delivered to its lane, and every escalation, is one `sidecar`
+# attention record on the finding's lane, written once: when the ledger first says the lane will not get it. Unlike the events,
+# the text quotes the first sentence: the operator may have only this line. attention() never raises.
+
+def read_it(directory: Path) -> str:
+    return f"Read it in {ledger_path(directory)} or on the run's sidecar page."
+
+
+def page_finding(directory: Path, n: int, finding: dict, why: str) -> None:
+    """Pass `n`'s P0/P1 that did not reach its lane: `why` is how its message there ended (`refused, lane_finished`,
+    `undeliverable, interrupted`, ...) or `no message to it`."""
+    from .automatic import first_sentence
+    attention(directory, "sidecar", f"Review sidecar pass {n}: {finding['severity']} {finding['id']} on lane {finding['lane']} did not reach "
+                                    f"the lane ({why}): {first_sentence(finding['problem'])} {read_it(directory)}", node=finding["lane"])
+
+
+def page_escalation(directory: Path, escalation: dict, lane: str | None) -> None:
+    from .automatic import first_sentence
+    attention(directory, "sidecar", f"Review sidecar pass {escalation['pass']}: escalation {escalation['finding_id']} ({escalation['kind']})"
+                                    f"{f' on lane {lane}' if lane else ''}: {first_sentence(escalation['text'])} {read_it(directory)}", node=lane)
+
+
+def findings_read(directory: Path, n: int) -> dict | None:
+    """The severity and disposition of each finding, by id, in the ledger pass `n` read before its merge (its inputs'
+    ledger.json, which only the controller writes); None once those inputs are gone or unreadable."""
+    try:
+        findings = read_json(directory / INPUTS / str(n) / "ledger.json")["findings"]
+        return {finding["id"]: {"severity": finding["severity"], "disposition": finding["disposition"]} for finding in findings}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def page_interrupted(directory: Path, ledger: dict, messages: list[dict]) -> None:
+    """recover(): what the delivery of `messages`, now `undeliverable` (`interrupted`), would have paged had its controller not
+    stopped (Pass.page_outcome): each finding a message carried on its own lane that the message's pass made an open P0/P1. A
+    finding on another lane was paged at the merge, before anything was typed (Pass.page). The ledger that pass read says
+    which ones it made blocking; without it, a finding with a history entry of that pass counts as new or raised there."""
+    findings = {finding["id"]: finding for finding in ledger["findings"]}
+    for message in messages:
+        earlier = findings_read(directory, message["pass"])
+        for finding_id in message["finding_ids"]:
+            finding = findings.get(finding_id)
+            if finding is None or finding["lane"] != message["lane"]:
+                continue
+            if earlier is not None:
+                blocking = became_blocking(earlier.get(finding_id), finding)
+            else:
+                blocking = (finding["severity"] in RANK and finding["disposition"] in OPEN
+                            and any(entry.get("pass") == message["pass"] for entry in finding["history"]))
+            if blocking:
+                page_finding(directory, message["pass"], finding, "undeliverable, interrupted")
+
+
 # ---- The job's schema and prompt -----------------------------------------------------------------------------------
 
 def schema() -> dict:
@@ -703,7 +757,8 @@ def claim(directory: Path, record: dict) -> None:
 
 
 class Pass:
-    """One pass: inputs, the polled print job, the merge, the deliveries and the events. Every step may raise; the caller guards."""
+    """One pass: inputs, the polled print job, the merge, the deliveries, the events and the pages. Every step may raise; the
+    caller guards."""
 
     def __init__(self, runtime, n: int, trigger: str, clock, detail: str = ""):
         self.runtime, self.directory, self.plan = runtime, runtime.directory, runtime.plan
@@ -851,7 +906,13 @@ class Pass:
             self.reject(error)
             return
         self.release()
-        outcomes = self.deliver([message for message in messages if message["status"] == "pending"])
+        earlier = {finding["id"]: finding for finding in before["findings"]}
+        blocking = {finding["id"]: finding for finding in merged["findings"] if became_blocking(earlier.get(finding["id"]), finding)}
+        # Said and paged before anything is typed: a controller stopped while typing (a Ctrl-C, a kill) loses neither.
+        for escalation in escalations:
+            self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
+        self.page(merged, blocking, messages, escalations)
+        outcomes = self.deliver([message for message in messages if message["status"] == "pending"], blocking)
         counts = merged["passes"][-1]["counts"]
         resolved = sum(1 for upsert in output["findings"] if upsert["disposition"] == "verified_resolved")
         delivered = [message["lane"] for message in outcomes if message["status"] == "delivered"]
@@ -860,52 +921,48 @@ class Pass:
         self.event("running", f"{self.label}: {counts['new']} new finding(s), {counts['changed']} changed, {resolved} verified resolved; "
                               f"{len(delivered)} message(s) delivered" + (f" to {', '.join(delivered)}" if delivered else "")
                               + f", {refused} refused, {undeliverable} undeliverable")
-        for escalation in escalations:
-            self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
-        self.page(before, merged, [*messages, *outcomes], escalations)
 
-    def page(self, before: dict, merged: dict, messages: list[dict], escalations: list[dict]) -> None:
-        """The operator's `sidecar` attention record, on the finding's lane (C41, decision 12): one per escalation, and one per
-        finding this pass made an open P0/P1 (new, raised or reopened) that no message of this pass delivered to its lane:
-        refused, undeliverable or never sent. A delivered one is the lane's to act on. `messages` are this pass's, a delivery's
-        outcome after its pending entry. Unlike the events, the text quotes the finding's first sentence: the operator may
-        have only this line. attention() never raises."""
-        from .automatic import first_sentence
-        outcome = {message["id"]: message for message in messages}
-        earlier = {finding["id"]: finding for finding in before["findings"]}
-        where = f"Read it in {ledger_path(self.directory)} or on the run's sidecar page."
-        for finding in merged["findings"]:
-            if not became_blocking(earlier.get(finding["id"]), finding):
-                continue
-            tried = [outcome[item] for item in finding["messages"] if item in outcome and outcome[item]["lane"] == finding["lane"]]
-            if any(message["status"] == "delivered" for message in tried):
-                continue
-            why = f"{tried[-1]['status']}, {tried[-1]['reason']}" if tried else "no message to it"
-            attention(self.directory, "sidecar", f"Review sidecar pass {self.n}: {finding['severity']} {finding['id']} on lane {finding['lane']} "
-                                                 f"did not reach the lane ({why}): {first_sentence(finding['problem'])} {where}", node=finding["lane"])
+    def page(self, merged: dict, blocking: dict, messages: list[dict], escalations: list[dict]) -> None:
+        """Right after the merge write, before anything is typed: the operator's `sidecar` attention record of every escalation,
+        and of every finding this pass made an open P0/P1 (`blocking`: new, raised or reopened) that no message of this pass can
+        still deliver to its lane: each one there refused, or none sent. One with a message pending on its lane waits for that
+        delivery, paged by page_outcome when it fails, or by recover() when the controller stops first. A delivered one is the
+        lane's to act on."""
+        for finding in blocking.values():
+            tried = [message for message in messages if message["lane"] == finding["lane"] and finding["id"] in message["finding_ids"]]
+            if not any(message["status"] == "pending" for message in tried):
+                page_finding(self.directory, self.n, finding, f"{tried[-1]['status']}, {tried[-1]['reason']}" if tried else "no message to it")
         lanes = {finding["id"]: finding["lane"] for finding in merged["findings"]}
         for escalation in escalations:
-            lane = lanes.get(escalation["finding_id"])
-            attention(self.directory, "sidecar", f"Review sidecar pass {self.n}: escalation {escalation['finding_id']} ({escalation['kind']})"
-                                                 f"{f' on lane {lane}' if lane else ''}: {first_sentence(escalation['text'])} {where}", node=lane)
+            page_escalation(self.directory, escalation, lanes.get(escalation["finding_id"]))
 
-    def deliver(self, messages: list[dict]) -> list[dict]:
-        """Each pending message in order: gated, typed or not, then flipped with one atomic write. Errors make it undeliverable."""
+    def page_outcome(self, message: dict, blocking: dict) -> None:
+        """A pending message the ledger now records undelivered (refused at the gate, or undeliverable): each finding it carried
+        on its lane that this pass made an open P0/P1, paged with that outcome."""
+        for finding_id in message["finding_ids"]:
+            finding = blocking.get(finding_id)
+            if finding is not None and finding["lane"] == message["lane"]:
+                page_finding(self.directory, self.n, finding, f"{message['status']}, {message['reason']}")
+
+    def deliver(self, messages: list[dict], blocking: dict) -> list[dict]:
+        """Each pending message in order: gated, typed or not, then flipped with one atomic write. Errors make it undeliverable.
+        An outcome the ledger records undelivered pages at once (page_outcome), before the next message is tried."""
         outcomes = []
         for message in messages:
             try:
                 status, reason = deliver_one(self.runtime, message, self.herdr)
                 error = None
             except KeyboardInterrupt:
-                raise  # It stays pending; the next controller makes it undeliverable (interrupted).
+                raise  # It stays pending; the next controller makes it undeliverable (interrupted) and pages it (recover).
             except BaseException as caught:
                 status, reason, error = "undeliverable", failure_reason(caught), caught
             try:
                 flip(self.directory, self.plan, message["id"], status, reason, iso(self.clock()))
+                recorded = True
             except KeyboardInterrupt:
                 raise
             except BaseException as caught:
-                error = error or caught
+                error, recorded = error or caught, False
             if error is not None:
                 try:
                     log_error(self.log, f"message {message['id']} undeliverable", error)
@@ -914,6 +971,8 @@ class Pass:
                 self.event("interactive", f"{self.label}: message {message['id']} to {message['lane']} undeliverable after an error "
                                           f"({type(error).__name__}); see {self.log.name}")
             outcomes.append({**message, "status": status, "reason": reason})
+            if recorded and status != "delivered":
+                self.page_outcome(outcomes[-1], blocking)  # A flip that failed leaves it pending: recover() pages it, so never twice.
         return outcomes
 
 
@@ -957,8 +1016,9 @@ def kill_orphan(pid, session_id) -> bool:
 
 
 def recover(runtime, clock=time.time) -> None:
-    """A controller (re)starting: every `pending` message becomes `undeliverable` (interrupted), and a pass left running is recorded
-    `interrupted` after its orphaned job, if it still runs, is killed. Then the running marker is removed."""
+    """A controller (re)starting: every `pending` message becomes `undeliverable` (interrupted), paging what its delivery would
+    have (page_interrupted), and a pass left running is recorded `interrupted` after its orphaned job, if it still runs, is
+    killed. Then the running marker is removed."""
     directory, plan = runtime.directory, runtime.plan
     marker = directory / RUNNING
     with deferred_interrupt(), ledger_lock(directory):
@@ -1001,6 +1061,7 @@ def recover(runtime, clock=time.time) -> None:
     if pending:
         runtime.event(SIDECAR, "interactive", f"Review sidecar: {len(pending)} message(s) left pending by a stopped controller recorded "
                                               f"undeliverable (interrupted): {', '.join(message['id'] for message in pending)}")
+        page_interrupted(directory, ledger, pending)  # After the write: stopped before it, the next controller pages them; never twice.
     if stale is not None and stale.get("recorded"):
         runtime.event(SIDECAR, "interactive", f"Review sidecar pass {stale['pass']} recorded interrupted: the controller stopped while it ran"
                                               + ("; its orphaned job was stopped" if stale["killed"] else ""))

@@ -788,6 +788,77 @@ class Paging(SidecarRun):
         self.assertEqual([(state["kind"], state["node"]) for state in states], [("sidecar", "adapter"), ("sidecar", "ui")])
         self.assert_node_statuses()
 
+    def interrupted_pass(self, findings, messages, escalations=(), deliver=KeyboardInterrupt) -> None:
+        """One pass returning this output whose delivery is cut short (a Ctrl-C, or a controller killed while typing)."""
+        self.script_steps([*([{}] * len(self.job_calls())), {"output": output(findings, messages, escalations)}])
+        with patch("workflow.sidecar.deliver_one", side_effect=deliver), self.assertRaises(KeyboardInterrupt):
+            self.run_pass()
+
+    def test_a_delivery_cut_short_loses_no_page_and_repeats_none(self):
+        # The 3 Oct OOM, or a Ctrl-C, while a message is typed. What the merge wrote pages before anything is typed: an escalation,
+        # a P0/P1 never sent to its lane (adapter's P0 rides only on ui's message) or refused there. An undeliverable one pages as its
+        # delivery ends. The one whose message was left pending pages when the next controller records it interrupted. Each once.
+        where = f"Read it in {self.directory / 'sidecar.ledger.json'} or on the run's sidecar page."
+        self.interrupted_pass([upsert(problem="The ui text is wrong. It says before."),
+                               upsert(ref="new-2", lane="adapter", severity="P0", problem="Deletes the database. Always."),
+                               upsert(ref="new-3", problem="The ui title is wrong too.")],
+                              [message(finding_ids=["new-1", "new-2"]), message(finding_ids=["new-3"], text="And the title.")],
+                              [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in self.ledger()["messages"]],
+                         [("M-1", "pending", None), ("M-2", "refused", "rate_limited")])
+        merged = [("sidecar", "adapter", f"Review sidecar pass 1: P0 S-2 on lane adapter did not reach the lane (no message to it): Deletes the database. {where}"),
+                  ("sidecar", "ui", f"Review sidecar pass 1: P1 S-3 on lane ui did not reach the lane (refused, rate_limited): The ui title is wrong too. {where}"),
+                  ("sidecar", "ui", f"Review sidecar pass 1: escalation S-1 (security) on lane ui: The token reaches the log. {where}")]
+        self.assertEqual(self.records(), merged)
+        self.assertIn(("interactive", "escalation S-1 (security): see the sidecar page"), self.sidecar_events())
+        # The next controller records M-1 interrupted and pages the P1 it carried; a later one pages nothing more.
+        interrupted = ("sidecar", "ui", f"Review sidecar pass 1: P1 S-1 on lane ui did not reach the lane (undeliverable, interrupted): "
+                                        f"The ui text is wrong. {where}")
+        for _ in range(2):
+            sidecar.recover(self.runtime, self.clock)
+            self.assertEqual(self.records(), [*merged, interrupted])
+        # ui's message ends undeliverable (a draft in its pane) and pages at once; adapter's delivery is then cut short, and the next
+        # controller pages adapter's P1 only.
+        real = sidecar.deliver_one
+
+        def cut_short(runtime, pending, herdr):
+            if pending["lane"] == "adapter":
+                raise KeyboardInterrupt
+            return real(runtime, pending, herdr)
+        self.herdr.screens["pane-ui"] = claude_screen("my own draft")
+        before = len(self.records())
+        self.interrupted_pass([upsert(problem="The ui footer is wrong."), upsert(ref="new-2", lane="adapter", problem="The adapter drops a row.")],
+                              [message(), message(lane="adapter", finding_ids=["new-2"])], deliver=cut_short)
+        self.assertEqual(self.records()[before:], [
+            ("sidecar", "ui", f"Review sidecar pass 2: P1 S-4 on lane ui did not reach the lane (undeliverable, pane_busy): The ui footer is wrong. {where}")])
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records()[before + 1:], [
+            ("sidecar", "adapter", f"Review sidecar pass 2: P1 S-5 on lane adapter did not reach the lane (undeliverable, interrupted): "
+                                   f"The adapter drops a row. {where}")])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in self.ledger()["messages"][2:]],
+                         [("M-3", "undeliverable", "pane_busy"), ("M-4", "undeliverable", "interrupted")])
+        validate_schema("sidecar", self.ledger())
+        self.assert_node_statuses()
+
+    def test_the_next_controller_pages_only_what_the_interrupted_pass_made_blocking(self):
+        # As that delivery would have: the ledger the pass read (its inputs' ledger.json) says which findings it made an open P0/P1.
+        # A P1 it only updated, and a P2, carried by the same message, page nothing.
+        where = f"Read it in {self.directory / 'sidecar.ledger.json'} or on the run's sidecar page."
+        self.assertEqual(self.run_output([upsert()], [message()]), [])  # S-1, a P1 delivered to ui.
+        self.interrupted_pass([upsert(finding_id="S-1", evidence="It still says before in b2c3d4e."), upsert(ref="new-1", problem="The ui footer is wrong."),
+                               upsert(ref="new-2", severity="P2")], [message(finding_ids=["S-1", "new-1", "new-2"])])
+        self.assertEqual(self.records(), [])  # Its one new P1 waits for the message.
+        sidecar.recover(self.runtime, self.clock)
+        paged = [("sidecar", "ui", f"Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (undeliverable, interrupted): The ui footer is wrong. {where}")]
+        self.assertEqual(self.records(), paged)
+        # Its inputs gone (removed by hand, or pruned under a message left pending): a finding with a history entry of that pass counts
+        # as new or raised there.
+        self.interrupted_pass([upsert(ref="new-1", lane="adapter", problem="The adapter drops a row.")], [message(lane="adapter")])
+        (self.directory / "sidecar-inputs" / "3" / "ledger.json").unlink()
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records(), [*paged, ("sidecar", "adapter", f"Review sidecar pass 3: P1 S-4 on lane adapter did not reach the lane "
+                                                                         f"(undeliverable, interrupted): The adapter drops a row. {where}")])
+
 
 class LedgerLock(SidecarRun):
     """Every ledger write waits for <run>/sidecar.lock: held here by another open file, as `sidecar-pass` or freeze would."""
