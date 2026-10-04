@@ -82,7 +82,7 @@ calls = Path({str(calls)!r})
 index = len(calls.read_text().splitlines()) if calls.exists() else 0
 add_dirs = [args[i + 1] for i, item in enumerate(args) if item == '--add-dir']
 with calls.open('a') as handle:
-    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs, "args": args}}) + '\\n')
+    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs, "args": args, "env": sorted(os.environ)}}) + '\\n')
 script = json.loads(Path({str(script)!r}).read_text())
 step = script[index] if index < len(script) else {{}}
 if step.get("wait_for"):
@@ -101,7 +101,7 @@ if "raw" in step:
     sys.exit(0)
 default = {{"summary": "Nothing new.", "findings": [], "messages": [], "escalations": [], "handoff": None}}
 print(json.dumps({{"session_id": step.get("session") or args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
-                  "structured_output": step.get("output", default)}}))
+                  "modelUsage": {{"claude-opus-5-5": {{}}}}, "structured_output": step.get("output", default)}}))
 ''')
     path.chmod(0o700)
 
@@ -480,6 +480,27 @@ class PassPrompt(SidecarRun):
                 self.plan["conventions"] = value
                 self.run_pass()
                 self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
+
+
+class PassPins(SidecarRun):
+    def test_a_pass_takes_the_judges_pins_in_a_scrubbed_env_and_records_them_beside_its_output(self):
+        # C52: the sidecar is a judge: --effort high unless pinned otherwise, the pinned model, none of a surrounding session's
+        # overrides; sidecar-<n>.role.json, since the ledger's schema is closed. A plan pinned before roles passes neither flag.
+        from .sessions import pin_roles
+        with patch.dict(os.environ, {"CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "CLAUDECODE": "1"}):
+            self.run_pass()
+            self.plan["roles"] = pin_roles(judge_model="claude-opus-5-5", env={})
+            self.run_pass()
+        old, pinned = self.job_calls()
+        self.assertFalse({"--effort", "--model"} & set(old["args"]))
+        args = pinned["args"]
+        self.assertEqual((args[args.index("--effort") + 1], args[args.index("--model") + 1]), ("high", "claude-opus-5-5"))
+        for call in (old, pinned):
+            self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE"} & set(call["env"]))
+        self.assertEqual(read_json(self.directory / "sidecar-1.role.json"), {"requested": {"model": None, "effort": None}, "observed_models": ["claude-opus-5-5"]})
+        self.assertEqual(read_json(self.directory / "sidecar-2.role.json"),
+                         {"requested": {"model": "claude-opus-5-5", "effort": "high"}, "observed_models": ["claude-opus-5-5"]})
+        self.assertFalse(any("requested" in item or "observed_models" in item for item in self.ledger()["passes"]))
 
 
 # ---- ledger-merge ----------------------------------------------------------------------------------------------------
@@ -1436,7 +1457,7 @@ class SidecarGraph(unittest.TestCase):
         sequence = [event["node"] for event in events]
         self.assertLess(sequence.index("sidecar"), next(index for index, event in enumerate(events) if event["node"] == "freeze"))
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual(exported["sidecar"]["passes"][0]["status"], "failed")
         self.assertIsNotNone(exported["sidecar"]["closed_at"])
         validate_schema("sidecar", exported["sidecar"])
@@ -1630,7 +1651,7 @@ class ExportsAndPrompt(SidecarRun):
         self.script_steps([{"output": output([upsert()])}])
         self.run_pass()
         exported = export_run(ExportRuntime(self.directory))
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual(exported["sidecar"], self.ledger())
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]][:2], ["sidecar", "launch_ui"])
         # A ledger that fails its schema is not evidence: null, never guessed.

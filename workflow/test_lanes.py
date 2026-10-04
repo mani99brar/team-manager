@@ -185,7 +185,7 @@ class ThreeLaneRun(LaneRun):
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]],
                          ["launch_ui", "launch_adapter", "launch_docs", "handoff", "verify_ui", "verify_adapter", "verify_docs", "candidate", "review", "approval", "integrate"])
         self.assertEqual(exported["definition"]["nodes"][2]["label"], "Launch docs worker")
@@ -812,7 +812,7 @@ class LegacyFeatureAndRun(LaneRun):
         runtime = ExportRuntime(directory)
         self.assertEqual((runtime.workers, runtime.excluded), (["ui", "adapter"], []))
         exported = export_run(runtime)
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual(exported["definition"], {"name": "Feature implementation", "nodes": old_nodes})  # Stored labels kept.
         self.assertEqual(exported["values"]["lanes"], {"ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"}})
         self.assertEqual(exported["values"]["packets"], {"ui": "/x", "adapter": "/y"})

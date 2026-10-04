@@ -442,6 +442,34 @@ class InteractiveTests(unittest.TestCase):
         self.assertLess(worker.index("--effort"), worker.index("--permission-mode"))
         self.assertNotIn("--effort", reviewer)
 
+    def test_pinned_roles_give_the_worker_and_the_native_reviewer_their_effort_and_model_and_the_helper_a_scrubbed_env(self):
+        # C52: plan.roles wins over the variable, which prepare read once; the native reviewer is a judge.
+        from .sessions import pin_roles
+        self.plan["roles"] = pin_roles(worker_model="claude-sonnet-5", worker_effort="low", judge_model="claude-opus-5-5", env={})
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        ids = {row["name"]: row["id"] for row in (self.row(), self.reviewer_row())}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        leaked = {"WORKFLOW_WORKER_EFFORT": "max", "CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "CLAUDECODE": "1",
+                  "CLAUDE_CONFIG_DIR": "/home/operator/.claude"}
+        with patch.dict(os.environ, leaked), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]):
+                self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
+        worker, reviewer = (call.args[0] for call in launch.call_args_list)
+        self.assertEqual((worker[worker.index("--effort") + 1], worker[worker.index("--model") + 1]), ("low", "claude-sonnet-5"))
+        self.assertEqual((reviewer[reviewer.index("--effort") + 1], reviewer[reviewer.index("--model") + 1]), ("high", "claude-opus-5-5"))
+        self.assertEqual(reviewer[-3:], ["--permission-mode", "dontAsk", "Review this candidate."])  # The prompt still follows a one-value option.
+        for call in launch.call_args_list:
+            env = call.kwargs["env"]
+            self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE"} & set(env))
+            self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/home/operator/.claude")
+
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
         candidate = self.plan["base_commit"]

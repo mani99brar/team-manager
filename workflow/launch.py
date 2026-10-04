@@ -19,7 +19,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
                          has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
-from .sessions import read_json, validate_node_id, validate_reviewer_id
+from .sessions import EFFORT_LEVELS, pin_roles, read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
 from .verification import validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
@@ -202,13 +202,17 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                    reviewer_transport: str | None = None, workers: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    reviewer_transport: str | None = None, workers: str | None = None, profile: str | None = None,
+                    roles: dict | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
     checkout of a new branch at its HEAD (`source_checkout`, beside the run directory). Every later command gets that
     worktree as `--repo`, and the feature files it reads are the same committed files at their paths in it; built-in
     briefs stay in the tool's own folder.
+
+    `roles` holds the role pins given as flags (worker_model, worker_effort, judge_model, judge_effort; C52): only those
+    reach prepare, which reads WORKFLOW_WORKER_EFFORT once for an omitted worker effort and pins the judges at high.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -298,18 +302,22 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             builtin = review_sidecar["prompt"].startswith(BUILTIN_PREFIX)
             prepare.extend(["--sidecar-brief", str(sidecar_brief if builtin else in_source(sidecar_brief)),
                             "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
+    roles = {key: value for key, value in (roles or {}).items() if value is not None}
+    pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
+    for key, value in roles.items():
+        prepare.extend([f"--{key.replace('_', '-')}", value])
     commands = [preflight, ["git", "worktree", "add", "-b", branch, str(source), "HEAD"], prepare, start]
     if automatic:
         from .automatic import automatic_settings
-        # Reject bad deadlines or an unknown transport before any command runs.
-        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds, reviewer_transport)
+        # Reject bad deadlines, an unknown transport or profile before any command runs.
+        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds, reviewer_transport, profile)
         commands[0].append("--automatic")
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
                             "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
-                            "--reviewer-transport", settings["reviewer_transport"]])
+                            "--reviewer-transport", settings["reviewer_transport"], "--profile", settings["profile"]])
         commands.append([*base, "automatic", str(run), "--live", "--repo", str(source)])
-    elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None:
-        raise ValueError("Timeouts and the reviewer transport apply to --automatic runs only")
+    elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None or profile is not None:
+        raise ValueError("Timeouts, the reviewer transport and the profile apply to --automatic runs only")
     drill = policy.get("failure_drill")
     if drill and drill["node_id"] not in selected:
         notes.append(f"Failure drill skipped: its lane {drill['node_id']} is not selected (selected: {', '.join(selected)}).")
@@ -341,6 +349,12 @@ def main(argv=None):
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: per-worker deadline from launch to completion signal (default 4h, max 24h)")
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m, max 24h)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
+    parser.add_argument("--profile", choices=["attended", "unattended"], help="Automatic mode: the run's profile (default unattended), pinned at prepare")
+    parser.add_argument("--worker-model", help="The workers' model, pinned at prepare (default: Claude Code's default)")
+    parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="The workers' effort, pinned at prepare (default: WORKFLOW_WORKER_EFFORT)")
+    parser.add_argument("--judge-model", help="The model of the design challenge, the reviewers and the review sidecar, pinned at prepare "
+                                              "(default: Claude Code's default)")
+    parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="Their effort, pinned at prepare (default high)")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     args = parser.parse_args(argv)
@@ -352,8 +366,10 @@ def main(argv=None):
             raise ValueError(f"{repo} is the source checkout of the run {owner}; launch from your own checkout: {common_dir(repo).parent}")
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)
+        roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
-                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
+                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
+                                               args.profile, roles)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
@@ -403,8 +419,10 @@ def main(argv=None):
             print(f"Note: {note}", file=sys.stderr)
         # How the run ends, from the automatic settings prepare pins as plan.automatic (validated by launch_commands).
         from .automatic import automatic_settings
-        settings = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport) if args.automatic else None
-        print(f"Run {run}: {finish_policy(settings, branch)}.", flush=True)
+        settings = (automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile)
+                    if args.automatic else None)
+        profile = f" (profile {settings['profile']})" if settings else ""
+        print(f"Run {run}{profile}: {finish_policy(settings, branch)}.", flush=True)
         print(f"Source checkout: {source}, the run's own worktree on {branch}; your checkout {repo} stays on its branch. "
               "Feature files edited during a design challenge pause are edited there.", flush=True)
         try:

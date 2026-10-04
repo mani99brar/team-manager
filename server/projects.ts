@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  RUN_PROFILES, runControllerSchema, runRolesSchema, sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
   type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
@@ -31,7 +31,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * `inputs.decisions`, `inputs.challenge`, the completion's version, evidence and unrecorded question and `questions`
  * per worker, and a `challenge` graph node before the launches; older exports serve them as null and `[]`, and their
  * completions as 1.0.0) and 1.6.0 (the review sidecar: a top-level `sidecar` section holding its ledger, or null, and a
- * `sidecar` graph node after the challenge). A section is served only when the
+ * `sidecar` graph node after the challenge) and 1.7.0 (C52: `inputs.roles`, `inputs.controller` and `inputs.automatic.profile`,
+ * each absent for a run prepared before it and served as null). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -67,7 +68,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
@@ -236,6 +237,8 @@ const inputsSectionSchema = z.strictObject({
     review_timeout_seconds: z.number().int().positive(),
     /** Null when the plan predates the setting and the run never reviewed; the export never guesses it. */
     reviewer_transport: z.enum(['native', 'print']).nullable(),
+    /** Export 1.7.0: the pinned profile; absent for plans pinned before it. */
+    profile: z.enum(RUN_PROFILES).nullable().optional(),
   }).nullable(),
   setup: z.array(z.strictObject({ argv: z.array(z.string()), command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
@@ -250,6 +253,9 @@ const inputsSectionSchema = z.strictObject({
   decisions: z.string().nullable().optional(),
   /** Export 1.5.0: the design challenge, null for runs without one; absent before. */
   challenge: challengeSectionSchema.nullable().optional(),
+  /** Export 1.7.0: plan.roles and plan.controller as prepare pinned them; absent for runs prepared before them. */
+  roles: runRolesSchema.nullable().optional(),
+  controller: runControllerSchema.nullable().optional(),
 })
 
 const exportSchema = z.object({
@@ -688,7 +694,7 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
   const challenge = section.challenge ?? null
   return {
     contract_version: '1.4.0', run_id: runId, feature: redactPaths(section.feature), base_commit: section.base_commit, source_branch: section.source_branch,
-    mode: section.mode, automatic: section.automatic === null ? null : { ...section.automatic },
+    mode: section.mode, automatic: section.automatic === null ? null : { ...section.automatic, profile: section.automatic.profile ?? null },
     setup: section.setup.map(step => ({ command: step.command, timeout_seconds: step.timeout_seconds })),
     max_verification_attempts: section.max_verification_attempts,
     // Exports before 1.3.0 describe every lane they ran and excluded nothing.
@@ -706,6 +712,9 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
       accepted_reason: challenge.accepted_reason === null ? null : redactPaths(challenge.accepted_reason),
       decided_at: utcTimestamp(challenge.decided_at),
     },
+    // Export 1.7.0; runs prepared before the pins, and older exports, serve null.
+    roles: section.roles == null ? null : { worker: { ...section.roles.worker }, judges: { ...section.roles.judges } },
+    controller: section.controller == null ? null : { ...section.controller },
   }
 }
 

@@ -4,7 +4,7 @@
  * its native session launched and ended its turn.
  */
 import { SIDECAR_NODE_ID } from '../../contracts/projects/triage.ts'
-import { isBlockingFinding, type ReviewResult, type RunDetail } from './api.ts'
+import { isBlockingFinding, type ReviewResult, type RunDetail, type RunInputs } from './api.ts'
 
 export { SIDECAR_NODE_ID }
 
@@ -163,6 +163,20 @@ export function formatDuration(seconds: number): string {
 /** The automatic profile's deadlines as one phrase, e.g. "worker 4h · review 30m". */
 export function deadlinesLabel(automatic: { worker_timeout_seconds: number; review_timeout_seconds: number }): string {
   return `worker ${formatDuration(automatic.worker_timeout_seconds)} · review ${formatDuration(automatic.review_timeout_seconds)}`
+}
+
+type RolePin = { model: string | null; effort: string | null }
+
+/**
+ * The run inputs' profile and roles on one line (export 1.7.0): an automatic run's profile, then the workers' and the judges'
+ * (the design challenge, the reviewers and the review sidecar) pinned model and effort, "default" where the CLI's own applies.
+ * A run prepared before the pins says so; a manual run has no profile.
+ */
+export function rolesLabel(inputs: Pick<RunInputs, 'automatic'> & { roles?: RunInputs['roles'] }): string {
+  const pin = (role: RolePin) => `${role.model ?? 'default model'}, ${role.effort ? `effort ${role.effort}` : 'default effort'}`
+  const parts = inputs.automatic ? [inputs.automatic.profile ?? 'profile not pinned'] : []
+  parts.push(inputs.roles ? `workers ${pin(inputs.roles.worker)} · judges ${pin(inputs.roles.judges)}` : 'roles not pinned')
+  return parts.join(' · ')
 }
 
 const DISPOSITIONS = ['open', 'resolved', 'accepted'] as const

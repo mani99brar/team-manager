@@ -25,25 +25,29 @@ from . import attention as attention_record  # Not `attention`: the waits keep s
 from .checks import now
 from .guardrails import conventions_block, decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
-from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
-                       run_lock, save_json, terminate)
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, job_env, plan_reviewers, plan_roles, plan_workers, popen_claude, read_json, record_role,
+                       requested_pins, review_node, reviewer_ids, role_flags, run_lock, save_json, terminate)
 from .verification import CONTRACTS
 from .worktrees import git_worktree
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
-            "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native"}
+            "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native", "profile": "unattended"}
 TIMEOUT_KEYS = ("worker_timeout_seconds", "review_timeout_seconds")
 REVIEWER_TRANSPORTS = ("native", "print")
-# Plans pinned before the native reviewer existed lack reviewer_transport; they mean native.
-REQUIRED_KEYS = frozenset(DEFAULTS) - {"reviewer_transport"}
+# C52 (decisions 1 and 3): `launch --automatic --profile attended|unattended`, unattended when omitted. Pinned here, exported,
+# and read through profile(); what attended changes is the reading rule (guardrails.reading_rule) for now.
+PROFILES = ("attended", "unattended")
+# Plans pinned before the native reviewer existed lack reviewer_transport; they mean native. Plans pinned before profiles lack
+# profile; they mean unattended.
+REQUIRED_KEYS = frozenset(DEFAULTS) - {"reviewer_transport", "profile"}
 
 
 def automatic_settings(worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                       reviewer_transport: str | None = None) -> dict:
-    """Run-scoped automatic configuration; deadlines and transport are pinned into plan.json at prepare."""
+                       reviewer_transport: str | None = None, profile: str | None = None) -> dict:
+    """Run-scoped automatic configuration; deadlines, transport and profile are pinned into plan.json at prepare."""
     settings = dict(DEFAULTS)
     for key, value in (("worker_timeout_seconds", worker_timeout_seconds), ("review_timeout_seconds", review_timeout_seconds),
-                       ("reviewer_transport", reviewer_transport)):
+                       ("reviewer_transport", reviewer_transport), ("profile", profile)):
         if value is not None:
             settings[key] = value
     validate_automatic({"automatic": settings, "source_branch": "feature/validation-only"})
@@ -61,6 +65,9 @@ def validate_automatic(plan: dict) -> None:
             raise ValueError("Automatic timeouts must be bounded positive seconds (at most 86400)")
     if "reviewer_transport" in settings and settings["reviewer_transport"] not in REVIEWER_TRANSPORTS:
         raise ValueError("Unsupported reviewer transport; expected native or print")
+    if "profile" in settings and settings["profile"] not in PROFILES:
+        raise ValueError(f"Unsupported profile {settings['profile']!r}; expected attended or unattended")
+    plan_roles(plan)  # Malformed pinned roles are refused with the rest of the run's configuration.
     if not plan.get("source_branch", "").startswith("feature/"):
         raise ValueError("Automatic completion is restricted to a feature/ branch")
 
@@ -68,6 +75,13 @@ def validate_automatic(plan: dict) -> None:
 def reviewer_transport(plan: dict) -> str:
     """Effective transport: plans that predate the setting are native, though they never launch a new reviewer."""
     return plan["automatic"].get("reviewer_transport", "native")
+
+
+def profile(plan: dict) -> str:
+    """The run's profile, "attended" or "unattended": plan.automatic.profile; unattended for a plan pinned before profiles
+    and for a manual run, which has no automatic settings (its own rules say what a manual run does)."""
+    automatic = plan.get("automatic")
+    return "attended" if isinstance(automatic, dict) and automatic.get("profile") == "attended" else "unattended"
 
 
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
@@ -1188,6 +1202,12 @@ def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> 
     save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
 
 
+def requested(plan: dict) -> dict:
+    """`{requested: {model, effort}}`, the judges' pins a native reviewer is launched with, for its status file (which has no
+    contract); nothing for a plan pinned before roles."""
+    return {"requested": requested_pins(plan, "judges")} if plan.get("roles") is not None else {}
+
+
 def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
     from .pipeline import digest_file
     declared = reviewers(runtime)
@@ -1195,7 +1215,7 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
                 "patch_sha256": digest_file(patch), "status": "launching", "reviewers": [item["reviewer_id"] for item in declared]}
     statuses = {item["reviewer_id"]: {"reviewer_id": item["reviewer_id"], "node_id": review_node(item["reviewer_id"]), "transport": "native",
                                       "launch_token": str(uuid.uuid4()), "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
-                                      "status": "pending"} for item in declared}
+                                      "status": "pending", **requested(runtime.plan)} for item in declared}
     state = ReviewStatus(runtime, combined, statuses)
     state.save()
     for reviewer in declared:
@@ -1366,12 +1386,13 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     return review
 
 
-def print_command(executable: str, session_id: str, schema: dict, add_dirs: list[str]) -> list[str]:
+def print_command(executable: str, session_id: str, schema: dict, add_dirs: list[str], pins: list[str] | tuple[str, ...] = ()) -> list[str]:
     """One headless read-only job (Read, Glob and Grep only, no prompts, no MCP) returning `schema` as structured output.
 
-    The print-mode reviewers and the design challenge run through it; the prompt goes to stdin.
+    The print-mode reviewers, the design challenge and the review sidecar run through it; the prompt goes to stdin. `pins`
+    are the judges' `--model`/`--effort` (sessions.role_flags), empty for a plan pinned before roles.
     """
-    command = [executable, "--print", "--output-format", "json", "--session-id", session_id,
+    command = [executable, "--print", "--output-format", "json", "--session-id", session_id, *pins,
                "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                "--tools", "Read,Glob,Grep", "--permission-mode", "dontAsk", "--permission-prompts", "none"]
     for directory in add_dirs:
@@ -1417,6 +1438,8 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
             process = processes[reviewer_id][0]
             status = state.statuses[reviewer_id]
             pending.remove(reviewer_id)
+            node = review_node(reviewer_id)
+            record_role(runtime.directory, node, runtime.plan, "judges", runtime.directory / f"{node}.stdout.json")  # The models it used.
             if blocked:
                 try:
                     decision = print_verdict(runtime, reviewer_id, process, status)
@@ -1475,7 +1498,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
                                       "status": "launching"} for item in declared}
     state = ReviewStatus(runtime, combined, statuses)
     state.save()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+    env = job_env()
     timeout = runtime.plan["automatic"]["review_timeout_seconds"]
     processes = {}
     waited = False
@@ -1487,7 +1510,9 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
             prompt_path = runtime.directory / f"{node}.prompt.txt"
             prompt_path.write_text(print_review_prompt(runtime, patch, reviewer))
             os.chmod(prompt_path, 0o600)
-            command = print_command(runtime.sessions.executable, status["session_id"], review_schema(runtime), [str(runtime.directory)])
+            command = print_command(runtime.sessions.executable, status["session_id"], review_schema(runtime), [str(runtime.directory)],
+                                    role_flags(runtime.plan, "judges"))
+            record_role(runtime.directory, node, runtime.plan, "judges")
             with prompt_path.open() as stdin, (runtime.directory / f"{node}.stdout.json").open("w") as output, (runtime.directory / f"{node}.stderr.log").open("w") as errors:
                 process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
             processes[reviewer_id] = (process, time.monotonic())
@@ -1992,6 +2017,27 @@ def final_stop(runtime, state) -> tuple[str, bool] | None:
     return failed_steps(state), False
 
 
+def note_controller_drift(runtime, current: str | None = None) -> None:
+    """One `warning` event on the controller when this step runs another controller commit than the one prepare pinned
+    (plan.controller): `automatic --live` re-executes the controller checkout at every checkpoint, so a checkout that moved
+    mid-run changes the code that drives it. Said once per commit, however many steps run it; nothing for a plan pinned
+    before the record, or when the commit cannot be read. Never a refusal."""
+    pinned = runtime.plan.get("controller")
+    if not isinstance(pinned, dict) or not isinstance(pinned.get("commit"), str):
+        return
+    if current is None:
+        from .sessions import controller_commit
+        current = controller_commit()[0]
+    if current is None or current == pinned["commit"]:
+        return
+    message = (f"Controller commit {current[:12]} runs this step, not {pinned['commit'][:12]} pinned at prepare: the controller checkout "
+               "moved during the run")
+    path = runtime.directory / "events.jsonl"
+    if path.exists() and any(json.loads(line).get("message") == message for line in path.read_text().splitlines() if line.strip()):
+        return
+    runtime.event("controller", "warning", message)
+
+
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import advance, build_pipeline, graph_config, report
@@ -2009,6 +2055,7 @@ def drive(runtime, *, single_step=False) -> str | None:
             reason, bare = stopped
             raise stop_error(runtime, reason, bare=bare)  # It already stopped for good: its block as the source branch says it.
         raise resumable_stop(runtime, source_branch_note(runtime, branch))
+    note_controller_drift(runtime)
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
     while True:

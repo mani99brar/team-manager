@@ -46,7 +46,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .checks import now
-from .sessions import TransientInfraError, git, plan_workers, popen_claude, read_json, run_lock, save_json, stale_claude_warning, terminate
+from .sessions import (TransientInfraError, git, job_env, plan_workers, popen_claude, read_json, record_role, role_flags, run_lock, save_json,
+                       stale_claude_warning, terminate)
 from .verification import CONTRACTS, validate_schema
 from .worktrees import git_worktree
 
@@ -242,16 +243,17 @@ READING = ("When you would build on a reading of a task line that departs from i
 def reading_rule(plan: dict) -> str:
     """C16 step 1: what a worker does before it builds on its own reading of a task line. An attended run's worker asks (status
     question) and a manual run's asks in its pane; an unattended run's records the reading where reviewers read it and goes on.
-    Slice 3 pins the profile as plan.automatic.profile; until then an automatic run is unattended. A 1.0.0 run (a 2.0.0 or 2.1.0
-    feature) has no question status and no untested field: its automatic worker records the reading in open_assumptions, which
-    1.0.0 has, whatever the profile."""
+    The profile is plan.automatic.profile (automatic.profile; unattended for a plan pinned before it). A 1.0.0 run (a 2.0.0 or
+    2.1.0 feature) has no question status and no untested field: its automatic worker records the reading in open_assumptions,
+    which 1.0.0 has, whatever the profile."""
+    from .automatic import profile
     automatic = plan.get("automatic")
     if not isinstance(automatic, dict):
         return READING + "ask in this pane, quoting that line, before building on it."
     record = READING + "record an open assumption that starts with \"reading:\" and quotes that line, and go on."
     if completion_version(plan) != COMPLETION_VERSION:
         return record
-    if automatic.get("profile") == "attended":
+    if profile(plan) == "attended":
         rule = READING + "write the completion file with status question quoting that line before building on it."
     else:
         rule = record
@@ -565,10 +567,11 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
     prompt_path.write_text(challenge_prompt(directory, plan))
     os.chmod(prompt_path, 0o600)
     add_dirs = [str(directory / "challenge-inputs")] if plan.get("prd") else []
-    command = print_command(runtime.sessions.executable, session_id, output_schema(), add_dirs)
+    command = print_command(runtime.sessions.executable, session_id, output_schema(), add_dirs, role_flags(plan, "judges"))
     runtime.event(CHALLENGE, "running", f"Design challenge attempt {attempt}: one print job, session {session_id}")
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+    env = job_env()
     stdout = directory / f"challenge-{attempt}.stdout.json"
+    record_role(directory, f"challenge-{attempt}", plan, "judges")  # The pins it asks for; challenge.json's schema is closed.
     try:
         with prompt_path.open() as stdin, stdout.open("w") as output, (directory / f"challenge-{attempt}.stderr.log").open("w") as errors:
             process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
@@ -587,6 +590,7 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
         except BaseException:
             terminate(process)
             raise
+        record_role(directory, f"challenge-{attempt}", plan, "judges", stdout)  # And the models its output reports.
         try:
             result = read_json(stdout)
         except ValueError:

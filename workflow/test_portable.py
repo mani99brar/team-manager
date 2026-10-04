@@ -198,13 +198,13 @@ class NoTargetSchema(LaneRun):
         # Preflight needs a Claude CLI; a stand-in answers --help and auth status, nothing else.
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --tools --permission-mode --settings'; "
+        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --tools --permission-mode --settings --effort'; "
                                         "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
         (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
         for item in bin_dir.iterdir():
             item.chmod(0o755)
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-        env.pop("WORKFLOW_WORKER_EFFORT", None)  # the stub answers --help with the base flags only; an operator-level effort setting would demand --effort
+        env.pop("WORKFLOW_WORKER_EFFORT", None)  # an operator-level effort setting must not reach the pinned roles; the stub knows --effort
         result = subprocess.run(commands[0], cwd=TOOL, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
@@ -224,17 +224,19 @@ class NoTargetSchema(LaneRun):
 
 
 class PreflightClaudeFlags(Isolated):
-    def test_preflight_refuses_a_claude_cli_without_settings(self):
-        """Every `claude --bg` command passes --settings (the auto-updater off inside its session): a CLI without it is refused."""
+    def test_preflight_refuses_a_claude_cli_without_settings_or_effort(self):
+        """Every `claude --bg` command passes --settings (the auto-updater off inside its session), and every judge --effort (C52):
+        a CLI without either is refused."""
         target = make_target(self.root)
         run = self.root / "runs/skeleton-001"
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-        env.pop("WORKFLOW_WORKER_EFFORT", None)  # the stub answers --help with the base flags only; an operator-level effort setting would demand --effort
+        env.pop("WORKFLOW_WORKER_EFFORT", None)  # an operator-level effort setting must not reach the pinned roles; the stub knows --effort
         preflight = [PY, "-m", "workflow", "preflight", str(run), "--repo", str(target), "--policy", str(target / "features/skeleton/policy.json")]
-        for flags, code in (("--bg --safe-mode --tools --permission-mode --settings", 0), ("--bg --safe-mode --tools --permission-mode", 1)):
+        for flags, code in (("--bg --safe-mode --tools --permission-mode --settings --effort", 0), ("--bg --safe-mode --tools --permission-mode --effort", 1),
+                            ("--bg --safe-mode --tools --permission-mode --settings", 1)):
             # A stand-in answers --help with exactly these flags, and auth status; nothing else.
             (bin_dir / "claude").write_text(f"#!/bin/sh\nif [ \"$1\" = --help ]; then echo '{flags}'; "
                                             "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
@@ -264,7 +266,8 @@ class MdManagerDefaults(Isolated):
             [*base, "prepare", str(run), "--repo", str(source), "--policy", str(copy / "policy.json"),
              "--task", f"ui={copy / 'ui-task.md'}", "--task", f"adapter={copy / 'adapter-task.md'}",
              "--reviewer", f"general={copy / 'reviewers/general.md'}", "--reviewer", f"coverage={copy / 'reviewers/coverage.md'}",
-             "--automatic", "--worker-timeout-seconds", "14400", "--review-timeout-seconds", "1800", "--reviewer-transport", "print"],
+             "--automatic", "--worker-timeout-seconds", "14400", "--review-timeout-seconds", "1800", "--reviewer-transport", "print",
+             "--profile", "unattended"],
             [*base, "start", str(run), "--live", "--repo", str(source), "--herdr"],
             [*base, "automatic", str(run), "--live", "--repo", str(source)],
         ]

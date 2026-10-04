@@ -284,7 +284,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.6.0")
+            self.assertEqual(exported["version"], "1.7.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -1242,6 +1242,85 @@ class RecordTests(unittest.TestCase):
         self.pin()
         report(f.runtime, SimpleNamespace(values={}, next=(), tasks=[]))
         self.assertNotIn("Worker authority", (f.directory / "report.html").read_text())
+
+    def prepare_cli(self, name: str, *flags: str, env: dict | None = None) -> tuple[Path, int, str]:
+        f = self.fixture
+        policy = f.root / "policy.json"
+        save_json(policy, f.policy)
+        tasks = []
+        for node in ("ui", "adapter"):
+            (f.root / f"{node}-task.md").write_text(f"Change {node}.\n")
+            tasks += ["--task", f"{node}={f.root / f'{node}-task.md'}"]
+        run = f.root / name
+        with patch.dict(os.environ, env or {}), patch("workflow.sessions.claude_version", return_value="2.1.288 (Claude Code)"):
+            code, _, err = pipeline_cli("prepare", str(run), "--repo", str(f.repo), "--policy", str(policy), *tasks, *flags)
+        return run, code, err
+
+    def test_prepare_pins_the_roles_the_controller_and_the_cli_version_and_nothing_changes_them_later(self):
+        # C52: the roles from prepare's flags (the worker effort from WORKFLOW_WORKER_EFFORT, read once; the judges at high), the
+        # controller checkout's commit and dirty flag, and `claude --version`.
+        from .guardrails import resume_main
+        from .sessions import CONTROLLER, role_flags, worker_effort
+        run, code, err = self.prepare_cli("pinned-run", env={"WORKFLOW_WORKER_EFFORT": "medium"})
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["roles"], {"worker": {"model": None, "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["controller"], {"commit": git(CONTROLLER, "rev-parse", "HEAD"),
+                                              "dirty": bool(git(CONTROLLER, "status", "--porcelain", "--untracked-files=no")),
+                                              "claude_version": "2.1.288 (Claude Code)"})
+        run, code, err = self.prepare_cli("flagged-run", "--worker-model", "claude-sonnet-5", "--worker-effort", "low",
+                                          "--judge-model", "claude-opus-5-5", "--judge-effort", "max", env={"WORKFLOW_WORKER_EFFORT": "medium"})
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-sonnet-5", "effort": "low"}, "judges": {"model": "claude-opus-5-5", "effort": "max"}})
+        # Later commands read the pins, never the variable again; resume takes no role flag.
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": "xhigh"}):
+            self.assertEqual(worker_effort(plan=plan), ["--effort", "low"])
+            self.assertEqual(role_flags(plan, "worker"), ["--model", "claude-sonnet-5", "--effort", "low"])
+        for flag in ("--worker-model", "--worker-effort", "--judge-model", "--judge-effort", "--profile"):
+            with self.subTest(flag), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+                resume_main([str(run), flag, "low"])
+            self.assertEqual(refused.exception.code, 2)
+        self.assertEqual(read_json(run / "plan.json"), plan)
+        # A bad level or model is refused before anything is written.
+        for flags in (["--worker-effort", "med"], ["--judge-model", "--effort"], ["--profile", "attended"]):
+            with self.subTest(flags):
+                run, code, err = self.prepare_cli("refused-run", *flags)
+                self.assertNotEqual(code, 0)
+                self.assertFalse(run.exists(), err)
+        _, code, err = self.prepare_cli("refused-run", env={"WORKFLOW_WORKER_EFFORT": "med"})
+        self.assertIn("not one of low, medium, high, xhigh, max", err)
+
+    def test_a_run_prepared_before_roles_and_the_controller_record_loads_and_launches_as_before(self):
+        from .sessions import role_flags
+        f = self.fixture
+        self.pin()
+        self.assertNotIn("roles", f.plan)
+        runtime = Pipeline(f.directory, f.sessions)
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": "medium"}):
+            self.assertEqual((role_flags(runtime.plan, "worker"), role_flags(runtime.plan, "judges")), (["--effort", "medium"], []))
+        self.pin(automatic=automatic_settings(), source_branch="feature/test")
+        del f.plan["automatic"]["profile"]
+        self.pin()
+        Pipeline(f.directory, f.sessions)  # An automatic plan without profile validates.
+
+    def test_a_step_on_another_controller_commit_than_the_pinned_one_writes_one_warning(self):
+        from .automatic import note_controller_drift
+        f = self.fixture
+        events = lambda: [event for event in map(json.loads, (f.directory / "events.jsonl").read_text().splitlines()) if event["status"] == "warning"] \
+            if (f.directory / "events.jsonl").exists() else []
+        note_controller_drift(f.runtime, "b" * 40)  # A plan pinned before the record compares nothing.
+        self.pin(controller={"commit": "a" * 40, "dirty": False, "claude_version": "2.1.288 (Claude Code)"})
+        note_controller_drift(f.runtime, "a" * 40)
+        self.assertEqual(events(), [])
+        for _ in range(3):  # Every checkpoint runs a new automatic-step: the same drift is said once.
+            note_controller_drift(f.runtime, "b" * 40)
+        [warning] = events()
+        self.assertEqual((warning["node"], warning["message"]),
+                         ("controller", f"Controller commit {'b' * 12} runs this step, not {'a' * 12} pinned at prepare: the controller checkout "
+                                        "moved during the run"))
+        note_controller_drift(f.runtime, "c" * 40)
+        self.assertEqual(len(events()), 2)
 
     def test_a_changed_shared_git_is_a_warning_at_freeze_review_and_integrate_never_a_refusal(self):
         # C25: prepare recorded a digest of what in the shared .git can make a Git command run something. Freeze (after the

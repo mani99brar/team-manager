@@ -128,7 +128,7 @@ export const servedWorkerResult: WorkerResult = {
 export const runInputs: RunInputs = {
   contract_version: '1.4.0', run_id: 'run-001', feature: 'Review verdict and findings in the viewer',
   base_commit: 'e'.repeat(40), source_branch: 'feature/review-result/run-001', mode: 'automatic',
-  automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 14400, review_timeout_seconds: 1800, reviewer_transport: 'native' },
+  automatic: { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 14400, review_timeout_seconds: 1800, reviewer_transport: 'native', profile: 'unattended' },
   setup: [{ command: 'npm ci', timeout_seconds: 600 }],
   max_verification_attempts: 3,
   selected_workers: ['ui', 'adapter'],
@@ -180,6 +180,8 @@ export const runInputs: RunInputs = {
     accepted_reason: 'The contract is split by file.',
     decided_at: '2026-01-01T11:59:00Z',
   },
+  roles: { worker: { model: null, effort: 'medium' }, judges: { model: 'claude-opus-5-5', effort: 'high' } },
+  controller: { commit: 'f'.repeat(40), dirty: false, claude_version: '2.1.288 (Claude Code)' },
 }
 
 /**

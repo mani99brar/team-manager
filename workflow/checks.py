@@ -14,7 +14,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .sessions import git, save_json, terminate
+from .sessions import git, save_json, scrub_env, terminate
 from .verification import evaluate_worker, policy_digest
 from .worktrees import git_worktree, without_controller_git_config
 
@@ -359,11 +359,12 @@ def check_environment(environ) -> tuple[dict, list[str]]:
 
     The controller's, without the Herdr variables (a check never targets the controller's pane), inherited Playwright
     reporter paths (the runner owns JSON capture), the controller's own Git configuration (target suites run their hooks
-    as written: worktrees.without_controller_git_config) and SECRET_SUFFIXES/SECRET_PREFIXES names; with HUSKY=0 and
-    GIT_TERMINAL_PROMPT=0, so no install script switches hooks on and no Git command waits for a password.
+    as written: worktrees.without_controller_git_config), a surrounding Claude Code session's variables and its model and
+    effort overrides (sessions.scrub_env; not secrets, so not listed) and SECRET_SUFFIXES/SECRET_PREFIXES names; with
+    HUSKY=0 and GIT_TERMINAL_PROMPT=0, so no install script switches hooks on and no Git command waits for a password.
     """
     env, dropped = {}, []
-    for key, value in without_controller_git_config(environ).items():
+    for key, value in scrub_env(without_controller_git_config(environ)).items():
         if key.startswith(("HERDR_", "PLAYWRIGHT_JSON_OUTPUT")):
             continue
         name = key.upper()

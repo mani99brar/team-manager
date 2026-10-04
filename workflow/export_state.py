@@ -36,6 +36,13 @@ empty ledger before its first pass, and `null` for a run without a sidecar (ever
 prepared before) or a ledger that fails the schema. The definition of a run with a
 sidecar has the `sidecar` node right after `challenge` (first without one), before
 every launch, and `handoff` depends on it last. Everything else is 1.5.0 unchanged.
+
+Version 1.7.0 (additive, C52) records what prepare pinned about who runs the run:
+`inputs.roles` (the workers' and the judges' model and effort, plan.roles),
+`inputs.controller` (the controller checkout's commit, its dirty flag and the
+`claude --version` line, plan.controller) and `inputs.automatic.profile`
+(attended or unattended). Each key is left out for a run prepared before it,
+as it was; everything else is 1.6.0 unchanged.
 """
 from __future__ import annotations
 
@@ -51,7 +58,7 @@ from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.6.0"
+EXPORT_VERSION = "1.7.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -308,21 +315,25 @@ def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
     declared = [worker["node_id"] for worker in policy["workers"]]
     if not set(workers) <= set(declared):
         raise ValueError("Plan selects lanes the pinned policy does not declare")
-    return {"feature": policy["feature"], "policy_version": policy["version"], "base_commit": plan["base_commit"],
-            "source_branch": plan.get("source_branch"), "mode": "automatic" if automatic else "manual",
-            "automatic": None if not automatic else {
-                "finish": automatic["finish"], "permission_mode": automatic["permission_mode"],
-                "worker_timeout_seconds": automatic["worker_timeout_seconds"], "review_timeout_seconds": automatic["review_timeout_seconds"],
-                # Plans pinned before the setting: the transport the receipts record, null before any reviewer ran.
-                "reviewer_transport": automatic["reviewer_transport"] if "reviewer_transport" in automatic else recorded_transport(directory)},
-            "setup": [{"argv": list(item["argv"]), "command": shlex.join(item["argv"]), "timeout_seconds": item["timeout_seconds"]}
-                      for item in policy.get("setup", [])],
-            "max_verification_attempts": policy.get("max_verification_attempts", 3),
-            # A drill naming an excluded lane is pinned as null at prepare; plans before the selection keep the policy's.
-            "failure_drill": plan["failure_drill"] if "failure_drill" in plan else policy.get("failure_drill"),
-            "selected_workers": list(workers), "excluded_workers": plan_excluded(plan),
-            "decisions": decisions_text(plan), "challenge": challenge_section(directory),
-            "workers": {worker["node_id"]: worker_inputs(directory, plan, policy, worker) for worker in policy["workers"] if worker["node_id"] in workers}}
+    section = {"feature": policy["feature"], "policy_version": policy["version"], "base_commit": plan["base_commit"],
+               "source_branch": plan.get("source_branch"), "mode": "automatic" if automatic else "manual",
+               "automatic": None if not automatic else {
+                   "finish": automatic["finish"], "permission_mode": automatic["permission_mode"],
+                   "worker_timeout_seconds": automatic["worker_timeout_seconds"], "review_timeout_seconds": automatic["review_timeout_seconds"],
+                   # Plans pinned before the setting: the transport the receipts record, null before any reviewer ran.
+                   "reviewer_transport": automatic["reviewer_transport"] if "reviewer_transport" in automatic else recorded_transport(directory),
+                   **({"profile": automatic["profile"]} if "profile" in automatic else {})},
+               "setup": [{"argv": list(item["argv"]), "command": shlex.join(item["argv"]), "timeout_seconds": item["timeout_seconds"]}
+                         for item in policy.get("setup", [])],
+               "max_verification_attempts": policy.get("max_verification_attempts", 3),
+               # A drill naming an excluded lane is pinned as null at prepare; plans before the selection keep the policy's.
+               "failure_drill": plan["failure_drill"] if "failure_drill" in plan else policy.get("failure_drill"),
+               "selected_workers": list(workers), "excluded_workers": plan_excluded(plan),
+               "decisions": decisions_text(plan), "challenge": challenge_section(directory),
+               "workers": {worker["node_id"]: worker_inputs(directory, plan, policy, worker) for worker in policy["workers"] if worker["node_id"] in workers}}
+    # 1.7.0: the roles and the controller record prepare pinned; a run prepared before them exports without them.
+    section.update({key: plan[key] for key in ("roles", "controller") if key in plan})
+    return section
 
 
 def export_state(runtime, state) -> dict:

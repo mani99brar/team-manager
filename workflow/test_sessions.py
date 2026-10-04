@@ -227,6 +227,58 @@ class RunClaudeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not one of low, medium, high, xhigh, max"):
             worker_effort({"WORKFLOW_WORKER_EFFORT": "med"})
 
+    def test_scrub_env_drops_the_session_effort_and_model_overrides_and_keeps_config_auth_and_provider(self):
+        # C52: an explicit denylist. A prefix scrub would drop CLAUDE_CONFIG_DIR, the OAuth token and the provider switches.
+        from .sessions import scrub_env
+        kept = {"PATH": "/usr/bin", "HOME": "/home/operator", "CLAUDE_CONFIG_DIR": "/home/operator/.claude", "CLAUDE_CODE_OAUTH_TOKEN": "token",
+                "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_BASE_URL": "https://proxy.invalid",
+                "CLAUDE_BG_ISOLATION": "none", "DISABLE_AUTOUPDATER": "1"}
+        dropped = {"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_SESSION_ID": "s", "CLAUDE_CODE_CHILD_SESSION": "1",
+                   "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/x", "CLAUDE_CODE_MESSAGING_TOKEN": "t", "CLAUDE_PID": "42", "CLAUDE_EFFORT": "max",
+                   "CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "ANTHROPIC_DEFAULT_OPUS_MODEL": "x",
+                   "ANTHROPIC_DEFAULT_HAIKU_MODEL": "y", "CLAUDE_CODE_SUBAGENT_MODEL": "z"}
+        environ = {**kept, **dropped}
+        self.assertEqual(scrub_env(environ), kept)
+        self.assertEqual(environ, {**kept, **dropped})  # The caller's mapping is not modified.
+
+    def test_roles_are_pinned_from_flags_with_the_worker_effort_read_once_and_the_judges_at_high(self):
+        from .sessions import pin_roles, role_flags, worker_effort
+        env = {"WORKFLOW_WORKER_EFFORT": "medium"}
+        self.assertEqual(pin_roles(env=env), {"worker": {"model": None, "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(pin_roles(env={}), {"worker": {"model": None, "effort": None}, "judges": {"model": None, "effort": "high"}})
+        roles = pin_roles(worker_model="claude-sonnet-5", worker_effort="low", judge_model="claude-opus-5-5", judge_effort="xhigh", env=env)
+        self.assertEqual(roles, {"worker": {"model": "claude-sonnet-5", "effort": "low"}, "judges": {"model": "claude-opus-5-5", "effort": "xhigh"}})
+        for bad in ({"worker_effort": "med"}, {"judge_effort": "extreme"}, {"worker_model": "--effort"}, {"judge_model": "two words"}, {"worker_model": ""}):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                pin_roles(env={}, **bad)
+        plan = {"roles": roles}
+        # The pins win over the environment at launch: the variable is read once, at prepare.
+        self.assertEqual(role_flags(plan, "worker", {"WORKFLOW_WORKER_EFFORT": "max"}), ["--model", "claude-sonnet-5", "--effort", "low"])
+        self.assertEqual(worker_effort({"WORKFLOW_WORKER_EFFORT": "max"}, plan), ["--effort", "low"])
+        self.assertEqual(role_flags(plan, "judges"), ["--model", "claude-opus-5-5", "--effort", "xhigh"])
+        unset = {"roles": pin_roles(env={})}
+        self.assertEqual((role_flags(unset, "worker", env), role_flags(unset, "judges")), ([], ["--effort", "high"]))
+        # A plan pinned before roles: the variable for workers, nothing for the judges, as before.
+        self.assertEqual((role_flags({}, "worker", env), role_flags({}, "judges", env)), (["--effort", "medium"], []))
+        with self.assertRaisesRegex(ValueError, "roles"):
+            role_flags({"roles": {"worker": {"model": None}}}, "worker")
+
+    def test_a_print_jobs_role_file_records_the_requested_pins_and_the_models_it_used(self):
+        from .sessions import pin_roles, record_role
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = {"roles": pin_roles(judge_model="claude-opus-5-5", env={})}
+            stdout = root / "challenge-1.stdout.json"
+            record_role(root, "challenge-1", plan, "judges")
+            self.assertEqual(read_json(root / "challenge-1.role.json"),
+                             {"requested": {"model": "claude-opus-5-5", "effort": "high"}, "observed_models": None})
+            stdout.write_text('{"type": "result", "modelUsage": {"claude-opus-5-5": {"inputTokens": 3}, "claude-haiku-4-5": {}}}')
+            record_role(root, "challenge-1", plan, "judges", stdout)
+            self.assertEqual(read_json(root / "challenge-1.role.json")["observed_models"], ["claude-haiku-4-5", "claude-opus-5-5"])
+            stdout.write_text("not json")
+            record_role(root, "challenge-1", {}, "judges", stdout)  # A plan before roles, an unreadable output.
+            self.assertEqual(read_json(root / "challenge-1.role.json"), {"requested": {"model": None, "effort": None}, "observed_models": []})
+
     def test_a_background_session_gets_the_same_setting_in_its_arguments(self):
         # `claude --bg` only hands its session to the background service, which starts it with the service's own
         # environment: the helper's DISABLE_AUTOUPDATER never reaches it. The helper's arguments do, as --settings.

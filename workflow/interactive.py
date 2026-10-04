@@ -19,8 +19,8 @@ from pathlib import Path
 
 from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule
 from .herdr import herdr
-from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
-                       review_nodes, run_claude, save_json, worker_effort, worker_settings)
+from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, plan_digest, read_json,
+                       review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
 
 REVIEW = "review"
 # A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
@@ -184,8 +184,10 @@ class InteractiveSessions(ClaudeSessions):
         return receipt
 
     def launch(self, node: str, path: Path, receipt: dict, command: list[str], cwd: Path) -> dict:
-        """Run the short `claude --bg` helper once, then bind the exact row it created."""
-        env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+        """Run the short `claude --bg` helper once, then bind the exact row it created. The helper gets job_env: no Herdr
+        variables, and none of a surrounding session's or its model and effort overrides, which the background service
+        would pass on to the session."""
+        env = job_env()
         try:
             # This command creates Claude's own persistent terminal, then exits.
             # Killing this short helper is NOT evidence that the session stopped.
@@ -239,8 +241,9 @@ class InteractiveSessions(ClaudeSessions):
             tools += ",Bash"
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
-        # One --settings for workers only: background_settings with the deny rules and Git variables (worker_settings).
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory), *worker_effort(),
+        # One --settings for workers only: background_settings with the deny rules and Git variables (worker_settings). The
+        # worker's pinned model and effort (plan.roles; the WORKFLOW_WORKER_EFFORT variable for plans pinned before them).
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory), *role_flags(self.plan, "worker"),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", tools, "--permission-mode", "bypassPermissions" if automatic else "manual"]
         if automatic:
@@ -283,7 +286,8 @@ class InteractiveSessions(ClaudeSessions):
         # --tools, --allowedTools and --add-dir are variadic: any of them directly before the
         # positional prompt would swallow it (the session would start idle, without a task).
         # The prompt therefore follows --permission-mode, which takes exactly one value.
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *background_settings(),
+        # A reviewer is a judge: the judges' pinned model and effort (nothing for plans pinned before roles).
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *background_settings(), *role_flags(self.plan, "judges"),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", "Read,Glob,Grep,Write", "--allowedTools", f"Edit(//{completion})",
                    "--add-dir", str(self.directory), "--permission-mode", "dontAsk", prompt]

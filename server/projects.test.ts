@@ -1305,7 +1305,9 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const inputs = validateRunInputs(response.json())
     assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.4.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
-    assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' })
+    // A 1.2.0 export: no roles, controller record or profile (export 1.7.0); served as null.
+    assert.deepEqual([inputs.roles, inputs.controller], [null, null])
+    assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native', profile: null })
     assert.deepEqual(inputs.setup, [{ command: 'npm ci', timeout_seconds: 600 }])
     assert.equal(inputs.max_verification_attempts, 3)
     assert.ok(!('failure_drill' in inputs) && !('policy_version' in inputs))
@@ -1449,7 +1451,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.7.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.8.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -2553,4 +2555,28 @@ test('[sidecar] a seeded run with a sidecar has the activity of its twin without
     assert.ok(order.filter(id => id.startsWith('launch_')).every(id => order.indexOf(id) > order.indexOf('sidecar')))
     assert.equal(nodes[key(without)].includes('sidecar'), false)
   }
+})
+
+// ---- Run roles, the controller record and the profile (C52): export 1.7.0 ----
+
+test('[roles] a 1.7.0 export serves the pinned roles, the controller record and the profile; a 1.6.0 export serves them as null', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const roles = { worker: { model: 'claude-sonnet-5', effort: 'low' }, judges: { model: null, effort: 'high' } }
+    const controller = { commit: 'f'.repeat(40), dirty: true, claude_version: '2.1.288 (Claude Code)' }
+    const pinned = inputsSection({ automatic: { ...inputsSection().automatic!, profile: 'attended' } as InputsSection['automatic'] })
+    await writeRun(root, { runId: 'pinned', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...pinned, roles, controller } })
+    await writeRun(root, { runId: 'before', version: '1.6.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2), inputs: inputsSection() })
+    const served = validateRunInputs((await get(app, url('alpha', 'main', 'pinned', '/inputs'))).json())
+    assert.deepEqual([served.roles, served.controller, served.automatic?.profile], [roles, controller, 'attended'])
+    const before = validateRunInputs((await get(app, url('alpha', 'main', 'before', '/inputs'))).json())
+    assert.deepEqual([before.roles, before.controller, before.automatic?.profile], [null, null, null])
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(list.runs.map(run => run.run_id).sort(), ['before', 'pinned'])
+    // A malformed record is invalid storage, as any other inputs field is.
+    await writeRun(root, { runId: 'bad-roles', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...inputsSection(), roles: { worker: { model: null, effort: 'extreme' }, judges: roles.judges } } })
+    assertError(await get(app, url('alpha', 'main', 'bad-roles', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+  })
 })

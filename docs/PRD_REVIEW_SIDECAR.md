@@ -177,7 +177,7 @@ Server (`server/projects.test.ts`): a 1.6.0 export with and without the section 
 - **Reviewers and the sidecar's handoff.** Default: the post-freeze reviewers do not receive the ledger (independence, as PRD_PARALLEL_REVIEWERS decided for reviewers among themselves); it sits in the run directory and the viewer for the operator. A later `sidecar.brief_reviewers: true` could append the unresolved findings as claims to verify.
 - **Now banner.** Default: an escalation is an event and a section, not an attention kind; adding `escalation` to `ATTENTION_KINDS` is a projects contract change for a later slice.
 - **Transcript tail.** The visible pane is a thin rebuttal channel. Default: deferred; the input layout leaves room for a `<lane>.transcript.txt`.
-- **Worker effort and model.** Default: the pass uses `ANTHROPIC_MODEL` like the challenge and takes no `--effort`.
+- **Worker effort and model.** Default: the pass uses `ANTHROPIC_MODEL` like the challenge and takes no `--effort`. Since C52 the pass is a judge: it takes the run's pinned judge model and effort (`plan.roles.judges`, high by default) and starts without `ANTHROPIC_MODEL` (workflow/RUNBOOK.md "Who runs the run is pinned").
 - **Pane for the sidecar.** Default: none; a Herdr pane tailing the ledger is a convenience for later.
 
 ## 8. How to run
