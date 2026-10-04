@@ -1891,6 +1891,28 @@ class AbandonTests(unittest.TestCase):
         self.assertEqual((code, stops, self.inventories), (0, [], 0), output)
         self.assertEqual(read_json(self.directory / "abandon.json")["not_running"], [])
 
+    def test_listing_failures_on_the_real_sessions_restores_the_class_method(self):
+        # The production path: inventory is InteractiveSessions' own method, shadowed by an instance attribute for the block
+        # and deleted afterwards, after a normal exit and after an error alike.
+        from .abandon import ListingUnavailable, listing_failures
+        from .interactive import InteractiveSessions
+        from .sessions import TransientInfraError
+        sessions = InteractiveSessions(self.directory)
+        with patch("workflow.interactive.run_claude", side_effect=subprocess.TimeoutExpired(["claude", "agents"], 15)):
+            with listing_failures(sessions):
+                self.assertIn("inventory", vars(sessions))
+                with self.assertRaises(ListingUnavailable) as caught:
+                    sessions.inventory()
+                self.assertIsInstance(caught.exception.__cause__, TransientInfraError)
+            self.assertNotIn("inventory", vars(sessions))
+            self.assertIs(sessions.inventory.__func__, InteractiveSessions.inventory)
+            with self.assertRaises(ListingUnavailable), listing_failures(sessions):
+                sessions.inventory()
+            self.assertNotIn("inventory", vars(sessions))
+            self.assertIs(sessions.inventory.__func__, InteractiveSessions.inventory)
+            with self.assertRaises(TransientInfraError):
+                sessions.inventory()  # Outside the block, the class's own failure again.
+
     def test_abandon_is_the_operators_and_refuses_a_held_lock_or_an_empty_reason(self):
         for argv, refusal in ((["--reason", self.REASON, "--by", "maintainer"], "abandon is the operator's decision"),
                               (["--reason", self.REASON], "abandon requires --by operator"),
