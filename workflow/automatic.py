@@ -1864,23 +1864,26 @@ def freeze_stop(error) -> str:
     return f"Freeze failed: {step_error(error)}; non-retryable graph failure, inspect retained evidence"
 
 
-def record_blocked(runtime, state=None, *, reason: str | None = None) -> None:
+def record_blocked(runtime, state=None, *, reason: str | None = None, bare: bool = False) -> None:
     """The `controller` `blocked` event before drive stops at a failure it does not retry (C44), so the timeline's last word
     says why: `reason` for a stop of its own (a failed freeze, a review worktree left behind, an unexpected manual gate, ...),
-    else each failed step of `state` with its error. At most once per controller process and run; a later `automatic --live`
-    is a new process and says it again. A stop the operator can resume is resumable_stop's instead."""
+    else each failed step of `state` with its error, as `Controller blocked: <reason>`. `bare` says the reason alone, as
+    advance_or_block and a failed wait do on the source branch (final_stop's framing, off it). At most once per controller
+    process and run; a later `automatic --live` is a new process and says it again. A stop the operator can resume is
+    resumable_stop's instead."""
     if str(runtime.directory) in BLOCKED_RUNS:
         return
     BLOCKED_RUNS.add(str(runtime.directory))
     if reason is None:
         reason = failed_steps(state)
-    runtime.event("controller", "blocked", f"Controller blocked: {reason}")
-    blocked_attention(runtime, f"Controller blocked: {reason}")
+    text = reason if bare else f"Controller blocked: {reason}"
+    runtime.event("controller", "blocked", text)
+    blocked_attention(runtime, text)
 
 
-def stop_error(runtime, message: str) -> RuntimeError:
+def stop_error(runtime, message: str, *, bare: bool = False) -> RuntimeError:
     """A stop drive does not retry, said on the timeline first (record_blocked): the error to raise."""
-    record_blocked(runtime, reason=message)
+    record_blocked(runtime, reason=message, bare=bare)
     return RuntimeError(message)
 
 
@@ -1931,16 +1934,18 @@ def graph_state(runtime):
         return build_pipeline(saver, runtime).get_state(graph_config(runtime))
 
 
-def final_stop(runtime, state) -> str | None:
-    """Why drive would stop at `state` for good, as record_blocked says it, or None while the run can continue: drive's own
-    classification, read only (no check retried, no review re-entered, nothing written). drive asks it when the target checkout
-    is off the source branch (P's review): a run that already stopped for good keeps its block's framing, since the resumable
-    interruption would hide the block from the viewer and switching back would only stop at it again."""
+def final_stop(runtime, state) -> tuple[str, bool] | None:
+    """Why drive would stop at `state` for good and how it says it, `(reason, bare)`, or None while the run can continue: drive's
+    own classification, read only (no check retried, no review re-entered, nothing written). `bare` is a stop the source branch
+    says as the reason alone (the failed wait in drive, advance_or_block); every other one record_blocked says as
+    `Controller blocked: <reason>`. drive asks it when the target checkout is off the source branch (P's review): a run that
+    already stopped for good keeps its block's framing, word for word, since the resumable interruption would hide the block
+    from the viewer, switching back would only stop at it again, and another text would page the operator again for one stop."""
     if not state.values or any(name.startswith("launch_") for name in state.next):
         return None  # A start that did not complete: reconciled or started, the run goes on.
     frozen = freeze_failure(state)
     if frozen:
-        return None if (runtime.directory / FREEZE_INTERRUPTED).exists() else freeze_stop(frozen)
+        return None if (runtime.directory / FREEZE_INTERRUPTED).exists() else (freeze_stop(frozen), False)
     if not state.next:
         return None  # The graph finished: back on the source branch, drive checks the integrated commit.
     pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
@@ -1948,26 +1953,26 @@ def final_stop(runtime, state) -> str | None:
         try:
             handoffs_after_stop(runtime, lanes(runtime))
         except Exception as error:  # What wait_handoffs raises: the workers were stopped when their wait failed.
-            return str(error)
+            return str(error), True
         return None
     if pending:
-        return MANUAL_GATE
+        return MANUAL_GATE, False
     if not any(task.error for task in state.tasks):
         return None
     try:
         if check_retries(runtime, state) is not None:
             return None
     except RuntimeError as error:  # Identical failures or the attempt limit: advance_or_block's stop.
-        return str(error)
+        return str(error), True
     if reviewer_stop_pending(runtime, state) or review_interrupted(runtime, state):
         return None
     if [task.name for task in state.tasks if task.error and task.name in state.next] == ["review"] and not combined_status_path(runtime).exists():
         worktree = runtime.directory / "review-worktree"
         if worktree.exists():
-            return partial_review_stop(runtime, worktree)
+            return partial_review_stop(runtime, worktree), False
         if not (runtime.directory / REVIEW_RESTART).exists():
             return None  # restart_review re-enters a review that launched nothing, once.
-    return failed_steps(state)
+    return failed_steps(state), False
 
 
 def drive(runtime, *, single_step=False) -> str | None:
@@ -1984,7 +1989,8 @@ def drive(runtime, *, single_step=False) -> str | None:
         except Exception:  # The state cannot be read here: the resumable framing, as before.
             stopped = None
         if stopped is not None:
-            raise stop_error(runtime, stopped)  # It already stopped for good: its block, whatever the checkout is on.
+            reason, bare = stopped
+            raise stop_error(runtime, reason, bare=bare)  # It already stopped for good: its block as the source branch says it.
         raise resumable_stop(runtime, source_branch_note(runtime, branch))
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)

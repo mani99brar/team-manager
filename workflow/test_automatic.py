@@ -2665,9 +2665,36 @@ class ControllerStopTests(GraphFixture):
         self.assertEqual([(event["node"], event["status"], event["message"]) for event in self.events()[before:]], [("controller", "blocked", stopped)])
         self.assertEqual((self.said("interrupted"), self.reviewer_launches()), ([], len(self.ids)))
 
+    def test_a_stop_said_bare_on_the_source_branch_is_said_the_same_off_it_and_pages_once(self):
+        # S2's review: verify_ui failed identically. On the source branch advance_or_block says the reason bare; off it, drive said
+        # `Controller blocked: <reason>`, a second controller_blocked text, so each switch of the checkout paged the operator again
+        # for the same stop. final_stop also says how drive frames it, so every controller says it the same, and it pages once.
+        f = self.fixture
+        packets = f.directory / "verification" / "worker" / "ui"
+        for attempt in (1, 2):
+            (packets / str(attempt)).mkdir(parents=True)
+            save_json(packets / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
+        save_json(f.directory / "attempts.json", {"worker:ui": 2})
+        state = SimpleNamespace(values={"run_id": "run"}, next=("verify_ui",),
+                                tasks=[SimpleNamespace(name="verify_ui", error="RuntimeError('Required checks failed')", interrupts=[])])
+        stop = (f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
+                "fix is a lane repair (RUNBOOK)")
+        git(f.repo, "branch", "feature/elsewhere")
+        graph = SimpleNamespace(get_state=lambda config: state)
+        for branch in ("feature/automatic-test", "feature/elsewhere", "feature/automatic-test", "feature/elsewhere"):
+            git(f.repo, "switch", "-q", branch)
+            with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                    self.assertRaisesRegex(RuntimeError, f"^{re.escape(stop)}$"):
+                drive(f.runtime)  # A new controller each time, as `automatic --live` starts one.
+        self.assertEqual(self.attention_lines(), [("controller_blocked", "controller", f"{stop}. Status: python -m workflow status {f.runtime.directory}")])
+        self.assertEqual(self.said(), [stop] * 4)
+        self.assertEqual(read_json(f.directory / "attempts.json"), {"worker:ui": 2})  # Nothing was retried.
+
     def test_off_the_source_branch_only_a_run_that_can_continue_reads_interrupted(self):
         # drive's own classification, read only: what it would continue (a wait, a resumed freeze, a review re-entered once, a check
-        # it retries) is the resumable interruption; what it stops for good keeps the block's framing, as on the source branch.
+        # it retries) is the resumable interruption; what it stops for good keeps the block's framing, word for word as on the source
+        # branch: `Controller blocked: <reason>` where record_blocked says it, the bare reason where the failed wait or
+        # advance_or_block (identical failures, the attempt limit) says it.
         import shlex
         from .automatic import FREEZE_INTERRUPTED
         f = self.fixture
@@ -2691,26 +2718,26 @@ class ControllerStopTests(GraphFixture):
         def packet(attempt):
             (packets / str(attempt)).mkdir(parents=True, exist_ok=True)
             save_json(packets / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
-        cases = [
-            ("the workers' handoffs are awaited", handoff, lambda: None, None),
+        cases = [  # (name, state, arrange, the stop's reason or None for the interruption, said bare)
+            ("the workers' handoffs are awaited", handoff, lambda: None, None, False),
             ("the workers were stopped when the wait failed", handoff,
              lambda: (save_json(f.directory / "ui.stop.json", {"stopped": True}), (f.directory / "ui.completion.json").unlink(missing_ok=True)),
-             "Invalid completion file for ui"),
-            ("a freeze an outage interrupted", frozen, lambda: save_json(f.directory / FREEZE_INTERRUPTED, {"error": "Claude Code unavailable"}), None),
+             "Invalid completion file for ui", True),
+            ("a freeze an outage interrupted", frozen, lambda: save_json(f.directory / FREEZE_INTERRUPTED, {"error": "Claude Code unavailable"}), None, False),
             ("a freeze that failed", frozen, lambda: (f.directory / FREEZE_INTERRUPTED).unlink(),
-             "Freeze failed: Stop failed for ui; non-retryable graph failure, inspect retained evidence"),
+             "Freeze failed: Stop failed for ui; non-retryable graph failure, inspect retained evidence", False),
             ("an unexpected manual gate", at(("review",), task("review", None, "independent_review")), lambda: None,
-             "Unexpected manual gate in automatic run; inspect state"),
-            ("a review that failed before any reviewer launched", review, lambda: None, None),
+             "Unexpected manual gate in automatic run; inspect state", False),
+            ("a review that failed before any reviewer launched", review, lambda: None, None, False),
             ("a review that ended blocked", review,
              lambda: save_json(f.directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": ["review"]}),
-             "the review step failed: Reviewer review deadline exhausted; not retried, inspect retained evidence"),
-            ("a check drive retries", verify, lambda: packet(1), None),
+             "the review step failed: Reviewer review deadline exhausted; not retried, inspect retained evidence", False),
+            ("a check drive retries", verify, lambda: packet(1), None, False),
             ("a check that failed identically", verify, lambda: (packet(2), save_json(f.directory / "attempts.json", {"worker:ui": 2})),
              f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
-             "fix is a lane repair (RUNBOOK)"),
+             "fix is a lane repair (RUNBOOK)", True),
         ]
-        for name, state, arrange, block in cases:
+        for name, state, arrange, block, bare in cases:
             with self.subTest(name):
                 arrange()
                 before = len(self.events())
@@ -2719,7 +2746,8 @@ class ControllerStopTests(GraphFixture):
                         self.assertRaisesRegex(RuntimeError, f"^{re.escape(interrupted if block is None else block)}$"):
                     drive(f.runtime)
                 said = [(event["node"], event["status"], event["message"]) for event in self.events()[before:]]
-                self.assertEqual(said, [("controller", "interrupted", interrupted)] if block is None else [("controller", "blocked", f"Controller blocked: {block}")])
+                self.assertEqual(said, [("controller", "interrupted", interrupted)] if block is None
+                                 else [("controller", "blocked", block if bare else f"Controller blocked: {block}")])
         self.assertEqual((read_json(f.directory / "attempts.json"), self.reviewer_launches()), ({"worker:ui": 2}, 0))  # Nothing was retried or launched.
 
     def test_a_start_that_did_not_complete_is_an_interruption_that_names_reconcile_or_start(self):
