@@ -606,6 +606,10 @@ class ReviewCompletionTests(unittest.TestCase):
                               "fails; (4) a line you could not check because its test source", "was unreadable: name the line and say why",
                               "Every other gap is one P2 finding per", "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)
+        # init's Acceptance template keeps one default line on how the lane runs its checks (C16 step 8): process, not a result, so the
+        # bundled brief, which init's features name, maps no proof to it.
+        self.assertIn('The default line that starts "Run targeted tests while iterating" says how the lane works, not what it delivers: map no '
+                      "proof to it.", " ".join(briefs[0].read_text().split()))
 
     def test_only_coverage_holds_its_p1_to_a_failure_shown_on_the_candidate(self):
         # The shared rubric's P1, for every reviewer: a defect or a contradicted requirement to fix before merge, with the inputs, the

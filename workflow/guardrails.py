@@ -1,6 +1,7 @@
 """The guardrails of feature.json 2.2.0 (docs/PRD_PORTABLE_WORKFLOW.md sections 2 and 4.3 to 4.6).
 
-- Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections.
+- Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections; init's default
+  line on running the checks alone leaves a section empty.
 - Decisions: the feature directory holds a non-empty `decisions.md` (written by the `workflow-grill` skill); it is
   pinned into the plan and every worker and reviewer prompt includes it after the task. With the `## Operator
   decisions` heading only those bind and win over the task, the rest stays open to the challenge, and reviewers
@@ -49,6 +50,10 @@ GUARDED_VERSION = "2.2.0"
 # 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py).
 GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
+# The one default line init's Acceptance template keeps (C16 step 8). It says how a lane runs its checks, not what the lane
+# delivers, so a section that holds nothing else is empty (brief_problems), as it was before the line existed (1943ea8).
+CHECKS_DEFAULT = ("Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; "
+                  "run browser specs only through check-report on this lane's own specs.")
 DECISIONS = "decisions.md"
 PLACEHOLDER = "TODO:"  # What launch refuses in the files `init` writes, and resume in the tasks and decisions.md it re-pins.
 COMPLETION_VERSION = "1.1.0"
@@ -99,13 +104,15 @@ def sections(text: str) -> dict[str, str]:
 
 
 def brief_problems(text: str) -> list[str]:
-    """`missing ## Stop`, `empty ## Acceptance`, ...: a required heading needs at least one non-blank line before the next `## `."""
+    """`missing ## Stop`, `empty ## Acceptance`, ...: a required heading needs at least one non-blank line before the next `## `.
+    init's default line on running the checks (CHECKS_DEFAULT, however wrapped) is process, not content: alone it leaves the
+    section empty, so an Acceptance emptied of everything init wrote but that line is still refused."""
     found = sections(text)
     problems = []
     for heading in REQUIRED_HEADINGS:
         if heading not in found:
             problems.append(f"missing ## {heading}")
-        elif not found[heading].strip():
+        elif not " ".join(found[heading].split()).replace(CHECKS_DEFAULT, "").strip():
             problems.append(f"empty ## {heading}")
     return problems
 

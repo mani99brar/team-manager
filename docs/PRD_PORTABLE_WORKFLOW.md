@@ -76,7 +76,7 @@ The guardrails apply to features at `feature.json` 2.2.0, which `init` writes fr
 
 For a 2.2.0 feature, launch refuses before any Git action:
 
-- a lane task without non-empty `## Goal`, `## Acceptance` and `## Stop` sections (a heading followed by at least one non-blank line before the next `## `), naming the file and the missing headings;
+- a lane task without non-empty `## Goal`, `## Acceptance` and `## Stop` sections (a heading followed by at least one non-blank line before the next `## `, other than `init`'s default Acceptance line on running the checks), naming the file and the missing headings;
 - a feature directory without a non-empty `decisions.md`;
 - a `prd` that does not exist in the target.
 

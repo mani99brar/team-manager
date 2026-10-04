@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 
+from .guardrails import CHECKS_DEFAULT
 from .launch import FEATURE_NAME, git_root
 from .sessions import validate_node_id
 
@@ -38,8 +39,7 @@ def feature_files(feature: str) -> dict[str, str]:
             "## Context\n\nTODO: where to start reading, or delete this section.\n\n"
             "## Constraints\n\nTODO: what the lane must not change, or delete this section.\n\n"
             "## Acceptance\n\nTODO: the observable results and the checks that prove them (the worker's Proof table names a proof for each).\n\n"
-            "Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; run "
-            "browser specs only through check-report on this lane's own specs.\n\n"
+            + CHECKS_DEFAULT + "\n\n"  # Process, not a result: alone it leaves the Acceptance empty (brief_problems).
             "Browser checks (delete this paragraph, the command and the line after it if the lane has none): each scenario id appears in "
             "exactly one test title as `[scenario:<id>]`, and that test, when it passes, attaches exactly one image/png named "
             "`screenshot:<id>` (other attachments are fine). The verifier refuses anything else. Before completing, run the spec "

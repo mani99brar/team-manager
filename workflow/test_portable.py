@@ -417,7 +417,7 @@ class InitScaffold(Isolated):
                          ("2.3.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
         # decisions.md has the grill's four sections in order (C4): the operator's answers, which alone bind, apart from the grill's own
         # defaults. Changes after launch starts as "None yet", not a placeholder; the grill fills the other three.
-        from .guardrails import OPERATOR_DECISIONS, brief_problems, has_operator_decisions, sections
+        from .guardrails import CHECKS_DEFAULT, OPERATOR_DECISIONS, brief_problems, has_operator_decisions, sections
         decisions = sections((folder / "decisions.md").read_text())
         self.assertEqual(list(decisions), ["Operator decisions", "Grill defaults", "Changes after launch", "Deferred"])
         self.assertEqual(decisions["Changes after launch"].strip(), "None yet.")
@@ -434,17 +434,21 @@ class InitScaffold(Isolated):
         for heading in ("## Goal", "## Acceptance", "## Stop"):
             self.assertIn(heading, task)
         # The Acceptance TODO line asks for a proof per result, which the worker's Proof table names (C34, decision 4). After it, one
-        # default line says how the lane runs its checks (C16 step 8). Deleting the TODO line and the browser paragraph, as the template
-        # allows, leaves that line only; deleting it as well leaves an empty Acceptance that launch refuses: no other boilerplate line
-        # stays behind as an acceptance item for the worker and coverage to map.
+        # default line says how the lane runs its checks (C16 step 8): process, not a result. Deleting the TODO line and the browser
+        # paragraph, as the template allows, leaves that line only, and launch still refuses the Acceptance as empty (1943ea8): no
+        # observable result is left to accept. Re-wrapped it is the same line; any result beside it makes the Acceptance count.
         acceptance = sections(task)["Acceptance"]
         todo, default = acceptance[:acceptance.index("Browser checks")].strip().split("\n\n")
         self.assertEqual(todo, "TODO: the observable results and the checks that prove them (the worker's Proof table names a proof for each).")
         self.assertEqual(default, "Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; "
                                   "run browser specs only through check-report on this lane's own specs.")
+        self.assertEqual(default, CHECKS_DEFAULT)
         edited = task.replace(acceptance[acceptance.index("Browser checks"):], "").replace(todo, "")
         self.assertEqual(sections(edited)["Acceptance"].strip(), default)
-        self.assertEqual(brief_problems(edited.replace(default, "")), ["empty ## Acceptance"])
+        self.assertEqual(brief_problems(edited), ["empty ## Acceptance"])
+        self.assertEqual(brief_problems(edited.replace(default, default.replace("; ", ";\n  "))), ["empty ## Acceptance"])
+        self.assertEqual(brief_problems(edited.replace(default, f"- It runs.\n\n{default}")), [])
+        self.assertEqual(brief_problems(edited.replace(default, f"{default} It also prints a summary.")), [])
         # Never overwrites: a second init is refused and changes nothing; CLAUDE.md is written only when missing.
         snapshot = {path: path.read_bytes() for path in [*folder.iterdir(), target / "CLAUDE.md"]}
         result = subprocess.run([PY, "-m", "workflow", "init", "skeleton", "--repo", str(target)], cwd=TOOL, capture_output=True, text=True, timeout=60)
