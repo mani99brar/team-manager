@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from .export_state import export_state
 from .launch import TOOL, launch_commands, main
+from .registry import previous_policy
 from .sessions import git, read_json, save_json
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
@@ -263,6 +265,18 @@ class LaunchNotes(unittest.TestCase):
         with self.subTest("a checkout that is gone"):
             self.make_run(self.first, self.root / "gone", [{"node_id": "web", "owned_paths": ["package.json"]}])
             self.assertEqual(self.overlaps(), [])
+
+    def test_a_timeline_last_modified_before_the_window_is_not_read(self):
+        # Events are appended at their own time, so a file older than RECENT holds no recent event: it is not even parsed.
+        # (Its one event is stamped an hour ago here only to show that it was not read.)
+        old = time.time() - 49 * 3600
+        os.utime(self.first / "events.jsonl", (old, old))
+        self.assertEqual(self.overlaps(), [])
+        # previous_policy reads plan.json and policy.json only, never a timeline.
+        self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "adapter", "owned_paths": ["server"]}])
+        with patch("workflow.registry.run_record", side_effect=AssertionError("a timeline was read")):
+            run_id, policy = previous_policy(self.own_root, self.own_root / "project-workflows-002")
+        self.assertEqual((run_id, [worker["node_id"] for worker in policy["workers"]]), ("project-workflows-001", ["adapter"]))
 
     def test_a_linked_worktree_and_a_clone_of_the_same_repository_each_give_one(self):
         worktree, clone = self.root / "linked", self.root / "clone"

@@ -300,18 +300,35 @@ def run_record(directory: Path) -> dict | None:
             "candidate_commit": candidate if isinstance(candidate, str) else None, "last_event": max(times) if times else None}
 
 
-def runs_in(runs_root: Path) -> list[dict]:
-    """Every readable run directly under a runs root, by name."""
+def run_folders(runs_root: Path) -> list[Path]:
+    """Every run directory (one with a plan.json) directly under a runs root, by name."""
     try:
-        folders = sorted(item for item in runs_root.iterdir() if item.is_dir() and (item / "plan.json").is_file())
+        return sorted(item for item in runs_root.iterdir() if item.is_dir() and (item / "plan.json").is_file())
     except OSError:
         return []
+
+
+def touched_since(directory: Path, since: datetime | None) -> bool:
+    """The run's timeline was written at or after `since` (always true without one). Events are appended at their own time,
+    so a file last modified earlier holds no later event, and is not read at all."""
+    if since is None:
+        return True
+    try:
+        return datetime.fromtimestamp((directory / "events.jsonl").stat().st_mtime, timezone.utc) >= since
+    except OSError:
+        return False
+
+
+def runs_in(runs_root: Path, since: datetime | None = None) -> list[dict]:
+    """Every readable run directly under a runs root, by name; with `since`, only runs whose timeline was written since."""
+    folders = [folder for folder in run_folders(runs_root) if touched_since(folder, since)]
     return [record for record in (run_record(folder) for folder in folders) if record is not None]
 
 
-def registered_runs(path: Path | None = None) -> list[dict]:
+def registered_runs(path: Path | None = None, since: datetime | None = None) -> list[dict]:
     """Each run under each runs root the registry at `path` (default registry_path()) names, once per runs root, with its
-    project_id, workflow_id and resolved runs_root. A missing or malformed registry has no runs."""
+    project_id, workflow_id and resolved runs_root; with `since`, only runs whose events.jsonl was modified since (the
+    others are never parsed). A missing or malformed registry has no runs."""
     try:
         document = json.loads((path or registry_path()).read_text())
     except (OSError, ValueError):
@@ -325,18 +342,28 @@ def registered_runs(path: Path | None = None) -> list[dict]:
             if root in seen:
                 continue
             seen.add(root)
-            for record in runs_in(root):
+            for record in runs_in(root, since):
                 runs.append({**record, "project_id": project.get("project_id"), "workflow_id": workflow.get("workflow_id"), "runs_root": root})
     return runs
 
 
 def previous_policy(runs_root: Path, current: Path) -> tuple[str, dict] | None:
-    """The pinned policy of the feature's latest other run in `runs_root` (by the plan's created_at), with its run id."""
-    pinned = [record for record in runs_in(runs_root) if record["directory"].resolve() != current.resolve() and isinstance(record["policy"], dict)]
+    """The pinned policy of the feature's latest other run in `runs_root` (by the plan's created_at), with its run id. Reads
+    plan.json and policy.json only; a run without both readable is left out."""
+    pinned = []
+    for folder in run_folders(runs_root):
+        if folder.resolve() == current.resolve():
+            continue
+        try:
+            plan, policy = read_json(folder / "plan.json"), read_json(folder / "policy.json")
+        except (OSError, ValueError):
+            continue
+        if isinstance(plan, dict) and isinstance(policy, dict):
+            pinned.append((str(plan.get("created_at") or ""), folder.name, plan.get("run_id", folder.name), policy))
     if not pinned:
         return None
-    latest = max(pinned, key=lambda record: (str(record["plan"].get("created_at") or ""), record["directory"].name))
-    return latest["run_id"], latest["policy"]
+    _, _, run_id, policy = max(pinned, key=lambda item: item[:2])
+    return run_id, policy
 
 
 def read_git(path: Path, *arguments: str) -> tuple[int, str]:
@@ -380,7 +407,7 @@ def overlap_notes(repository: Path, lanes: list[dict], runs_root: Path, base: st
     if own is None:
         return []
     now = now or datetime.now(timezone.utc)
-    runs = registered_runs() if runs is None else runs
+    runs = registered_runs(since=now - RECENT) if runs is None else runs
     identities: dict[str, tuple | None] = {}
     notes = []
     for run in runs:
