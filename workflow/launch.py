@@ -31,7 +31,8 @@ TOOL = Path(__file__).resolve().parents[1]
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
 BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-# The feature version that adds `critical` (C51): the operator confirmed at the grill that the feature's code is critical.
+# The feature version that adds `critical` (C51): the operator confirmed at the grill that the feature's code is critical;
+# and `tryout` (C7): a user-facing feature the operator tries before the merge to main.
 CRITICAL_VERSION = "2.4.0"
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
@@ -158,7 +159,8 @@ def load_feature(folder: Path) -> dict:
     A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
     (workflow/guardrails.py) and adds the optional `challenge` and `prd`. 2.3.0 adds the optional review
     `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them. 2.4.0 keeps
-    both and adds the optional `critical` (C51): `true` makes an automatic run stop for the operator's approval.
+    both and adds the optional `critical` (C51): `true` makes an automatic run stop for the operator's approval, and the
+    optional `tryout` (C7): `true` asks the operator to try each integrated run (workflow/tryout.py).
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -175,6 +177,8 @@ def load_feature(folder: Path) -> dict:
         raise ValueError("feature.json challenge and prd need version 2.2.0")
     if "critical" in manifest and manifest["version"] != CRITICAL_VERSION:
         raise ValueError(f"feature.json critical needs version {CRITICAL_VERSION} (this file is {manifest['version']})")
+    if "tryout" in manifest and manifest["version"] != CRITICAL_VERSION:
+        raise ValueError(f"feature.json tryout needs version {CRITICAL_VERSION} (this file is {manifest['version']})")
     reviewers = manifest.get("reviewers")
     if reviewers is not None:
         if manifest["version"] == "2.0.0":
@@ -212,7 +216,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
                     roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
-                    follows: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    follows: str | None = None, allow_untried: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
@@ -230,6 +234,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     plan.holds. It is refused for a feature without the challenge (before 2.2.0, or challenge: false).
     `follows` names the run this one follows up (C30): a run directory, or a run id under `run_root`; prepare pins it as
     plan.follows.
+
+    A feature with `tryout: true` (C7) passes --tryout to preflight and prepare, which pins plan.tryout. Its launch is refused
+    here, before any Git action, while 3 other registered features wait for their tryout (C29, tryout.untried_check), unless
+    it is a continuation or `allow_untried` gives the operator's reason, which preflight and prepare get too (prepare pins
+    it). A feature with a browser check that leaves the flag out gets a note.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -269,6 +278,21 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     sidecar_brief = sidecar.brief_path(folder, review_sidecar["prompt"]) if review_sidecar else None
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
+    tryout = manifest.get("tryout") is True
+    if allow_untried is not None and not tryout:
+        raise ValueError("--allow-untried applies to a feature with tryout: true (feature.json 2.4.0); this one asks for no tryout")
+    if tryout:
+        # C29: before any Git action, a dry run included. The registry's projects are read; this feature is its runs root.
+        from .tryout import untried_check
+        passed = untried_check(run_root, repository=repo, feature=feature, follows=followed is not None, allow_untried=allow_untried)
+        if passed:
+            notes.append(passed)
+    elif "tryout" not in manifest:
+        browser = [node for node in selected if any(check["kind"] == "browser" for worker in policy["workers"] if worker["node_id"] == node
+                                                    for check in worker["checks"])]
+        if browser:
+            notes.append(f"Lane {', '.join(browser)} has a browser check, and feature.json says nothing of a tryout: set \"tryout\": true "
+                         "(feature.json 2.4.0) when you should try each run before the merge to main, or false when it is not user-facing.")
     run = (run_root / run_id).resolve()
     if run == repo or repo in run.parents:
         raise ValueError("Run storage must be outside the repository")
@@ -306,6 +330,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         prepare.extend(["--workers", ",".join(selected)])
     if followed is not None:
         prepare.extend(["--follows", str(followed)])
+    if tryout:
+        # Preflight checks the limit again, before the worktree; prepare pins plan.tryout and the override's reason.
+        untried = ["--tryout", *(["--follows", str(followed)] if followed is not None else []),
+                   *(["--allow-untried", allow_untried, "--by", by] if allow_untried is not None else [])]
+        preflight.extend(untried)
+        prepare.extend(["--tryout", *(["--allow-untried", allow_untried, "--by", by] if allow_untried is not None else [])])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
@@ -429,6 +459,8 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     parser.add_argument("--follows", metavar="RUN", help="The run this one follows up (its directory, or its run id under the run root): "
                                                          "prepare pins its id, verdict and candidate as plan.follows. See `python -m workflow brief`")
+    parser.add_argument("--allow-untried", metavar="REASON", help="A tryout feature: launch although 3 other features wait for their tryout "
+                                                                  "(pinned as plan.allow_untried; the operator's decision)")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
@@ -445,7 +477,7 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows)
+                                               by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows, args.allow_untried)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]

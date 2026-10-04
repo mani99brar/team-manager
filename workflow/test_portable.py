@@ -428,6 +428,9 @@ class InitScaffold(Isolated):
                          ("2.4.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
         # C51: the grill sets `critical: true` when the operator confirms the code is critical; the scaffold starts at false.
         self.assertIs(manifest["critical"], False)
+        # C7: `tryout` starts at false too; the README says what true asks of you.
+        self.assertIs(manifest["tryout"], False)
+        self.assertIn("`tryout` (false;", (folder / "README.md").read_text())
         # decisions.md has the grill's four sections in order (C4): the operator's answers, which alone bind, apart from the grill's own
         # defaults. Changes after launch starts as "None yet", not a placeholder; the grill fills the other three.
         from .guardrails import CHECKS_DEFAULT, OPERATOR_DECISIONS, OPERATOR_NOTES, brief_problems, cut_conventions, has_operator_decisions, sections

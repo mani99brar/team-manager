@@ -45,7 +45,10 @@ Version 1.7.0 (additive, C52) records what prepare pinned about who runs the run
 as it was; everything else is 1.6.0 unchanged. Within 1.7.0 (C8), `inputs.challenge`
 gains `hold` ({held_at, released_at, released_by, dropped}) when `challenge-hold.json`
 records the attempt shown: a run held after a passing challenge, and its release. The
-status stays `passed`; the key is left out for every other run.
+status stays `passed`; the key is left out for every other run. Within 1.7.0 (C7, C29),
+`inputs.tryout` ({required, verdicts, allow_untried}) carries plan.tryout, the verdicts of
+`tryout.json` and the reason a launch went past the untried-feature limit (only when
+pinned); the key is left out for a run prepared before it.
 """
 from __future__ import annotations
 
@@ -343,6 +346,11 @@ def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
                "workers": {worker["node_id"]: worker_inputs(directory, plan, policy, worker) for worker in policy["workers"] if worker["node_id"] in workers}}
     # 1.7.0: the roles and the controller record prepare pinned; a run prepared before them exports without them.
     section.update({key: plan[key] for key in ("roles", "controller") if key in plan})
+    # Within 1.7.0 (C7, C29): the tryout prepare pinned, the operator's verdicts and any launch past the untried limit.
+    if "tryout" in plan:
+        from .tryout import verdicts
+        section["tryout"] = {"required": plan["tryout"] is True, "verdicts": verdicts(directory),
+                             **({"allow_untried": plan["allow_untried"]} if "allow_untried" in plan else {})}
     return section
 
 

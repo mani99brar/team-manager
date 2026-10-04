@@ -704,7 +704,222 @@ class LaunchNotes(unittest.TestCase):
         launch = [event for event in events if event["message"].startswith("Launch notes: ")]
         self.assertEqual([(event["node"], event["status"]) for event in launch], [("controller", "running")])
         for note in expected:
-            self.assertIn(note, launch[0]["message"])
+            if "browser check" not in note:  # C7's tryout note is launch's own, about the feature file; prepare records the lane notes.
+                self.assertIn(note, launch[0]["message"])
+
+
+class UntriedLimit(unittest.TestCase):
+    """C29 (decision 10): a new tryout launch stops when 3 other features are untried, across every registered project. A
+    feature is untried when its latest integrated run asks for a tryout and has no verdict (C7's tryout.json)."""
+
+    def setUp(self):
+        from .test_guardrails import BRIEF, DECISIONS, two_lane_policy
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        # A committed 2.4.0 feature that asks for a tryout.
+        self.repo = self.root / "target"
+        self.folder = self.repo / "features" / "board"
+        self.folder.mkdir(parents=True)
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs/PRD.md").write_text("# PRD\n\nThe board.\n")
+        save_json(self.folder / "policy.json", two_lane_policy())
+        for lane in ("ui", "adapter"):
+            (self.folder / f"{lane}-task.md").write_text(BRIEF.format(lane=lane))
+        (self.folder / "decisions.md").write_text(DECISIONS)
+        self.manifest = {"version": "2.4.0", "name": "Board", "branch_prefix": "feature/board", "prd": "docs/PRD.md", "policy": "policy.json",
+                         "challenge": False, "tryout": True, "workers": [{"node_id": lane, "task": f"{lane}-task.md"} for lane in ("ui", "adapter")]}
+        save_json(self.folder / "feature.json", self.manifest)
+        for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["add", "."], ["commit", "-qm", "Base"]):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True)
+        self.registry = self.root / "config" / "projects.json"
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.registry), "HOME": str(self.root / "home"), "CLAUDECODE": ""})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.runs = self.root / "runs"
+        self.own_root = self.runs / "target" / "board"
+        # Three other features waiting for their tryout: two in another project, one beside this feature in its own.
+        self.waiting = [self.integrated(self.runs / "alpha" / "login" / "login-001"), self.integrated(self.runs / "alpha" / "search" / "search-002"),
+                        self.integrated(self.runs / "target" / "chart" / "chart-001")]
+        self.registry.parent.mkdir(parents=True)
+        save_json(self.registry, {"version": 1, "projects": [
+            {"project_id": "alpha", "name": "alpha", "repository": str(self.root / "alpha"), "workflows": [
+                {"workflow_id": "login", "runs_root": str(self.runs / "alpha" / "login")},
+                {"workflow_id": "search", "runs_root": str(self.runs / "alpha" / "search")}]},
+            {"project_id": "target", "name": "target", "repository": str(self.repo), "workflows": [
+                {"workflow_id": "chart", "runs_root": str(self.runs / "target" / "chart")},
+                {"workflow_id": "board", "runs_root": str(self.own_root)}]}]})
+
+    def integrated(self, directory: Path, tryout: bool = True, hours: float = 1, fast_forward: bool = True) -> Path:
+        """A run that integrated `hours` ago (its integrate event), its plan asking for a tryout or not."""
+        directory.mkdir(parents=True, exist_ok=True)
+        save_json(directory / "plan.json", {"run_id": directory.name, "created_at": ago(hours + 1), "tryout": tryout})
+        events = [{"sequence": 1, "time": ago(hours), "node": "integrate", "status": "succeeded",
+                   "message": f"Fast-forwarded to {'a' * 40}"} if fast_forward else
+                  {"sequence": 1, "time": ago(hours), "node": "review", "status": "blocked", "message": "Blocked"}]
+        (directory / "events.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+        return directory
+
+    def launch(self, run_id: str = "board-001", **options):
+        return launch_commands(self.repo, "board", run_id, self.own_root, herdr=False, **options)
+
+    def refused(self, **options) -> str:
+        with self.assertRaises(ValueError) as refusal:
+            self.launch(**options)
+        return str(refusal.exception)
+
+    def dry_run(self, *argv: str) -> tuple[int, str, str]:
+        code = 0
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            try:
+                main(["board", "--repo", str(self.repo), "--dry-run", "--run-root", str(self.own_root), *argv])
+            except SystemExit as exit_:
+                code = exit_.code or 0
+        command.assert_not_called()
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_three_untried_features_in_any_registered_project_refuse_a_fourths_tryout_launch_dry_runs_included(self):
+        message = self.refused()
+        self.assertIn("3 other features wait for your tryout, and a new tryout launch stops at 3", message)
+        for name in ("alpha/login", "alpha/search", "target/chart"):
+            self.assertIn(name, message)
+        self.assertIn("python -m workflow tryout <run> --result works|broken|skipped --by operator", message)
+        self.assertIn('--allow-untried "<reason>" --by operator', message)
+        code, output, errors = self.dry_run()
+        self.assertEqual(code, 1)
+        self.assertIn("3 other features wait for your tryout", errors)
+        self.assertEqual(output, "")
+        # A live launch stops before any Git action: no worktree, no branch, no run directory.
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            main(["board", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(self.own_root)])
+        command.assert_not_called()
+        self.assertFalse(self.own_root.exists())
+        # Two untried others pass.
+        save_json(self.waiting[0] / "tryout.json", {"verdicts": [{"result": "works", "note": None, "at": ago(0), "by": "operator"}]})
+        self.launch()
+
+    def test_tryout_false_features_runs_not_integrated_and_launches_without_a_tryout_never_count(self):
+        with self.subTest("a feature whose latest integrated run asks for no tryout"):
+            self.integrated(self.waiting[1], tryout=False)
+            self.launch()
+        with self.subTest("a later run that did not integrate leaves the latest integrated one deciding"):
+            self.integrated(self.waiting[1], tryout=True, hours=5)
+            self.integrated(self.runs / "alpha" / "search" / "search-003", tryout=False, hours=0.5, fast_forward=False)
+            self.refused()
+        with self.subTest("a newer integrated run without a tryout clears its feature"):
+            self.integrated(self.runs / "alpha" / "search" / "search-004", tryout=False, hours=0.2)
+            self.launch()
+        with self.subTest("a launch of a feature that asks for no tryout"):
+            self.integrated(self.runs / "alpha" / "search" / "search-004", tryout=True, hours=0.2)
+            self.refused()
+            save_json(self.folder / "feature.json", {**self.manifest, "tryout": False})
+            git(self.repo, "commit", "-qam", "No tryout")
+            _, commands, _ = self.launch()
+            self.assertNotIn("--tryout", commands[2])
+
+    def test_a_recorded_verdict_clears_its_feature_whatever_it_says(self):
+        for result in ("broken", "skipped"):
+            with self.subTest(result=result):
+                save_json(self.waiting[2] / "tryout.json", {"verdicts": [{"result": result, "note": None, "at": ago(0), "by": "operator"}]})
+                self.launch()
+
+    def test_a_continuation_still_launches(self):
+        with self.subTest("a follow-up run"):
+            _, commands, _ = self.launch(follows=str(self.waiting[0]))
+            self.assertIn("--tryout", commands[2])
+        with self.subTest("a run of a feature that is untried itself"):
+            self.integrated(self.own_root / "board-001")
+            _, commands, _ = self.launch("board-002")
+            self.assertIn("--tryout", commands[0])
+
+    def test_launch_passes_tryout_to_preflight_and_prepare_which_pins_it(self):
+        save_json(self.waiting[0] / "tryout.json", {"verdicts": [{"result": "works", "note": None, "at": ago(0), "by": "operator"}]})
+        run, commands, notes = self.launch()
+        self.assertIn("--tryout", commands[0])
+        self.assertIn("--tryout", commands[2])
+        self.assertFalse([note for note in notes if "tryout" in note])
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = read_json(run / "plan.json")
+        self.assertIs(plan["tryout"], True)
+        self.assertNotIn("allow_untried", plan)
+        self.assertEqual(read_json(run / "run-state.json")["inputs"]["tryout"], {"required": True, "verdicts": []})
+
+    def test_preflight_refuses_a_tryout_launch_past_the_limit_before_anything_else(self):
+        _, commands, _ = self.launch(allow_untried="demo")  # The commands a launch past the limit would run, without the override.
+        preflight = commands[0][:commands[0].index("--allow-untried")]
+        result = subprocess.run(preflight, cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("3 other features wait for your tryout", result.stderr)
+        # The override passes this check (the rest of preflight then reads the real environment).
+        self.assertIn("--allow-untried", commands[0])
+        self.assertEqual(commands[0][commands[0].index("--by") + 1], "operator")
+
+    def test_the_override_is_pinned_and_printed_and_refused_for_the_maintainer(self):
+        run, commands, notes = self.launch(allow_untried="The demo is tomorrow")
+        [note] = [note for note in notes if "untried" in note]
+        self.assertIn("Launched past 3 untried features", note)
+        self.assertIn("The demo is tomorrow", note)
+        self.assertEqual(commands[2][commands[2].index("--allow-untried") + 1], "The demo is tomorrow")
+        self.assertEqual(commands[2][commands[2].index("--by") + 1], "operator")
+        code, output, errors = self.dry_run("--allow-untried", "The demo is tomorrow")
+        self.assertEqual(code, 0, errors)
+        self.assertIn(note, json.loads(output)["notes"])
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pinned = read_json(run / "plan.json")["allow_untried"]
+        self.assertEqual((pinned["reason"], pinned["by"]), ("The demo is tomorrow", "operator"))
+        self.assertTrue(pinned["at"].endswith("Z"))
+        status = subprocess.run([*commands[2][:3], "status", str(run)], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        printed = json.loads(status.stdout.split("\nReport:")[0])
+        self.assertEqual(printed["tryout"]["allow_untried"]["reason"], "The demo is tomorrow")
+        self.assertEqual(read_json(run / "run-state.json")["inputs"]["tryout"]["allow_untried"]["reason"], "The demo is tomorrow")
+        # The maintainer is refused at launch (its dry run too) and at prepare and preflight.
+        code, _, errors = self.dry_run("--allow-untried", "x", "--by", "maintainer")
+        self.assertEqual(code, 1)
+        self.assertIn("--by maintainer is refused", errors)
+        for action in ("prepare", "preflight"):
+            with self.subTest(action=action):
+                argv = [*commands[2][:3], action, str(self.root / "other-run"), "--repo", str(self.repo), "--tryout", "--allow-untried", "x", "--by", "maintainer"]
+                result = subprocess.run(argv, cwd=TOOL, capture_output=True, text=True, timeout=120)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("--allow-untried is the operator's decision: --by maintainer is refused", result.stderr)
+                self.assertFalse((self.root / "other-run").exists())
+
+
+class TryoutFlag(unittest.TestCase):
+    """C7: feature.json 2.4.0's optional `tryout`; a feature with a browser check that leaves it out gets a note."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.repo = fixture_target(self.root)
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "projects.json"), "HOME": str(self.root / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_a_feature_with_a_browser_check_that_leaves_the_flag_out_gets_the_note(self):
+        _, commands, notes = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs", herdr=False)
+        [note] = [note for note in notes if "tryout" in note]
+        self.assertIn("ui has a browser check", note)
+        self.assertIn('"tryout": true', note)
+        self.assertNotIn("--tryout", commands[2])
+        # A lane subset without the browser check gets none.
+        _, _, notes = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", herdr=False, workers="adapter")
+        self.assertFalse([note for note in notes if "tryout" in note])
+
+    def test_tryout_needs_2_4_0(self):
+        from .launch import load_feature
+        folder = self.repo / "features/project-workflows"
+        save_json(folder / "feature.json", {**read_json(folder / "feature.json"), "tryout": True})
+        with self.assertRaisesRegex(ValueError, "feature.json tryout needs version 2.4.0"):
+            load_feature(folder)
 
 
 if __name__ == "__main__":

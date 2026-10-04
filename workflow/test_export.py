@@ -383,6 +383,26 @@ class ExportRunTests(unittest.TestCase):
         del plan["automatic"]
         self.assertNotIn("profile", str(inputs_section(directory, plan, read_json(directory / "policy.json"))["automatic"]))  # A manual run: none.
 
+    def test_export_1_7_0_carries_the_tryout_and_its_verdicts_and_older_plans_export_without_it(self):
+        """Within 1.7.0 (C7, C29): inputs.tryout {required, verdicts, allow_untried} from plan.tryout and tryout.json."""
+        directory = legacy_run(self.root)
+        exported = export_run(ExportRuntime(directory))
+        self.assertEqual(exported["version"], "1.7.0")
+        self.assertNotIn("tryout", exported["inputs"])  # A plan from before C7.
+        plan = read_json(directory / "plan.json")
+        save_json(directory / "plan.json", {**plan, "tryout": False})
+        self.assertEqual(export_run(ExportRuntime(directory))["inputs"]["tryout"], {"required": False, "verdicts": []})
+        save_json(directory / "plan.json", {**plan, "tryout": True})
+        self.assertEqual(export_run(ExportRuntime(directory))["inputs"]["tryout"], {"required": True, "verdicts": []})
+        verdicts = [{"result": "broken", "note": "Empty list", "at": "2026-10-04T09:00:00Z", "by": "operator"},
+                    {"result": "works", "note": None, "at": "2026-10-04T10:00:00Z", "by": "operator", "via": "claude-code"}]
+        save_json(directory / "tryout.json", {"version": "1.0.0", "run_id": "legacy-001", "verdicts": verdicts})
+        override = {"reason": "The demo is tomorrow", "by": "operator", "at": "2026-10-04T08:00:00Z"}
+        save_json(directory / "plan.json", {**plan, "tryout": True, "allow_untried": override})
+        self.assertEqual(export_run(ExportRuntime(directory))["inputs"]["tryout"], {"required": True, "verdicts": verdicts, "allow_untried": override})
+        (directory / "tryout.json").write_text("{not json")
+        self.assertEqual(export_run(ExportRuntime(directory))["inputs"]["tryout"]["verdicts"], [])  # Unreadable: no verdict, never a failed export.
+
     def test_export_1_7_0_carries_the_hold_of_the_challenge_attempt_shown_and_other_runs_export_none(self):
         """Within 1.7.0 (C8): inputs.challenge.hold when challenge-hold.json records the attempt challenge.json holds; the status stays passed."""
         from .export_state import challenge_section

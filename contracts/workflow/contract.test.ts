@@ -174,6 +174,10 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   feature.parse({ ...structuredClone(reviewed), version: '2.4.0', critical: true, sidecar: { prompt: 'builtin:senior-review' } })
   feature.parse({ ...structuredClone(reviewed), version: '2.4.0', critical: false })
   assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.4.0', critical: 'yes' }).success, false)
+  // 2.4.0 also adds the optional tryout flag (C7, C29): a user-facing feature the operator tries before the merge to main.
+  feature.parse({ ...structuredClone(reviewed), version: '2.4.0', tryout: true })
+  feature.parse({ ...structuredClone(reviewed), version: '2.4.0', critical: false, tryout: false })
+  assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.4.0', tryout: 'yes' }).success, false)
   for (const bad of [true, {}, { prompt: '' }, { ...sidecar, cadence_seconds: 59 }, { ...sidecar, cadence_seconds: 7201 }, { ...sidecar, pass_timeout_seconds: 3601 },
     { ...sidecar, max_passes: 0 }, { ...sidecar, max_passes: 65 }, { ...sidecar, max_messages_per_lane: 21 }, { ...sidecar, max_passes: 1.5 }, { ...sidecar, extra: 1 }]) {
     assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: bad }).success, false, JSON.stringify(bad))

@@ -1,4 +1,4 @@
-"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `abandon`, `check-report`, `clean` and `ledger`."""
+"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `abandon`, `check-report`, `clean`, `ledger` and `tryout`."""
 import os
 import sys
 
@@ -40,6 +40,9 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "clean":
         from .clean import clean_main
         clean_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "tryout":
+        from .tryout import tryout_main
+        tryout_main(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "ledger":
         from .ledger import ledger_main
         ledger_main(sys.argv[2:])

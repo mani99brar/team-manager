@@ -1,7 +1,8 @@
 """`workflow init <feature> [--repo X]`: write a feature directory to fill in; never overwrite a file.
 
-The scaffold is a 2.4.0 `feature.json` with one lane, the bundled reviewers, a `prd` to name and `critical: false`
-(the workflow-grill skill sets it to true when the operator confirms the code is critical; its README shows the optional
+The scaffold is a 2.4.0 `feature.json` with one lane, the bundled reviewers, a `prd` to name, `critical: false`
+(the workflow-grill skill sets it to true when the operator confirms the code is critical) and `tryout: false` (true for a
+user-facing feature the operator tries before the merge to main, C7; its README shows the optional
 review `sidecar` key, which the feature file leaves out), a 1.2.0
 `policy.json` with a placeholder check, the lane's task in outcome-brief form (with the browser scenario rules
 and the Playwright report command, to delete for a lane without browser checks), a `decisions.md` for the
@@ -29,7 +30,7 @@ def feature_files(feature: str) -> dict[str, str]:
                 "prd": "TODO: the specification the design challenge reads, relative to the repository root (or delete this key)",
                 "policy": "policy.json", "workers": [{"node_id": LANE, "task": f"{LANE}-task.md"}],
                 "reviewers": [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}],
-                "critical": False}
+                "critical": False, "tryout": False}
     policy = {"version": "1.2.0", "feature": "TODO: the feature's name", "independent_review": True, "integration_approval": True,
               "max_verification_attempts": 3,
               "workers": [{"node_id": LANE, "role": "TODO: a short role label, for example backend",
@@ -67,7 +68,10 @@ def feature_files(feature: str) -> dict[str, str]:
               "TODO: why this feature exists and where its specification lives.\n\n"
               "- `feature.json`: the lanes, their task files, the reviewers (`builtin:<id>` names a bundled brief), the `prd` the design "
               "challenge reads, `challenge` (default true) and `critical` (false; the workflow-grill skill sets it to true when you "
-              "confirm the feature's code is critical, and an automatic run then stops after review for your `approve`).\n"
+              "confirm the feature's code is critical, and an automatic run then stops after review for your `approve`) and `tryout` (false; "
+              "set it to true for a user-facing feature: each integrated run then waits for you to try it and record "
+              "`python -m workflow tryout <run> --result works|broken|skipped --by operator`, and a new tryout launch stops while 3 other "
+              "features wait for theirs).\n"
               "- Optional `sidecar` in `feature.json`: a review sidecar, an independent reviewer that reads the lanes' diffs and panes "
               "while they work and may message them through the controller (the workflow tool's README, section Review sidecar). Add it as "
               "`\"sidecar\": {\"prompt\": \"builtin:senior-review\"}`, optionally with `cadence_seconds` (default 900), "

@@ -1268,6 +1268,11 @@ def run_status(directory: Path) -> tuple[dict, str]:
     workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
     if workspaces:
         status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
+    if "tryout" in plan:
+        # C7, C29: whether the operator tries each integrated run, the verdicts so far and any launch past the untried limit.
+        from .tryout import verdicts
+        status["tryout"] = {"required": plan["tryout"] is True, "verdicts": verdicts(directory),
+                            **({"allow_untried": plan["allow_untried"]} if "allow_untried" in plan else {})}
     from .abandon import abandoned
     record = abandoned(directory)
     if record is not None:
@@ -1331,8 +1336,16 @@ def main():
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
     parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
                                                                    "{run_id, verdict, candidate_commit}")
+    parser.add_argument("--tryout", action="store_true", help="preflight, prepare: the feature asks for a tryout (feature.json 2.4.0 tryout: true, C7); "
+                                                              "prepare pins plan.tryout, and both refuse it while 3 other features are untried (C29)")
+    parser.add_argument("--allow-untried", metavar="REASON", help="preflight, prepare --tryout: launch past the untried-feature limit; prepare pins "
+                                                                  "the reason as plan.allow_untried (--by operator)")
     add_actor_argument(parser)
     args = parser.parse_args()
+    if args.action not in {"preflight", "prepare"} and (args.tryout or args.allow_untried is not None):
+        parser.error("--tryout and --allow-untried apply to preflight and prepare only; the tryout is pinned at prepare")
+    if args.allow_untried is not None and not args.tryout:
+        parser.error("--allow-untried applies with --tryout: a launch that asks for no tryout is never held by the limit")
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
                                                                          args.judge_model, args.judge_effort, args.restore_from)):
         # Prepare pins them (C52, C12); any other action would ignore them silently, `automatic --live` resuming a run included.
@@ -1346,8 +1359,19 @@ def main():
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
         actor = require_actor(args, args.action) if args.action in GATE_ACTIONS else None
-        if args.follows and args.action != "prepare":
-            parser.error("--follows applies to prepare only")
+        if args.follows and args.action not in {"preflight", "prepare"}:
+            parser.error("--follows applies to prepare (and preflight, for the untried-feature limit) only")
+        if args.allow_untried is not None:
+            require_actor(args, "--allow-untried")  # The operator's decision, refused for the maintainer before anything is read.
+            if not args.allow_untried.strip():
+                raise ValueError("--allow-untried needs a reason")
+        if args.tryout and args.action == "preflight":
+            # C29: first, before the clean check and any Git action launch runs after preflight.
+            from .tryout import untried_check
+            passed = untried_check(directory.parent, repository=args.repo.resolve(), follows=args.follows is not None,
+                                   allow_untried=args.allow_untried)
+            if passed:
+                print(f"Note: {passed}", file=sys.stderr, flush=True)
         if args.action not in {"preflight", "prepare", "status", "export"}:
             from .abandon import refuse_abandoned
             refuse_abandoned(directory)  # Before `automatic` records its action: an abandoned run changes no more.
@@ -1446,6 +1470,10 @@ def main():
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if follows:
                 plan["follows"] = follows
+            plan["tryout"] = bool(args.tryout)  # C7: the operator tries each integrated run (tryout.py); false for every other launch.
+            if args.allow_untried is not None:
+                from .actor import actor_record
+                plan["allow_untried"] = {"reason": args.allow_untried.strip(), **actor_record(args.by), "at": now()}
             if reviewers:
                 plan["reviewers"] = reviewers
             drill = policy.get("failure_drill")

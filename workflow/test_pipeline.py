@@ -1913,6 +1913,7 @@ class ActorTests(unittest.TestCase):
         from .notes import note_main
         from .abandon import abandon_main
         from .repair import repair_main
+        from .tryout import tryout_main
         run = str(missing)
         return [("start", pipeline.main, ["start", run, "--live"]), ("automatic", pipeline.main, ["automatic", run, "--live"]),
                 ("retry", pipeline.main, ["retry", run]), ("reconcile", pipeline.main, ["reconcile", run]),
@@ -1921,7 +1922,7 @@ class ActorTests(unittest.TestCase):
                 ("answer", answer_main, [run, "ui", "A"]),
                 ("repair", repair_main, [run, "ui", "--commit", "HEAD", "--reason", "fix"]),
                 ("launch", launch_main, ["demo", "--repo", run, "--live"]), ("note", note_main, [run, "ui", "Hold the tests."]),
-                ("abandon", abandon_main, [run, "--reason", "dead"])]
+                ("abandon", abandon_main, [run, "--reason", "dead"]), ("tryout", tryout_main, [run, "--result", "works"])]
 
     def test_every_gate_refuses_a_missing_by_before_it_reads_the_run(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1934,7 +1935,7 @@ class ActorTests(unittest.TestCase):
                     self.assertNotIn("No such file", output)
 
     def test_the_maintainer_is_refused_the_operators_decisions_before_it_reads_the_run(self):
-        refused = {"approve", "accept-challenge", "resume --launch", "answer", "repair", "launch", "abandon"}
+        refused = {"approve", "accept-challenge", "resume --launch", "answer", "repair", "launch", "abandon", "tryout"}
         with tempfile.TemporaryDirectory() as temp:
             for action, main, argv in self.gates(Path(temp) / "missing"):
                 code, output = self.run_main(main, [*argv, "--by", "maintainer"])
