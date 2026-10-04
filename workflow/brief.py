@@ -190,11 +190,32 @@ def lane_claims(directory: Path, lane: str, snapshot: dict | None) -> list[str]:
     return lines
 
 
-def candidate_ref(plan: dict, directory: Path, candidate: str) -> str:
+def readable(repository: str) -> bool:
+    """`git -C <repository> rev-parse --git-dir` answers: a checkout Git can still read."""
+    try:
+        return subprocess.run(["git", "-C", repository, "rev-parse", "--git-dir"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def readable_checkout(plan: dict, directory: Path) -> str | None:
+    """A checkout of the run's repository that Git can still read: plan.repository, else (a C56 run's source worktree removed
+    once the run finished) one of the run's own worktrees of the same repository: a lane's, candidate/, review-worktree/ or
+    challenge-worktree/. None when every one is gone."""
+    nodes = plan.get("nodes") if isinstance(plan.get("nodes"), dict) else {}
+    others = [info.get("worktree") for info in nodes.values() if isinstance(info, dict) and info.get("worktree")]
+    others += [str(directory / name) for name in ("candidate", "review-worktree", "challenge-worktree")]
+    for repository in (str(plan.get("repository")), *others):
+        if Path(repository).exists() and readable(repository):
+            return repository
+    return None
+
+
+def candidate_ref(repository: str, directory: Path, candidate: str) -> str:
     """` (kept as refs/workflow/<hash>/candidate)` when that ref holds the candidate; runs from before the ref have none."""
     ref = run_ref(directory, CANDIDATE_REF)
     try:
-        held = subprocess.run(["git", "-C", str(plan.get("repository")), "rev-parse", "--verify", "-q", ref], capture_output=True, text=True, timeout=30)
+        held = subprocess.run(["git", "-C", repository, "rev-parse", "--verify", "-q", ref], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return ""
     return f" (kept as {ref})" if held.returncode == 0 and held.stdout.strip() == candidate else ""
@@ -223,13 +244,15 @@ def render(directory: Path) -> str:
     review = optional_json(directory / "review.json")
     verdict = review.get("verdict") if isinstance(review, dict) and review.get("verdict") else "none recorded (no review.json)"
     candidate = candidate_commit(directory)
+    # The Git queries run in a checkout that still exists; with none, the candidate is kept and nothing is checked.
+    repository = readable_checkout(plan, directory)
     snapshots = lane_snapshots(directory)
     findings, notes = collect_findings(run, review)
     lanes = run.workers
     lines = [f"# Follow-up brief: {plan.get('run_id', directory.name)}", "",
              f"- Run directory: {directory}",
              f"- Verdict: {verdict}",
-             f"- Candidate: {candidate}{candidate_ref(plan, directory, candidate)}" if candidate else "- Candidate: none (the run stopped before its candidate)",
+             f"- Candidate: {candidate}{candidate_ref(repository, directory, candidate) if repository else ''}" if candidate else "- Candidate: none (the run stopped before its candidate)",
              f"- Base: {plan.get('base_commit')} on {plan.get('source_branch')}",
              f"- Lanes: {', '.join(lanes)}" + (f" (excluded: {', '.join(plan_excluded(plan))})" if plan.get("excluded_workers") else ""), "",
              "Follow it up with a new run of the same feature: `python -m workflow launch <feature> --repo <target repo> --run-id <feature>-00N "
@@ -237,8 +260,14 @@ def render(directory: Path) -> str:
              "needs from this brief. The restore recipe uses the owned paths this run pinned: check them against the follow-up's policy."]
     for note in notes:
         lines += ["", f"Note: {note}."]
-    repository = str(plan.get("repository"))
-    pruned = candidate is not None and not commit_exists(repository, candidate)
+    if repository is None:
+        repository = str(plan.get("repository"))
+        lines += ["", f"Note: The run's repository could not be read: {repository} and the run's worktrees are gone, so the candidate is "
+                  "kept as recorded and which paths exist is not checked."]
+        pruned = False
+    else:
+        # Pruned only when a readable checkout answers that the commit is gone.
+        pruned = candidate is not None and not commit_exists(repository, candidate)
     if pruned:
         lines += ["", f"Note: The candidate {candidate} is not in the repository any more (no ref held it once its worktree was "
                   "removed), so each lane restores its own snapshot, kept by its lane ref."]

@@ -207,6 +207,30 @@ class BriefTests(unittest.TestCase):
         self.assertIn(f"The candidate {gone} is not in the repository any more", out)
         self.assertIn(run_ref(run.directory, "adapter"), out.split("## Lane adapter")[1])
 
+    def test_a_removed_source_checkout_keeps_the_candidate_and_reads_another_checkout(self):
+        # A C56 run: plan.repository is the run's own source worktree, removed once the run finished (clean). The candidate
+        # is still in the target repository; the brief must not call it pruned.
+        run = self.run_
+        source = run.root / "run.source"
+        git(run.repo, "worktree", "add", "-q", "--detach", str(source), run.plan["base_commit"])
+        save_json(run.directory / "plan.json", {**read_json(run.directory / "plan.json"), "repository": str(source)})
+        git(run.repo, "worktree", "remove", "--force", str(source))
+        code, out, err = brief(run.directory)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("is not in the repository any more", out)
+        commands = self.sh_block(out, "legacy.py")
+        # Read in a lane worktree of the same repository: the deleted path is split out, so the recipe still works.
+        self.assertIn(f"git restore --source={run.candidate} --staged --worktree -- backend.py", commands)
+        self.assertIn("git rm -r -q --ignore-unmatch -- legacy.py", commands)
+        # With no checkout of the repository left, the candidate is kept and the brief says the repository could not be read.
+        for lane in ("ui", "adapter"):
+            git(run.repo, "worktree", "remove", "--force", str(run.directory / f"worktree-{lane}"))
+        code, out, err = brief(run.directory)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("is not in the repository any more", out)
+        self.assertIn(f"--source={run.candidate}", out)
+        self.assertIn(f"could not be read: {source}", out)
+
     def test_without_a_candidate_the_lane_snapshot_is_restored(self):
         run = self.run_
         for name in ("review.json", "review-bundle.json", "candidate.json"):
