@@ -1030,9 +1030,10 @@ describe('deriveNow', () => {
   it('blocked_before_freeze: on a lane named controller, a stop said bare off the source branch is the run\'s, as source 0', () => {
     // automatic.py final_stop says workers stopped when their wait failed without `Controller blocked: ` off the source branch, as
     // drive says them; a server before the fix serves such a row aliased onto launch_controller. The failed wait's own texts follow:
-    // wait_handoffs' and read_signal's refusals.
+    // wait_handoffs' (record_question's fourth question among them) and read_signal's refusals.
     for (const stop of ['Handoff changed after stop intent', 'Invalid completion file for ui', 'Worker ui deadline exhausted; no automatic relaunch',
       'Worker ui explicitly blocked: the fixture is missing', 'Worker ui asked a question that is not recorded yet: Which port?',
+      'Worker ui asked question 4; at most 3 are answered, so it is treated as blocked: Which port?',
       'Native worker missing; reconciliation required', 'Malformed completion signal', 'Stale or foreign worker completion signal',
       'Invalid completion status/summary', 'Invalid completion evidence: untested must be a list of strings',
       'Completion version 1.1.0 refused: this run is pinned at completion 1.0.0']) {

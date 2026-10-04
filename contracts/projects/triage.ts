@@ -265,11 +265,12 @@ const CONTROLLER_BLOCKED = /^Controller blocked: /
 /**
  * automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
  * failed are said bare, without CONTROLLER_BLOCKED's prefix, as advance_or_block and the failed wait say them. Then the failed
- * wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a missing session) and
- * read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).
+ * wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a fourth question from
+ * guardrails.py record_question, a missing session) and read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).
  */
 const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion\b/,
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
+  /^Worker \S+ asked question \d+; at most \d+ are answered\b/,
   /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
 /** pipeline.py action_event: who ran a gate action (C17), a log line. */
