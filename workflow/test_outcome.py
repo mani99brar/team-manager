@@ -2,6 +2,7 @@
 the top of report.html. Run directories here are written by hand in the shapes the controller writes; no agent runs."""
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -114,14 +115,68 @@ class OutcomeBlock(OutcomeRun):
         self.assertNotIn("  general: approved (its file says blocked)", items)
         self.assertIn("  verify yourself: Open the page and see the new heading.", items)
 
+    def test_a_clean_approval_of_a_completed_1_1_0_lane_is_one_line(self):
+        # Every completed 1.1.0 lane carries a verify_yourself line: on its own it does not make an approval unclean.
+        self.review("approved", [("general", "approved"), ("coverage", "approved")])
+        for reviewer in REVIEWERS:
+            self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
+        self.lane()
+        self.assertEqual(outcome_block(self.directory), "Outcome: approved by general and coverage; nothing open.")
+        # The approval stop (unit T4) still lists it among the open items.
+        self.assertEqual(outcome_block(self.directory, open_items_only=True).splitlines(),
+                         ["Lane ui:", "  verify yourself: Open the page and see the new heading."])
+
     def test_an_approval_with_lane_items_is_no_longer_one_line_and_a_run_without_a_record_has_no_block(self):
         self.assertEqual(outcome_block(self.directory), "")
         self.assertEqual(outcome_block(self.directory.parent / "missing"), "")
         self.review("approved", [("general", "approved"), ("coverage", "approved")])
-        self.lane()
+        self.lane(untested=["Safari layout"])
         lines = outcome_block(self.directory).splitlines()
         self.assertEqual(lines[0], "Outcome: approved by general and coverage")
-        self.assertIn("  verify yourself: Open the page and see the new heading.", lines)
+        self.assertIn("  untested: Safari layout", lines)
+        self.assertIn("  verify yourself: Open the page and see the new heading.", lines)  # Listed once the block is more than one line.
+
+    def test_without_review_json_the_reviewers_come_from_their_status_files(self):
+        # A single reviewer ran out its deadline, or none gave a verdict: _record_partial writes no review.json.
+        self.plan["reviewers"].append({"reviewer_id": "security", "prompt": "security brief"})
+        save_json(self.directory / "plan.json", self.plan)
+        save_json(self.directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": [*REVIEWERS, "security"]})
+        self.status("general", status="accepted", accepted_decision=self.decision("blocked", [finding("P1", "The key is lost. Twice.")]), derived=True)
+        self.status("coverage", status="blocked", error="Reviewer coverage deadline exhausted; no second reviewer is launched")
+        self.status("security", status="superseded")
+        with (self.directory / "events.jsonl").open("w") as events:
+            events.write(json.dumps({"sequence": 1, "time": "2026-10-01T23:13:00Z", "node": "review", "status": "note",
+                                     "message": "Reviewer security gave no verdict and ends superseded: general blocked the candidate"}) + "\n")
+        lines = outcome_block(self.directory).splitlines()
+        self.assertEqual(lines[:2], ["Outcome: no review.json recorded", "Reviewers:"])
+        self.assertIn("  general: blocked", lines)
+        self.assertIn("  coverage: no verdict accepted (deadline exhausted); no file written", lines)
+        self.assertIn("  security: no verdict accepted (superseded: general blocked the candidate); no file written", lines)
+        self.assertIn("  [P1 general] The key is lost.", lines)
+
+    def test_a_running_reviewer_says_still_running(self):
+        save_json(self.directory / "automatic-review.json", {"transport": "native", "status": "running", "reviewers": REVIEWERS})
+        self.status("general", status="running")
+        self.status("coverage", status="launching")
+        lines = outcome_block(self.directory).splitlines()
+        self.assertIn("  general: no verdict accepted (still running); no file written", lines)
+        self.assertIn("  coverage: no verdict accepted (still running); no file written", lines)
+
+    def test_a_print_reviewer_reports_its_job_output_never_a_file(self):
+        # Print-transport reviewers write no completion file: the fact is their job's stdout.
+        save_json(self.directory / "automatic-review.json", {"transport": "print", "status": "blocked", "reviewers": REVIEWERS})
+        self.status("general", transport="print", status="superseded", late_error="Reviewer general stdout refused: no structured output")
+        self.status("coverage", transport="print", status="blocked", error="Reviewer coverage deadline exhausted")
+        (self.directory / "review-general.stdout.json").write_text('{"is_error": true}')
+        lines = outcome_block(self.directory).splitlines()
+        self.assertIn("  general: no verdict accepted (Reviewer general stdout refused: no structured output); "
+                      "its print job's output was not accepted", lines)
+        self.assertIn("  coverage: no verdict accepted (deadline exhausted); its print job wrote no output", lines)
+
+    def test_an_unreadable_plan_never_raises(self):
+        self.review("approved", [("general", "approved"), ("coverage", "approved")])
+        with patch("workflow.outcome.load_optional", side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(outcome_block(self.directory), "Outcome: unavailable (PermissionError: [Errno 13] Permission denied)")
 
     def test_the_sidecar_unresolved_list_is_listed(self):
         from .sidecar import initial_ledger
@@ -169,6 +224,35 @@ class OutcomePrinted(OutcomeRun):
                 resume_main([str(self.directory)])
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("Outcome: blocked\n", output.getvalue())
+
+    def test_automatic_prints_the_block_once_after_its_evidence_line_and_automatic_step_leaves_it_to_its_caller(self):
+        self.blocked_run()
+        with patch("workflow.automatic.supervise"):
+            code, out, err = pipeline_cli("automatic", str(self.directory), "--live")
+        self.assertEqual(code, 0, err)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("Automatic run reached a verified feature branch. Evidence: "), out)
+        self.assertEqual(lines[1], "Outcome: blocked")
+        self.assertEqual(out.count("Outcome:"), 1)
+        # The step's child shares the supervisor's terminal: the block comes once, from `automatic`, `resume` or `launch`.
+        with patch("workflow.automatic.drive", return_value="3" * 40), patch("workflow.pipeline.Pipeline"):
+            code, out, err = pipeline_cli("automatic-step", str(self.directory), "--live")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Verified feature branch: ", out)
+        self.assertNotIn("Outcome:", out)
+
+    def test_resume_prints_the_block_once_after_its_success_line(self):
+        from .guardrails import resume_main
+        self.blocked_run()
+        output = io.StringIO()
+        with patch("workflow.guardrails.resume_challenge", return_value={"status": "passed", "attempt": 1}), \
+                patch("workflow.pipeline.Pipeline"), patch("workflow.pipeline.start_workers"), patch("workflow.automatic.supervise"), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            resume_main([str(self.directory)])
+        lines = output.getvalue().splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("Automatic run reached a verified feature branch. Evidence: "))
+        self.assertEqual(lines[index + 1], "Outcome: blocked")
+        self.assertEqual(output.getvalue().count("Outcome:"), 1)
 
 
 if __name__ == "__main__":

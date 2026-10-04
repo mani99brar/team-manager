@@ -1237,8 +1237,11 @@ def main():
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
-            from .guardrails import pin_restore, resolve_commit
-            restore = resolve_commit(args.repo.resolve(), args.restore_from) if args.restore_from is not None else None  # Before the run directory.
+            from .guardrails import check_restore, pin_restore, resolve_commit
+            restore = None
+            if args.restore_from is not None:  # Before the run directory.
+                check_restore(args.automatic, selected)
+                restore = resolve_commit(args.repo.resolve(), args.restore_from)
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if reviewers:
                 plan["reviewers"] = reviewers
@@ -1285,6 +1288,7 @@ def main():
                 warning = stale_claude_warning()
                 parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
+            print(outcome_lines(directory), end="")
             return
         if args.action == "export":
             # Re-export an existing run (for example one recorded before a newer export version), and refresh its report.html.
@@ -1315,8 +1319,8 @@ def main():
                     parser.exit(UNAVAILABLE_EXIT, f"Interrupted: {error}\nNothing was stopped; the supervisor exits resumable.\n")
                 if commit is None:
                     parser.exit(75, "Checkpoint persisted; continuing in a new controller process.\n")
+                # No outcome block here: this child shares the terminal of `automatic`, `resume` or `launch`, which print it.
                 print(f"Verified feature branch: {runtime.plan['source_branch']} at {commit}. No main merge or push.")
-                print(outcome_lines(directory), end="")
                 return
             if args.action == "attach":
                 print(json.dumps(attach_panels(runtime.sessions), indent=2)); return

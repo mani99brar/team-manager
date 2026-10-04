@@ -4,7 +4,9 @@ It is built from the export's own section builders (review_section, each lane's 
 reviewers' status files (`automatic-review*.json`), never from an orchestrator's memory. It lists each reviewer's verdict (the
 derived one, and the one its file says when they differ), or `no verdict accepted` with the reason and whether a file was
 written; late verdicts; open P0/P1 with their first sentences; accepted P2s as "Known limits"; each lane's untested and
-verify_yourself items; and the review sidecar's unresolved list. A clean approval is one line.
+verify_yourself items; and the review sidecar's unresolved list. A clean approval is one line: every completed 1.1.0 lane
+carries a verify_yourself line, so those lines alone never make an approval unclean (they show once the block is longer,
+and always in `open_items_only`).
 
 `status`, the success lines, the Blocked handlers and report.html print it. It reads files the controller replaces atomically
 and writes nothing, so `status` stays lock-free. The digest and PR pasting come later.
@@ -50,8 +52,13 @@ def no_verdict_reason(directory: Path, reviewer_id: str, status: dict) -> str:
     return "no status recorded" if word is None else str(word)
 
 
-def file_fact(directory: Path, reviewer_id: str) -> str:
-    """Whether the reviewer wrote its completion file, and what verdict it says when it can be read."""
+def file_fact(directory: Path, reviewer_id: str, status: dict) -> str:
+    """Whether the reviewer wrote its completion file, and what verdict it says when it can be read. A print reviewer writes
+    no completion file: the fact is whether its job wrote output (`<node>.stdout.json`)."""
+    if status.get("transport") == "print":
+        output = directory / f"{review_node(reviewer_id)}.stdout.json"
+        written = output.exists() and output.stat().st_size > 0
+        return "its print job's output was not accepted" if written else "its print job wrote no output"
     path = directory / f"{review_node(reviewer_id)}.completion.json"
     if not path.exists():
         return "no file written"
@@ -67,7 +74,7 @@ def reviewer_lines(directory: Path, ids: list[str], derived: dict) -> tuple[list
         status = reviewer_status(directory, reviewer_id)
         verdict = derived.get(reviewer_id)
         if verdict is None:
-            lines.append(f"  {reviewer_id}: no verdict accepted ({no_verdict_reason(directory, reviewer_id, status)}); {file_fact(directory, reviewer_id)}")
+            lines.append(f"  {reviewer_id}: no verdict accepted ({no_verdict_reason(directory, reviewer_id, status)}); {file_fact(directory, reviewer_id, status)}")
             caveat = True
             continue
         decision = status.get("accepted_decision")
@@ -103,11 +110,12 @@ def reviews(directory: Path, plan: dict) -> tuple[str | None, list[str], dict, l
     return None, list(ids), derived, findings
 
 
-def open_items(directory: Path, plan: dict, findings: list) -> list[str]:
-    """The sections that need the operator: open P0/P1, known limits, each lane's evidence, the sidecar's unresolved list."""
+def open_items(directory: Path, plan: dict, findings: list) -> tuple[list[str], bool]:
+    """The sections that need the operator: open P0/P1, known limits, each lane's evidence, the sidecar's unresolved list; and
+    whether any of them is more than a lane's verify_yourself line (which every completed 1.1.0 lane carries)."""
     from .automatic import first_sentence
     from .pipeline import blocking_findings
-    lines = []
+    lines, open_ = [], False
     blocking = sorted(blocking_findings(findings), key=lambda item: item["severity"])
     if blocking:
         lines.append("Open P0/P1:")
@@ -121,6 +129,7 @@ def open_items(directory: Path, plan: dict, findings: list) -> list[str]:
         if signal is None:
             continue
         items = [f"  untested: {item}" for item in signal["untested"] or []]
+        open_ = open_ or bool(items)
         if signal["verify_yourself"]:
             items.append(f"  verify yourself: {signal['verify_yourself']}")
         if items:
@@ -129,7 +138,7 @@ def open_items(directory: Path, plan: dict, findings: list) -> list[str]:
     unresolved = ((ledger or {}).get("handoff") or {}).get("unresolved") or []
     if unresolved:
         lines += ["Sidecar unresolved:", *(f"  {item}" for item in unresolved)]
-    return lines
+    return lines, open_ or bool(blocking or limits or unresolved)
 
 
 def outcome_block(directory: Path, open_items_only: bool = False) -> str:
@@ -139,12 +148,12 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
     unresolved list), without the outcome line and the reviewers' verdicts, for a stop that lists its open items.
     """
     directory = Path(directory)
-    plan = load_optional(directory / "plan.json")
-    if not isinstance(plan, dict):
-        return ""
-    try:
+    try:  # It never raises: the Blocked handlers print it inside their `except`.
+        plan = load_optional(directory / "plan.json")
+        if not isinstance(plan, dict):
+            return ""
         verdict, ids, derived, findings = reviews(directory, plan)
-        items = open_items(directory, plan, findings)
+        items, open_ = open_items(directory, plan, findings)
         if open_items_only:
             return "\n".join(items)
         if not ids:
@@ -152,7 +161,7 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         lines, caveat = reviewer_lines(directory, ids, derived)
         if verdict == "approved":
             header = f"Outcome: approved by {listing(ids)}"
-            if not caveat and not items:
+            if not caveat and not open_:
                 return header + "; nothing open."
             return "\n".join([header, "Reviewers:", *lines, *items])
         header = f"Outcome: {verdict}" if verdict else "Outcome: no review.json recorded"

@@ -25,7 +25,7 @@
 - Restore from a candidate (C12): `--restore-from <commit>` on launch and prepare pins `plan.restore_from` (the commit
   and each lane's owned paths present at it), keeps the commit under the run's `refs/workflow/<hash>/restore-from` and
   writes a read-only copy of those paths at it into `challenge-inputs/restore/`, a plain directory, never a worktree.
-  The challenge reads it through --add-dir, and each worker's prompt starts with its own `git restore` command.
+  Automatic runs only: a manual worker has no shell to run its restore command. The challenge reads it through --add-dir, and each worker's prompt starts with its own `git restore` command.
 
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
@@ -36,7 +36,6 @@ import argparse
 import copy
 import fcntl
 import hashlib
-import io
 import json
 import os
 import re
@@ -258,6 +257,15 @@ def resolve_commit(repo: Path, name: str) -> str:
     return commit
 
 
+def check_restore(automatic: bool, lanes: list[str]) -> None:
+    """launch and prepare refuse `--restore-from` here, before any Git or filesystem action: in a manual run (its workers
+    get no shell to run their restore command), and in a run with a lane named after the restore ref."""
+    if not automatic:
+        raise ValueError("--restore-from needs --automatic: a manual worker has no shell to run its git restore command")
+    if RESTORE_REF in lanes:
+        raise ValueError(f"--restore-from needs the ref name {RESTORE_REF}, which a lane of this run takes; rename the lane")
+
+
 def restore_ref(directory: Path) -> str:
     """The run's own ref that keeps the pinned commit reachable, beside its lane snapshot refs (Pipeline.freeze)."""
     return f"refs/workflow/{hashlib.sha256(str(directory).encode()).hexdigest()[:16]}/{RESTORE_REF}"
@@ -282,22 +290,27 @@ def restore_member(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None
 
 
 def write_restore_copy(directory: Path, repo: Path, commit: str, paths: list[str]) -> Path:
-    """`challenge-inputs/restore/`: `paths` as `commit` holds them (git archive), files 0444 and directories 0555."""
+    """`challenge-inputs/restore/`: `paths` as `commit` holds them, streamed from `git archive` (so the target's export-ignore
+    and export-subst attributes apply, and links are left out). Files 0444; directories 0755, so a plain `rm -rf` of the run
+    still works (the challenge has no write tool)."""
     inputs = directory / "challenge-inputs"
     inputs.mkdir(mode=0o700, exist_ok=True)
     target = inputs / RESTORE
     target.mkdir(mode=0o700)
     if paths:
-        archive = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", "archive", "--format=tar", commit, "--", *paths],
-                                 capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(target, filter=restore_member)
+        with subprocess.Popen(["git", "-C", str(repo), "--literal-pathspecs", "archive", "--format=tar", commit, "--", *paths],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as archive:
+            with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
+                tar.extractall(target, filter=restore_member)
+            errors = archive.stderr.read()
+        if archive.returncode != 0:
+            raise subprocess.CalledProcessError(archive.returncode, archive.args, stderr=errors)
     for root, folders, files in os.walk(target, topdown=False):
         for name in files:
             os.chmod(Path(root) / name, 0o444)
         for name in folders:
-            os.chmod(Path(root) / name, 0o555)
-    os.chmod(target, 0o555)
+            os.chmod(Path(root) / name, 0o755)
+    os.chmod(target, 0o755)
     return target
 
 
@@ -305,8 +318,6 @@ def pin_restore(plan: dict, directory: Path, policy: dict, commit: str) -> None:
     """`prepare --restore-from`: plan.restore_from = {commit, paths: {lane: its owned paths present at the commit}}, the copy of
     their union, and the ref that keeps the commit. `commit` is resolve_commit's."""
     repo = Path(plan["repository"])
-    if RESTORE_REF in plan_workers(plan):
-        raise ValueError(f"--restore-from needs the ref name {RESTORE_REF}, which a lane of this run takes; rename the lane")
     owned = {worker["node_id"]: worker["owned_paths"] for worker in policy["workers"]}
     paths = {node: present_paths(repo, commit, owned[node]) for node in plan_workers(plan)}
     write_restore_copy(directory, repo, commit, sorted({path for items in paths.values() for path in items}))

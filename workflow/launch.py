@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from .guardrails import (DECISIONS, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, has_operator_decisions, is_guarded, migration_note,
-                         prd_path, refusals, resolve_commit, resume_command)
+                         prd_path, refusals, check_restore, resolve_commit, resume_command)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -234,6 +234,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             bounds = {key: value for key, value in review_sidecar.items() if key != "prompt"}
             prepare.extend(["--sidecar-brief", str(sidecar_brief), "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
     if restore_from is not None:
+        check_restore(automatic, selected)
         prepare.extend(["--restore-from", resolve_commit(repo, restore_from)])
     commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
     if automatic:
