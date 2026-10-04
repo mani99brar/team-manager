@@ -238,7 +238,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     A feature with `tryout: true` (C7) passes --tryout to preflight and prepare, which pins plan.tryout. Its launch is refused
     here, before any Git action, while 3 other registered features wait for their tryout (C29, tryout.untried_check), unless
     it is a continuation or `allow_untried` gives the operator's reason, which preflight and prepare get too (prepare pins
-    it). A feature with a browser check that leaves the flag out gets a note.
+    it) when the launch goes past the limit; under it the reason is dropped with a note. A 2.4.0 feature with a browser check
+    that leaves the flag out gets a note.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -287,7 +288,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         passed = untried_check(run_root, repository=repo, feature=feature, follows=followed is not None, allow_untried=allow_untried)
         if passed:
             notes.append(passed)
-    elif "tryout" not in manifest:
+        elif allow_untried is not None:
+            # Under the limit, or a continuation: no override happened, so none is passed on or pinned.
+            notes.append("Fewer than 3 other features wait for their tryout, or this launch continues one: --allow-untried was not needed "
+                         "and is not pinned.")
+            allow_untried = None
+    elif "tryout" not in manifest and manifest["version"] == CRITICAL_VERSION:  # Earlier versions refuse the key: no note to silence.
         browser = [node for node in selected if any(check["kind"] == "browser" for worker in policy["workers"] if worker["node_id"] == node
                                                     for check in worker["checks"])]
         if browser:

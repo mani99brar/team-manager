@@ -858,6 +858,20 @@ class UntriedLimit(unittest.TestCase):
         self.assertNotIn("allow_untried", plan)
         self.assertEqual(read_json(run / "run-state.json")["inputs"]["tryout"], {"required": True, "verdicts": []})
 
+    def test_an_override_under_the_limit_is_not_pinned(self):
+        # Two others wait: the launch passes without it, so preflight and prepare never get the reason and the plan claims none.
+        save_json(self.waiting[0] / "tryout.json", {"verdicts": [{"result": "works", "note": None, "at": ago(0), "by": "operator"}]})
+        run, commands, notes = self.launch(allow_untried="demo")
+        self.assertNotIn("--allow-untried", commands[0])
+        self.assertNotIn("--allow-untried", commands[2])
+        [note] = [note for note in notes if "untried" in note]
+        self.assertIn("--allow-untried was not needed", note)
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("allow_untried", read_json(run / "plan.json"))
+        self.assertIsNone(read_json(run / "run-state.json")["inputs"]["tryout"].get("allow_untried"))
+
     def test_preflight_refuses_a_tryout_launch_past_the_limit_before_anything_else(self):
         _, commands, _ = self.launch(allow_untried="demo")  # The commands a launch past the limit would run, without the override.
         preflight = commands[0][:commands[0].index("--allow-untried")]
@@ -915,6 +929,18 @@ class TryoutFlag(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def test_a_feature_with_a_browser_check_that_leaves_the_flag_out_gets_the_note(self):
+        # Before 2.4.0 the key is refused, so a note there could never be silenced: it gets none.
+        _, _, notes = launch_commands(self.repo, "project-workflows", "project-workflows-000", self.root / "runs", herdr=False)
+        self.assertFalse([note for note in notes if "tryout" in note])
+        from .test_guardrails import BRIEF, DECISIONS
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        save_json(folder / "feature.json", {**manifest, "version": "2.4.0"})
+        for worker in manifest["workers"]:  # 2.4.0 carries the 2.2.0 guardrails: outcome briefs and decisions.md.
+            (folder / worker["task"]).write_text(BRIEF.format(lane=worker["node_id"]))
+        (folder / "decisions.md").write_text(DECISIONS)
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "-qm", "feature.json 2.4.0")
         _, commands, notes = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs", herdr=False)
         [note] = [note for note in notes if "tryout" in note]
         self.assertIn("ui has a browser check", note)
