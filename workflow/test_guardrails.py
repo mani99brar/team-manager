@@ -2316,8 +2316,12 @@ class GrillSkill(unittest.TestCase):
                       "AskUserQuestion option's label and description).", ask)
         self.assertIn("(an interface, a data shape or field, a rule about another file, a scope change) becomes its own question, or a "
                       "Grill default tagged `[added, not asked]`.", ask)
-        self.assertIn("offer the repository's own mechanism for the analogous artifact as an option, citing its file", ask)
+        self.assertIn("When the drafts or your defaults keep a table, a list or a generator by hand, offer the repository's own mechanism for "
+                      "the analogous artifact as an option, citing its file", ask)
         self.assertIn("is a run limit, not a product reason: label it as a run limit and name the setup that would lift it.", ask)
+        # The read-back's question is not a sixth question: the limit of five never skips or softens it (C1).
+        self.assertIn("never more than five questions in total. The read-back's confirm question (§4) is not one of the five.", ask)
+        self.assertIn("After the fifth answer, ask nothing more until the read-back.", ask)
         self.assertIn("restate the answer in one sentence at the start of your next message", ask)
         self.assertIn("record it as a Grill default that names the items it covers", ask)
         self.assertIn("A question asked but not answered, including a \"clarify\" reply that was never settled, stays open: write it as "
@@ -2335,12 +2339,26 @@ class GrillSkill(unittest.TestCase):
         self.assertNotIn("No `TODO:` line may remain", body)
         self.assertNotIn("## Assumptions", body)
         self.assertIn("Do not edit the tasks, the policy, the PRD or any code.", write)
+        # An older file says nothing of whose each bullet was: its bullets become grill defaults until the operator names them as their
+        # own at the read-back, so a re-grill neither binds the grill's guesses nor silently demotes the operator's decisions.
+        self.assertIn("An older file without `## Operator decisions` does not record which bullets were the operator's answers: carry its "
+                      "decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which "
+                      "carried-over bullets are the operator's own (§4).", write)
+        self.assertNotIn("that you cannot trace to an operator's answer", body)
         # §4: the read-back always runs before the hand-back, the bullets the operator did not choose first, then one short question (C1).
         self.assertIn("Always read back before the hand-back, also when the operator asked up front to grill and launch.", back)
         self.assertIn("lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, "
                       "every Deferred bullet and any `TODO:` line), then each Operator decision on one line.", back)
-        self.assertIn("End it with one short question: confirm, or say what to change.", back)
+        self.assertIn("End it with one short question: confirm, or say what to change. After carrying over an older file, the same question "
+                      "also asks which carried-over bullets are the operator's own.", back)
         self.assertLess(back.index("Always read back"), back.index("--dry-run"))
+        # The read-back's answer is the operator's: it becomes an Operator decision, never an edit of a grill default in place (C4).
+        self.assertIn("The answer is the operator's own: record it before you hand back. Each bullet the answer changes, and each one it "
+                      "confirms by its id, becomes a new `[O<n>]` with the date and the operator's words verbatim, citing what it changes", back)
+        self.assertIn("A Grill default or Deferred bullet so replaced leaves its section, and a `TODO: Q<n>` line it answers gives way to its "
+                      "`[O<n>]`, since launch refuses the line; an Operator decision stays as written. A plain \"confirm\" changes nothing.", back)
+        self.assertNotIn("Change `decisions.md` as the answer says", body)
+        self.assertLess(back.index("The answer is the operator's own"), back.index("--dry-run"))
 
 if __name__ == "__main__":
     unittest.main()
