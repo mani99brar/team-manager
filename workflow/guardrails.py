@@ -250,7 +250,7 @@ def resolve_commit(repo: Path, name: str) -> str:
     refused = ValueError(f"--restore-from {name} is not a commit in {repo}")
     if not name or name.startswith("-"):
         raise refused
-    try:  # git_read: launch's dry run resolves it too, under the tests' patched subprocess.run.
+    try:  # git_read: a read, like conventions_summary's during a dry run.
         commit = git_read(repo, "rev-parse", "--verify", "-q", f"{name}^{{commit}}").decode().strip()
     except (OSError, subprocess.CalledProcessError):
         raise refused from None

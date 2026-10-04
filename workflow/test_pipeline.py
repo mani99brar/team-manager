@@ -1398,11 +1398,11 @@ class RecordTests(unittest.TestCase):
         self.pin()
         plan = read_json(f.directory / "plan.json")
         for argv in (["automatic", str(f.directory), "--live", "--judge-effort", "low"], ["status", str(f.directory), "--worker-model", "x"],
-                     ["start", str(f.directory), "--live", "--profile", "attended"]):
+                     ["start", str(f.directory), "--live", "--profile", "attended"], ["automatic", str(f.directory), "--live", "--restore-from", "HEAD"]):
             with self.subTest(argv):
                 code, _, err = pipeline_cli(*argv)
                 self.assertEqual(code, 2, err)
-                self.assertIn("--profile and the role flags apply to prepare only; the pins cannot change after it", err)
+                self.assertIn("--profile, --restore-from and the role flags apply to prepare only; the pins cannot change after it", err)
         self.assertEqual(read_json(f.directory / "plan.json"), plan)
 
     def test_the_drift_check_reads_only_the_controller_head_and_prepare_reads_dirt_without_optional_locks(self):
