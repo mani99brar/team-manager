@@ -4,7 +4,9 @@ A native session (a worker, a native reviewer) is priced when its stop is confir
 `<projects>/*/<session_id>.jsonl`, carries `cost-state` rows, the running totals of one process of the session (its
 `startTime`). The last row of each startTime counts once, and a resumed session's processes are summed. The row type is
 undocumented: a transcript without such rows, or none at all, records null. The record is `<node>.cost.json` beside the
-stop intent. A session resumed after its stop is not counted.
+stop intent. A session resumed after its stop is not counted, unless the record is written late: one written after a
+kill (by the next freeze or the next entry to the accepted review), or for a run stopped before C49, prices the whole
+transcript, so it also counts any resume made before it.
 
 A print job (a challenge attempt, a print reviewer, a sidecar pass) reports `total_cost_usd`, `duration_ms` and
 `modelUsage` in its JSON result, `<node>.stdout.json`.
