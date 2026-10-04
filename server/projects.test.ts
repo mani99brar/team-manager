@@ -2151,7 +2151,7 @@ test('[B1] on a lane named controller, the stops said bare off the source branch
   }
 })
 
-test('[B1] on a lane named controller, a gate action\'s actor row (C17) belongs to the run, never touching the lane', async () => {
+test('[B1] on a lane named controller, a gate action\'s actor row (C17) and a tryout verdict (C7) belong to the run, never touching the lane', async () => {
   // pipeline.py action_event: `<Action> by the operator|maintainer…` as a `controller` row with the plain record status `note`, served with no status.
   await harness(async ({ app, runsRoot }) => {
     const lanes = ['controller', 'ui']
@@ -2163,10 +2163,12 @@ test('[B1] on a lane named controller, a gate action\'s actor row (C17) belongs 
       { sequence: 3, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
       { sequence: 4, time: T1, node: 'controller', status: 'interactive', message: 'Worker controller needs attention in its pane (native state blocked); waiting until its deadline' },
       { sequence: 5, time: T2, node: 'controller', status: 'note', message: 'Automatic by the maintainer: the supervisor continues the run' },
+      // tryout.py (C7): the operator's verdict, the same plain record.
+      { sequence: 6, time: T2, node: 'controller', status: 'note', message: 'Tryout recorded by the operator: works. Reload keeps the list.' },
     ]
     await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
     const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
-    assert.deepEqual(served.map(event => [event.sequence, event.node_id]), [[1, null], [2, 'launch_controller'], [3, 'launch_ui'], [4, 'launch_controller'], [5, null]])
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id]), [[1, null], [2, 'launch_controller'], [3, 'launch_ui'], [4, 'launch_controller'], [5, null], [6, null]])
   })
 })
 

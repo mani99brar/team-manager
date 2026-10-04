@@ -629,6 +629,24 @@ describe('deriveNow', () => {
     assert.equal(isUntried({ ...untried, detail: { ...untried.detail, snapshot: { ...untried.detail.snapshot, status: 'running' } } }), false)
   })
 
+  it('the tryout\'s own row (C7) is a log line: Now and the markers read as before it, on a succeeded run and on a failed one', () => {
+    // tryout.py appends `controller` `note`; `note` is no event status, so it is served node-less with no status.
+    const recorded = (run: RunData, bundle: Bundle): RunData => {
+      const last = run.events.at(-1)!
+      const row = laterEvent(bundle, last.sequence, last.sequence + 1, last.occurred_at,
+        { node_id: null, status: null, type: 'log', message: 'Tryout recorded by the operator: broken. The list is empty after a reload.' })
+      return { ...run, events: [...run.events, row] }
+    }
+    for (const [name, run, bundle] of [['skeleton-fixes-001', runData(fixes), fixes], ['workflow-guardrails-001', guardrailsFull(), guardrails]] as const) {
+      const before = checked(run)
+      const after = checked(recorded(run, bundle))
+      assert.deepEqual([after.situation, after.reasonSource, after.next.label, textToString(after.headline, T0)],
+        [before.situation, before.reasonSource, before.next.label, textToString(before.headline, T0)], name)
+      const marker = buildTimeline(recorded(run, bundle)).markers.find(item => item.raw.startsWith('Tryout recorded'))
+      assert.deepEqual([marker?.kind, marker?.blocked], ['log', false], name)
+    }
+  })
+
   it('question', () => {
     const now = checked(synthetic({
       status: 'running', nodes: WORKING,

@@ -451,7 +451,9 @@ const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Cod
   /^Worker \S+ asked question \d+; at most \d+ are answered\b/,
   /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/,
   // pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches.
-  /^Launch notes: /]
+  /^Launch notes: /,
+  // tryout.py (C7): the operator's tryout verdict, a `note` row.
+  /^Tryout recorded by the (?:operator|maintainer)\b/]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
 /** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
 const QUESTIONS_BYTE_LIMIT = 256 * 1024
