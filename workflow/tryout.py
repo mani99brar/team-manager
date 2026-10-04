@@ -3,8 +3,8 @@
 A user-facing feature (feature.json 2.4.0 `tryout: true`) asks the operator to try its run before the merge to main.
 launch passes `--tryout` to prepare, which pins `plan.tryout`. `python -m workflow tryout <run> --result
 works|broken|skipped [--note "<text>"] --by operator` appends {result, note, at, by} to `<run>/tryout.json`, writes one
-plain record on the timeline and exports the run again, so the viewer drops its Untried chip. It refuses a run whose plan
-does not ask for a tryout, a run with no candidate yet, and the maintainer (actor.OPERATOR_ONLY). The record is advisory:
+plain record on the timeline and exports the run again, so the viewer drops its Untried chip. It refuses an abandoned run, a
+run whose plan does not ask for a tryout, a run with no candidate yet, and the maintainer (actor.OPERATOR_ONLY). The record is advisory:
 the controller never merges main, so nothing waits on it but the operator and the limit below.
 
 The limit (C29): a feature is untried when its latest integrated run has `tryout: true` and no verdict. A new tryout launch
@@ -118,6 +118,8 @@ def tryout_main(argv=None):
         actor = require_actor(args, "tryout")
         if not (directory / "plan.json").is_file():
             raise ValueError(f"{directory} has no plan.json: name a run directory")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)  # An abandoned run changes no more: status, export and brief still read it.
         plan = read_json(directory / "plan.json")
         if plan.get("tryout") is not True:
             raise ValueError("The run's plan does not ask for a tryout (feature.json 2.4.0 tryout: true pins it at launch)")
@@ -130,8 +132,13 @@ def tryout_main(argv=None):
         with run_lock(directory):
             entry = record_verdict(directory, plan, args.result, note, actor)
             append_event(directory, "controller", "note", f"Tryout recorded by {actor_text(actor)}: {args.result}" + (f". {note}" if note else ""))
-            runtime = ExportRuntime(directory)
-            report(runtime, persisted_state(runtime))  # run-state.json carries the verdict: the viewer drops the Untried chip.
+            recorded = f"Tryout recorded for {plan['run_id']}: {entry['result']}" + (f" ({note})" if note else "") + f". History: {directory / TRYOUT}"
+            try:
+                runtime = ExportRuntime(directory)
+                report(runtime, persisted_state(runtime))  # run-state.json carries the verdict: the viewer drops the Untried chip.
+            except Exception as error:  # The verdict stands: a rerun would record it twice.
+                parser.exit(1, f"{recorded}\nThe export failed ({error}): the viewer still shows the run as before. Refresh it with "
+                               f'python -m workflow export "{directory}"\n')
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(1, f"Blocked: {error}\nNothing was recorded.\n")
-    print(f"Tryout recorded for {plan['run_id']}: {entry['result']}" + (f" ({note})" if note else "") + f". History: {directory / TRYOUT}")
+    print(recorded)

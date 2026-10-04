@@ -1859,6 +1859,7 @@ class AbandonTests(unittest.TestCase):
         from .notes import note_main
         from .repair import repair_main
         from .sidecar import pass_main
+        from .tryout import tryout_main
         code, output, _ = self.abandon("--reason", self.REASON, "--by", "operator")
         self.assertEqual(code, 0, output)
         run = str(self.directory)
@@ -1872,7 +1873,8 @@ class AbandonTests(unittest.TestCase):
         for name, main, argv in (("resume", resume_main, [run, "--by", "operator"]), ("resume --launch", resume_main, [run, "--launch", "--by", "operator"]),
                                  ("accept-challenge", resume_main, [run, "--accept-challenge", "fine", "--by", "operator"]), ("answer", answer_main, [run, "ui", "Yes", "--by", "operator"]),
                                  ("note", note_main, [run, "ui", "Hold", "--by", "operator"]), ("sidecar-pass", pass_main, [run]),
-                                 ("repair", repair_main, [run, "ui", "--commit", "HEAD", "--reason", "fix", "--by", "operator"])):
+                                 ("repair", repair_main, [run, "ui", "--commit", "HEAD", "--reason", "fix", "--by", "operator"]),
+                                 ("tryout", tryout_main, [run, "--result", "works", "--by", "operator"])):
             with self.subTest(action=name):
                 err = io.StringIO()
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as exit_:

@@ -11,7 +11,7 @@ stop_session waits out) unless its state is terminal. A session that is gone is 
 `controller` event with the status `cancelled`, which the viewer reads as the run's own status.
 
 Afterwards every command that would change the run refuses it (refuse_abandoned): automatic, automatic-step, start,
-attach, freeze, retry, reconcile, review, approve, resume, answer, note, repair and sidecar-pass. status, export and brief
+attach, freeze, retry, reconcile, review, approve, resume, answer, note, repair, sidecar-pass and tryout. status, export and brief
 still read it; clean removes its worktrees and keeps its source checkout, which brief reads (clean.run_worktrees), and
 ledger reads it like any other run.
 """

@@ -101,6 +101,26 @@ class TryoutTests(unittest.TestCase):
         self.assertIn("has no candidate yet", output)
         self.assertFalse((run / "tryout.json").exists())
 
+    def test_an_abandoned_run_is_refused(self):
+        run = tryout_run(self.root)
+        save_json(run / "abandon.json", {"reason": "followed up by run-002", "by": "operator", "abandoned_at": "2026-10-04T10:00:00Z"})
+        code, output = tryout_cli(str(run), "--result", "works", "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertIn("The run was abandoned by the operator", output)
+        self.assertFalse((run / "tryout.json").exists())
+        self.assertFalse((run / "events.jsonl").exists() and "Tryout recorded" in (run / "events.jsonl").read_text())
+
+    def test_an_export_that_fails_after_the_verdict_says_it_was_recorded(self):
+        run = tryout_run(self.root)
+        with patch("workflow.pipeline.report", side_effect=OSError("disk full")):
+            code, output = tryout_cli(str(run), "--result", "works", "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertNotIn("Nothing was recorded", output)
+        self.assertIn(f"Tryout recorded for {run.name}: works", output)
+        self.assertIn("disk full", output)
+        self.assertIn(f'python -m workflow export "{run}"', output)
+        self.assertEqual([item["result"] for item in read_json(run / "tryout.json")["verdicts"]], ["works"])
+
     def test_the_maintainer_and_a_missing_actor_are_refused(self):
         run = tryout_run(self.root)
         code, output = tryout_cli(str(run), "--result", "works", "--by", "maintainer")
