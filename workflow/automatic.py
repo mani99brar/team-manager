@@ -1043,9 +1043,11 @@ def review_candidate(runtime) -> dict:
         if combined.get("bundle_sha256") == digest and combined.get("status") == "succeeded":
             runtime.validate_review(combined["review"])
             if combined.get("transport") == "native":
-                # Accepted earlier, but a stop was not confirmed: retry it (the stop intent makes it idempotent).
+                # Accepted earlier, but a stop was not confirmed: retry it (the stop intent makes it idempotent). A stop
+                # confirmed before its cost was recorded (C49; a controller killed in between) goes through stop_session
+                # again, which records the cost without issuing another stop.
                 for reviewer_id in state.ids:
-                    if not reviewer_stopped(runtime, reviewer_id):
+                    if not reviewer_stopped(runtime, reviewer_id) or not (runtime.directory / f"{review_node(reviewer_id)}.cost.json").exists():
                         runtime.stop_reviewer(reviewer_id)
             return combined["review"]
         if combined.get("bundle_sha256") == digest and combined.get("transport") == "native" and combined.get("status") in {"running", "needs_reconciliation"}:

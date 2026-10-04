@@ -3533,6 +3533,31 @@ sys.exit(0 if commit else 75)
         self.assertEqual(self.reviewer_launches(), len(self.ids))
         self.assertEqual([event["status"] for event in self.events() if event["node"] == "review"][-2:], ["stopped", "approved"])
 
+    def test_a_confirmed_reviewer_stop_without_its_cost_record_is_priced_on_resume(self):
+        # C49: a controller killed between a reviewer's confirmed stop and its cost record leaves stop.json stopped and no
+        # cost.json. Re-entering the accepted review records the cost through stop_session, without issuing another stop.
+        # (The fake stop confirms without a cost record, as such a kill leaves it; the re-entry runs the real stop_session.)
+        from .pipeline import Pipeline
+        f = self.fixture
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(f.runtime)
+        for reviewer_id in self.ids:
+            self.assertTrue(read_json(self.file(reviewer_id, "stop.json"))["stopped"])
+            self.assertFalse(self.file(reviewer_id, "cost.json").exists())
+        real_stop = lambda reviewer_id="review": Pipeline.stop_session(f.runtime, self.node(reviewer_id))
+        with patch.object(f.runtime, "stop_reviewer", side_effect=real_stop) as stop, \
+                patch("workflow.pipeline.run_claude", side_effect=AssertionError("stop issued again")), \
+                patch.object(f.sessions, "run_reviewer", side_effect=AssertionError("relaunched")):
+            review_candidate(f.runtime)
+        self.assertEqual([call.args[0] for call in stop.call_args_list], self.ids)
+        for reviewer_id in self.ids:
+            cost = read_json(self.file(reviewer_id, "cost.json"))
+            self.assertEqual(cost["session_id"], read_json(self.file(reviewer_id, "stop.json"))["session_id"])
+        # Once each is priced, a later re-entry calls no stop.
+        with patch.object(f.runtime, "stop_reviewer") as stop:
+            review_candidate(f.runtime)
+        stop.assert_not_called()
+
     # ---- Re-checks between the accepted files and the verdict -------------------------------------
 
     def assert_refused_after_wait(self, error):
