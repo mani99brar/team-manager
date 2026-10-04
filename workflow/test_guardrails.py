@@ -310,6 +310,13 @@ class DecisionsPrecedence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             return guardrails.challenge_prompt(Path(root), plan)
 
+    # What a split file tells reviewers (and the workers, who read the same block): a permitted departure from a grill default is
+    # no contradicted requirement, so the rubric's "P1 at least" does not block the candidate for it.
+    REVIEWER_RULE = ("For reviewers: a candidate behaviour that contradicts an Operator decision is P1 at least, and one that an Operator "
+                     "decision requires contradicts no line of a task or of a document a task cites. A departure from another section that "
+                     "is named so, stays inside the lane's owned paths and changes nothing another lane reads is no contradicted "
+                     "requirement: judge only what it does. An unnamed or out-of-lane departure is a contradicted requirement.")
+
     def test_a_split_file_binds_only_the_operator_decisions_and_leaves_the_rest_open_to_the_challenge(self):
         plan = self.plan(SPLIT_DECISIONS)
         self.assertEqual(guardrails.decisions_block(plan),
@@ -317,8 +324,8 @@ class DecisionsPrecedence(unittest.TestCase):
                          "this run and win over the task. Workers follow its other sections too, and may depart from a grill default or a "
                          "change after launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only "
                          "inside their own lane's owned paths; a departure that would change anything another lane reads is a question for "
-                         "the operator instead. Each departure is named, with the bullet's id, in the completion's open_assumptions:\n"
-                         + SPLIT_DECISIONS.rstrip() + "\n")
+                         "the operator instead. Each departure is named, with the bullet's id, in the completion's open_assumptions. "
+                         + self.REVIEWER_RULE + " The file:\n" + SPLIT_DECISIONS.rstrip() + "\n")
         prompt = self.challenge_prompt(plan)
         self.assertIn("raise one only for a consequence you can name; reopen an Operator decision of decisions.md (the operator's own "
                       "answer) only by showing it cannot hold, and then as a P1; the rest of decisions.md is open to challenge, like the "
@@ -339,6 +346,31 @@ class DecisionsPrecedence(unittest.TestCase):
                 self.assertIn("raise one only for a consequence you can name; do not reopen what decisions.md settles unless you show it "
                               "cannot hold. kind is assumption", self.challenge_prompt(plan))
         self.assertEqual(guardrails.decisions_block({}), "")  # A run without decisions (every run before slice 2).
+
+    def test_every_reviewer_of_a_split_file_gets_the_reviewer_rule_in_both_transports_and_a_legacy_file_reaches_them_unchanged(self):
+        # The rubric makes a contradicted line of decisions.md P1 at least and says a disclosure never lowers a severity. For a split
+        # file only an Operator decision is such a line: a worker's permitted, named departure from a grill default must not block the
+        # candidate. A file without the heading still binds as a whole, in the wording runs always had.
+        from .automatic import REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_prompt
+        self.assertIn("A candidate behaviour that contradicts a quoted line of a task, of a document a task cites or of an Operator decision "
+                      "in decisions.md (all of decisions.md when it has no Operator decisions heading) is P1 at least", REVIEW_RUBRIC)
+        self.assertNotIn("or of decisions.md is P1", REVIEW_RUBRIC)
+        coverage = {"reviewer_id": "coverage", "prompt": (TOOL / "workflow/prompts/reviewers/coverage.md").read_text()}
+        with tempfile.TemporaryDirectory() as root:
+            patch_path = Path(root) / "review.diff"
+            for text, split in ((SPLIT_DECISIONS, True), (DECISIONS, False)):
+                runtime = SimpleNamespace(directory=Path(root), plan=self.plan(text), workers=["ui"])
+                for reviewer in (None, coverage):
+                    printed = print_review_prompt(runtime, patch_path, reviewer)
+                    native = review_prompt(runtime, patch_path, reviewer) + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40)
+                    for transport, prompt in (("print", printed), ("native", native)):
+                        with self.subTest(split=split, reviewer=(reviewer or {}).get("reviewer_id", "review"), transport=transport):
+                            self.assertIn(REVIEW_RUBRIC, prompt)
+                            self.assertIn(guardrails.decisions_block(runtime.plan), prompt)
+                            self.assertEqual(self.REVIEWER_RULE in prompt, split)
+                            self.assertEqual("For reviewers" in prompt, split)
+                            if not split:
+                                self.assertIn("\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + DECISIONS.rstrip() + "\n", prompt)
 
 
 class FailingChallenge(GuardedFeature):

@@ -3,8 +3,9 @@
 - Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections.
 - Decisions: the feature directory holds a non-empty `decisions.md` (written by the `workflow-grill` skill); it is
   pinned into the plan and every worker and reviewer prompt includes it after the task. With the `## Operator
-  decisions` heading only those bind and win over the task, and the rest stays open to the challenge; a file without
-  it (every one written before) binds as a whole, as before, and launch prints a note saying so.
+  decisions` heading only those bind and win over the task, the rest stays open to the challenge, and reviewers
+  count a worker's named departure from the rest inside its lane as no contradicted requirement; a file without it
+  (every one written before) binds as a whole, as before, and launch prints a note saying so.
 - Design challenge: one read-only `claude --print` job reads the pinned PRD, tasks and decisions before any worker
   starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
@@ -227,6 +228,8 @@ def decisions_block(plan: dict) -> str:
     """What every worker and reviewer prompt appends after the task; empty for runs without decisions.
 
     A file with `## Operator decisions` binds only those; workers follow the rest and may depart from it only as stated.
+    Reviewers read the same block: only a contradicted Operator decision, or a departure the worker did not name or took
+    outside its lane, is a contradicted requirement, which the rubric (automatic.REVIEW_RUBRIC) makes P1 at least.
     A file without the heading (every one written before C4) binds as a whole, in the wording runs always had.
     """
     text = decisions_text(plan)
@@ -238,7 +241,11 @@ def decisions_block(plan: dict) -> str:
             "run and win over the task. Workers follow its other sections too, and may depart from a grill default or a change after "
             "launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only inside their own "
             "lane's owned paths; a departure that would change anything another lane reads is a question for the operator instead. "
-            "Each departure is named, with the bullet's id, in the completion's open_assumptions:\n" + text.rstrip() + "\n")
+            "Each departure is named, with the bullet's id, in the completion's open_assumptions. For reviewers: a candidate behaviour "
+            "that contradicts an Operator decision is P1 at least, and one that an Operator decision requires contradicts no line of a "
+            "task or of a document a task cites. A departure from another section that is named so, stays inside the lane's owned "
+            "paths and changes nothing another lane reads is no contradicted requirement: judge only what it does. An unnamed or "
+            "out-of-lane departure is a contradicted requirement. The file:\n" + text.rstrip() + "\n")
 
 
 def has_challenge(plan: dict) -> bool:

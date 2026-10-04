@@ -567,8 +567,9 @@ class ReviewCompletionTests(unittest.TestCase):
         # (a contradicted task line is P1 at least), asks for the consequence, lets a brief name further blocking items and
         # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own.
         from .automatic import PRINT_REVIEW_SUFFIX, REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_brief, review_prompt
-        for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3", "contradicts a quoted line of a task, of a document a task cites or of decisions.md",
-                      "a failure a worker's completion discloses", "never lowers a severity", 'End each P1 and P2 message with "Consequence: "',
+        for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3",
+                      "contradicts a quoted line of a task, of a document a task cites or of an Operator decision in decisions.md (all of decisions.md "
+                      "when it has no Operator decisions heading) is P1 at least", "a failure a worker's completion discloses", "never lowers a severity", 'End each P1 and P2 message with "Consequence: "',
                       "Your brief may name further items that block", "The controller derives your verdict from your findings",
                       "a blocked verdict blocks on its own only when it lists no finding"):
             self.assertIn(value, REVIEW_RUBRIC)
@@ -593,13 +594,17 @@ class ReviewCompletionTests(unittest.TestCase):
         for path in briefs:
             text = " ".join(path.read_text().split())
             with self.subTest(brief=str(path.relative_to(tool))):
-                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things"):
+                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things",
+                               "or of decisions.md (contradictions"):
                     self.assertNotIn(absent, text)
+                # Case (2) follows decisions.md's precedence (C4): with the Operator decisions heading only those are requirements, so a
+                # worker's named departure from a grill default is no contradiction; a file without the heading counts as a whole.
                 for value in ("A gap is P1 only in these four cases: (1) a failure you show on the candidate: the inputs, the expected behaviour quoted, "
                               "the actual behaviour, and path:line; (2) a candidate behaviour that contradicts a quoted line of a task, of a document a "
-                              "task cites, or of decisions.md", "(3) a worker's disclosure, quoted, that something fails; (4) a line you could not check "
-                              "because its test source", "was unreadable: name the line and say why", "Every other gap is one P2 finding per",
-                              "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
+                              "task cites, or of an Operator decision in decisions.md, all of decisions.md when it has no Operator decisions heading "
+                              "(contradictions are yours to report, not the general reviewer's)", "(3) a worker's disclosure, quoted, that something "
+                              "fails; (4) a line you could not check because its test source", "was unreadable: name the line and say why",
+                              "Every other gap is one P2 finding per", "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)
 
     def test_only_coverage_holds_its_p1_to_a_failure_shown_on_the_candidate(self):
