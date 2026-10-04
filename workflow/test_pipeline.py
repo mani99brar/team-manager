@@ -1631,6 +1631,10 @@ class AbandonTests(unittest.TestCase):
             row = next((row for row in rows if row["id"] == background_id), None)
             if row is not None and row.get("name", f"workflow-run-{node}") != f"workflow-run-{node}":
                 raise RuntimeError("Claude session identity/worktree mismatch")
+            if row is not None and row.get("state") not in {"idle", "working", "blocked", "done"}:
+                raise RuntimeError(f"Session is not attachable: {row.get('state')!r}; reconcile manually")
+            if row is not None and not row.get("pid"):
+                raise RuntimeError("No live native PID; reconcile session before attaching")
             return row
         self.sessions = SimpleNamespace(executable="claude", directory=f.directory, inventory=inventory, locate=locate)
 
@@ -1683,6 +1687,48 @@ class AbandonTests(unittest.TestCase):
         record = read_json(self.directory / "abandon.json")
         self.assertEqual((record["stopped"], record["not_running"]), (["ui", "review"], ["adapter"]))
         self.assertNotIn("review", self.live)
+
+    def test_a_bound_session_listed_without_a_pid_is_stopped_through_the_respawn_gap(self):
+        # A Claude Code restart: the service lists ui without a PID for about 15 s before it respawns it. The session is
+        # still there, so abandon stops it (stop_session waits the gap out) rather than recording it as not running.
+        listings = []
+        inventory = self.sessions.inventory
+
+        def respawning():
+            rows = inventory()
+            listings.append(1)
+            return [{**row, "pid": None} if row["id"] == "id-ui" and len(listings) == 1 else row for row in rows]
+        self.sessions.inventory = respawning
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-ui"], ["claude", "stop", "id-review"]])
+        self.assertEqual(read_json(self.directory / "abandon.json")["stopped"], ["ui", "review"])
+
+    def test_an_unbound_session_still_starting_is_a_failure_and_a_terminal_one_is_not_running(self):
+        save_json(self.directory / "review.interactive.json", {"node_id": "review", "session_id": None, "status": "needs_reconciliation"})
+        (self.directory / "review.launch.log").write_text("Started in the background.\nclaude attach 4f3a2b1c \n")
+        self.live["review"] = {"id": "4f3a2b1c", "sessionId": "session-review", "pid": None, "state": "starting"}
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertIn("review: Session is not attachable: 'starting'", output)
+        self.assertFalse((self.directory / "abandon.json").exists())
+        self.live["review"]["state"] = "failed"  # Rerun once it ended: a terminal row is not running.
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual((code, stops), (0, []), output)
+        # ui's stop was confirmed by the first attempt; its marker keeps it from being issued again.
+        self.assertEqual(read_json(self.directory / "abandon.json")["not_running"], ["ui", "adapter", "review"])
+
+    def test_an_unavailable_listing_is_waited_out_once_not_once_per_node(self):
+        from .sessions import TransientInfraError
+
+        def unavailable():
+            self.inventories += 1
+            raise TransientInfraError("Claude Code unavailable: `claude agents --json` exited 75")
+        self.sessions.inventory = unavailable
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual((code, stops, self.inventories), (1, [], 1), output)
+        self.assertEqual(output.count("exited 75"), 1, output)
+        self.assertFalse((self.directory / "abandon.json").exists())
 
     def test_an_identity_refusal_is_a_failure_not_a_session_that_is_not_running(self):
         self.live["review"]["name"] = "workflow-other-run-review"

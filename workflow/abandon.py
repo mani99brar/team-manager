@@ -6,7 +6,8 @@ mechanical recovery, so the maintainer is refused (actor.OPERATOR_ONLY). It take
 `repair` does, and refuses while a controller holds either. It stops each worker and reviewer session the run recorded
 (`<node>.interactive.json`) that is still live, by its exact ids through Pipeline.stop_session, so nothing keeps using
 quota: a bound receipt by its ids in the listing, one the launch never bound by the id its launch log printed (locate), and
-an unfinished stop intent by its ids or its process. A session that is gone is recorded as not running. Then it writes `abandon.json` and one
+an unfinished stop intent by its ids or its process. A listed row counts whatever its PID (a restart's respawn gap, which
+stop_session waits out) unless its state is terminal. A session that is gone is recorded as not running. Then it writes `abandon.json` and one
 `controller` event with the status `cancelled`, which the viewer reads as the run's own status.
 
 Afterwards every command that would change the run refuses it (refuse_abandoned): automatic, automatic-step, start,
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from .actor import actor_record, actor_text, add_actor_argument, require_actor
 from .checks import now
+from .interactive import PROCESS_ENDED, TERMINAL_STATES
 from .pipeline import pid_alive
 from .sessions import plan_workers, read_json, review_nodes, run_lock, save_json
 
@@ -58,30 +60,42 @@ def recorded_nodes(plan: dict, directory: Path) -> list[str]:
 
 
 def listed_live(rows: list[dict], *records: dict) -> bool:
-    """The listing shows one of these records' sessions with a process: by its background id or its session UUID."""
+    """The listing shows one of these records' sessions, by its background id or its session UUID, in a state that is not
+    terminal. A row without a PID counts: after a Claude Code restart the service lists an idle session that way until it
+    respawns it, and stop_session waits that gap out (UpdateGaps)."""
     background_ids = {record.get("background_id") for record in records} - {None}
     session_ids = {record.get("session_id") for record in records} - {None}
-    return any(row.get("pid") and (row.get("id") in background_ids or row.get("sessionId") in session_ids) for row in rows)
-
-
-# What locate says of a listed row with no process behind it: the session is not running.
-NOT_RUNNING = ("No live native PID", "Native process is unavailable", "Session is not attachable")
+    return any(row.get("state") not in TERMINAL_STATES and (row.get("id") in background_ids or row.get("sessionId") in session_ids)
+               for row in rows)
 
 
 def unbound_live(runtime, node: str, rows: list[dict]) -> bool:
     """A receipt the launch never bound (its settle step failed: Claude Code unavailable, or Ctrl-C) still has a session when
     its launch log printed one: locate binds that id and checks its identity, as a stop does. A launch log that printed no
-    id launched nothing; a listed row without a process is not running. Any other refusal (an ambiguous id, another run's
-    session) raises, and is a failure, never 'not running'."""
+    id launched nothing. The session is not running only when its process ended (PROCESS_ENDED) or its row is in a terminal
+    state; a row still starting or without a PID yet, and any other refusal (an ambiguous id, another run's session), raise:
+    a failure the operator reruns, never 'not running'."""
     log = runtime.directory / f"{node}.launch.log"
     if not log.exists() or not re.search(r"claude attach [a-f0-9-]{8,36}\s", log.read_text(errors="replace")):
         return False
     try:
         return runtime.sessions.locate(node, rows) is not None
     except RuntimeError as error:
-        if str(error).startswith(NOT_RUNNING):
+        if str(error).startswith(PROCESS_ENDED):
+            return False
+        if str(error).startswith("Session is not attachable") and terminal_row(log, rows):
             return False
         raise
+
+
+def terminal_row(log: Path, rows: list[dict]) -> bool:
+    """The row of the id the launch log printed is in a terminal state (stopped, failed)."""
+    ids = set(re.findall(r"claude attach ([a-f0-9-]{8,36})\s", log.read_text(errors="replace")))
+    return any(row.get("id") in ids and row.get("state") in TERMINAL_STATES for row in rows)
+
+
+class ListingUnavailable(RuntimeError):
+    """`claude agents --json` gave no listing: abandon ends at once, having waited it out once (inventory's grace)."""
 
 
 def abandon(runtime, reason: str, actor: str) -> dict:
@@ -98,8 +112,12 @@ def abandon(runtime, reason: str, actor: str) -> dict:
 
     def rows() -> list[dict]:
         # Listed once, and only when a node needs it: a run that never launched is abandoned while Claude Code is unavailable.
+        # A listing that failed is not asked again for the next node: its grace was waited out once.
         if not listing:
-            listing.append(runtime.sessions.inventory())
+            try:
+                listing.append(runtime.sessions.inventory())
+            except Exception as error:
+                raise ListingUnavailable(str(error)) from error
         return listing[0]
     for node in recorded_nodes(runtime.plan, directory):
         receipt = read_json(directory / f"{node}.interactive.json")
@@ -122,6 +140,9 @@ def abandon(runtime, reason: str, actor: str) -> dict:
                 continue
             runtime.stop_session(node)
             stopped.append(node)
+        except ListingUnavailable as error:
+            raise RuntimeError(f"Not abandoned: `claude agents --json` gave no session list ({error}), so abandon cannot tell which "
+                               "sessions still run. Rerun the same abandon once `claude --version` works") from error
         except Exception as error:
             failures[node] = error
     if failures:
