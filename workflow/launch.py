@@ -206,7 +206,8 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
-                    roles: dict | None = None, restore_from: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    roles: dict | None = None, restore_from: str | None = None,
+                    follows: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
@@ -219,9 +220,13 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     `restore_from` (C12) is resolved to its commit here, in the target (the run's worktree shares its objects and refs),
     before any Git action, and prepare gets that commit.
+
+    `follows` names the run this one follows up (C30): a run directory, or a run id under `run_root`; prepare pins it as
+    plan.follows.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
+    followed = followed_run(follows, run_root) if follows is not None else None
     repo = repo.resolve()
     folder = feature_folder(repo, feature)
     left = placeholders(folder)
@@ -292,6 +297,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     prepare = [*base, "prepare", str(run), "--repo", str(source), "--policy", str(in_source(policy_path))]
     if workers is not None:
         prepare.extend(["--workers", ",".join(selected)])
+    if followed is not None:
+        prepare.extend(["--follows", str(followed)])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
@@ -333,6 +340,17 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     return run, commands, notes
 
 
+def followed_run(value: str, run_root: Path) -> Path:
+    """The run directory `--follows` names: a path, or a run id under the run root. Refused when it holds no plan.json."""
+    from .brief import follows_record
+    path = Path(value).expanduser()
+    if not path.exists() and not path.is_absolute() and FEATURE_NAME.fullmatch(value):
+        path = run_root / value
+    path = path.resolve()
+    follows_record(path)  # Refuses a directory without plan.json, before any Git action.
+    return path
+
+
 def challenge_paused(run: Path) -> bool:
     path = run / "challenge.json"
     return path.is_file() and read_json(path).get("status") == "paused"
@@ -368,6 +386,8 @@ def main(argv=None):
     parser.add_argument("--restore-from", metavar="COMMIT", help="A follow-up run: each lane starts by restoring its owned paths from this commit "
                                                               "(pinned in the plan; the design challenge reads a read-only copy)")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
+    parser.add_argument("--follows", metavar="RUN", help="The run this one follows up (its directory, or its run id under the run root): "
+                                                         "prepare pins its id, verdict and candidate as plan.follows. See `python -m workflow brief`")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
@@ -384,7 +404,7 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles, args.restore_from)
+                                               by, args.profile, roles, args.restore_from, args.follows)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
