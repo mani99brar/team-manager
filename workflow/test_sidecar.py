@@ -430,6 +430,51 @@ class PassInputs(SidecarRun):
         self.assertEqual(len(self.ledger()["passes"]), 10)
 
 
+class PassPrompt(SidecarRun):
+    def test_the_prompt_holds_the_operators_severity_rule_and_the_reviewer_briefs_are_inputs_only(self):
+        # C41 (decisions 4 and 12): the prompt defined no severity, and all 23 findings of 35 live passes came out P2. The rule is
+        # the operator's, not the reviewer briefs' (coverage's stricter bar would contradict decision 4): those are context.
+        self.plan["reviewers"] = [{"reviewer_id": "general", "prompt": "Review like a staff engineer. GENERAL-BRIEF."},
+                                  {"reviewer_id": "coverage", "prompt": "Block on every missing test. COVERAGE-BRIEF."}]
+        self.run_pass()
+        [call] = self.job_calls()
+        prompt = " ".join(call["prompt"].split())
+        self.assertIn("Severity, the operator's rule for your findings, whatever a reviewer brief says: P0 or P1 only for a defect shown by "
+                      "the code, a check or a pane; work that contradicts a line of a task, of decisions.md or a safety line of the PRD; a "
+                      "failure the worker disclosed; or a security or data-loss risk. P0 when the lane's work must not merge at all. "
+                      "Untested behaviour, risks and suggestions are P2, however likely; P2 is the lowest.", prompt)
+        self.assertIn("tasks/ holds the pinned tasks, decisions.md, the policy, the design challenge record and, in reviewers/, the briefs "
+                      "of the run's reviewers: what review will look at, never a severity rule for your findings.", prompt)
+        self.assertNotIn("GENERAL-BRIEF", prompt)
+        tasks = self.directory / "sidecar-inputs" / "1" / "tasks"
+        self.assertEqual({path.name: path.read_text() for path in (tasks / "reviewers").iterdir()},
+                         {"general.md": "Review like a staff engineer. GENERAL-BRIEF.", "coverage.md": "Block on every missing test. COVERAGE-BRIEF."})
+        # A run with the single built-in reviewer pins no brief: no folder, and the prompt names none.
+        del self.plan["reviewers"]
+        self.run_pass()
+        self.assertFalse((self.directory / "sidecar-inputs" / "2" / "tasks" / "reviewers").exists())
+        prompt = " ".join(self.job_calls()[-1]["prompt"].split())
+        self.assertIn("tasks/ holds the pinned tasks, decisions.md, the policy and the design challenge record.", prompt)
+        self.assertIn("Severity, the operator's rule for your findings", prompt)
+
+    def test_the_prompt_carries_the_project_conventions_and_an_old_plan_none(self):
+        # C15: the conventions block every role gets, from plan.conventions (pinned at prepare); a plan without one has none.
+        self.run_pass()
+        self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
+        self.plan["conventions"] = {"text": "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n\n"}
+        self.run_pass()
+        prompt = self.job_calls()[-1]["prompt"]
+        block = (f"\n\nProject conventions (CLAUDE.md at {self.plan['base_commit']}; the task and decisions.md take precedence):\n"
+                 "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n")
+        self.assertEqual(sidecar.conventions_block(self.plan), block)
+        self.assertIn(BRIEF + block + "\n=== Review sidecar protocol", prompt)  # After the brief, before the protocol block.
+        for value in ({"text": "  \n"}, {"text": None}, "not a record"):
+            with self.subTest(conventions=value):
+                self.plan["conventions"] = value
+                self.run_pass()
+                self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
+
+
 # ---- ledger-merge ----------------------------------------------------------------------------------------------------
 
 class LedgerMerge(SidecarRun):
@@ -679,6 +724,68 @@ class Messages(SidecarRun):
                 self.assertEqual(self.herdr.verbs(), verbs)
         self.assertFalse(any(node == "controller" for node, _, _ in self.events))
         validate_schema("sidecar", self.ledger())
+        self.assert_node_statuses()
+
+
+class Paging(SidecarRun):
+    """C41 (decision 12): a P0/P1 a pass made that no lane took, and every escalation, reach the operator as one `sidecar`
+    attention record on that lane; a P0/P1 delivered to its lane does not."""
+
+    def setUp(self):
+        super().setUp()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def records(self) -> list:
+        feed = self.root / "config" / "attention.jsonl"
+        return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed.read_text().splitlines())] if feed.exists() else []
+
+    def run_output(self, findings=(), messages=(), escalations=()) -> list:
+        """One pass returning this output; the attention records it added."""
+        before = len(self.records())
+        self.script_steps([*([{}] * len(self.job_calls())), {"output": output(findings, messages, escalations)}])
+        self.assertEqual(self.run_pass()["status"], "completed")
+        return self.records()[before:]
+
+    def test_a_p1_no_lane_took_and_an_escalation_page_the_operator_and_a_delivered_p1_does_not(self):
+        ledger = self.directory / "sidecar.ledger.json"
+        where = f"Read it in {ledger} or on the run's sidecar page."
+        # Delivered to its lane: the lane has it, nothing pages.
+        self.assertEqual(self.run_output([upsert()], [message()]), [])
+        self.assertEqual(self.ledger()["messages"][-1]["status"], "delivered")
+        # Refused because the lane finished (a one-lane run's final pass reaches no worker): one record, on that lane.
+        self.completion("ui")
+        problem = "The ui text is still wrong after the fix. It says before."
+        self.assertEqual(self.run_output([upsert(problem=problem)], [message()]),
+                         [("sidecar", "ui", f"Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (refused, lane_finished): "
+                                            f"The ui text is still wrong after the fix. {where}")])
+        (self.directory / "ui.completion.json").unlink()
+        # Not messaged at all, or undeliverable: each pages once.
+        self.herdr.screens["pane-adapter"] = claude_screen("my own draft")
+        self.assertEqual(self.run_output([upsert(lane="adapter", severity="P0", problem="Deletes the database. Always.")],
+                                         [message(lane="adapter")]),
+                         [("sidecar", "adapter", f"Review sidecar pass 3: P0 S-3 on lane adapter did not reach the lane (undeliverable, pane_busy): "
+                                                 f"Deletes the database. {where}")])
+        self.assertEqual(len(self.run_output([upsert(ref="new-1", lane="adapter")])), 1)
+        # Not new and not raised: a P1 updated again, a P2, a P1 resolved, a delivered P1 upserted without a message.
+        self.assertEqual(self.run_output([upsert(finding_id="S-1", note="Still open."), upsert(ref="new-1", severity="P2"),
+                                          upsert(finding_id="S-4", lane="adapter", disposition="verified_resolved", evidence="Fixed in b2c3d4e.")]), [])
+        # Raised from P2, and reopened from verified_resolved: each pages, with no message to it.
+        raised = self.run_output([upsert(finding_id="S-5", severity="P1", problem="Now it loses data."),
+                                  upsert(finding_id="S-4", lane="adapter", evidence="It broke again in c3d4e5f.")])
+        self.assertEqual(raised, [  # In the ledger's order.
+            ("sidecar", "adapter", f"Review sidecar pass 6: P1 S-4 on lane adapter did not reach the lane (no message to it): The ui text is wrong. {where}"),
+            ("sidecar", "ui", f"Review sidecar pass 6: P1 S-5 on lane ui did not reach the lane (no message to it): Now it loses data. {where}")])
+        # Every escalation pages, here of a finding delivered to its lane, which itself does not; its event keeps the fixed form.
+        escalated = self.run_output([upsert(ref="new-1", problem="Leaks the token.")], [message()],
+                                    [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])
+        self.assertEqual(escalated, [("sidecar", "ui", f"Review sidecar pass 7: escalation S-6 (security) on lane ui: The token reaches the log. {where}")])
+        self.assertIn(("interactive", "escalation S-6 (security): see the sidecar page"), self.sidecar_events())
+        self.assertEqual([item["status"] for item in self.ledger()["messages"]][-1], "delivered")
+        # The run's record holds the latest record per lane.
+        states = read_json(self.directory / "attention.json")["states"]
+        self.assertEqual([(state["kind"], state["node"]) for state in states], [("sidecar", "adapter"), ("sidecar", "ui")])
         self.assert_node_statuses()
 
 

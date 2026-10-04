@@ -115,16 +115,20 @@ class AttentionRecord(unittest.TestCase):
         self.assertIsNotNone(self.record("question", "Worker adapter asked question 1 of 3: A or B?", "adapter", at=NOON + 1000))
 
     def test_kinds_are_fixed_and_the_reserved_ones_write_nothing_yet(self):
-        self.assertEqual(KINDS, frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished"}))
-        self.assertEqual(RESERVED_KINDS, frozenset({"sidecar", "usage_limit"}))
+        self.assertEqual(KINDS, frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar"}))
+        self.assertEqual(RESERVED_KINDS, frozenset({"usage_limit"}))
         self.assertFalse(KINDS & RESERVED_KINDS)
-        for kind in ("sidecar", "usage_limit", "blocked", ""):
+        for kind in ("usage_limit", "blocked", ""):
             with self.subTest(kind):
                 self.assertIsNone(self.record(kind=kind))
                 self.assertIn("attention kind", self.errors)
         self.assertIsNone(self.record(text="  "))
         self.assertFalse((self.run / "attention.json").exists())
         self.assertEqual(self.lines(), [])
+        # The review sidecar's P0/P1 that reached no lane, and its escalations (C41), are a kind of their own, per lane.
+        written = self.record("sidecar", "Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (refused, lane_finished)", node="ui")
+        self.assertEqual((written["kind"], written["node"], self.errors), ("sidecar", "ui", ""))
+        self.assertEqual([(line["kind"], line["node"]) for line in self.lines()], [("sidecar", "ui")])
 
     def test_attention_never_raises(self):
         # The registry folder cannot be created (a file is in its way): nothing is written, and the caller goes on.
