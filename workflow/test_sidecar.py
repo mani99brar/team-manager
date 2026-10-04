@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from . import sidecar
+from . import guardrails, sidecar
 from .automatic import DEFAULTS as AUTOMATIC, automatic_settings, drive, wait_handoffs
 from .export_state import graph_nodes
 from .guardrails import input_shown, iso
@@ -458,16 +458,20 @@ class PassPrompt(SidecarRun):
         self.assertIn("Severity, the operator's rule for your findings", prompt)
 
     def test_the_prompt_carries_the_project_conventions_and_an_old_plan_none(self):
-        # C15: the conventions block every role gets, from plan.conventions (pinned at prepare); a plan without one has none.
+        # C15: the conventions block every role gets, from plan.conventions (pinned at prepare); a plan without one has none. It is
+        # guardrails.conventions_block, word for word: it names the pinned commit, never the base a resume moved to.
         self.run_pass()
         self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
-        self.plan["conventions"] = {"text": "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n\n"}
+        pinned = "c0ffee" + "0" * 34
+        self.plan["conventions"] = {"commit": pinned, "text": "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n\n"}
         self.run_pass()
         prompt = self.job_calls()[-1]["prompt"]
-        block = (f"\n\nProject conventions (CLAUDE.md at {self.plan['base_commit']}; the task and decisions.md take precedence):\n"
+        block = (f"\n\nProject conventions (CLAUDE.md at {pinned}; the controller's rules, the task and decisions.md take precedence):\n"
                  "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n")
-        self.assertEqual(sidecar.conventions_block(self.plan), block)
+        self.assertNotEqual(pinned, self.plan["base_commit"])
+        self.assertEqual(guardrails.conventions_block(self.plan), block)
         self.assertIn(BRIEF + block + "\n=== Review sidecar protocol", prompt)  # After the brief, before the protocol block.
+        self.assertFalse(hasattr(sidecar, "conventions_block"), "no stand-in beside guardrails.conventions_block")
         for value in ({"text": "  \n"}, {"text": None}, "not a record"):
             with self.subTest(conventions=value):
                 self.plan["conventions"] = value

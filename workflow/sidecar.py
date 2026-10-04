@@ -448,21 +448,11 @@ SEVERITY_RULE = ("Severity, the operator's rule for your findings, whatever a re
                  "behaviour, risks and suggestions are P2, however likely; P2 is the lowest.")
 
 
-def conventions_block(plan: dict) -> str:
-    """The "Project conventions" block every role's prompt carries (C15): the target's CLAUDE.md as prepare pinned it in
-    `plan.conventions.text`; empty for a plan without it (every run prepared before). A local stand-in for
-    guardrails.conventions_block, which the prompt-builder chain adds."""
-    conventions = plan.get("conventions")
-    text = conventions.get("text") if isinstance(conventions, dict) else None
-    if not isinstance(text, str) or not text.strip():
-        return ""
-    return (f"\n\nProject conventions (CLAUDE.md at {plan['base_commit']}; the task and decisions.md take precedence):\n"
-            + text.rstrip() + "\n")
-
-
 def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path) -> str:
     """The pinned brief, the project conventions, then the controller's protocol block (PRD section 3): vocabulary, owned
-    paths, inputs, ledger, the severity rule and the rules."""
+    paths, inputs, ledger, the severity rule and the rules. The conventions block is guardrails.conventions_block, word for word as
+    the workers, reviewers and challenge get it."""
+    from . import guardrails  # At use, never as a name of this module: the block has one definition.
     lanes = plan_workers(plan)
     owned = owned_paths(directory)
     vocabulary = "; ".join(f"{lane} (worktree {plan['nodes'][lane]['worktree']}, owns {', '.join(owned.get(lane, [])) or 'its assigned paths'})"
@@ -475,7 +465,7 @@ def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path)
     tasks = ("tasks/ holds the pinned tasks, decisions.md, the policy, the design challenge record and, in reviewers/, the briefs of "
              "the run's reviewers: what review will look at, never a severity rule for your findings." if (inputs / "tasks" / "reviewers").is_dir()
              else "tasks/ holds the pinned tasks, decisions.md, the policy and the design challenge record.")
-    return ((plan["sidecar"]["prompt"].rstrip() + conventions_block(plan)).rstrip() + "\n\n"
+    return ((plan["sidecar"]["prompt"].rstrip() + guardrails.conventions_block(plan)).rstrip() + "\n\n"
             f"=== Review sidecar protocol (appended by the controller) ===\n"
             f"Run {plan['run_id']}, pass {n} ({trigger}), base commit {plan['base_commit']}. Lanes: {vocabulary}.\n"
             f"Inputs of this pass, in {inputs}: manifest.json lists per lane its head commit, native state (idle, working, blocked, done, "
