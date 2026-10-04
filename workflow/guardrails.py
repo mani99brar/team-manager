@@ -679,9 +679,10 @@ def challenge_worktree(runtime) -> Path:
     return cwd
 
 
-def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
+def run_challenge(runtime, attempt: int, herdr: bool = False, released: bool = False) -> dict:
     """One print job, validated and decided: `passed` without a P0/P1 concern, `paused` with one. No worker is launched here.
-    `herdr`: the `start` or `resume` that runs it was given --herdr, which the paused record's commands keep."""
+    `herdr`: the `start` or `resume` that runs it was given --herdr, which the paused record's commands keep. `released`: the
+    operator asked for the launch before this attempt ran (`resume --launch`), so a pass the plan would hold launches the workers."""
     from .automatic import print_command
     directory, plan = runtime.directory, runtime.plan
     try:
@@ -753,7 +754,7 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
         attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD {edited_in(plan)}, then run: "
                                                  f"{resume_command(directory, herdr)}; "
                                                  f"or accept it: {resume_command(directory, herdr, accept=True)}", node=CHALLENGE)
-    elif hold_pinned(plan):  # challenge_gate holds it next: no worker launches before `resume --launch`.
+    elif hold_pinned(plan) and not released:  # challenge_gate holds it next: no worker launches before `resume --launch`.
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {attempt} passed ({len(output['concerns'])} P2 concern(s)); held for the operator")
     else:
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {attempt} passed ({len(output['concerns'])} P2 concern(s)); launching workers")
@@ -902,9 +903,14 @@ def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) 
             "launch with those notes. Resume --launch without --drop")
 
 
-def held_refusal(directory: Path, record: dict, herdr: bool = False) -> str:
-    """What `resume` says on a held run when nothing changed since its attempt, and to `--accept-challenge` on a held run."""
+def held_refusal(directory: Path, record: dict, herdr: bool = False, unchanged: bool = True) -> str:
+    """What `resume` says on a held run when nothing changed since its attempt, and to `--accept-challenge` on a held run. With
+    feature files edited since the attempt (`unchanged` false), what each resume does with them."""
     plan = read_json(directory / "plan.json")
+    if not unchanged:
+        return (f"Design challenge attempt {record['attempt']} passed and is held for the operator, and feature files changed since it "
+                f"read them: nothing is accepted. {resume_command(directory, herdr, launch=True)} commits them, reruns the challenge and "
+                f"launches the workers unless it finds a P0/P1; or {resume_command(directory, herdr)} reruns it and holds again")
     return (f"Design challenge attempt {record['attempt']} passed and is held for the operator: nothing is accepted and nothing it "
             f"read has changed since. Launch the workers (add --drop <n>,<m> to leave notes out of their prompts): "
             f"{resume_command(directory, herdr, launch=True)}\nOr edit the task files, decisions.md or the PRD {edited_in(plan)}, then "
@@ -1347,7 +1353,7 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     if is_held(directory, plan, current):
         unchanged = unchanged_since(directory, plan, current)
         if accept_reason is not None or (unchanged and not launch):
-            raise ValueError(held_refusal(directory, current, herdr))
+            raise ValueError(held_refusal(directory, current, herdr, unchanged))
         if unchanged:
             beyond = sorted(number for number in dropped if number > len(current["concerns"]))
             if beyond:
@@ -1394,9 +1400,10 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     (directory / REVISION_INTENT).unlink()
     action_event(runtime.event, actor, "resume", f"rerunning the design challenge as attempt {attempt}")
     runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt} on base {plan['base_commit']}")
-    record = run_challenge(runtime, attempt, herdr)
-    if launch and record["status"] == "passed":
+    record = run_challenge(runtime, attempt, herdr, released=launch)
+    if launch and record["status"] == "passed" and hold_pinned(plan):
         release_hold(runtime, record, actor, frozenset())  # The operator asked for the launch before this attempt passed.
+        action_event(runtime.event, actor, "resume", f"design challenge attempt {attempt} passed under --launch, hold released; launching the workers")
     return record
 
 

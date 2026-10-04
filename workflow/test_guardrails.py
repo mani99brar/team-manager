@@ -1446,6 +1446,12 @@ class ChallengeHold(GuardedFeature):
         self.assertEqual((hold["attempt"], hold["released_by"], hold["dropped"]), (2, "operator", []))
         self.assertEqual(read_json(directory / "challenge-hold-1.json")["released_at"], None)
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+        # The operator asked for the launch before attempt 2 passed: its pass never says held, and the release is on the timeline.
+        events = self.events(directory)
+        self.assertIn(("challenge", "succeeded", "Design challenge attempt 2 passed (1 P2 concern(s)); launching workers"), events)
+        self.assertFalse([event for event in events if "attempt 2" in event[2] and "held for the operator" in event[2]], events)
+        self.assertIn(("controller", "note", "Resume by the operator: design challenge attempt 2 passed under --launch, hold released; launching the workers"),
+                      events)
         # A rerun with --launch that finds a P1 is an ordinary pause.
         other = self.held("edit-pause-001")
         self.edit_task()
@@ -1522,6 +1528,18 @@ class ChallengeHold(GuardedFeature):
                 self.assertIn(f"The operator runs: {PY} -m workflow resume {directory} --by operator --launch", output)
                 self.assertEqual((git(self.repo, "rev-parse", "HEAD"), (directory / "plan.json").read_bytes()), (head, plan))
                 self.assertEqual((len(self.challenge_calls()), self.launches(directory)), (1, ["challenge"]))
+
+    def test_the_override_on_an_edited_hold_says_the_files_changed_and_what_each_resume_does(self):
+        directory = self.held("held-accept-001")
+        self.edit_task()
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "fine"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: Design challenge attempt 1 passed and is held for the operator, and feature files changed since it read "
+                      f"them: nothing is accepted. {PY} -m workflow resume {directory} --by operator --launch commits them, reruns the "
+                      "challenge and launches the workers unless it finds a P0/P1; or "
+                      f"{PY} -m workflow resume {directory} --by operator reruns it and holds again", output)
+        self.assertNotIn("nothing it read has changed since", output)
+        self.assertEqual(len(self.challenge_calls()), 1)
 
     def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):
         directory = self.held("edit-hold-001")
