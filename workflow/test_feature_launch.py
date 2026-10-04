@@ -16,6 +16,7 @@ from .guardrails import LAUNCH_NOTE_ENV
 from .launch import launch_commands, main
 from .sessions import save_json
 from .worktrees import LOCK_NAME
+from .test_pipeline import stub_claude_cli
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -27,6 +28,10 @@ def fixture_target(root: Path) -> Path:
     for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["add", "."], ["commit", "-qm", "Feature"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True)
     return repo
+
+
+def setUpModule():
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 class FeatureLaunchTests(unittest.TestCase):

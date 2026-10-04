@@ -22,10 +22,15 @@ from unittest.mock import patch
 from .sessions import claude_env, git, prepare, read_json, save_json
 from .worktrees import (ATTEMPTS, BACKOFF_SECONDS, LOCK_NAME, WorktreeError, controller_git_config, entry_digest, git_config_entries, git_worktree,
                         shared_git_changes, shared_git_state, without_controller_git_config, worktree_lock)
+from .test_pipeline import stub_claude_cli
 
 TOOL = Path(__file__).resolve().parents[1]
 # A separate process adding one worktree once its stdin closes, so the test can release every child at once.
 CHILD = "import sys; from workflow.worktrees import git_worktree; sys.stdin.read(); git_worktree(sys.argv[1], 'add', '--detach', sys.argv[2], 'HEAD')"
+
+
+def setUpModule():
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 class Repository(unittest.TestCase):

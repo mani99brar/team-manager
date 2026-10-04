@@ -33,7 +33,7 @@ from .launch import LEGACY_FEATURE_MESSAGE, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, check_review, digest_file, export_run, graph_config, lane_positions, parse_lane_selection, report, validate_pipeline_policy
 from .sessions import git, plan_digest, prepare, read_json, save_json, validate_node_id
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry, stub_claude_cli
 from .verification import CONTRACTS, policy_digest, required_kinds, validate_policy
 
 REPO = Path(__file__).resolve().parents[1]
@@ -45,6 +45,7 @@ LANES = ["ui", "adapter", "docs"]
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 def three_lane_policy(fail_marker: Path | None = None, drill: dict | None = None) -> dict:

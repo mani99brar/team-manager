@@ -28,6 +28,9 @@ from .verification import CONTRACTS, policy_digest
 LANE_EDITS = {"ui": ("ui.txt", "after"), "adapter": ("backend.py", "VALUE = 2\n")}
 
 
+CLAUDE_VERSION_STUB = "2.1.288 (Claude Code)"
+
+
 def isolate_registry() -> None:
     """setUpModule of every test module whose runs can record attention (an integration, a paused design challenge, the
     automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
@@ -40,8 +43,23 @@ def isolate_registry() -> None:
     unittest.addModuleCleanup(environment.stop)
 
 
+def stub_claude_cli() -> None:
+    """setUpModule of every test module that prepares a run: until the module's last test, a stand-in `claude` comes first on
+    PATH, so prepare's `claude --version` (sessions.controller_record) never runs the operator's CLI, in process or in a
+    child. It answers --version with CLAUDE_VERSION_STUB and fails anything else; a test that sets PATH itself still wins."""
+    temp = tempfile.TemporaryDirectory()
+    stub = Path(temp.name) / "claude"
+    stub.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] || exit 2\necho '{CLAUDE_VERSION_STUB}'\n")
+    stub.chmod(0o755)
+    environment = patch.dict(os.environ, {"PATH": f"{temp.name}{os.pathsep}{os.environ.get('PATH', '')}"})
+    environment.start()
+    unittest.addModuleCleanup(temp.cleanup)
+    unittest.addModuleCleanup(environment.stop)
+
+
 def setUpModule():
     isolate_registry()
+    stub_claude_cli()
 
 
 class FakeSessions:
@@ -1290,6 +1308,14 @@ class RecordTests(unittest.TestCase):
                 self.assertFalse(run.exists(), err)
         _, code, err = self.prepare_cli("refused-run", env={"WORKFLOW_WORKER_EFFORT": "med"})
         self.assertIn("not one of low, medium, high, xhigh, max", err)
+
+    def test_prepare_in_this_suite_reads_the_stand_in_cli_never_the_operators(self):
+        # setUpModule puts a stand-in `claude` first on PATH (stub_claude_cli), for prepare in process and in a child.
+        from .sessions import controller_record
+        self.assertEqual(controller_record()["claude_version"], CLAUDE_VERSION_STUB)
+        child = subprocess.run([sys.executable, "-c", "from workflow.sessions import claude_version; print(claude_version())"],
+                               capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parents[1])
+        self.assertEqual(child.stdout.strip(), CLAUDE_VERSION_STUB)
 
     def test_a_run_prepared_before_roles_and_the_controller_record_loads_and_launches_as_before(self):
         from .sessions import role_flags

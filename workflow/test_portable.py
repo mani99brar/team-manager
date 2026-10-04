@@ -25,7 +25,7 @@ from .scaffold import init
 from .sessions import read_json, save_json
 from .test_export import legacy_run
 from .test_lanes import LANES, LaneRun
-from .test_pipeline import isolate_registry
+from .test_pipeline import isolate_registry, stub_claude_cli
 from .verification import CONTRACTS
 
 PY = sys.executable
@@ -36,6 +36,7 @@ FINISHED_FEATURES = ("project-workflows", "worker-lanes", "parallel-reviewers", 
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 def git(repo: Path, *args: str) -> str:

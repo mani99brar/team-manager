@@ -32,7 +32,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry, stub_claude_cli
 from .test_portable import Isolated, commit_all, git
 from .verification import validate_schema
 
@@ -53,6 +53,7 @@ OPERATOR_NOTES = "\n\n- Workers run targeted tests only: OPERATOR-NOTE-3.\n"
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 def two_lane_policy() -> dict:

@@ -373,6 +373,21 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 2)
 
 
+class ClaudeVersionTests(unittest.TestCase):
+    """prepare records `claude --version` (C52): the real call path, run against a stand-in binary, never the operator's CLI."""
+
+    def test_the_version_is_the_first_line_of_a_successful_call_and_none_otherwise(self):
+        from .sessions import claude_version
+        with tempfile.TemporaryDirectory() as temp:
+            stub = Path(temp) / "claude"
+            stub.write_text("#!/bin/sh\n[ \"$1\" = --version ] || exit 2\necho '2.1.288 (Claude Code)'\necho 'second line'\n")
+            stub.chmod(0o755)
+            self.assertEqual(claude_version(str(stub)), "2.1.288 (Claude Code)")
+            stub.write_text("#!/bin/sh\necho '2.1.288 (Claude Code)'\nexit 1\n")
+            self.assertIsNone(claude_version(str(stub)))
+            self.assertIsNone(claude_version(str(Path(temp) / "missing")))
+
+
 class StaleClaudeTests(unittest.TestCase):
     def test_processes_running_a_deleted_claude_executable_are_named_from_proc(self):
         from .sessions import stale_claude_processes, stale_claude_warning
