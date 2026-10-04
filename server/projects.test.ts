@@ -2020,8 +2020,13 @@ test('[B1] on a lane named controller, a Controller blocked row belongs to the r
 test('[B1] on a lane named controller, the stops said bare off the source branch belong to the run, never failing the lane', async () => {
   // automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
   // failed are said as drive says them, without `Controller blocked: `. On a lane named `controller` each row would otherwise land on
-  // that lane's launch node and fail it.
-  const stops = ['Verification retry limit exhausted; work and evidence retained', 'Handoff changed after stop intent', 'Invalid completion file for ui']
+  // that lane's launch node and fail it. The failed wait's own texts follow: wait_handoffs' and read_signal's refusals.
+  const stops = ['Verification retry limit exhausted; work and evidence retained', 'Handoff changed after stop intent', 'Invalid completion file for ui',
+    'Worker ui deadline exhausted; no automatic relaunch', 'Worker ui explicitly blocked: the fixture is missing',
+    'Worker ui asked a question that is not recorded yet: Which port?', 'Native worker missing; reconciliation required',
+    'Malformed completion signal', 'Malformed completion signal: version 1.1.0 needs untested, falsifying_check, verify_yourself and question',
+    'Stale or foreign worker completion signal', 'Invalid completion status/summary', 'Invalid completion evidence: untested must be a list of strings',
+    'Invalid completion: status question needs a non-empty question', 'Completion version 1.1.0 refused: this run is pinned at completion 1.0.0']
   for (const stop of stops) {
     await harness(async ({ app, runsRoot }) => {
       const lanes = ['controller', 'ui']

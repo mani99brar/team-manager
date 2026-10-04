@@ -260,9 +260,13 @@ const NEVER_STARTED = /\bthe run was never started\b/
 const CONTROLLER_BLOCKED = /^Controller blocked: /
 /**
  * automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
- * failed are said bare, without CONTROLLER_BLOCKED's prefix, as advance_or_block and the failed wait say them.
+ * failed are said bare, without CONTROLLER_BLOCKED's prefix, as advance_or_block and the failed wait say them. Then the failed
+ * wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a missing session) and
+ * read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).
  */
-const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion file for /]
+const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion\b/,
+  /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
+  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
 const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */

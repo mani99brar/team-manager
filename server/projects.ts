@@ -409,8 +409,12 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
  */
 const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
   /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/, /^Controller blocked: /,
-  // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them.
-  /^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion file for /]
+  // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them. Then the
+  // failed wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a missing session) and
+  // read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).
+  /^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion\b/,
+  /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
+  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
 /** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
 const QUESTIONS_BYTE_LIMIT = 256 * 1024

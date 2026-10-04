@@ -948,17 +948,19 @@ describe('deriveNow', () => {
     assert.doesNotMatch(prose(now), /Failed/)
   })
 
-  it('no_rule_matched: a controller block aliased onto a lane named controller (C6) is still the reason, as source 4', () => {
-    // Before and with B1, `Worker ui deadline exhausted` matches no controller-process pattern, so it stays on launch_controller.
+  it('blocked_before_freeze: a failed wait\'s deadline row aliased onto a lane named controller (C6) is the run\'s, as source 0', () => {
+    // `Worker ui deadline exhausted` is one of the failed wait's texts in CONTROLLER_LANE_ROWS: a server before B1 serves it aliased
+    // onto launch_controller, and the triage reads it as the run's reason, never as the lane's failure.
     const now = checked(synthetic({
       base: guardrails, status: 'failed', nodes: { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'failed' },
       events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [0, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
         [5, 'launch_controller', 'running', 'Automatic checkpoint controller PID 5151'], [3600, 'launch_controller', 'failed', 'Worker ui deadline exhausted; no automatic relaunch'],
         [3601, 'handoff', null, 'Native workers stopped before snapshot capture: controller, ui']],
     }))
-    assert.equal(now.situation, 'no_rule_matched')
-    assert.equal(now.reasonSource, 4)
-    assert.equal(textToString(now.headline, T0), '✗ Failed at Freeze worker handoffs · Worker ui deadline exhausted; no automatic relaunch. The workflow did not complete.')
+    assert.equal(now.situation, 'blocked_before_freeze')
+    assert.equal(now.reasonSource, 0)
+    assert.match(textToString(now.reason, T0), /Worker ui deadline exhausted; no automatic relaunch/)
+    assert.equal(textToString(now.headline, T0), '✗ Blocked before freeze at Freeze worker handoffs · Worker ui deadline exhausted; no automatic relaunch. The workflow did not complete.')
   })
 
   it('blocked_before_freeze: on a lane named controller, a Controller blocked row aliased onto the lane is the run\'s, as source 0', () => {
@@ -977,8 +979,13 @@ describe('deriveNow', () => {
 
   it('blocked_before_freeze: on a lane named controller, a stop said bare off the source branch is the run\'s, as source 0', () => {
     // automatic.py final_stop says workers stopped when their wait failed without `Controller blocked: ` off the source branch, as
-    // drive says them; a server before the fix serves such a row aliased onto launch_controller.
-    for (const stop of ['Handoff changed after stop intent', 'Invalid completion file for ui']) {
+    // drive says them; a server before the fix serves such a row aliased onto launch_controller. The failed wait's own texts follow:
+    // wait_handoffs' and read_signal's refusals.
+    for (const stop of ['Handoff changed after stop intent', 'Invalid completion file for ui', 'Worker ui deadline exhausted; no automatic relaunch',
+      'Worker ui explicitly blocked: the fixture is missing', 'Worker ui asked a question that is not recorded yet: Which port?',
+      'Native worker missing; reconciliation required', 'Malformed completion signal', 'Stale or foreign worker completion signal',
+      'Invalid completion status/summary', 'Invalid completion evidence: untested must be a list of strings',
+      'Completion version 1.1.0 refused: this run is pinned at completion 1.0.0']) {
       const now = checked(synthetic({
         base: guardrails, status: 'failed', nodes: { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'failed' },
         events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [0, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
