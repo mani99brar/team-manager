@@ -875,6 +875,32 @@ class Paging(SidecarRun):
             yield
         self.assertGreaterEqual(len(seen), which)
 
+    def test_a_ctrl_c_inside_a_deferred_block_wins_over_the_blocks_own_error(self):
+        # Another error raised by the block (a full disk, a failed page) never drops the operator's Ctrl-C: the Ctrl-C is raised,
+        # with the error as its cause. Without a Ctrl-C the error is raised as it is.
+        full = OSError(28, "No space left on device")
+        with self.assertRaises(KeyboardInterrupt) as raised, sidecar.deferred_interrupt():
+            os.kill(os.getpid(), signal.SIGINT)
+            raise full
+        self.assertIs(raised.exception.__cause__, full)
+        with self.assertRaises(OSError) as raised, sidecar.deferred_interrupt():
+            raise OSError(28, "No space left on device")
+        self.assertEqual(raised.exception.errno, 28)
+
+    def test_a_ctrl_c_in_the_merge_write_is_raised_when_the_escalation_event_then_fails(self):
+        # The Ctrl-C lands in the merge write, then the escalation's event fails on a full disk. The pass does not end as completed;
+        # the controller sees the Ctrl-C.
+        def event(node, status, message):
+            if message.startswith("escalation "):
+                raise OSError(28, "No space left on device")
+            self.event(node, status, message)
+        self.runtime.event = event
+        self.completion("ui")
+        self.script_steps([{"output": output([upsert(problem="Leaks the token.")], [message()],
+                                             [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])}])
+        with self.sigint_in_write(1):
+            self.run_pass()
+
     def test_a_ctrl_c_during_a_ledger_write_still_pages_what_that_write_records(self):
         # A Ctrl-C waits for the write and for the pages that write triggers: in a delivery's flip, in the merge write and in
         # recover's write. Raised between them, it would leave a ledger that no longer holds the message pending, so recover()

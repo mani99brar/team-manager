@@ -195,7 +195,8 @@ DEFERRING = []  # The main thread's active deferred_interrupt blocks: an inner o
 def deferred_interrupt():
     """A Ctrl-C during the block is raised once the block finished, so a ledger write is never cut short (main thread only).
     Re-entrant: inside an active block an inner one only yields, so a block that holds a write and the pages it triggers
-    (Pass.merge, Pass.deliver, recover) raises after the pages, not after save_ledger's own block."""
+    (Pass.merge, Pass.deliver, recover) raises after the pages, not after save_ledger's own block. The Ctrl-C always wins: when the
+    block raises another error too (a full disk, a failed page), the Ctrl-C is raised with that error as its cause."""
     if threading.current_thread() is not threading.main_thread() or DEFERRING:
         yield
         return
@@ -204,6 +205,10 @@ def deferred_interrupt():
     DEFERRING.append(True)
     try:
         yield
+    except BaseException as error:
+        if caught:
+            raise KeyboardInterrupt from error
+        raise
     finally:
         DEFERRING.pop()
         signal.signal(signal.SIGINT, previous)
