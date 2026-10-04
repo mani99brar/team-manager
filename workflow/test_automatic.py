@@ -2624,6 +2624,80 @@ class ControllerStopTests(GraphFixture):
         wait.assert_called_once()
         self.assertRegex(self.said("running")[-1], r"^Automatic checkpoint controller PID \d+$")
 
+    def test_a_run_that_stopped_for_good_keeps_its_block_when_the_checkout_left_the_source_branch(self):
+        # P's review: the review blocked, then `automatic --live` ran with the target checkout on another branch. The resumable
+        # `interrupted` row hid the block from triage, and switching back would only stop at the block again. drive reads the graph
+        # state first (read only) and keeps the block's framing: the failed step with its error, and nothing launched.
+        f = self.fixture
+        self.verdict.write_text("blocked")
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        [stopped] = self.said()
+        git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        before = len(self.events())
+        with patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                self.assertRaisesRegex(RuntimeError, f"^{re.escape(stopped.removeprefix('Controller blocked: '))}$"):
+            drive(f.runtime)  # A new controller process, as `automatic --live` starts one.
+        self.assertEqual([(event["node"], event["status"], event["message"]) for event in self.events()[before:]], [("controller", "blocked", stopped)])
+        self.assertEqual((self.said("interrupted"), self.reviewer_launches()), ([], len(self.ids)))
+
+    def test_off_the_source_branch_only_a_run_that_can_continue_reads_interrupted(self):
+        # drive's own classification, read only: what it would continue (a wait, a resumed freeze, a review re-entered once, a check
+        # it retries) is the resumable interruption; what it stops for good keeps the block's framing, as on the source branch.
+        import shlex
+        from .automatic import FREEZE_INTERRUPTED
+        f = self.fixture
+        git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        repository = shlex.quote(f.plan["repository"])
+        interrupted = (f"Source feature branch changed: {repository} is on feature/elsewhere, not feature/automatic-test. Nothing was stopped "
+                       f"or relaunched: switch it back with: git -C {repository} switch feature/automatic-test, then resume with: "
+                       f"python -m workflow automatic {f.directory} --live")
+
+        def task(name, error=None, *kinds):
+            return SimpleNamespace(name=name, error=error, interrupts=[SimpleNamespace(value={"kind": kind}) for kind in kinds])
+
+        def at(step, *tasks):
+            return SimpleNamespace(values={"run_id": "run"}, next=step, tasks=list(tasks))
+        handoff = at(("handoff",), task("handoff", None, "worker_handoff"))
+        frozen = at((), task("handoff", "RuntimeError('Stop failed for ui')", "worker_handoff"))
+        review = at(("review",), task("review", "RuntimeError('Reviewer review deadline exhausted')"))
+        verify = at(("verify_ui",), task("verify_ui", "RuntimeError('Required checks failed')"))
+        packets = f.directory / "verification" / "worker" / "ui"
+
+        def packet(attempt):
+            (packets / str(attempt)).mkdir(parents=True, exist_ok=True)
+            save_json(packets / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
+        cases = [
+            ("the workers' handoffs are awaited", handoff, lambda: None, None),
+            ("the workers were stopped when the wait failed", handoff,
+             lambda: (save_json(f.directory / "ui.stop.json", {"stopped": True}), (f.directory / "ui.completion.json").unlink(missing_ok=True)),
+             "Invalid completion file for ui"),
+            ("a freeze an outage interrupted", frozen, lambda: save_json(f.directory / FREEZE_INTERRUPTED, {"error": "Claude Code unavailable"}), None),
+            ("a freeze that failed", frozen, lambda: (f.directory / FREEZE_INTERRUPTED).unlink(),
+             "Freeze failed: Stop failed for ui; non-retryable graph failure, inspect retained evidence"),
+            ("an unexpected manual gate", at(("review",), task("review", None, "independent_review")), lambda: None,
+             "Unexpected manual gate in automatic run; inspect state"),
+            ("a review that failed before any reviewer launched", review, lambda: None, None),
+            ("a review that ended blocked", review,
+             lambda: save_json(f.directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": ["review"]}),
+             "the review step failed: Reviewer review deadline exhausted; not retried, inspect retained evidence"),
+            ("a check drive retries", verify, lambda: packet(1), None),
+            ("a check that failed identically", verify, lambda: (packet(2), save_json(f.directory / "attempts.json", {"worker:ui": 2})),
+             f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
+             "fix is a lane repair (RUNBOOK)"),
+        ]
+        for name, state, arrange, block in cases:
+            with self.subTest(name):
+                arrange()
+                before = len(self.events())
+                graph = SimpleNamespace(get_state=lambda config, state=state: state)
+                with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                        self.assertRaisesRegex(RuntimeError, f"^{re.escape(interrupted if block is None else block)}$"):
+                    drive(f.runtime)
+                said = [(event["node"], event["status"], event["message"]) for event in self.events()[before:]]
+                self.assertEqual(said, [("controller", "interrupted", interrupted)] if block is None else [("controller", "blocked", f"Controller blocked: {block}")])
+        self.assertEqual((read_json(f.directory / "attempts.json"), self.reviewer_launches()), ({"worker:ui": 2}, 0))  # Nothing was retried or launched.
+
     def test_a_start_that_did_not_complete_is_an_interruption_that_names_reconcile_or_start(self):
         # Launches that did not complete are reconciled (RUNBOOK, Ambiguous startup), and a run that was never started is started;
         # then `automatic --live` continues it. Nothing was stopped or relaunched, so nothing says `Controller blocked:`.
