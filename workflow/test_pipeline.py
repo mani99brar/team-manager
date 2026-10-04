@@ -1392,6 +1392,11 @@ class CandidateRefTests(unittest.TestCase):
         # The candidate worktree's removal leaves the commit reachable by its ref.
         git(f.repo, "worktree", "remove", "--force", str(f.directory / "candidate"))
         self.assertEqual(git(f.repo, "rev-parse", f"{run_ref(f.directory, CANDIDATE_REF)}^{{commit}}"), candidate)
+        # The brief names the ref, so its recipe still works once Git prunes what no ref holds.
+        from .test_brief import brief
+        code, out, err = brief(f.directory)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"- Candidate: {candidate} (kept as {run_ref(f.directory, CANDIDATE_REF)})", out)
 
 
 class AbandonTests(unittest.TestCase):
@@ -1411,15 +1416,37 @@ class AbandonTests(unittest.TestCase):
         # ui and the reviewer still run; adapter's session ended (a usage limit): it is not listed and gets no stop.
         self.live = {node: {"id": f"id-{node}", "sessionId": f"session-{node}", "pid": os.getpid(), "state": "idle"} for node in ("ui", "review")}
         live = self.live
-        self.sessions = SimpleNamespace(executable="claude", directory=f.directory, inventory=lambda: list(live.values()),
-                                        locate=lambda node, rows: next((row for row in rows if row["id"] == f"id-{node}"), None))
+        self.inventories = 0
+
+        def inventory():
+            self.inventories += 1
+            return list(live.values())
+
+        def locate(node, rows):
+            # As InteractiveSessions.locate: the receipt's background id, else the one id its launch log printed.
+            receipt = read_json(f.directory / f"{node}.interactive.json")
+            background_id = receipt.get("background_id")
+            if not background_id:
+                log = f.directory / f"{node}.launch.log"
+                if not log.exists():
+                    return None
+                ids = set(re.findall(r"claude attach ([a-z0-9-]+)\s", log.read_text()))
+                if len(ids) != 1:
+                    raise RuntimeError("Missing/ambiguous native launch ID; reconcile manually")
+                background_id = ids.pop()
+            row = next((row for row in rows if row["id"] == background_id), None)
+            if row is not None and row.get("name", f"workflow-run-{node}") != f"workflow-run-{node}":
+                raise RuntimeError("Claude session identity/worktree mismatch")
+            return row
+        self.sessions = SimpleNamespace(executable="claude", directory=f.directory, inventory=inventory, locate=locate)
 
     def abandon(self, *argv: str) -> tuple[int, str, list]:
         from .abandon import abandon_main
         live = self.live
 
         def stop(argv, **_kwargs):
-            live.pop(argv[-1].removeprefix("id-"), None)
+            for node in [node for node, row in live.items() if row["id"] == argv[-1]]:
+                live.pop(node)
             return subprocess.CompletedProcess(argv, 0)
         output = io.StringIO()
         code = 0
@@ -1449,6 +1476,67 @@ class AbandonTests(unittest.TestCase):
         self.assertIn("already abandoned", output)
         self.assertEqual(read_json(self.directory / "abandon.json")["reason"], self.REASON)
         self.assertEqual(len([event for event in self.events() if event["status"] == "cancelled"]), 1)
+
+    def test_a_session_whose_launch_receipt_was_never_bound_is_stopped(self):
+        # The settle step failed (Claude Code unavailable, or Ctrl-C): the receipt has no ids, but the launch log names the
+        # session, which still runs and uses quota.
+        save_json(self.directory / "review.interactive.json", {"node_id": "review", "session_id": None, "status": "needs_reconciliation"})
+        self.live["review"]["id"] = "4f3a2b1c"
+        (self.directory / "review.launch.log").write_text("Started in the background.\nclaude attach 4f3a2b1c \n")
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-ui"], ["claude", "stop", "4f3a2b1c"]])
+        record = read_json(self.directory / "abandon.json")
+        self.assertEqual((record["stopped"], record["not_running"]), (["ui", "review"], ["adapter"]))
+        self.assertNotIn("review", self.live)
+
+    def test_an_identity_refusal_is_a_failure_not_a_session_that_is_not_running(self):
+        self.live["review"]["name"] = "workflow-other-run-review"
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertIn("review: Claude session identity/worktree mismatch", output)
+        self.assertFalse((self.directory / "abandon.json").exists())
+        self.assertEqual([event for event in self.events() if event["status"] == "cancelled"], [])
+
+    def test_a_node_the_controller_stopped_before_is_not_running_and_gets_no_stop(self):
+        self.live.pop("ui")
+        save_json(self.directory / "ui.stop.json", {"background_id": "id-ui", "session_id": "session-ui", "pid": 999999, "stopped": True, "issued": True})
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-review"]])
+        self.assertEqual(read_json(self.directory / "abandon.json")["not_running"], ["ui", "adapter"])
+
+    def test_an_unfinished_stop_of_a_session_that_is_gone_completes_the_abandon(self):
+        # A controller stop that failed (claude stop exited non-zero while the service restarted) left issued false; the
+        # session has ended since. stop_session would look through the respawn gap and raise on every attempt.
+        self.live.pop("ui")
+        save_json(self.directory / "ui.stop.json", {"background_id": "id-ui", "session_id": "session-ui", "pid": 999999, "stopped": False, "issued": False})
+        from .pipeline import Pipeline
+        stop_row = Pipeline.stop_row
+
+        def no_wait_for_ui(pipeline, node, rows):
+            if node == "ui":
+                raise AssertionError("waited for a respawn")
+            return stop_row(pipeline, node, rows)
+        with patch("workflow.abandon.pid_alive", return_value=False), patch.object(Pipeline, "stop_row", autospec=True, side_effect=no_wait_for_ui):
+            code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-review"]])
+        self.assertEqual(read_json(self.directory / "abandon.json")["not_running"], ["ui", "adapter"])
+
+    def test_an_unfinished_stop_of_a_live_session_is_completed(self):
+        save_json(self.directory / "ui.stop.json", {"background_id": "id-ui", "session_id": "session-ui", "pid": os.getpid(), "stopped": False, "issued": False})
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-ui"], ["claude", "stop", "id-review"]])
+        self.assertTrue(read_json(self.directory / "ui.stop.json")["stopped"])
+
+    def test_a_run_that_never_launched_is_abandoned_without_claude_code(self):
+        for node in ("ui", "adapter", "review"):
+            (self.directory / f"{node}.interactive.json").unlink()
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual((code, stops, self.inventories), (0, [], 0), output)
+        self.assertEqual(read_json(self.directory / "abandon.json")["not_running"], [])
 
     def test_abandon_is_the_operators_and_refuses_a_held_lock_or_an_empty_reason(self):
         for argv, refusal in ((["--reason", self.REASON, "--by", "maintainer"], "abandon is the operator's decision"),
@@ -1497,6 +1585,7 @@ class AbandonTests(unittest.TestCase):
         self.assertEqual(status["abandoned"]["reason"], self.REASON)
         self.assertTrue(status["next_step"].startswith("none: the run was abandoned by the operator"), status["next_step"])
         self.assertIn("brief", status["next_step"])
+        self.assertIn("launch <feature> --repo <target repo> --run-id", status["next_step"])
         code, out, err = pipeline_cli("export", run)
         self.assertEqual(code, 0, err)
 

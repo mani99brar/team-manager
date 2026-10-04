@@ -129,7 +129,7 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(files_of(run.directory), before)  # Read-only.
         self.assertIn(f"git restore --source={run.candidate} --staged --worktree -- ui.txt", out)
-        self.assertIn(f"git restore --source={run.candidate} --staged --worktree -- backend.py legacy.py", out)
+        self.assertIn(f"git restore --source={run.candidate} --staged --worktree -- backend.py\ngit rm -r -q --ignore-unmatch -- legacy.py\n", out)
         self.assertIn(f"git diff --stat {run.candidate} -- backend.py legacy.py", out)
         self.assertNotIn("git checkout", out)  # The overlay-mode checkout never deletes a file the candidate removed.
         # Every finding verbatim; coverage's came only from its bound file, so it is marked unrecorded.
@@ -154,15 +154,58 @@ class BriefTests(unittest.TestCase):
     def test_the_printed_recipe_deletes_a_file_the_candidate_removed(self):
         run = self.run_
         _, out, _ = brief(run.directory)
-        recipe = next(line.strip() for line in out.splitlines() if line.strip().startswith("git restore") and "legacy.py" in line)
-        check = next(line.strip() for line in out.splitlines() if line.strip().startswith("git diff --stat") and "legacy.py" in line)
         follow = run.root / "follow"
         git(run.repo, "worktree", "add", "-q", "--detach", str(follow), run.plan["base_commit"])
         self.assertTrue((follow / "legacy.py").exists())
-        subprocess.run(shlex.split(recipe), cwd=follow, check=True)
+        for line in self.sh_block(out, "legacy.py"):
+            result = subprocess.run(shlex.split(line), cwd=follow, check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout, "")  # The empty-diff check, last.
         self.assertFalse((follow / "legacy.py").exists())
         self.assertEqual((follow / "backend.py").read_text(), "VALUE = 2\n")
-        self.assertEqual(subprocess.run(shlex.split(check), cwd=follow, check=True, capture_output=True, text=True).stdout, "")
+
+    def sh_block(self, out: str, needle: str) -> list[str]:
+        """The commands of the lane's recipe block that mentions `needle`."""
+        for block in out.split("```sh\n")[1:]:
+            commands = block.split("```")[0].strip().splitlines()
+            if any(needle in command for command in commands):
+                return commands
+        self.fail(f"no recipe mentions {needle}:\n{out}")
+
+    def test_the_recipe_works_in_a_follow_up_whose_tree_lacks_a_path_the_candidate_deleted(self):
+        # An approved follow-up after the approved branch was merged: the follow-up's base no longer has legacy.py.
+        run = self.run_
+        _, out, _ = brief(run.directory)
+        commands = self.sh_block(out, "legacy.py")
+        self.assertIn(f"git restore --source={run.candidate} --staged --worktree -- backend.py", commands)
+        self.assertIn("git rm -r -q --ignore-unmatch -- legacy.py", commands)
+        merged = commit(run.repo, "merged", {"legacy.py": None})
+        for start in (merged, run.plan["base_commit"]):
+            with self.subTest(start=start):
+                follow = run.root / f"follow-{start[:7]}"
+                git(run.repo, "worktree", "add", "-q", "--detach", str(follow), start)
+                for line in commands:
+                    result = subprocess.run(shlex.split(line), cwd=follow, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, f"{line}: {result.stderr}")
+                    if line.startswith("git diff"):
+                        self.assertEqual(result.stdout, "")
+                self.assertFalse((follow / "legacy.py").exists())
+                self.assertEqual((follow / "backend.py").read_text(), "VALUE = 2\n")
+
+    def test_a_candidate_git_no_longer_has_falls_back_to_each_lanes_snapshot_ref(self):
+        from .pipeline import run_ref
+        run = self.run_
+        gone = "0123456789abcdef0123456789abcdef01234567"
+        for name, key in (("review.json", "candidate_commit"), ("review-bundle.json", "candidate_commit"), ("candidate.json", "commit")):
+            save_json(run.directory / name, {**read_json(run.directory / name), key: gone})
+        for lane in ("ui", "adapter"):
+            git(run.repo, "update-ref", run_ref(run.directory, lane), run.snapshots[lane]["commit"])
+        code, out, err = brief(run.directory)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(f"--source={gone}", out)
+        self.assertIn(f"git restore --source={run.ui} --staged --worktree -- ui.txt", out)
+        self.assertIn(f"git restore --source={run.adapter} --staged --worktree -- backend.py", out)
+        self.assertIn(f"The candidate {gone} is not in the repository any more", out)
+        self.assertIn(run_ref(run.directory, "adapter"), out.split("## Lane adapter")[1])
 
     def test_without_a_candidate_the_lane_snapshot_is_restored(self):
         run = self.run_
@@ -171,7 +214,7 @@ class BriefTests(unittest.TestCase):
         code, out, err = brief(run.directory)
         self.assertEqual(code, 0, err)
         self.assertIn(f"git restore --source={run.ui} --staged --worktree -- ui.txt", out)
-        self.assertIn(f"git restore --source={run.adapter} --staged --worktree -- backend.py legacy.py", out)
+        self.assertIn(f"git restore --source={run.adapter} --staged --worktree -- backend.py", out)
         self.assertIn("Verdict: none recorded", out)
 
     def test_an_approved_run_lists_its_open_p2s(self):
@@ -200,6 +243,43 @@ class BriefTests(unittest.TestCase):
         self.assertNotIn(COVERAGE_FINDINGS[0]["message"], out)
         self.assertIn(GENERAL_FINDINGS[0]["message"], out)  # From review.json.
         self.assertIn("not read", out)
+
+    def print_result(self, session_id: str) -> dict:
+        return {"type": "result", "subtype": "success", "is_error": False, "session_id": session_id,
+                "structured_output": {"verdict": "approved", "findings": COVERAGE_FINDINGS}}
+
+    def test_a_print_reviewers_stdout_json_is_read_as_the_controller_reads_it(self):
+        run = self.run_
+        (run.directory / "review-coverage.completion.json").unlink()
+        save_json(run.directory / "review-coverage.stdout.json", self.print_result("coverage-uuid"))
+        code, out, err = brief(run.directory)
+        self.assertEqual(code, 0, err)
+        line = next(line for line in out.splitlines() if COVERAGE_FINDINGS[0]["message"] in line)
+        self.assertIn("unrecorded: from review-coverage.stdout.json", line)
+
+    def test_a_print_result_of_another_session_or_with_a_foreign_lane_is_named_never_quoted(self):
+        run = self.run_
+        (run.directory / "review-coverage.completion.json").unlink()
+        foreign_lane = self.print_result("coverage-uuid")
+        foreign_lane["structured_output"]["findings"] = [{**COVERAGE_FINDINGS[0], "worker": "backend"}]
+        for result in (self.print_result("someone-else"), {**self.print_result("coverage-uuid"), "is_error": True}, foreign_lane):
+            with self.subTest(result=result):
+                save_json(run.directory / "review-coverage.stdout.json", result)
+                code, out, err = brief(run.directory)
+                self.assertEqual(code, 0, err)
+                self.assertNotIn(COVERAGE_FINDINGS[0]["message"], out)
+                self.assertIn("Reviewer coverage's review-coverage.stdout.json was not read", out)
+
+    def test_a_manual_import_is_read(self):
+        run = self.run_
+        (run.directory / "review-coverage.completion.json").unlink()
+        save_json(run.directory / "review-coverage.imported.json", {"reviewer_id": "coverage", "imported_at": "2026-10-04T09:00:00Z",
+                                                                    "review": {"verdict": "approved", "findings": COVERAGE_FINDINGS}})
+        code, out, err = brief(run.directory)
+        self.assertEqual(code, 0, err)
+        line = next(line for line in out.splitlines() if COVERAGE_FINDINGS[0]["message"] in line)
+        self.assertIn("unrecorded: from review-coverage.imported.json", line)
+        self.assertIn("--repo <target repo>", out)
 
     def test_a_directory_without_plan_json_is_refused(self):
         code, _, err = brief(self.run_.root / "missing")

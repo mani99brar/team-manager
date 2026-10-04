@@ -7,7 +7,10 @@ there is no candidate), every reviewer's findings verbatim, the worker's own cla
 handoff. It reads the run's files and writes nothing; a file it cannot read is named, never raised.
 
 The restore recipe is `git restore --source=<sha> --staged --worktree -- <paths>`: unlike `git checkout <sha> -- <paths>`
-(overlay mode) it deletes a file the candidate removed. The paths are the followed run's pinned policy's, so a follow-up
+(overlay mode) it deletes a file the candidate removed. An owned path the source does not have at all goes to
+`git rm -r -q --ignore-unmatch` instead, since the follow-up's tree may lack it too (after a merge) and `git restore` would
+then refuse every path. A candidate Git no longer holds (a run from before the candidate ref, its worktree removed) falls
+back to each lane's snapshot, which its lane ref keeps. The paths are the followed run's pinned policy's, so a follow-up
 whose policy moved them needs the recipe adjusted.
 """
 from __future__ import annotations
@@ -136,23 +139,37 @@ def finding_line(finding: dict) -> str:
     return line
 
 
-def existing_paths(repository: str, revisions: list[str], paths: list[str]) -> tuple[list[str], list[str], str | None]:
-    """The owned paths at one of `revisions` (a path in neither would fail `git restore`), the others, and why nothing was checked."""
+def in_tree(repository: str, revision: str, paths: list[str]) -> tuple[list[str], list[str], str | None]:
+    """The owned paths `revision`'s tree has, those it lacks, and why nothing was checked (all are then taken as present)."""
     present, absent = [], []
     for path in paths:
         name = path.rstrip("/") or "."
         try:
-            found = any(subprocess.run(["git", "-C", repository, "cat-file", "-e", f"{revision}:{name}"], capture_output=True, timeout=30).returncode == 0
-                        for revision in revisions)
+            found = subprocess.run(["git", "-C", repository, "cat-file", "-e", f"{revision}:{name}"], capture_output=True, timeout=30).returncode == 0
         except (OSError, subprocess.SubprocessError) as error:
             return list(paths), [], str(error)
         (present if found else absent).append(path)
-    if not present and absent:
-        try:
-            subprocess.run(["git", "-C", repository, "rev-parse", "--git-dir"], capture_output=True, timeout=30, check=True)
-        except (OSError, subprocess.SubprocessError):
-            return list(paths), [], f"{repository} is not a readable Git checkout any more"
+    if absent and not commit_exists(repository, revision):
+        return list(paths), [], f"{repository} is not a readable Git checkout any more, or does not hold {revision}"
     return present, absent, None
+
+
+def commit_exists(repository: str, revision: str) -> bool:
+    """`git cat-file -e <revision>^{commit}`: the commit is still in the repository (an unreferenced one is pruned in time)."""
+    try:
+        return subprocess.run(["git", "-C", repository, "cat-file", "-e", f"{revision}^{{commit}}"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def restore_recipe(source: str, present: list[str], absent: list[str]) -> list[str]:
+    """`git restore` of the paths the source has and `git rm` of those it lacks: a path in neither the source nor the follow-up's
+    tree would fail `git restore` as a whole, while `git rm --ignore-unmatch` deletes it where it still exists and passes over it
+    where it does not. The empty-diff check covers every owned path."""
+    quote = lambda paths: " ".join(shlex.quote(path) for path in paths)  # noqa: E731
+    return ([f"git restore --source={source} --staged --worktree -- {quote(present)}"] if present else []) \
+        + ([f"git rm -r -q --ignore-unmatch -- {quote(absent)}"] if absent else []) \
+        + [f"git diff --stat {source} -- {quote(present + absent)}"]
 
 
 def lane_claims(directory: Path, lane: str, snapshot: dict | None) -> list[str]:
@@ -215,14 +232,23 @@ def render(directory: Path) -> str:
              f"- Candidate: {candidate}{candidate_ref(plan, directory, candidate)}" if candidate else "- Candidate: none (the run stopped before its candidate)",
              f"- Base: {plan.get('base_commit')} on {plan.get('source_branch')}",
              f"- Lanes: {', '.join(lanes)}" + (f" (excluded: {', '.join(plan_excluded(plan))})" if plan.get("excluded_workers") else ""), "",
-             "Follow it up with a new run of the same feature: `python -m workflow launch <feature> --run-id <feature>-00N "
+             "Follow it up with a new run of the same feature: `python -m workflow launch <feature> --repo <target repo> --run-id <feature>-00N "
              f"--follows {shlex.quote(str(directory))} --live --automatic --by operator`. Paste into each lane's task Context what it "
              "needs from this brief. The restore recipe uses the owned paths this run pinned: check them against the follow-up's policy."]
     for note in notes:
         lines += ["", f"Note: {note}."]
+    repository = str(plan.get("repository"))
+    pruned = candidate is not None and not commit_exists(repository, candidate)
+    if pruned:
+        lines += ["", f"Note: The candidate {candidate} is not in the repository any more (no ref held it once its worktree was "
+                  "removed), so each lane restores its own snapshot, kept by its lane ref."]
     for lane in lanes:
         snapshot = snapshots.get(lane) if isinstance(snapshots.get(lane), dict) else None
-        source, kind = (candidate, "the candidate") if candidate else ((snapshot or {}).get("commit"), f"the {lane} lane's snapshot")
+        if candidate and not pruned:
+            source, kind = candidate, "the candidate"
+        else:
+            source = (snapshot or {}).get("commit")
+            kind = f"the {lane} lane's snapshot" + (f" (kept as {run_ref(directory, lane)})" if pruned else "")
         paths = owned.get(lane, [])
         lines += ["", f"## Lane {lane}", "", f"Owned paths (this run's pinned policy): {', '.join(f'`{path}`' for path in paths) or 'none'}", ""]
         if not source:
@@ -230,15 +256,10 @@ def render(directory: Path) -> str:
         elif not paths:
             lines.append("Nothing to restore: the pinned policy names no owned path for this lane.")
         else:
-            revisions = [source] + ([plan["base_commit"]] if plan.get("base_commit") else [])
-            present, absent, unchecked = existing_paths(str(plan.get("repository")), revisions, paths)
-            quoted = " ".join(shlex.quote(path) for path in present)
-            lines += [f"Restore {kind}'s version of these paths in the follow-up lane's worktree, then check that nothing differs "
-                      "(the second command prints nothing once restored):", "", "```sh",
-                      f"git restore --source={source} --staged --worktree -- {quoted}",
-                      f"git diff --stat {source} -- {quoted}", "```"]
-            if absent:
-                lines += ["", f"Not in {kind} or the base, so not restored: {', '.join(f'`{path}`' for path in absent)}."]
+            present, absent, unchecked = in_tree(repository, source, paths)
+            lines += [f"Restore {kind}'s version of these paths in the follow-up lane's worktree (a path it does not have is removed), "
+                      "then check that nothing differs (the last command prints nothing once restored):", "", "```sh",
+                      *restore_recipe(source, present, absent), "```"]
             if unchecked:
                 lines += ["", f"Which paths exist was not checked ({unchecked}); `git restore` refuses a path that exists in neither tree."]
         own = [finding for finding in findings if finding.get("worker") == lane]

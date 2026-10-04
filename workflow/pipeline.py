@@ -1114,7 +1114,7 @@ def abandoned_step(directory: Path, record: dict) -> str:
     run = shlex.quote(str(directory))
     by = f" by the {record['by']}" if record.get("by") else ""
     return (f"none: the run was abandoned{by} ({record.get('reason')}), and every command that would change it refuses. For a follow-up: "
-            f"{sys.executable} -m workflow brief {run}, then {sys.executable} -m workflow launch <feature> --run-id <feature>-00N --follows {run} "
+            f"{sys.executable} -m workflow brief {run}, then {sys.executable} -m workflow launch <feature> --repo <target repo> --run-id <feature>-00N --follows {run} "
             f"--live --automatic {BY_OPERATOR}")
 
 

@@ -16,6 +16,8 @@ limit cut short, or a merge chore. The paths this lane owns: <owned paths>.
 ## Acceptance
 
 - `git restore --source=<sha> --staged --worktree -- <owned paths>` ran in this worktree.
+  An owned path that <sha> does not have is left out of it and removed with `git rm -r -q --ignore-unmatch -- <those paths>`
+  instead: `git restore` refuses every path when one exists in neither tree. `python -m workflow brief` prints both lines.
 - `git diff --stat <sha> -- <owned paths>` prints nothing.
 - No other file changed. You ran no check: the controller verifies the lane itself.
 
