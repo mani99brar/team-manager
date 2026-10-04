@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .sessions import git, save_json, terminate
 from .verification import evaluate_worker, policy_digest
-from .worktrees import git_worktree, without_controller_git_config
+from .worktrees import WorktreeError, git_worktree, without_controller_git_config
 
 
 def now() -> str:
@@ -275,9 +275,47 @@ def browser_evidence(report_path: Path, output_root: Path, requirement: dict, ca
     return counts, [{"id": item["id"], "status": item["status"], "screenshot_artifact_id": item["screenshot"]} for item in found.values()]
 
 
+# What a passed attempt no longer needs (C47): the checkout and caches its checks ran in, and Playwright's raw output, whose
+# screenshots are already artifacts. The folder, packet.json, the logs, artifacts/ and browser-report-<n>.json stay.
+PRUNED_CACHES = ("npm_config_cache", "xdg_cache_home")
+RAW_BROWSER_OUTPUT = re.compile(r"browser-\d+")
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes what a check left read-only (an npm cache entry, a Go module cache)."""
+    def writable(function, name, _):
+        os.chmod(os.path.dirname(name), 0o700)
+        if os.path.isdir(name) and not os.path.islink(name):
+            os.chmod(name, 0o700)
+        function(name)
+    shutil.rmtree(path, onexc=writable)
+
+
+def prune_attempt(repository, directory: Path) -> list[Path]:
+    """Remove a passed attempt's worktree (through git_worktree, under the repository's worktree lock), its caches and its
+    raw browser output; returns what it removed, nothing when it was already pruned. recheck_packet reads only the
+    packet and artifacts/, so the attempt still rechecks and is still reused. Never called on an attempt that failed."""
+    removed = []
+    worktree = directory / "worktree"
+    if worktree.exists() or worktree.is_symlink():
+        git_worktree(repository, "remove", "--force", str(worktree))
+        removed.append(worktree)
+    raw = sorted(path for path in directory.iterdir() if RAW_BROWSER_OUTPUT.fullmatch(path.name)) if directory.is_dir() else []
+    for path in [directory / name for name in PRUNED_CACHES] + raw:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            remove_tree(path)
+        else:
+            continue
+        removed.append(path)
+    return removed
+
+
 def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
                     session_id: str, phase: str = "worker", attempt: int = 1) -> dict:
-    """One fresh verification worktree per node/phase/attempt, artifacts retained."""
+    """One fresh verification worktree per node/phase/attempt, artifacts retained. A passed attempt is pruned once its
+    packet is saved (prune_attempt); a failed one is kept whole."""
     worker = next(worker for worker in policy["workers"] if worker["node_id"] == node)
     directory = run / "verification" / phase / node / str(attempt)
     packet_path = directory / "packet.json"
@@ -345,6 +383,12 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
               "dropped_env_names": dropped}
     packet = recheck_packet(packet, policy, run)
     save_json(packet_path, packet)
+    if packet["gate"]["status"] == "passed":
+        try:
+            prune_attempt(plan["repository"], directory)
+        except (WorktreeError, OSError) as error:
+            # The evidence is saved and passed; what is left only takes disk. `workflow clean` prunes it later.
+            print(f"Warning: passed attempt {directory} was not pruned ({error}); `python -m workflow clean` prunes it", file=sys.stderr)
     return packet
 
 

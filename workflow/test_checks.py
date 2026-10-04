@@ -232,6 +232,56 @@ class FileCaptureTests(unittest.TestCase):
         self.assertEqual(recheck_packet(json.loads(saved), policy, self.run_dir)["gate"]["status"], "passed")
 
 
+class PruneTests(unittest.TestCase):
+    """C47: a passed attempt keeps its folder, packet, logs, artifacts and browser reports, and loses its worktree, its caches and
+    the raw browser output; a failed attempt is kept whole."""
+
+    setUp, policy, snapshot, verify = FileCaptureTests.setUp, FileCaptureTests.policy, FileCaptureTests.snapshot, FileCaptureTests.verify
+
+    # Writes what a real attempt leaves beside its evidence: a cache entry, raw browser output and a browser report.
+    LEAVE = ("import os, pathlib, sys\n"
+             "pathlib.Path(os.environ['npm_config_cache'], 'entry').write_text('cached')\n"
+             "pathlib.Path(os.environ['XDG_CACHE_HOME'], 'entry').write_text('cached')\n"
+             "pathlib.Path('../browser-0/trace').mkdir(parents=True)\n"
+             "pathlib.Path('../browser-0/trace/shot.png').write_bytes(b'png')\n"
+             "pathlib.Path('../browser-report-0.json').write_text('{}')\n")
+
+    def attempt(self, code):
+        commit, changed = self.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        argv = [sys.executable, "-c", self.LEAVE + f"print('Ran 1 test in 0.001s\\n\\nOK'); sys.exit({code})"]
+        policy = self.policy(argv)
+        return self.verify(commit, changed, policy=policy), policy, self.run_dir / "verification/worker/adapter/1"
+
+    def worktrees(self):
+        return git(self.repo, "worktree", "list", "--porcelain")
+
+    def test_a_passed_attempt_keeps_its_evidence_and_loses_its_worktree_and_caches(self):
+        packet, policy, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        for name in ("worktree", "npm_config_cache", "xdg_cache_home", "browser-0"):
+            self.assertFalse((folder / name).exists(), name)
+        self.assertNotIn(str(folder / "worktree"), self.worktrees())
+        for name in ("packet.json", "check-0.log", "browser-report-0.json"):
+            self.assertTrue((folder / name).is_file(), name)
+        self.assertTrue(all(Path(path).is_file() for path in packet["artifact_paths"].values()))
+        saved = json.loads((folder / "packet.json").read_text())
+        self.assertEqual(recheck_packet(saved, policy, self.run_dir)["gate"]["status"], "passed")
+        # Asked again for the same revision, the pruned attempt's packet is rechecked and reused.
+        self.assertEqual(self.verify(packet["expected"]["output_commit"], packet["result"]["changed_files"], policy=policy)["gate"]["status"], "passed")
+
+    def test_a_failed_attempt_is_kept_whole(self):
+        packet, _, folder = self.attempt(1)
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        for name in ("worktree", "npm_config_cache/entry", "xdg_cache_home/entry", "browser-0/trace/shot.png", "browser-report-0.json"):
+            self.assertTrue((folder / name).exists(), name)
+        self.assertIn(str(folder / "worktree"), self.worktrees())
+
+    def test_prune_attempt_is_idempotent(self):
+        packet, _, folder = self.attempt(0)
+        self.assertEqual(checks.prune_attempt(self.repo, folder), [])
+        self.assertTrue((folder / "packet.json").is_file())
+
+
 class VitestCountsTests(unittest.TestCase):
     SUMMARY = ("\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m6 passed\x1b[39m\x1b[22m\x1b[90m (6)\x1b[39m\n"
                "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m70 passed\x1b[39m\x1b[22m\x1b[90m (70)\x1b[39m\n\x1b[2m   Start at \x1b[22m 09:20:57\n")
