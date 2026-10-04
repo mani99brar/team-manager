@@ -802,7 +802,7 @@ def challenge_gate(runtime, herdr: bool = False, announce=None) -> bool:
 
 # ---- The hold after a passing challenge (C8) -------------------------------------------------------------------
 
-HOLD = "challenge-hold.json"  # {attempt, held_at, released_at, released_by, dropped}: the latest held attempt and its release.
+HOLD = "challenge-hold.json"  # {attempt, held_at, released_at, released_by, dropped, held?}: the latest held attempt and its release.
 
 
 def hold_pinned(plan: dict) -> bool:
@@ -878,13 +878,15 @@ def parse_drop(value: str | None) -> frozenset[int]:
     return numbers
 
 
-def release_hold(runtime, record: dict, actor: str, dropped: frozenset[int]) -> None:
+def release_hold(runtime, record: dict, actor: str, dropped: frozenset[int], held: bool = True) -> None:
     """`resume --launch`: record the release of `record`'s attempt (when, by whom, the notes left out). A rerun that passed under
-    `--launch` was never held: its record is written released."""
+    `--launch` was never held (`held` false): its record is written released and marked `"held": false`, which the export reads as
+    no hold. Records before it carry no `held` and were all held."""
     directory = runtime.directory
     found = load_hold(directory)
     held_at = found["held_at"] if found and found.get("attempt") == record["attempt"] else now()
-    save_hold(directory, {"attempt": record["attempt"], "held_at": held_at, "released_at": now(), "released_by": actor, "dropped": sorted(dropped)})
+    entry = {"attempt": record["attempt"], "held_at": held_at, "released_at": now(), "released_by": actor, "dropped": sorted(dropped)}
+    save_hold(directory, entry if held else {**entry, "held": False})
 
 
 def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) -> str:
@@ -905,11 +907,15 @@ def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) 
 
 def held_refusal(directory: Path, record: dict, herdr: bool = False, unchanged: bool = True) -> str:
     """What `resume` says on a held run when nothing changed since its attempt, and to `--accept-challenge` on a held run. With
-    feature files edited since the attempt (`unchanged` false), what each resume does with them."""
+    feature files edited since the attempt (`unchanged` false), what each resume does with them, or resume's refusal when its
+    read-only checks fail (resume_refusal): never a command that refuses."""
     plan = read_json(directory / "plan.json")
     if not unchanged:
-        return (f"Design challenge attempt {record['attempt']} passed and is held for the operator, and feature files changed since it "
-                f"read them: nothing is accepted. {resume_command(directory, herdr, launch=True)} commits them, reruns the challenge and "
+        changed = f"Design challenge attempt {record['attempt']} passed and is held for the operator, and feature files changed since it read them"
+        refusal = resume_refusal(plan)
+        if refusal:
+            return f"{changed}, but resume refuses: {refusal}; nothing is accepted"
+        return (f"{changed}: nothing is accepted. {resume_command(directory, herdr, launch=True)} commits them, reruns the challenge and "
                 f"launches the workers unless it finds a P0/P1; or {resume_command(directory, herdr)} reruns it and holds again")
     return (f"Design challenge attempt {record['attempt']} passed and is held for the operator: nothing is accepted and nothing it "
             f"read has changed since. Launch the workers (add --drop <n>,<m> to leave notes out of their prompts): "
@@ -1404,7 +1410,7 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt} on base {plan['base_commit']}")
     record = run_challenge(runtime, attempt, herdr, released=launch)
     if launch and record["status"] == "passed" and hold_pinned(plan):
-        release_hold(runtime, record, actor, frozenset())  # The operator asked for the launch before this attempt passed.
+        release_hold(runtime, record, actor, frozenset(), held=False)  # The operator asked for the launch before this attempt passed.
         action_event(runtime.event, actor, "resume", f"design challenge attempt {attempt} passed under --launch, hold released; launching the workers")
     return record
 

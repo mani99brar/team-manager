@@ -424,6 +424,12 @@ class ExportRunTests(unittest.TestCase):
         exported = export_run(ExportRuntime(directory))["inputs"]["challenge"]
         self.assertEqual((exported["status"], exported["hold"]),
                          ("passed", {"held_at": "2026-10-03T09:00:00Z", "released_at": "2026-10-03T11:00:00Z", "released_by": "operator", "dropped": [1]}))
+        # A rerun that passed under resume --launch was never held: its release is marked so, and the attempt exports no hold.
+        save_json(directory / "challenge-hold.json", {**hold, "attempt": 2, "held_at": "2026-10-03T11:00:00Z", "released_at": "2026-10-03T11:00:00Z",
+                                                      "released_by": "operator", "held": False})
+        exported = export_run(ExportRuntime(directory))["inputs"]["challenge"]
+        self.assertEqual(exported["status"], "passed")
+        self.assertNotIn("hold", exported)
 
     def test_prepared_run_without_checkpoint_exports_the_prepare_shape(self):
         directory = legacy_run(self.root)

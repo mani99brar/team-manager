@@ -279,7 +279,8 @@ def challenge_history(directory: Path) -> list[dict]:
 
 def challenge_section(directory: Path) -> dict | None:
     """The latest `challenge.json` without `run_id` and `version`, plus `attempts`; null when absent or invalid. With
-    `hold` (C8) when `challenge-hold.json` records that attempt: held, and once released when, by whom and the notes dropped."""
+    `hold` (C8) when `challenge-hold.json` records that attempt held: held, and once released when, by whom and the notes dropped.
+    An attempt that passed under `resume --launch` was never held and has no `hold`."""
     item = load_optional(directory / "challenge.json")
     if item is None:
         return None
@@ -292,7 +293,8 @@ def challenge_section(directory: Path) -> dict | None:
     section = {key: value for key, value in item.items() if key not in {"run_id", "version"}}
     section["attempts"] = item["attempt"]
     hold = load_optional(directory / HOLD)
-    if isinstance(hold, dict) and hold.get("attempt") == item["attempt"]:  # 1.7.0, C8: only the hold of the attempt shown.
+    # 1.7.0, C8: only the hold of the attempt shown, and never a release marked `"held": false` (a rerun that passed under --launch).
+    if isinstance(hold, dict) and hold.get("attempt") == item["attempt"] and hold.get("held") is not False:
         section["hold"] = {key: hold.get(key) for key in HOLD_KEYS}
     history = challenge_history(directory)
     if history:  # 1.7.0, C49: left out for a single attempt, as for every run exported before.

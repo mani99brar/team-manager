@@ -1478,6 +1478,11 @@ class ChallengeHold(GuardedFeature):
         self.assertFalse([event for event in events if "attempt 2" in event[2] and "held for the operator" in event[2]], events)
         self.assertIn(("controller", "note", "Resume by the operator: design challenge attempt 2 passed under --launch, hold released; launching the workers"),
                       events)
+        # Attempt 2 was never held: its release is marked so, and the export shows no hold for it.
+        self.assertIs(hold["held"], False)
+        exported = read_json(directory / "run-state.json")["inputs"]["challenge"]
+        self.assertEqual((exported["status"], exported["attempts"]), ("passed", 2))
+        self.assertNotIn("hold", exported)
         # A rerun with --launch that finds a P1 is an ordinary pause.
         other = self.held("edit-pause-001")
         self.edit_task()
@@ -1521,6 +1526,27 @@ class ChallengeHold(GuardedFeature):
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
         for lane in LANES:
             self.assertNotIn("One test is slow", self.given[lane]["prompt"])
+        # An accepted attempt whose launch failed: the override was the release, and nothing holds it to drop notes from.
+        accepted = self.prepare("drop-accepted-001", hold=True)
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(accepted), "--live"])
+        self.assertEqual((code, read_json(accepted / "challenge.json")["status"]), (0, "paused"), output)
+        with patch("workflow.pipeline.start_workers", side_effect=RuntimeError("Claude launch exited 1")):
+            output, code = self.cli(resume_main, [str(accepted), "--accept-challenge", "Known risk"])
+        self.assertEqual((code, read_json(accepted / "challenge.json")["status"]), (1, "accepted"), output)
+        output, code = self.cli(resume_main, [str(accepted), "--launch", "--drop", "1"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 1: design challenge attempt 1 was accepted, and nothing holds it", output)
+        self.assertEqual(self.launches(accepted), ["challenge"])
+        # No record at all: a first attempt that was interrupted before it decided. Its rerun numbers its own notes.
+        interrupted = self.prepare("drop-interrupted-001", hold=True)
+        save_json(interrupted / "challenge.running.json", {"attempt": 1, "session_id": "00000000-0000-4000-8000-000000000001", "started_at": now()})
+        calls = len(self.challenge_calls())
+        output, code = self.cli(resume_main, [str(interrupted), "--launch", "--drop", "1"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 1: no design challenge attempt was decided, and the rerun numbers its own notes", output)
+        self.assertFalse((interrupted / "challenge.json").exists())
+        self.assertEqual((len(self.challenge_calls()), self.launches(interrupted)), (calls, []))
 
     def test_a_held_next_step_after_an_edit_names_the_rerun_or_the_refusal_resume_would_give(self):
         directory = self.held("held-step-001")
@@ -1565,6 +1591,17 @@ class ChallengeHold(GuardedFeature):
                       "challenge and launches the workers unless it finds a P0/P1; or "
                       f"{PY} -m workflow resume {directory} --by operator reruns it and holds again", output)
         self.assertNotIn("nothing it read has changed since", output)
+        self.assertEqual(len(self.challenge_calls()), 1)
+        # Never a command that refuses: with another change in the source checkout, the refusal names resume's refusal instead.
+        (self.repo / "other.txt").write_text("stray\n")
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "fine"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: Design challenge attempt 1 passed and is held for the operator, and feature files changed since it read "
+                      "them, but resume refuses: ", output)
+        self.assertIn("other.txt", output)
+        self.assertIn("; nothing is accepted", output)
+        self.assertNotIn("commits them", output)
+        self.assertNotIn("reruns it and holds again", output)
         self.assertEqual(len(self.challenge_calls()), 1)
 
     def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):
