@@ -4,8 +4,11 @@ It prunes every passed check attempt of the run (checks.prune_attempt, which ver
 since C47), then removes the lane, candidate, review and challenge worktrees and, once the run is finished, its source
 checkout `<runs root>/<run id>.source`; then `git worktree prune`. Every removal goes through git_worktree, under the
 repository's worktree lock, since running runs add worktrees to the same .git (a leftover Git no longer lists is deleted:
-checks.remove_worktree). Failed attempts are kept whole, and so are repair workspaces (an operator's fix may sit
-uncommitted in one), packets, logs, artifacts and every run file.
+checks.remove_worktree). The repository is the first checkout of the run Git can still read (worktrees.run_checkouts), since
+a C56 run's plan.repository is that source checkout; with none left, leftovers are deleted and nothing is pruned. The
+source checkout goes last, only once every other removal succeeded, and never while it holds uncommitted changes or a
+rebase or merge in progress (the operator integrates there when --ff-only refuses). Failed attempts are kept whole, and so
+are repair workspaces (an operator's fix may sit uncommitted in one), packets, logs, artifacts and every run file.
 
 It refuses while the run's controller or supervisor lock is held, while a receipt cannot be read, or while `claude agents`
 lists a live session of the run: by a receipt's IDs, by the ID a never-bound receipt's launch log printed, or by one of
@@ -24,11 +27,11 @@ import sys
 from pathlib import Path
 
 from .actor import add_actor_argument, require_actor
-from .checks import prunable, prune_attempt, remove_worktree
+from .checks import prunable, prune_attempt, remove_tree, remove_worktree
 from .guardrails import source_checkout
 from .interactive import REVIEW, TERMINAL_STATES, launch_name, recorded_stop
 from .sessions import read_json, run_lock
-from .worktrees import common_dir, git_worktree
+from .worktrees import common_dir, git_worktree, run_checkouts
 
 RUN_WORKTREES = (("review worktree", "review-worktree"), ("challenge worktree", "challenge-worktree"))
 
@@ -107,7 +110,7 @@ def listed_sessions(directory: Path, plan: dict, rows: list[dict]) -> list[str]:
 
 
 def uncommitted(path: Path) -> int | None:
-    """How many changes `git status` shows in a lane worktree; None when Git cannot tell."""
+    """How many changes `git status` shows in a lane worktree or the source checkout; None when Git cannot tell."""
     try:
         return len(subprocess.run(["git", "-C", str(path), "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.splitlines())
     except (OSError, subprocess.SubprocessError):
@@ -127,6 +130,16 @@ def snapshot_commits(directory: Path, plan: dict) -> dict[Path, str]:
         if isinstance(info, dict) and info.get("worktree") and isinstance(snapshot, dict) and isinstance(snapshot.get("commit"), str):
             frozen[Path(info["worktree"])] = snapshot["commit"]
     return frozen
+
+
+def in_progress(path: Path) -> bool:
+    """A rebase, merge, cherry-pick or revert stopped in this checkout: the operator's integration may be half done there."""
+    try:
+        gitdir = Path(subprocess.run(["git", "-C", str(path), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True,
+                                     check=True).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return any((gitdir / name).exists() for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"))
 
 
 def finished(directory: Path) -> bool:
@@ -179,11 +192,40 @@ def run_worktrees(directory: Path, plan: dict) -> tuple[list[tuple[str, Path]], 
     kept += [f"{path}: a repair workspace, which may hold an uncommitted fix" for path in sorted(directory.glob("repair-workspace-*")) if path.is_dir()]
     source = source_checkout(directory)  # launch's own checkout of the run (C56); older runs have none.
     if source.exists():
-        if finished(directory):
-            remove.append(("source checkout", source))
-        else:
+        # The operator integrates by hand there when --ff-only refuses (RUNBOOK): what it holds uncommitted is their work.
+        changes = uncommitted(source) if finished(directory) else 0
+        if not finished(directory):
             kept.append(f"{source}: the run is not finished")
+        elif changes is None:
+            kept.append(f"{source}: Git cannot tell whether it holds uncommitted changes; remove it by hand once checked")
+        elif changes:
+            kept.append(f"{source}: {changes} uncommitted change{'s' if changes != 1 else ''}; commit or discard it, then rerun clean")
+        elif in_progress(source):
+            kept.append(f"{source}: a rebase or merge is in progress there; finish or abort it, then rerun clean")
+        else:
+            remove.append(("source checkout", source))  # Always last: it goes only once every other removal succeeded.
     return remove, kept
+
+
+def readable(path: str) -> bool:
+    """`git -C <path> rev-parse --git-dir` answers: a checkout Git can still read."""
+    try:
+        return subprocess.run(["git", "-C", path, "rev-parse", "--git-dir"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def remove_leftover(path: Path) -> None:
+    """A worktree's folder when no checkout of the repository is left to ask Git with: deleted, as remove_worktree deletes
+    a leftover Git no longer lists. An independent repository (a `.git` directory) is never deleted."""
+    if not (path.exists() or path.is_symlink()):
+        return
+    if (path / ".git").is_dir():
+        raise RuntimeError(f"{path} holds its own repository (a .git directory); clean never deletes one")
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        remove_tree(path)
 
 
 def clean_main(argv=None):
@@ -206,8 +248,10 @@ def clean_main(argv=None):
                 raise ValueError(f"claude agents still lists {', '.join(listed)} from this run's receipts; stop it first "
                                  "(RUNBOOK: Stopping an unfinished run)")
             # Git's common directory itself, which outlives every worktree removed here (a source checkout may be the plan's
-            # repository) and is the repository whatever its layout (--separate-git-dir, a bare repository's worktrees).
-            repository = common_dir(plan["repository"])
+            # repository) and is the repository whatever its layout (--separate-git-dir, a bare repository's worktrees). Found
+            # from the first checkout of the run Git can still read: a C56 run's plan.repository is its source checkout, which
+            # an earlier clean or the operator may have removed. None when none is left: leftovers are then deleted as such.
+            repository = next((common_dir(path) for path in run_checkouts(plan, directory) if Path(path).exists() and readable(path)), None)
             attempts, kept_attempts = passed_attempts(directory)
             worktrees, kept = run_worktrees(directory, plan)
             if not attempts and not worktrees:
@@ -238,17 +282,26 @@ def clean_main(argv=None):
             errors = []
             for folder, _ in attempts:
                 try:
+                    if repository is None:
+                        remove_leftover(folder / "worktree")
                     prune_attempt(repository, folder)
                     print(f"Removed: passed attempt {folder.relative_to(directory)} pruned")
                 except Exception as error:  # Whatever one removal raises, the others still run.
                     errors.append(f"{folder}: {error}")
             for label, path in worktrees:
+                if label == "source checkout" and errors:
+                    # The source checkout names the repository for every later clean: it goes last, once the rest is gone.
+                    print(f"Kept: source checkout {path}: another removal failed; rerun clean once fixed")
+                    continue
                 try:
-                    remove_worktree(repository, path)
+                    if repository is None:
+                        remove_leftover(path)
+                    else:
+                        remove_worktree(repository, path)
                     print(f"Removed: {label} {path}")
                 except Exception as error:
                     errors.append(f"{path}: {error}")
-            if attempts or worktrees:
+            if (attempts or worktrees) and repository is not None:
                 try:
                     git_worktree(repository, "prune")
                 except Exception as error:  # Reported with the removals that failed, never in their place.

@@ -1730,6 +1730,24 @@ class AbandonTests(unittest.TestCase):
         self.assertEqual(output.count("exited 75"), 1, output)
         self.assertFalse((self.directory / "abandon.json").exists())
 
+    def test_a_listing_that_fails_inside_a_stop_ends_the_abandon_after_one_wait(self):
+        # abandon's own listing worked; then Claude Code restarts (an update) while the first stop lists again.
+        from .sessions import TransientInfraError
+        listed = self.sessions.inventory
+
+        def later_unavailable():
+            if self.inventories == 0:
+                return listed()
+            self.inventories += 1
+            raise TransientInfraError("Claude Code unavailable: inventory unavailable for 60s")
+        self.sessions.inventory = later_unavailable
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertEqual(self.inventories, 2, output)  # abandon's own listing, then the one waited listing of ui's stop.
+        self.assertEqual(output.count("inventory unavailable for 60s"), 1, output)
+        self.assertIn("Not abandoned: `claude agents --json` gave no session list", output)
+        self.assertFalse((self.directory / "abandon.json").exists())
+
     def test_an_identity_refusal_is_a_failure_not_a_session_that_is_not_running(self):
         self.live["review"]["name"] = "workflow-other-run-review"
         code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")

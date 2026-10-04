@@ -26,7 +26,7 @@ from .actor import actor_record, actor_text, add_actor_argument, require_actor
 from .checks import now
 from .interactive import PROCESS_ENDED, TERMINAL_STATES
 from .pipeline import pid_alive
-from .sessions import plan_workers, read_json, review_nodes, run_lock, save_json
+from .sessions import TransientInfraError, plan_workers, read_json, review_nodes, run_lock, save_json
 
 ABANDON = "abandon.json"
 ABANDON_VERSION = "1.0.0"
@@ -140,7 +140,8 @@ def abandon(runtime, reason: str, actor: str) -> dict:
                 continue
             runtime.stop_session(node)
             stopped.append(node)
-        except ListingUnavailable as error:
+        except (ListingUnavailable, TransientInfraError) as error:
+            # A stop's own listing that failed (Claude Code restarting) waited out its grace too: the next node would only wait again.
             raise RuntimeError(f"Not abandoned: `claude agents --json` gave no session list ({error}), so abandon cannot tell which "
                                "sessions still run. Rerun the same abandon once `claude --version` works") from error
         except Exception as error:

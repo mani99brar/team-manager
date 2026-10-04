@@ -1279,8 +1279,8 @@ class ChallengeResumeSupervises(GuardedFeature):
         self.assertEqual(supervised, [(directory, ["challenge", "challenge", "adapter", "ui"])])
         self.assertIn("Automatic run reached a verified feature branch", output)
         # The run's branch is in its own worktree: merged from your checkout without switching, then the worktree removed.
-        self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, remove its source checkout: "
-                      f"git worktree remove {self.repo}", output)
+        self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, `python -m workflow clean "
+                      f"{directory} --by operator` removes its checkouts, its source checkout last (by hand: git worktree remove {self.repo})", output)
 
 
 class ChallengeRevision(GuardedFeature):

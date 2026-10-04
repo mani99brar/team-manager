@@ -804,11 +804,13 @@ def edited_in(plan: dict) -> str:
 
 
 def finished_note(source: Path, branch: str, checkout: Path | None = None) -> str:
-    """How a run launched on its own worktree ends: the branch merges into your checkout without switching it, and the
-    worktree is removed by hand (C47's cleanup is later)."""
+    """How a run launched on its own worktree ends: the branch merges into your checkout without switching it, and `clean`
+    (C47) removes the run's checkouts, its source checkout last. The `git worktree remove` form only while it exists."""
     where = f"git -C {checkout} " if checkout else "git "
+    run = source.with_name(source.name.removesuffix(".source"))
+    by_hand = f" (by hand: {where}worktree remove {source})" if source.exists() else ""
     return (f"Merge the run branch from your checkout without switching it: {where}merge --ff-only {branch}. Once the run is "
-            f"finished, remove its source checkout: {where}worktree remove {source}")
+            f"finished, `python -m workflow clean {run} --by operator` removes its checkouts, its source checkout last{by_hand}")
 
 
 # Set by launch on the `automatic` it runs: launch prints finished_note itself, in its `git -C <your checkout>` form.

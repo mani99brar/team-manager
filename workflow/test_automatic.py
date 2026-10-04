@@ -3914,8 +3914,9 @@ class FinishNote(unittest.TestCase):
             directory = Path(temp) / "run-001"
             directory.mkdir()
             source = Path(temp) / "run-001.source"
+            # The source checkout is not there: no `git worktree remove` to give, only clean.
             note = (f"Merge the run branch from your checkout without switching it: git merge --ff-only feature/x/run-001. Once the run is "
-                    f"finished, remove its source checkout: git worktree remove {source}")
+                    f"finished, `python -m workflow clean {directory} --by operator` removes its checkouts, its source checkout last")
             for repository, environment, expected in ((source, {}, True), (Path(temp) / "checkout", {}, False),
                                                       (source, {LAUNCH_NOTE_ENV: "1"}, False)):
                 save_json(directory / "plan.json", {"run_id": "run-001", "repository": str(repository), "source_branch": "feature/x/run-001"})

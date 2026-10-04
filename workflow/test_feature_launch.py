@@ -130,7 +130,8 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertTrue(all("env" not in call.kwargs for call in command.call_args_list))
         source, branch = (runs / "project-workflows-001.source").resolve(), "feature/project-workflows/project-workflows-001"
         self.assertIn(f"Once it integrates: Merge the run branch from your checkout without switching it: git -C {self.repo} merge --ff-only "
-                      f"{branch}. Once the run is finished, remove its source checkout: git -C {self.repo} worktree remove {source}", output.getvalue())
+                      f"{branch}. Once the run is finished, `python -m workflow clean {source.with_name('project-workflows-001')} --by operator` removes "
+                      "its checkouts, its source checkout last\n", output.getvalue())
 
     def test_a_launch_from_a_runs_own_source_checkout_is_refused(self):
         # The cwd rule would take the run's worktree for the target: a project named after it, branched from the run's branch.
@@ -593,6 +594,23 @@ class LaunchNotes(unittest.TestCase):
         [note] = self.overlaps()
         self.assertIn(f"candidate {side[:12]} is not in this base", note)
 
+    def test_a_finished_run_whose_source_checkout_was_removed_is_still_named(self):
+        # A launched (C56) run: plan.repository is its <run>.source worktree, which clean or the operator removes once it finished.
+        source = self.runs / "first" / "first-001.source"
+        git(self.repo, "worktree", "add", "-q", "-b", "feature/first/first-001", str(source), "HEAD")
+        (source / "package.json").write_text("{}\n")
+        git(source, "add", "package.json")
+        git(source, "commit", "-qm", "first's work")
+        integrated = git(source, "rev-parse", "HEAD")
+        plan = json.loads((self.first / "plan.json").read_text())
+        save_json(self.first / "plan.json", {**plan, "repository": str(source)})
+        save_json(self.first / "review-bundle.json", {"candidate_commit": integrated})
+        [note] = self.overlaps()
+        git(self.repo, "worktree", "remove", str(source))
+        # Its commit is still in the repository, not in the new base: the registry's checkout of the project names the repository.
+        self.assertEqual(self.overlaps(), [note])
+        self.assertIn(f"candidate {integrated[:12]} is not in this base", note)
+
     def test_runs_whose_work_is_in_the_base_idle_runs_earlier_runs_of_the_feature_and_other_repositories_give_none(self):
         with self.subTest("candidate in the new base"):
             save_json(self.first / "review-bundle.json", {"candidate_commit": self.base})
@@ -612,7 +630,11 @@ class LaunchNotes(unittest.TestCase):
             self.make_run(self.first, other, [{"node_id": "web", "owned_paths": ["package.json"]}])
             self.assertEqual(self.overlaps(), [])
         with self.subTest("a checkout that is gone"):
+            # Neither the run's checkout nor its project's registered one is left: nothing names its repository.
             self.make_run(self.first, self.root / "gone", [{"node_id": "web", "owned_paths": ["package.json"]}])
+            registry = json.loads(self.registry.read_text())
+            registry["projects"][0]["repository"] = str(self.root / "gone")
+            save_json(self.registry, registry)
             self.assertEqual(self.overlaps(), [])
 
     def test_a_timeline_last_modified_before_the_window_is_not_read(self):

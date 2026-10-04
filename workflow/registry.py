@@ -25,6 +25,7 @@ from pathlib import Path
 from .export_state import definition
 from .sessions import plan_workers, read_json
 from .verification import owns
+from .worktrees import run_checkouts
 
 REGISTRY_ENV = "MD_MANAGER_PROJECTS_CONFIG"
 REGISTRY_VERSION = 1
@@ -327,8 +328,9 @@ def runs_in(runs_root: Path, since: datetime | None = None) -> list[dict]:
 
 def registered_runs(path: Path | None = None, since: datetime | None = None) -> list[dict]:
     """Each run under each runs root the registry at `path` (default registry_path()) names, once per runs root, with its
-    project_id, workflow_id and resolved runs_root; with `since`, only runs whose events.jsonl was modified since (the
-    others are never parsed). A missing or malformed registry has no runs."""
+    project_id, workflow_id, resolved runs_root and the project's repository (your checkout, which launch registers); with
+    `since`, only runs whose events.jsonl was modified since (the others are never parsed). A missing or malformed registry
+    has no runs."""
     try:
         document = json.loads((path or registry_path()).read_text())
     except (OSError, ValueError):
@@ -343,7 +345,8 @@ def registered_runs(path: Path | None = None, since: datetime | None = None) -> 
                 continue
             seen.add(root)
             for record in runs_in(root, since):
-                runs.append({**record, "project_id": project.get("project_id"), "workflow_id": workflow.get("workflow_id"), "runs_root": root})
+                runs.append({**record, "project_id": project.get("project_id"), "workflow_id": workflow.get("workflow_id"), "runs_root": root,
+                             "project_repository": project.get("repository")})
     return runs
 
 
@@ -367,8 +370,8 @@ def previous_policy(runs_root: Path, current: Path) -> tuple[str, dict] | None:
 
 
 def read_git(path: Path, *arguments: str) -> tuple[int, str]:
-    """A read-only Git command's exit code and output, (-1, "") when it cannot run. Popen, not subprocess.run: a dry run is
-    checked by patching subprocess.run, and its notes still read Git."""
+    """A read-only Git command's exit code and output, (-1, "") when it cannot run. Popen: a read during a dry run, like
+    guardrails.git_read."""
     try:
         with subprocess.Popen(["git", "-C", str(path), *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, text=True) as process:
@@ -401,8 +404,10 @@ def overlap_notes(repository: Path, lanes: list[dict], runs_root: Path, base: st
     """A launch note for each owned path of `lanes` (policy workers) that a run of another feature on the same repository
     also owns while its work is not in `base` (C23). Only runs from another runs root (a feature's own lanes are disjoint
     and its earlier runs superseded), with an event in the last RECENT. The same repository is the same git common
-    directory (a linked worktree) or a shared root commit (a clone); a run whose checkout is gone is skipped. The work is in
-    the base when its integrated, else its candidate, commit is an ancestor of `base`."""
+    directory (a linked worktree) or a shared root commit (a clone). The other run's repository is read from the first of its
+    checkouts that is still a repository (worktrees.run_checkouts: plan.repository, a C56 run's `<run>.source` that clean or
+    the operator removes once it finished, then the run's worktrees), else from its registered project's checkout; a run
+    with none left is skipped. The work is in the base when its integrated, else its candidate, commit is an ancestor of `base`."""
     own = repository_identity(repository)
     if own is None:
         return []
@@ -413,12 +418,15 @@ def overlap_notes(repository: Path, lanes: list[dict], runs_root: Path, base: st
     for run in runs:
         if Path(run["runs_root"]).resolve() == runs_root.resolve() or run["last_event"] is None or now - run["last_event"] > RECENT:
             continue
-        checkout = run["plan"].get("repository")
-        if not isinstance(checkout, str) or not isinstance(run["policy"], dict):
+        if not isinstance(run["plan"].get("repository"), str) or not isinstance(run["policy"], dict):
             continue
-        if checkout not in identities:
-            identities[checkout] = repository_identity(Path(checkout)) if Path(checkout).is_dir() else None
-        other = identities[checkout]
+        other = None
+        for checkout in [*run_checkouts(run["plan"], Path(run["directory"])), run.get("project_repository")]:
+            if isinstance(checkout, str) and checkout not in identities:
+                identities[checkout] = repository_identity(Path(checkout)) if Path(checkout).is_dir() else None
+            other = identities.get(checkout) if isinstance(checkout, str) else None
+            if other is not None:
+                break
         if other is None or (other[0] != own[0] and not other[1] & own[1]):
             continue
         landed = run["integration"]["integrated_commit"] or run["candidate_commit"]

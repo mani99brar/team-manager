@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .pipeline import CANDIDATE_REF, digest_file, run_ref
 from .sessions import plan_excluded, plan_workers, read_json, review_node, reviewer_ids
+from .worktrees import run_checkouts
 
 def optional_json(path: Path):
     """The file's JSON, or None when it is missing or unreadable."""
@@ -200,15 +201,9 @@ def readable(repository: str) -> bool:
 
 def readable_checkout(plan: dict, directory: Path) -> str | None:
     """A checkout of the run's repository that Git can still read: plan.repository, else (a C56 run's source worktree removed
-    once the run finished) one of the run's own worktrees of the same repository: a lane's, candidate/, review-worktree/ or
-    challenge-worktree/. None when every one is gone."""
-    nodes = plan.get("nodes") if isinstance(plan.get("nodes"), dict) else {}
-    others = [info.get("worktree") for info in nodes.values() if isinstance(info, dict) and info.get("worktree")]
-    others += [str(directory / name) for name in ("candidate", "review-worktree", "challenge-worktree")]
-    for repository in (str(plan.get("repository")), *others):
-        if Path(repository).exists() and readable(repository):
-            return repository
-    return None
+    once the run finished) one of the run's own worktrees of the same repository, or the common Git directory one of their
+    `.git` files names (worktrees.run_checkouts). None when every one is gone."""
+    return next((repository for repository in run_checkouts(plan, directory) if Path(repository).exists() and readable(repository)), None)
 
 
 def candidate_ref(repository: str, directory: Path, candidate: str) -> str:

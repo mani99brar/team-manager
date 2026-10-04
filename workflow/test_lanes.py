@@ -591,7 +591,8 @@ class DeclaredReviewers(LaneRun):
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), read_json(self.directory / "run-state.json")["values"]["integrated_commit"])
         branch = self.plan["source_branch"]
         note = (f"Merge the run branch from your checkout without switching it: git merge --ff-only {branch}. Once the run is finished, "
-                f"remove its source checkout: git worktree remove {self.repo}")
+                f"`python -m workflow clean {self.directory} --by operator` removes its checkouts, its source checkout last (by hand: "
+                f"git worktree remove {self.repo})")
         self.assertIn(note, result.stdout)
         # status's finished next step says it too.
         result = self.cli("status", str(self.directory))

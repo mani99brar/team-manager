@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -304,6 +305,104 @@ class CleanTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"Kept: {outside}: outside the run directory", out)
         self.assertTrue(outside.exists())
+
+
+class LaunchedRunCleanTests(CleanTests):
+    """A launched (C56) run: plan.repository is its `<run>.source` checkout, and every worktree of the run was added from it."""
+
+    def setUp(self):
+        super().setUp()
+        plan = json.loads((self.run / "plan.json").read_text())
+        save_json(self.run / "plan.json", {**plan, "repository": str(self.source)})
+
+    def add(self, path: Path) -> Path:
+        source = self.root / "runs" / "feature-001.source"
+        if path != source and source.exists():
+            git_worktree(source, "add", "--detach", str(path), self.base)
+            return path
+        return super().add(path)
+
+    def gone(self):
+        for path in (self.passed / "worktree", self.candidate_passed / "worktree", self.run / "worktree-ui", self.run / "candidate",
+                     self.run / "candidate-1", self.run / "review-worktree", self.run / "challenge-worktree", self.source):
+            self.assertFalse(path.exists(), path)
+            self.assertNotIn(str(path), self.listed())
+
+    def test_a_finished_run_is_cleaned_completely_and_a_second_clean_has_nothing_to_remove(self):
+        self.finish()
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.rstrip().splitlines()[-1].startswith("Removed: source checkout"), out)  # Always the last removal.
+        self.gone()
+        self.assertTrue((self.run / "repair-workspace-1").exists())
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to remove", out)
+
+    def test_a_clean_after_the_source_checkout_was_removed_by_hand_removes_the_rest(self):
+        self.finish()
+        git(self.repo, "worktree", "remove", "--force", str(self.source))
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.gone()
+
+    def test_with_no_readable_checkout_left_the_leftovers_are_still_deleted(self):
+        # Git forgot every worktree of the run, but their folders stayed: no checkout of the run names a readable repository.
+        self.finish()
+        for path in (self.source, self.run / "worktree-ui", self.run / "candidate", self.run / "candidate-1", self.run / "review-worktree",
+                     self.run / "challenge-worktree", self.passed / "worktree", self.failed / "worktree", self.candidate_passed / "worktree",
+                     self.run / "repair-workspace-1"):
+            (path / ".git").write_text("gitdir: /nonexistent/worktrees/gone\n")
+        shutil.rmtree(self.repo / ".git" / "worktrees")
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        for path in (self.passed / "worktree", self.candidate_passed / "worktree", self.run / "worktree-ui", self.run / "candidate",
+                     self.run / "candidate-1", self.run / "review-worktree", self.run / "challenge-worktree"):
+            self.assertFalse(path.exists(), path)
+        # Git cannot read the source checkout, so clean cannot tell what it holds: it stays for the operator.
+        self.assertIn(f"Kept: {self.source}: Git cannot tell whether it holds uncommitted changes", out)
+        self.assertTrue(self.source.exists())
+        self.assertTrue((self.failed / "worktree").exists())
+        self.assertTrue((self.run / "repair-workspace-1").exists())
+
+    def test_the_source_checkout_stays_while_another_removal_failed(self):
+        self.finish()
+        lane = self.run / "worktree-ui"
+        real = clean.remove_worktree
+
+        def remove(repository, path):
+            if path == lane:
+                raise RuntimeError("lane is busy")
+            return real(repository, path)
+        with patch.object(clean, "remove_worktree", side_effect=remove):
+            code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{lane}: lane is busy", err)
+        self.assertIn(f"Kept: source checkout {self.source}: another removal failed", out)
+        self.assertTrue(self.source.exists())
+        code, out, err = self.clean("--by", "operator")  # The rerun the message asks for.
+        self.assertEqual(code, 0, err)
+        self.gone()
+
+    def test_a_source_checkout_with_uncommitted_changes_is_kept(self):
+        self.finish()
+        (self.source / "README.md").write_text("# A conflict resolution in progress\n")
+        code, out, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(f"  source checkout {self.source}", out)
+        self.assertIn(f"Kept: {self.source}: 1 uncommitted change; commit or discard it, then rerun clean", out)
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.source / "README.md").read_text().startswith("# A conflict"))
+        self.assertFalse((self.run / "worktree-ui").exists())
+
+    def test_a_source_checkout_in_the_middle_of_a_rebase_is_kept(self):
+        self.finish()
+        gitdir = Path(git(self.source, "rev-parse", "--absolute-git-dir"))
+        (gitdir / "rebase-merge").mkdir()
+        code, out, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Kept: {self.source}: a rebase or merge is in progress there; finish or abort it, then rerun clean", out)
 
 
 if __name__ == "__main__":
