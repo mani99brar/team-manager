@@ -46,13 +46,18 @@ def isolate_registry() -> None:
 def stub_claude_cli() -> None:
     """setUpModule of every test module that prepares a run: until the module's last test, a stand-in `claude` comes first on
     PATH, so prepare's `claude --version` (sessions.controller_record) never runs the operator's CLI, in process or in a
-    child. It answers --version with CLAUDE_VERSION_STUB and fails anything else; a test that sets PATH itself still wins."""
+    child. It answers --version with CLAUDE_VERSION_STUB and fails anything else; a test that sets PATH itself still wins.
+    The model and effort overrides the sessions never see (scrub_env) are unset too, so an operator's shell that sets
+    ANTHROPIC_MODEL adds no override note (override_note) to what prepare or a dry run prints."""
+    from .sessions import scrub_env
     temp = tempfile.TemporaryDirectory()
     stub = Path(temp.name) / "claude"
     stub.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] || exit 2\necho '{CLAUDE_VERSION_STUB}'\n")
     stub.chmod(0o755)
     environment = patch.dict(os.environ, {"PATH": f"{temp.name}{os.pathsep}{os.environ.get('PATH', '')}"})
     environment.start()
+    for key in set(os.environ) - set(scrub_env(os.environ)):  # Restored with the rest of the environment.
+        del os.environ[key]
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
 
