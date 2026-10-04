@@ -23,10 +23,22 @@ from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientIn
                        review_nodes, run_claude, save_json, worker_effort)
 
 REVIEW = "review"
+# A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
+# exec, after the launch receipt is written. Refused below that, before the receipt; there is no separate CLAUDE.md cap.
+PROMPT_ARGV_LIMIT = 120_000
 
 
 def is_review_node(node: str) -> bool:
     return node == REVIEW or node.startswith("review-")
+
+
+def refuse_long_prompt(node: str, prompt: str) -> None:
+    """Refuse a prompt over PROMPT_ARGV_LIMIT bytes; the launch calls it before it writes the receipt."""
+    size = len(prompt.encode())
+    if size > PROMPT_ARGV_LIMIT:
+        raise RuntimeError(f"{node_title(node)}'s prompt is {size} bytes, over the {PROMPT_ARGV_LIMIT} bytes one command-line argument can "
+                           "safely carry; nothing was launched and no receipt was written. Shorten what the run pinned into it (the "
+                           "task or the reviewer's brief, CLAUDE.md above its operator-notes heading, decisions.md) and prepare a new run.")
 
 
 def pane_label(node: str) -> str:
@@ -205,6 +217,10 @@ class InteractiveSessions(ClaudeSessions):
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"],
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        # Built before the receipt is saved, from the launch time it records (so the deadline the prompt states is the one
+        # wait_handoffs applies): a prompt too long for argv is refused while nothing is recorded or launched.
+        prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
+        refuse_long_prompt(node, prompt)
         save_json(path, receipt)
         automatic = bool(self.plan.get("automatic"))
         if automatic:
@@ -213,7 +229,6 @@ class InteractiveSessions(ClaudeSessions):
         tools = "Read,Glob,Grep,Edit,Write" if self.plan["allow_edits"] else "Read,Glob,Grep"
         if automatic:
             tools += ",Bash"
-        prompt = worker_prompt(self.directory, self.plan, node)
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         command = [self.executable, "--bg", "--name", self.launch_name(node), *background_settings(), *worker_effort(),
@@ -248,6 +263,7 @@ class InteractiveSessions(ClaudeSessions):
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"], "candidate_commit": candidate_commit,
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        refuse_long_prompt(node, prompt)  # Before the receipt: nothing is recorded or launched.
         save_json(path, receipt)
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # Claude permission rules spell absolute paths as //absolute/path, and file writes are
@@ -271,9 +287,10 @@ SIDECAR_NOTE = ("\n\nReview sidecar: an independent reviewer reads your diff and
                 "keep your ## Stop bound, and never stop or wait for the sidecar.\n")
 
 
-def worker_prompt(directory: Path, plan: dict, node: str) -> str:
+def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
     """What a native worker session receives: the rules, its pinned task, the project's conventions (CLAUDE.md), the run's
-    decisions.md, a note on the review sidecar when the plan has one, and in automatic mode the completion protocol."""
+    decisions.md, a note on the review sidecar when the plan has one, and in automatic mode the completion protocol, whose
+    deadline counts from `launched_at` (the launch time the receipt records), else from the receipt on disk."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
@@ -283,7 +300,7 @@ def worker_prompt(directory: Path, plan: dict, node: str) -> str:
         prompt += SIDECAR_NOTE
     if plan.get("automatic"):
         from .automatic import completion_prompt
-        prompt += completion_prompt(directory, plan, node)
+        prompt += completion_prompt(directory, plan, node, launched_at)
     return prompt
 
 

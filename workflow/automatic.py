@@ -69,7 +69,8 @@ def reviewer_transport(plan: dict) -> str:
     return plan["automatic"].get("reviewer_transport", "native")
 
 
-def completion_prompt(directory: Path, plan: dict, node: str) -> str:
+def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+    """An automatic worker's completion protocol; its deadline counts from `launched_at` when given (deadline_sentence)."""
     from .guardrails import COMPLETION_VERSION, MAX_QUESTIONS, completion_version, stop_rule
     version = completion_version(plan)
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
@@ -101,7 +102,7 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
             "then finish your turn and do not modify more files. Controller checks and independent review "
-            "still determine acceptance." + deadline_sentence(directory, plan, node) + "\n" + json.dumps(example) + evidence)
+            "still determine acceptance." + deadline_sentence(directory, plan, node, launched_at) + "\n" + json.dumps(example) + evidence)
 
 
 def duration(seconds: int) -> str:
@@ -111,17 +112,17 @@ def duration(seconds: int) -> str:
             return f"{seconds // size} {unit}{'' if seconds // size == 1 else 's'}"
 
 
-def deadline_sentence(directory: Path, plan: dict, node: str) -> str:
-    """The worker prompt's deadline (C16 step 6): the lane deadline in UTC, from the receipt the launch saves before it builds the
-    prompt (interactive.py), so what the worker reads is what wait_handoffs holds it to. Only the bound when no receipt is
-    readable; nothing for a plan without a worker timeout."""
+def deadline_sentence(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+    """The worker prompt's deadline (C16 step 6): the lane deadline in UTC, from the launch time the receipt records (`launched_at`,
+    which the launch passes before it saves the receipt: interactive.py; else the receipt on disk), so what the worker reads is
+    what wait_handoffs holds it to. Only the bound when neither is readable; nothing for a plan without a worker timeout."""
     from .guardrails import iso
     seconds = (plan.get("automatic") or {}).get("worker_timeout_seconds")
     if type(seconds) is not int:
         return ""
     bound = f"{duration(seconds)} after this launch"
     try:
-        deadline = deadline_at(directory, plan, node)
+        deadline = deadline_at(directory, plan, node, launched_at)
     except (OSError, ValueError, KeyError, TypeError):
         deadline = None
     when = f"{iso(int(deadline))} (UTC), {bound}" if deadline is not None else bound
@@ -230,14 +231,16 @@ class Stalls:
                                                     "accepted once the state is idle or done, or the status idle")
 
 
-def deadline_at(directory: Path, plan: dict, node: str) -> float | None:
-    """A lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
+def deadline_at(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> float | None:
+    """A lane's own deadline: its launch (`launched_at`, else its receipt's launch_requested_at) plus worker_timeout_seconds plus
+    its answered questions' pauses; None while a question waits."""
     from .guardrails import deadline_extension
     extension = deadline_extension(directory, node)
     if extension is None:
         return None
-    receipt = read_json(directory / f"{node}.interactive.json")
-    return datetime.fromisoformat(receipt["launch_requested_at"]).timestamp() + plan["automatic"]["worker_timeout_seconds"] + extension
+    if launched_at is None:
+        launched_at = read_json(directory / f"{node}.interactive.json")["launch_requested_at"]
+    return datetime.fromisoformat(launched_at).timestamp() + plan["automatic"]["worker_timeout_seconds"] + extension
 
 
 def lane_deadline(runtime, node: str) -> float | None:
