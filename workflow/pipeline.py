@@ -1337,7 +1337,7 @@ def main():
     parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
                                                                    "{run_id, verdict, candidate_commit}")
     parser.add_argument("--tryout", action="store_true", help="preflight, prepare: the feature asks for a tryout (feature.json 2.4.0 tryout: true, C7); "
-                                                              "prepare pins plan.tryout, and both refuse it while 3 other features are untried (C29)")
+                                                              "prepare pins plan.tryout; preflight refuses it while 3 other features are untried (C29), prepare only pins")
     parser.add_argument("--allow-untried", metavar="REASON", help="preflight, prepare --tryout: launch past the untried-feature limit; prepare pins "
                                                                   "the reason as plan.allow_untried (--by operator)")
     add_actor_argument(parser)
@@ -1367,9 +1367,9 @@ def main():
                 raise ValueError("--allow-untried needs a reason")
         if args.tryout and args.action == "preflight":
             # C29: first, before the clean check and any Git action launch runs after preflight.
-            from .tryout import untried_check
-            passed = untried_check(directory.parent, repository=args.repo.resolve(), follows=args.follows is not None,
-                                   allow_untried=args.allow_untried)
+            from .tryout import launch_check  # The feature as launch knows it: its runs root, or its policy's features/<name>/.
+            passed = launch_check(directory.parent, args.repo.resolve(), args.policy, follows=args.follows is not None,
+                                  allow_untried=args.allow_untried)
             if passed:
                 print(f"Note: {passed}", file=sys.stderr, flush=True)
         if args.action not in {"preflight", "prepare", "status", "export"}:

@@ -847,10 +847,16 @@ class UntriedLimit(unittest.TestCase):
 
     def test_a_continuation_still_launches(self):
         def preflight_passes(commands):
-            # Preflight checks the limit again, first: the command launch gives it gets past that check (the rest of preflight
-            # then reads the real environment).
-            result = subprocess.run(commands[0], cwd=TOOL, capture_output=True, text=True, timeout=120)
+            # Preflight checks the limit again, first: the command launch gives it gets past that check. An untracked file
+            # stops it at the clean check right after, so it never runs `claude`.
+            untracked = self.repo / "untracked.txt"
+            untracked.write_text("stop preflight before claude\n")
+            try:
+                result = subprocess.run(commands[0], cwd=TOOL, capture_output=True, text=True, timeout=120)
+            finally:
+                untracked.unlink()
             self.assertNotIn("wait for your tryout", result.stdout + result.stderr)
+            self.assertIn("Source must be clean before prepare", result.stderr)
         with self.subTest("a follow-up run"):
             _, commands, _ = self.launch(follows=str(self.waiting[0]))
             self.assertIn("--tryout", commands[2])
@@ -860,6 +866,30 @@ class UntriedLimit(unittest.TestCase):
             _, commands, _ = self.launch("board-002")
             self.assertIn("--tryout", commands[0])
             preflight_passes(commands)
+        with self.subTest("a run of a feature untried itself under another runs root"):
+            # The registry lists board at its own root, where board-001 waits; this launch stores its runs elsewhere. Launch and
+            # preflight both know the feature by its project and workflow id too, so neither counts it among the others.
+            elsewhere = self.runs / "elsewhere"
+            _, commands, notes = launch_commands(self.repo, "board", "board-002", elsewhere, herdr=False)
+            self.assertFalse([note for note in notes if "untried" in note])
+            preflight_passes(commands)
+            # With an override launch drops as not needed, preflight passes as well.
+            _, commands, _ = launch_commands(self.repo, "board", "board-002", elsewhere, herdr=False, allow_untried="demo")
+            self.assertNotIn("--allow-untried", commands[0])
+            preflight_passes(commands)
+
+    def test_a_blank_override_reason_is_refused_and_a_given_one_is_stripped(self):
+        for blank in ("", "   "):
+            with self.subTest(reason=blank):
+                self.assertIn("--allow-untried needs a reason", self.refused(allow_untried=blank))
+                code, output, errors = self.dry_run("--allow-untried", blank)
+                self.assertEqual(code, 1)
+                self.assertIn("--allow-untried needs a reason", errors)
+                self.assertEqual(output, "")
+        _, commands, notes = self.launch(allow_untried="  The demo is tomorrow  ")
+        self.assertEqual(commands[2][commands[2].index("--allow-untried") + 1], "The demo is tomorrow")
+        self.assertEqual(commands[0][commands[0].index("--allow-untried") + 1], "The demo is tomorrow")
+        self.assertTrue([note for note in notes if note.endswith(": The demo is tomorrow")])
 
     def test_launch_passes_tryout_to_preflight_and_prepare_which_pins_it(self):
         save_json(self.waiting[0] / "tryout.json", {"verdicts": [{"result": "works", "note": None, "at": ago(0), "by": "operator"}]})
@@ -946,9 +976,11 @@ class TryoutFlag(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def test_a_feature_with_a_browser_check_that_leaves_the_flag_out_gets_the_note(self):
-        # Before 2.4.0 the key is refused, so a note there could never be silenced: it gets none.
+        # Before 2.4.0 the key is refused: the note is a migration hint.
         _, _, notes = launch_commands(self.repo, "project-workflows", "project-workflows-000", self.root / "runs", herdr=False)
-        self.assertFalse([note for note in notes if "tryout" in note])
+        [note] = [note for note in notes if "tryout" in note]
+        self.assertEqual(note, 'Lane ui has a browser check: to have each run tried before the merge to main, move feature.json to 2.4.0 '
+                               'and set "tryout": true.')
         from .test_guardrails import BRIEF, DECISIONS
         folder = self.repo / "features/project-workflows"
         manifest = read_json(folder / "feature.json")

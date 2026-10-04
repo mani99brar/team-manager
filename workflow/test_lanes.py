@@ -881,7 +881,10 @@ class LegacyFeatureAndRun(LaneRun):
         """Scenario legacy-feature-refused: a 1.0.0 feature.json is refused with a message to use 2.x; nothing runs."""
         self.two_lane_features()
         _, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
-        self.assertEqual((commands_new[1], notes_new), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"], []))
+        # Its ui lane has a browser check: the one note is C7's tryout migration hint.
+        self.assertEqual((commands_new[1], notes_new), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"],
+                                                        ['Lane ui has a browser check: to have each run tried before the merge to main, move '
+                                                         'feature.json to 2.4.0 and set "tryout": true.']))
         with self.assertRaisesRegex(ValueError, r"version 1\.0\.0 .*no longer supported: rewrite it as version 2\.x"):
             launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:

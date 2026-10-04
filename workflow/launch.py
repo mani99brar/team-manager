@@ -236,10 +236,10 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     plan.follows.
 
     A feature with `tryout: true` (C7) passes --tryout to preflight and prepare, which pins plan.tryout. Its launch is refused
-    here, before any Git action, while 3 other registered features wait for their tryout (C29, tryout.untried_check), unless
+    here, before any Git action, while 3 other registered features wait for their tryout (C29, tryout.launch_check), unless
     it is a continuation or `allow_untried` gives the operator's reason, which preflight and prepare get too (prepare pins
-    it) when the launch goes past the limit; under it the reason is dropped with a note. A 2.4.0 feature with a browser check
-    that leaves the flag out gets a note.
+    it) when the launch goes past the limit; under it the reason is dropped with a note. A blank reason is refused. A feature
+    with a browser check that leaves the flag out gets a note (before 2.4.0, a migration hint).
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -282,10 +282,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     tryout = manifest.get("tryout") is True
     if allow_untried is not None and not tryout:
         raise ValueError("--allow-untried applies to a feature with tryout: true (feature.json 2.4.0); this one asks for no tryout")
+    if allow_untried is not None:
+        allow_untried = allow_untried.strip()
+        if not allow_untried:
+            raise ValueError("--allow-untried needs a reason")  # As preflight and prepare refuse it: the dry run approves no less.
     if tryout:
-        # C29: before any Git action, a dry run included. The registry's projects are read; this feature is its runs root.
-        from .tryout import untried_check
-        passed = untried_check(run_root, repository=repo, feature=feature, follows=followed is not None, allow_untried=allow_untried)
+        # C29: before any Git action, a dry run included. The registry's projects are read; this feature is its runs root, or
+        # its registered workflow (launch_check, which preflight calls too, finds it from the policy's features/<name>/ folder).
+        from .tryout import launch_check
+        passed = launch_check(run_root, repo, policy_path, follows=followed is not None, allow_untried=allow_untried)
         if passed:
             notes.append(passed)
         elif allow_untried is not None:
@@ -293,12 +298,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             notes.append("Fewer than 3 other features wait for their tryout, or this launch continues one: --allow-untried was not needed "
                          "and is not pinned.")
             allow_untried = None
-    elif "tryout" not in manifest and manifest["version"] == CRITICAL_VERSION:  # Earlier versions refuse the key: no note to silence.
+    elif "tryout" not in manifest:
         browser = [node for node in selected if any(check["kind"] == "browser" for worker in policy["workers"] if worker["node_id"] == node
                                                     for check in worker["checks"])]
-        if browser:
+        if browser and manifest["version"] == CRITICAL_VERSION:
             notes.append(f"Lane {', '.join(browser)} has a browser check, and feature.json says nothing of a tryout: set \"tryout\": true "
                          "(feature.json 2.4.0) when you should try each run before the merge to main, or false when it is not user-facing.")
+        elif browser:  # Earlier versions refuse the key: the note is a migration hint.
+            notes.append(f"Lane {', '.join(browser)} has a browser check: to have each run tried before the merge to main, move feature.json "
+                         f"to {CRITICAL_VERSION} and set \"tryout\": true.")
     run = (run_root / run_id).resolve()
     if run == repo or repo in run.parents:
         raise ValueError("Run storage must be outside the repository")
@@ -466,7 +474,7 @@ def main(argv=None):
     parser.add_argument("--follows", metavar="RUN", help="The run this one follows up (its directory, or its run id under the run root): "
                                                          "prepare pins its id, verdict and candidate as plan.follows. See `python -m workflow brief`")
     parser.add_argument("--allow-untried", metavar="REASON", help="A tryout feature: launch although 3 other features wait for their tryout "
-                                                                  "(pinned as plan.allow_untried; the operator's decision)")
+                                                                  "(pinned as plan.allow_untried, only when the launch goes past the limit; the operator's decision)")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
