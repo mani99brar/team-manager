@@ -37,9 +37,12 @@ def isolate_registry() -> None:
     automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
     temporary directory, so attention.jsonl never lands beside the operator's registry. Child processes inherit it, and
     a test that sets the variable itself still wins. CLAUDECODE is emptied too: run from a Claude Code session the event texts
-    would name it (actor.actor_text), and the tests that expect the marker set it themselves."""
+    would name it (actor.actor_text), and the tests that expect the marker set it themselves. CLAUDE_CONFIG_DIR names an empty
+    directory there as well, so a confirmed stop's cost record (costs.record_session_cost) never reads the operator's
+    transcripts."""
     temp = tempfile.TemporaryDirectory()
-    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": ""})
+    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": "",
+                                          "CLAUDE_CONFIG_DIR": str(Path(temp.name) / "claude")})
     environment.start()
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
@@ -523,6 +526,17 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             self.runtime.stop_session("ui")  # A stopped intent without its cost record: recorded now, and a failure only warns.
         self.assertIn("ui.cost.json not written: disk full", errors.getvalue())
+        with patch("workflow.costs.session_cost", side_effect=TypeError("unhashable type: 'dict'")), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.runtime.stop_session("ui")  # Any failure of the record, not only I/O, leaves the confirmed stop standing.
+        self.assertIn("ui.cost.json not written: unhashable type", errors.getvalue())
+        self.assertTrue(read_json(self.directory / "ui.stop.json")["stopped"])
+
+    def test_stopping_a_fake_session_never_reads_the_operators_transcripts(self):
+        # isolate_registry points CLAUDE_CONFIG_DIR at a temporary directory: every stop records its cost from there.
+        from .costs import transcripts_root
+        self.assertNotEqual(transcripts_root(), Path.home() / ".claude" / "projects")
+        self.assertTrue(str(transcripts_root()).startswith(tempfile.gettempdir()))
 
     def test_completed_stop_intent_is_reconciled_without_another_stop(self):
         for node, row in self.native_rows().items():

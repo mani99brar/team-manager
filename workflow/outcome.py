@@ -193,7 +193,7 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
             return ""
         if open_items_only:
             return "\n".join(open_items(directory, plan, reviews(directory, plan)[3], open_p2=True)[0])
-        block = outcome_lines(directory, plan)
+        block = verdict_lines(directory, plan)
         cost = run_cost(directory, plan) if block else None
         return block + "\n" + cost if cost else block
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
@@ -208,8 +208,8 @@ def run_cost(directory: Path, plan: dict) -> str | None:
         return None
 
 
-def outcome_lines(directory: Path, plan: dict) -> str:
-    """The block without its cost line."""
+def verdict_lines(directory: Path, plan: dict) -> str:
+    """The block without its cost line (pipeline.outcome_lines is the whole block, printed)."""
     verdict, ids, derived, findings = reviews(directory, plan)
     items, open_ = open_items(directory, plan, findings)
     if not ids:

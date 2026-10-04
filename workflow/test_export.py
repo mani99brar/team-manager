@@ -471,7 +471,7 @@ class ExportRunTests(unittest.TestCase):
 
 
 
-def cost_row(start: int, cost: float, duration: int, models: list[str]) -> dict:
+def cost_row(start: int | str, cost: float, duration: int, models: list[str]) -> dict:
     """A Claude Code `cost-state` transcript row: running totals of one process of the session (`startTime`)."""
     return {"type": "cost-state", "sessionId": "sess", "totalCostUSD": cost, "totalDuration": duration, "startTime": start,
             "modelUsage": {model: {"costUSD": cost} for model in models}, "hasUnknownModelCost": False}
@@ -513,6 +513,11 @@ class CostTests(unittest.TestCase):
         self.assertIsNone(session_cost("missing", projects))  # No transcript: unknown, never zero.
         (projects / "-home-x-worktree-ui" / "bare.jsonl").write_text(json.dumps({"type": "user"}) + "\n")
         self.assertIsNone(session_cost("bare", projects))  # A transcript without cost-state rows: unknown too.
+        # An undocumented row type may change shape: a startTime that is neither a number nor a string skips the row, never raises.
+        (projects / "-home-x-worktree-ui" / "odd.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+            {"type": "cost-state", "totalCostUSD": 1.0, "startTime": {"wall": 1}}, {"type": "cost-state", "totalCostUSD": 0.5, "startTime": [1]},
+            cost_row("2026-10-01T10:00:00Z", 0.75, 100, ["claude-opus-5-5"]))))
+        self.assertEqual(session_cost("odd", projects), {"cost_usd": 0.75, "duration_ms": 100, "models": ["claude-opus-5-5"]})
 
     def test_the_costs_section_sums_native_sessions_and_print_jobs_by_role(self):
         directory = legacy_run(self.root)

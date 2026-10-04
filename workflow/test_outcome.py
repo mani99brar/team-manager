@@ -272,6 +272,25 @@ class OutcomeBlock(OutcomeRun):
                          ["Outcome: approved by general and coverage; no open P0/P1.", "Cost: $7.73 (workers $3.08, reviewers $4.25, challenge $0.40)"])
         self.assertNotIn("Cost:", outcome_block(self.directory, open_items_only=True))
 
+    def test_the_cost_line_counts_the_sessions_it_could_not_price(self):
+        # A total of the known costs only would understate the spend without saying so: the line ends with the unpriced count.
+        self.review("approved", [("general", "approved"), ("coverage", "approved")])
+        for reviewer in REVIEWERS:
+            self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
+        save_json(self.directory / "ui.stop.json", {"background_id": "b", "session_id": "s-ui", "pid": 1, "stopped": True})
+        save_json(self.directory / "review-general.cost.json", {"session_id": "s-general", "cost_usd": None, "duration_ms": None, "models": None, "recorded_at": "2026-10-01T23:00:00Z"})
+        save_json(self.directory / "review-coverage.stdout.json", {"is_error": False, "total_cost_usd": 1.5, "duration_ms": 10})
+        self.assertEqual(outcome_block(self.directory).splitlines()[-1], "Cost: $1.50 (reviewers $1.50); 2 sessions unpriced")
+        save_json(self.directory / "ui.cost.json", {"session_id": "s-ui", "cost_usd": 2.0, "duration_ms": 1000, "models": ["m"], "recorded_at": "2026-10-01T23:00:00Z"})
+        self.assertEqual(outcome_block(self.directory).splitlines()[-1], "Cost: $3.50 (workers $2.00, reviewers $1.50); 1 session unpriced")
+
+    def test_the_block_without_its_cost_line_is_not_named_like_pipeline_outcome_lines(self):
+        # pipeline.outcome_lines(directory) is the whole block with its newline; a same-named helper here would be imported by mistake.
+        from . import outcome, pipeline
+        self.assertFalse(hasattr(outcome, "outcome_lines"))
+        self.assertTrue(callable(outcome.verdict_lines))
+        self.assertEqual(pipeline.outcome_lines.__module__, "workflow.pipeline")
+
 
 class OutcomePrinted(OutcomeRun):
     def blocked_run(self) -> None:

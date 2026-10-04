@@ -9,7 +9,8 @@ stop intent. A session resumed after its stop is not counted.
 A print job (a challenge attempt, a print reviewer, a sidecar pass) reports `total_cost_usd`, `duration_ms` and
 `modelUsage` in its JSON result, `<node>.stdout.json`.
 
-The export's `costs` section lists them by role with a run total; the outcome block prints the total in one line.
+The export's `costs` section lists them by role with a run total; the outcome block prints the total in one line, with the
+count of sessions it could not price.
 """
 from __future__ import annotations
 
@@ -49,8 +50,10 @@ def session_cost(session_id: str, root: Path | None = None) -> dict | None:
                         row = json.loads(line)
                     except ValueError:
                         continue
-                    if isinstance(row, dict) and row.get("type") == "cost-state" and number(row.get("totalCostUSD")):
-                        latest[row.get("startTime")] = row  # Running totals: the last row of a process is its whole spend.
+                    # A startTime that is neither a number nor a string (the row type is undocumented) cannot name a process: skipped.
+                    if isinstance(row, dict) and row.get("type") == "cost-state" and number(row.get("totalCostUSD")) \
+                            and (number(row.get("startTime")) or isinstance(row.get("startTime"), str)):
+                        latest[row["startTime"]] = row  # Running totals: the last row of a process is its whole spend.
         except OSError:
             continue
     if not latest:
@@ -69,7 +72,7 @@ def record_session_cost(directory: Path, node: str, session_id: str, root: Path 
         cost = session_cost(session_id, root)
         save_json(directory / f"{node}.cost.json", {"session_id": session_id, **(cost or dict.fromkeys(COST_KEYS)),
                                                      "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
-    except (OSError, ValueError) as error:
+    except Exception as error:  # noqa: BLE001 - a record only: whatever fails, the stop it follows stands.
         print(f"Warning: {node}.cost.json not written: {error}", file=sys.stderr, flush=True)
 
 
@@ -138,9 +141,12 @@ def costs_section(directory: Path, plan: dict) -> dict:
 
 
 def cost_line(section: dict) -> str | None:
-    """`Cost: $X (workers $a, reviewers $b, sidecar $c, challenge $d)`, leaving out the parts that are unknown; None when
+    """`Cost: $X (workers $a, reviewers $b, sidecar $c, challenge $d)`, leaving out the parts that are unknown, then
+    `; n sessions unpriced` when some session's cost is unknown, since the total sums the known ones only; None when
     nothing is known."""
     if section["total_usd"] is None:
         return None
     parts = [f"{role} ${section['by_role'][role]:.2f}" for role in ROLES if section["by_role"][role] is not None]
-    return f"Cost: ${section['total_usd']:.2f} ({', '.join(parts)})"
+    unpriced = sum(item["cost_usd"] is None for item in section["nodes"])
+    tail = f"; {unpriced} {'session' if unpriced == 1 else 'sessions'} unpriced" if unpriced else ""
+    return f"Cost: ${section['total_usd']:.2f} ({', '.join(parts)}){tail}"
