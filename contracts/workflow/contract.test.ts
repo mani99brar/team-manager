@@ -160,7 +160,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0'])
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)
@@ -170,6 +170,10 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar })
   feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: { prompt: 'sidecar-brief.md' } })
   feature.parse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: false })
+  // 2.4.0 keeps the sidecar and adds the optional critical flag the grill sets (C51; workflow/launch.py refuses it on an earlier version).
+  feature.parse({ ...structuredClone(reviewed), version: '2.4.0', critical: true, sidecar: { prompt: 'builtin:senior-review' } })
+  feature.parse({ ...structuredClone(reviewed), version: '2.4.0', critical: false })
+  assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.4.0', critical: 'yes' }).success, false)
   for (const bad of [true, {}, { prompt: '' }, { ...sidecar, cadence_seconds: 59 }, { ...sidecar, cadence_seconds: 7201 }, { ...sidecar, pass_timeout_seconds: 3601 },
     { ...sidecar, max_passes: 0 }, { ...sidecar, max_passes: 65 }, { ...sidecar, max_messages_per_lane: 21 }, { ...sidecar, max_passes: 1.5 }, { ...sidecar, extra: 1 }]) {
     assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.3.0', sidecar: bad }).success, false, JSON.stringify(bad))

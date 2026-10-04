@@ -47,6 +47,8 @@ from .verification import CONTRACTS, validate_schema
 
 SIDECAR = "sidecar"
 SIDECAR_VERSION = "2.3.0"
+# The feature versions that may declare a sidecar: 2.3.0, and 2.4.0, which keeps it and adds `critical` (C51).
+SIDECAR_VERSIONS = frozenset({SIDECAR_VERSION, "2.4.0"})
 LEDGER_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "sidecar.schema.json"
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "sidecar"
@@ -90,14 +92,14 @@ def settings(value: dict, where: str = "sidecar ") -> dict:
 def declared(manifest: dict) -> dict | None:
     """The feature's `sidecar` as `{prompt, <bounds>}` with the defaults filled in; None without one (absent or false).
 
-    Refused, naming feature.json and the key: `sidecar` before 2.3.0, a value that is neither false nor an object with a
+    Refused, naming feature.json and the key: `sidecar` before 2.3.0 (2.3.0 and 2.4.0 declare it), a value that is neither false nor an object with a
     non-empty `prompt`, an unknown key and a bound out of range.
     """
     value = manifest.get("sidecar", False)
     if value is False:
         return None
-    if manifest.get("version") != SIDECAR_VERSION:
-        raise ValueError(f"feature.json sidecar needs version {SIDECAR_VERSION} (this file is {manifest.get('version')})")
+    if manifest.get("version") not in SIDECAR_VERSIONS:
+        raise ValueError(f"feature.json sidecar needs version {SIDECAR_VERSION} or 2.4.0 (this file is {manifest.get('version')})")
     if not isinstance(value, dict):
         raise ValueError("feature.json sidecar must be false or an object with a prompt")
     prompt = value.get("prompt")

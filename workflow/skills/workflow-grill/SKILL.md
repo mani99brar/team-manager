@@ -7,17 +7,19 @@ allowed-tools: Read, Glob, Grep, Write, Edit
 
 # Workflow grill: settle a feature's decisions before launch
 
-You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0 or 2.3.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
+You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0, 2.3.0 or 2.4.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
 
 ## 1. Read before asking
 
 - The target repository is the `--repo` argument, else the current Git repository. The feature lives at `<target>/features/<feature>/`; stop and say so if it has no `feature.json`.
 - Read the target's `CLAUDE.md`, `feature.json`, the PRD it names in `prd` (relative to the target; it may be a PDF), every lane task file it lists, `policy.json` (owned paths and checks per lane) and an existing `decisions.md`, if any. Read the code only as far as a question needs it.
+- In the target's `CLAUDE.md`, read its operator-notes section (`## Workflow (operator notes; workers skip this section)`) for a "Critical paths" list: the paths whose code the operator holds critical. No list, or "none", means no path is listed. Compare each lane's owned paths in `policy.json` with it.
 - List for yourself the uncertainties that could change the design or the acceptance: contradictions between the PRD and the tasks, lanes whose owned paths or responsibilities overlap, acceptance that no check can prove, an unbounded `## Stop`, choices the PRD leaves open, and values the drafts or your defaults keep by hand that the repository already records (ids, routes, address lists; cite the file that records them). Drop anything the documents already settle, and anything a worker can decide alone without changing the outcome.
 - A limit on what the feature delivers (only, never, except, excluded, deferred), one that excludes data or behaviour, never counts as settled by the documents, even when it quotes the operator's own words. Ownership lines are not limits. If there are any limits, Question 1 plays them all back in one question: "You wrote X; the drafts read it as Y, so Z is excluded. Correct?"
 
 ## 2. Ask at most five questions, one at a time
 
+- When a lane's owned paths (`policy.json`) touch a listed critical path, your first question, before every other one, asks whether AI workers may write those paths, or the operator writes them by hand and audits them with AI. Name the lanes and the paths, and ask too whether their defects are hard or easy to spot. Launch never refuses a feature for its critical paths: this answer decides it. It counts as one of the five.
 - Rank the uncertainties by how much a wrong guess would cost and ask about the top ones only: never more than five questions in total. The read-back's confirm question (§4) is not one of the five.
 - Ask exactly one question per message and wait for the answer before the next one.
 - Every question states the recommended default and its consequence, in this shape:
@@ -65,6 +67,8 @@ None yet.
 - An existing file keeps its Operator decisions and its Changes after launch as they are; number new bullets after them. An older file without `## Operator decisions` does not record which bullets were the operator's answers: carry its decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which carried-over bullets are the operator's own (§4).
 - The only line that may begin with `TODO:` is an unanswered question, and launch refuses the feature while one remains.
 - Quote file paths, check ids and lane ids exactly as the feature files spell them.
+- Record the critical-paths answer (§2) as an Operator decision together with the feature's R32 cell: critical or not, and defects hard or easy to spot. For example `[O1] Q1: AI workers may write validator/ (critical, defects hard to spot). Operator: "<the operator's words>".`
+- When the operator confirms the code is critical, set `"critical": true` in `feature.json` (version 2.4.0; raise an older version to 2.4.0 for it): an automatic run then stops after review for the operator's `approve`, whatever its profile. This key is the one edit you make outside `decisions.md`.
 - Do not edit the tasks, the policy, the PRD or any code. If an answer means a task must change, say which file and what to change, and leave the edit to the operator.
 
 ## 4. Read back, then hand back

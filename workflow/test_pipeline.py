@@ -1064,6 +1064,37 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(f.runtime.integrate(decision["bundle_sha256"]), commit)
         self.assertEqual(len(self.feed.read_text().splitlines()), 1)
 
+    def test_approve_integrates_an_automatic_run_that_waits_for_approval_and_records_the_actor(self):
+        # C51: an automatic run with finish "approval" (attended, or a critical feature) stops at the same gate as a manual run;
+        # the operator's approve integrates it and the approval node records who approved. The maintainer is refused (C17).
+        f = self.fixture
+        git(f.repo, "checkout", "-q", "-b", "feature/record")
+        self.pin(source_branch="feature/record")
+        with self.graph() as graph:
+            decision = self.review_gate(graph)
+            self.pin(source_branch="feature/record", automatic=automatic_settings(profile="attended"))
+            graph = build_pipeline(graph.checkpointer, f.runtime)
+            stopped = graph.invoke(Command(resume=decision), f.config)
+            self.assertEqual(stopped["__interrupt__"][0].value["kind"], "integration_approval")
+            report(f.runtime, graph.get_state(f.config))
+        digest = decision["bundle_sha256"]
+        printed, _ = self.status()
+        self.assertIn("finish approval (the attended profile)", printed["next_step"])
+        self.assertIn(f"-m workflow approve {f.directory} --bundle-sha256 {digest} --by operator", printed["next_step"])
+        code, _, err = pipeline_cli("approve", str(f.directory), "--bundle-sha256", digest, "--by", "maintainer")
+        self.assertEqual(code, 1)
+        self.assertIn("approve is the operator's decision: --by maintainer is refused", err)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        self.assertEqual(self.events("approval"), [])
+        code, out, err = pipeline_cli("approve", str(f.directory), "--bundle-sha256", digest)
+        self.assertEqual(code, 0, err)
+        commit = read_json(f.directory / "run-state.json")["values"]["integrated_commit"]
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), commit)
+        [(status, message)] = self.events("approval")
+        self.assertEqual(status, "approved")
+        self.assertRegex(message, rf"^Approved by the operator( \(via a Claude Code session\))?: the fast-forward of bundle {digest[:12]}$")
+        self.assertEqual(self.events("integrate"), [("succeeded", f"Fast-forwarded to {commit}; no push performed")])
+
     def test_status_reads_beside_a_running_controller_and_writes_nothing(self):
         f = self.fixture
         self.pin()

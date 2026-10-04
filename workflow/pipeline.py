@@ -872,11 +872,12 @@ def build_pipeline(checkpointer, runtime):
         return {"review": decision}
     def approval(_state):
         _, digest = runtime.validate_bundle()
-        if runtime.plan.get("automatic"):
+        from .automatic import awaits_approval
+        if runtime.plan.get("automatic") and not awaits_approval(runtime.plan):
             from .automatic import validate_automatic
             validate_automatic(runtime.plan)
             decision = {"approve": digest}  # Explicit run-level authority: feature branch only.
-        else:
+        else:  # A manual run, or an automatic one whose finish is "approval" (C51): the operator's `approve` resumes it.
             decision = interrupt({"kind": "integration_approval", "bundle_sha256": digest,
                                   "message": "Approve fast-forward of source branch; no push."})
         if decision != {"approve": digest}:
@@ -1001,13 +1002,54 @@ def outcome_lines(directory: Path) -> str:
     return f"{block}\n" if block else ""
 
 
+def approve_command(directory: Path, digest: str | None) -> str:
+    """The operator's `approve` of the exact reviewed bundle; `--by operator`, since the maintainer is refused it (C17)."""
+    return f"{sys.executable} -m workflow approve {shlex.quote(str(directory))} --bundle-sha256 {digest} {BY_OPERATOR}"
+
+
+def awaiting_approval(directory: Path) -> str | None:
+    """The bundle digest an automatic run with finish "approval" waits to have approved (C51), from run-state.json, which the
+    controller exports before it stops; None for any other state, and for a manual run (its own gates say what it waits for)."""
+    from .automatic import awaits_approval
+    try:
+        plan = read_json(directory / "plan.json")
+        exported = read_json(directory / "run-state.json")
+    except (OSError, ValueError):
+        return None
+    if not awaits_approval(plan):
+        return None
+    gates = [item for task in exported.get("tasks") or [] for item in task.get("interrupts") or [] if isinstance(item, dict)]
+    if [item.get("kind") for item in gates] != ["integration_approval"]:
+        return None
+    return gates[0].get("bundle_sha256")
+
+
+def approval_stop(directory: Path) -> str:
+    """What `automatic`, `resume` and `launch` print when the run stopped for the operator's approval (C51): the approve
+    command, then the open items (outcome_block's open_items_only: the open findings, the sidecar's unresolved list, each
+    lane's untested and verify_yourself items). Empty when the run does not wait for it."""
+    digest = awaiting_approval(directory)
+    if digest is None:
+        return ""
+    branch = read_json(directory / "plan.json").get("source_branch") or "the source branch"
+    items = outcome_block(directory, open_items_only=True)
+    return (f"Automatic run awaiting your approval: review approved, and {branch} is not fast-forwarded until you approve. "
+            f"Evidence: {directory / 'report.html'}. Nothing is pushed.\nApprove with: {approve_command(directory, digest)}\n"
+            + (f"Open items:\n{items}\n" if items else "Open items: none recorded.\n"))
+
+
 def finish_policy(automatic: dict | None, branch: str) -> str:
     """How the run ends, from its automatic settings (plan.automatic, or what prepare pins from launch's flags), never from
     plan.mode, the transport tag every run records as "interactive". An automatic run approves its own integration: the
-    policy's integration_approval is a schema constant, true in every policy, and no stop for it."""
+    policy's integration_approval is a schema constant, true in every policy, and no stop for it; except with finish
+    "approval" (an attended profile or a critical feature, C51), which stops for the operator's `approve` as a manual run does."""
     if automatic and automatic.get("finish") == "verified-feature-branch":
         return (f"automatic, finish {automatic['finish']}: once every reviewer approves, the controller fast-forwards {branch} "
                 "itself; it does not stop for integration approval, and nothing merges main or pushes")
+    if automatic and automatic.get("finish") == "approval":
+        why = "the attended profile" if automatic.get("profile") == "attended" else "a feature marked critical"
+        return (f"automatic, finish approval ({why}): once every reviewer approves, the run stops for your approval; approve "
+                f"fast-forwards {branch}, and nothing merges main or pushes")
     if automatic:
         return f"automatic, finish {automatic.get('finish')}"  # A finish this controller does not describe; it says no more than the plan.
     return f"manual: you freeze the workers, import each review and approve the fast-forward of {branch}; nothing is pushed"
@@ -1089,11 +1131,12 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
         from .guardrails import HERDR_HINT
         supervise = f", then supervise them: {run('automatic')} --live {BY_OPERATOR}" if automatic else ""
         return f"no worker started yet: {run('start')} --live {BY_OPERATOR} ({HERDR_HINT}){supervise}. Then: {finish_policy(automatic, branch)}"
+    if "integration_approval" in gates and (not automatic or automatic.get("finish") == "approval"):
+        return (f"approve the fast-forward of {branch}: {run('approve')} --bundle-sha256 {gates['integration_approval'].get('bundle_sha256')} {BY_OPERATOR}; "
+                "nothing is pushed" + (f". {finish_policy(automatic, branch)}" if automatic else ""))
     if automatic:
         return (f"{finish_policy(automatic, branch)}. Its supervisor continues the run; if none is running: {run('automatic')} --live {BY_OPERATOR} "
                 "(it says why when the run cannot go on)")
-    if "integration_approval" in gates:
-        return f"approve the fast-forward of {branch}: {run('approve')} --bundle-sha256 {gates['integration_approval'].get('bundle_sha256')} {BY_OPERATOR}; nothing is pushed"
     if "independent_review" in gates:
         reviewer = " --reviewer <id>" if plan.get("reviewers") else ""
         return f"import each reviewer's review: {run('review')} --review-file <review.json>{reviewer}; then approve the fast-forward of {branch}"
@@ -1176,6 +1219,8 @@ def main():
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="prepare --automatic: the run's profile (default unattended), pinned")
+    parser.add_argument("--critical", action="store_true", help="prepare --automatic: the feature is marked critical (feature.json 2.4.0); "
+                                                                "the run stops after review for approve, whatever the profile")
     parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: Claude Code's default; no --model is passed)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="prepare: the workers' effort, pinned (default: WORKFLOW_WORKER_EFFORT, read now)")
     parser.add_argument("--judge-model", help="prepare: the model of the design challenge, the reviewers and the review sidecar, pinned (default: Claude Code's default)")
@@ -1203,6 +1248,8 @@ def main():
                                                                          args.judge_model, args.judge_effort)):
         # Prepare pins them (C52); any other action would ignore them silently, `automatic --live` resuming a run included.
         parser.error("--profile and the role flags apply to prepare only; the pins cannot change after it")
+    if args.action != "prepare" and args.critical:
+        parser.error("--critical applies to prepare only; the finish it pins cannot change after it")
     directory = args.directory.resolve()
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
@@ -1286,8 +1333,8 @@ def main():
             note = override_note(os.environ, args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
             if note:
                 print(f"Note: {note}", file=sys.stderr, flush=True)
-            if args.profile and not args.automatic:
-                parser.error("--profile applies to --automatic runs only")
+            if (args.profile or args.critical) and not args.automatic:
+                parser.error("--profile and --critical apply to --automatic runs only")
             from .guardrails import check_restore, pin_restore, resolve_commit
             restore = None
             if args.restore_from is not None:  # Before the run directory.
@@ -1312,7 +1359,8 @@ def main():
                 pin_restore(plan, directory, policy, restore)
             if args.automatic:
                 from .automatic import automatic_settings
-                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile)
+                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile,
+                                                       critical=args.critical)
             elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
             save_json(directory / "policy.json", policy)
@@ -1332,16 +1380,19 @@ def main():
         if args.action == "automatic":
             if not args.live:
                 parser.error("automatic requires --live because it can launch an independent reviewer")
-            from .automatic import supervise
+            from .automatic import AWAITING_APPROVAL, supervise
             from .guardrails import LAUNCH_NOTE_ENV, run_finished_note
             # Launch's word to this process only, so removed before supervise: steps, checks, workers and reviewers inherit os.environ.
             launch_prints_note = os.environ.pop(LAUNCH_NOTE_ENV, None) == "1"
             try:
-                supervise(directory, actor)
+                stopped = supervise(directory, actor)
             except TransientInfraError as error:
                 # Resumable, not blocked: 75 (EX_TEMPFAIL). Stale long-lived sessions are the usual source of an update.
                 warning = stale_claude_warning()
                 parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
+            if stopped == AWAITING_APPROVAL:  # Exits 0, as `start` does at a challenge pause; launch reads the run's state.
+                print(approval_stop(directory), end="")
+                return
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             print(outcome_lines(directory), end="")
             note = run_finished_note(directory, read_json(directory / "plan.json"))
@@ -1370,11 +1421,13 @@ def main():
             if args.action == "automatic-step":
                 if not args.live:
                     parser.error("automatic requires --live because it can launch an independent reviewer")
-                from .automatic import UNAVAILABLE_EXIT, drive
+                from .automatic import AWAITING_APPROVAL, AWAITING_APPROVAL_EXIT, UNAVAILABLE_EXIT, drive
                 try:
                     commit = drive(runtime, single_step=True)
                 except TransientInfraError as error:
                     parser.exit(UNAVAILABLE_EXIT, f"Interrupted: {error}\nNothing was stopped; the supervisor exits resumable.\n")
+                if commit == AWAITING_APPROVAL:
+                    parser.exit(AWAITING_APPROVAL_EXIT, "Stopped for the operator's approval; the supervisor stops.\n")
                 if commit is None:
                     parser.exit(75, "Checkpoint persisted; continuing in a new controller process.\n")
                 # No outcome block here: this child shares the terminal of `automatic`, `resume` or `launch`, which print it.
@@ -1454,6 +1507,10 @@ def main():
                         parser.error("Provide the exact --bundle-sha256 displayed at approval")
                     runtime.validate_review(read_json(directory / "review.json"))  # Every declared reviewer approved.
                     action_event(runtime.event, actor, "approve", f"the fast-forward of bundle {digest[:12]}")
+                    # The approval node's own record, naming the actor (C51): the viewer's approval line reads it.
+                    runtime.event("approval", "approved", f"Approved by {actor_text(actor)}: the fast-forward of bundle {digest[:12]}")
+                    from .attention import resolved
+                    resolved(directory, "awaiting_approval", node="approval")
                     value = Command(resume={"approve": digest})
                 elif args.action == "reconcile":
                     if pending or not state.next or not any(step.startswith("launch_") for step in state.next):

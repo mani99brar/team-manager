@@ -683,6 +683,20 @@ class ChallengeCheckoutFails(FailingChallenge):
         self.assertEqual(supervised, [(directory, ["challenge", "adapter", "ui"])])
         self.assertIn("Automatic run reached a verified feature branch", output)
 
+    def test_a_resumed_automatic_run_that_stops_for_approval_prints_the_approve_command_not_the_finished_line(self):
+        # C51: resume supervises the run like `automatic --live`; a run with finish "approval" ends at the operator's approve.
+        from .automatic import AWAITING_APPROVAL
+        directory = self.prepare("checkout-approval-001", automatic=True)
+        (directory / "challenge-worktree").symlink_to(self.root / "nowhere")
+        self.cli(pipeline.main, ["start", str(directory), "--live"])
+        (directory / "challenge-worktree").unlink()
+        stop = "Automatic run awaiting your approval: ...\nApprove with: python -m workflow approve run --bundle-sha256 abc --by operator\n"
+        with patch("workflow.automatic.supervise", return_value=AWAITING_APPROVAL), patch("workflow.pipeline.approval_stop", return_value=stop):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertIn(stop, output)
+        self.assertNotIn("reached a verified feature branch", output)
+
 
 class ChallengeHeartbeat(FailingChallenge):
     """A challenge job runs for minutes: the terminal hears from it once a minute, and Ctrl-C says how to go on."""
@@ -2989,6 +3003,57 @@ class ExportSeam(unittest.TestCase):
 
 
 
+class CriticalFeature(GuardedFeature):
+    """feature.json 2.4.0 (C51, decision 3): the optional `critical` flag the grill sets; every version gate takes 2.4.0."""
+
+    def save(self, **fields) -> None:
+        save_json(self.folder / "feature.json", {**self.manifest, **fields})
+        commit_all(self.repo, "Feature file")
+
+    def test_a_2_4_0_feature_keeps_its_guardrails_and_its_sidecar(self):
+        from . import sidecar
+        from .launch import load_feature
+        self.save(version="2.4.0", critical=False, sidecar={"prompt": "builtin:senior-review"})
+        manifest = load_feature(self.folder)
+        self.assertTrue(guardrails.is_guarded(manifest))
+        self.assertEqual(sidecar.declared(manifest)["prompt"], "builtin:senior-review")
+        prepare = launch_commands(self.repo, FEATURE, "gate-001", self.runs, herdr=False)[1][2]
+        self.assertIn("--guardrails", prepare)
+        self.assertIn("--sidecar-brief", prepare)
+        # Its guardrails are enforced: a task without its sections is refused as for 2.2.0.
+        (self.folder / "ui-task.md").write_text("# ui\n\nNo sections.\n")
+        commit_all(self.repo, "Bare task")
+        with self.assertRaisesRegex(ValueError, "does not meet the 2.2.0 guardrails"):
+            launch_commands(self.repo, FEATURE, "gate-002", self.runs, herdr=False)
+
+    def test_critical_needs_2_4_0_and_a_boolean(self):
+        from jsonschema.exceptions import ValidationError
+        from .launch import load_feature
+        self.save(version="2.3.0", critical=True)
+        with self.assertRaisesRegex(ValueError, "feature.json critical needs version 2.4.0"):
+            load_feature(self.folder)
+        self.save(version="2.4.0", critical="yes")
+        with self.assertRaises(ValidationError):
+            load_feature(self.folder)
+
+    def test_a_critical_feature_pins_the_approval_finish_under_the_unattended_profile(self):
+        self.save(version="2.4.0", critical=True)
+        _, commands, _ = launch_commands(self.repo, FEATURE, "crit-001", self.runs, herdr=False, automatic=True)
+        self.assertIn("--critical", commands[2])
+        self.assertEqual(commands[2][commands[2].index("--profile") + 1], "unattended")
+        # A manual run stops for approval anyway: prepare gets no --critical.
+        self.assertNotIn("--critical", launch_commands(self.repo, FEATURE, "crit-002", self.runs, herdr=False)[1][2])
+        plan = read_json(self.prepare("crit-001", automatic=True) / "plan.json")
+        self.assertEqual((plan["automatic"]["finish"], plan["automatic"]["profile"]), ("approval", "unattended"))
+
+    def test_a_feature_not_marked_critical_keeps_the_verified_feature_branch_finish(self):
+        self.save(version="2.4.0", critical=False)
+        _, commands, _ = launch_commands(self.repo, FEATURE, "plain-001", self.runs, herdr=False, automatic=True)
+        self.assertNotIn("--critical", commands[2])
+        plan = read_json(self.prepare("plain-001", automatic=True) / "plan.json")
+        self.assertEqual(plan["automatic"]["finish"], "verified-feature-branch")
+
+
 class GrillSkill(unittest.TestCase):
     def test_the_workflow_grill_skill_has_valid_frontmatter_follows_the_interview_rules_and_the_readme_links_it(self):
         """PRD section 4.4: the interview skill ships with the tool."""
@@ -3010,7 +3075,7 @@ class GrillSkill(unittest.TestCase):
         intro, read, ask, write, back = (body[body.index(start):body.index(end)] for start, end in (
             ("You interview", "## 1."), ("## 1.", "## 2."), ("## 2.", "## 3."), ("## 3.", "## 4."), ("## 4.", "The design challenge then")))
         # Line 10: both guarded versions, and only the operator's answers bind (C4, decision 8).
-        self.assertIn("A `feature.json` 2.2.0 or 2.3.0 feature cannot launch without a non-empty `decisions.md`", intro)
+        self.assertIn("A `feature.json` 2.2.0, 2.3.0 or 2.4.0 feature cannot launch without a non-empty `decisions.md`", intro)
         self.assertIn("Only the operator's answers bind the run", intro)
         self.assertNotIn("binds the whole run", body)
         # §1: the target's CLAUDE.md, values kept by hand that the repository records (C3), and every limit played back (C1).
@@ -3036,6 +3101,17 @@ class GrillSkill(unittest.TestCase):
         self.assertIn("Resolve what is still open and was never asked yourself with its recommended default (a Grill default), or move it to "
                       "`## Deferred` when it does not block this feature; a question asked and not answered stays a `TODO: Q<n>` line.", ask)
         self.assertNotIn("Resolve what is still open yourself", ask)
+        # Decision 9 (C5, C51): the target's critical paths. §1 reads the list in CLAUDE.md's operator notes; a lane that owns a listed
+        # path makes the first question whether AI workers may write it; the answer, with the R32 cell, is an Operator decision, and a
+        # confirmed critical feature gets `critical: true` (feature.json 2.4.0), which makes an automatic run stop for approval.
+        self.assertIn('read its operator-notes section (`## Workflow (operator notes; workers skip this section)`) for a "Critical paths" list', read)
+        self.assertIn("When a lane's owned paths (`policy.json`) touch a listed critical path, your first question, before every other one, "
+                      "asks whether AI workers may write those paths, or the operator writes them by hand and audits them with AI.", ask)
+        self.assertIn("Launch never refuses a feature for its critical paths: this answer decides it.", ask)
+        self.assertIn("Record the critical-paths answer (§2) as an Operator decision together with the feature's R32 cell: critical or not, "
+                      "and defects hard or easy to spot.", write)
+        self.assertIn('When the operator confirms the code is critical, set `"critical": true` in `feature.json` (version 2.4.0', write)
+        self.assertIn("an automatic run then stops after review for the operator's `approve`", write)
         self.assertIn("restate the answer in one sentence at the start of your next message", ask)
         self.assertIn("record it as a Grill default that names the items it covers", ask)
         self.assertIn("A question asked but not answered, including a \"clarify\" reply that was never settled, stays open: write it as "

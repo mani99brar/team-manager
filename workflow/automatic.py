@@ -40,16 +40,23 @@ PROFILES = ("attended", "unattended")
 # Plans pinned before the native reviewer existed lack reviewer_transport; they mean native. Plans pinned before profiles lack
 # profile; they mean unattended.
 REQUIRED_KEYS = frozenset(DEFAULTS) - {"reviewer_transport", "profile"}
+# C51 (decision 3): "approval" stops after review for the operator's `approve`, as a manual run does; prepare pins it for an
+# attended profile or a feature marked critical (feature.json 2.4.0 `critical: true`). Every other run fast-forwards its
+# feature branch itself, as before.
+FINISHES = ("verified-feature-branch", "approval")
 
 
 def automatic_settings(worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                       reviewer_transport: str | None = None, profile: str | None = None) -> dict:
-    """Run-scoped automatic configuration; deadlines, transport and profile are pinned into plan.json at prepare."""
+                       reviewer_transport: str | None = None, profile: str | None = None, critical: bool = False) -> dict:
+    """Run-scoped automatic configuration; deadlines, transport, profile and finish are pinned into plan.json at prepare.
+    The finish is "approval" when the profile is attended or the feature is marked critical (`critical`)."""
     settings = dict(DEFAULTS)
     for key, value in (("worker_timeout_seconds", worker_timeout_seconds), ("review_timeout_seconds", review_timeout_seconds),
                        ("reviewer_transport", reviewer_transport), ("profile", profile)):
         if value is not None:
             settings[key] = value
+    if settings["profile"] == "attended" or critical is True:
+        settings["finish"] = "approval"
     validate_automatic({"automatic": settings, "source_branch": "feature/validation-only"})
     return settings
 
@@ -58,7 +65,7 @@ def validate_automatic(plan: dict) -> None:
     settings = plan.get("automatic")
     if not isinstance(settings, dict) or not REQUIRED_KEYS <= set(settings) <= set(DEFAULTS):
         raise ValueError("Malformed automatic run configuration")
-    if settings["finish"] != DEFAULTS["finish"] or settings["permission_mode"] != "bypassPermissions":
+    if settings["finish"] not in FINISHES or settings["permission_mode"] != "bypassPermissions":
         raise ValueError("Unsupported automatic authority")
     for key in TIMEOUT_KEYS:
         if type(settings[key]) is not int or not 1 <= settings[key] <= 86400:
@@ -82,6 +89,12 @@ def profile(plan: dict) -> str:
     and for a manual run, which has no automatic settings (its own rules say what a manual run does)."""
     automatic = plan.get("automatic")
     return "attended" if isinstance(automatic, dict) and automatic.get("profile") == "attended" else "unattended"
+
+
+def awaits_approval(plan: dict) -> bool:
+    """The run stops after review for the operator's approval: finish "approval" (C51)."""
+    automatic = plan.get("automatic")
+    return isinstance(automatic, dict) and automatic.get("finish") == "approval"
 
 
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
@@ -1730,9 +1743,10 @@ class Timeline:
         self.poll()
 
 
-def supervise(directory: Path, actor: str | None = None) -> None:
+def supervise(directory: Path, actor: str | None = None) -> str | None:
     """Each recovery uses a new controller process, not just an in-memory replay. `automatic --live` passes its --by
-    (`actor`), recorded once the supervisor lock is held; `resume` already recorded its own."""
+    (`actor`), recorded once the supervisor lock is held; `resume` already recorded its own. AWAITING_APPROVAL when the run
+    stopped for the operator's approval (finish "approval"), else None once the run reached its verified feature branch."""
     validate_automatic(read_json(directory / "plan.json"))
     with run_lock(directory, "automatic-supervisor.lock"), Timeline(directory):
         if actor:
@@ -1746,7 +1760,9 @@ def supervise(directory: Path, actor: str | None = None) -> None:
             except KeyboardInterrupt:
                 raise RuntimeError(RESUME_NOTE.format(directory=directory)) from None
             if result.returncode == 0:
-                return
+                return None
+            if result.returncode == AWAITING_APPROVAL_EXIT:
+                return AWAITING_APPROVAL
             if result.returncode == UNAVAILABLE_EXIT:
                 raise TransientInfraError(UNAVAILABLE_NOTE.format(directory=directory))
             if result.returncode != 75:
@@ -1759,6 +1775,10 @@ RESUME_NOTE = ("Supervisor interrupted. Native workers were NOT stopped and keep
 # automatic-step exits 75 when a checkpoint persisted (the supervisor continues in a new process) and 69
 # (EX_UNAVAILABLE) when Claude Code itself was unavailable; then the supervisor, `automatic`, exits 75 itself.
 UNAVAILABLE_EXIT = 69
+# automatic-step exits 76 when the run stopped for the operator's approval (finish "approval", C51): the supervisor stops and
+# returns AWAITING_APPROVAL (as drive does), and `automatic` exits 0 printing the approve command and the open items.
+AWAITING_APPROVAL_EXIT = 76
+AWAITING_APPROVAL = "awaiting_approval"
 UNAVAILABLE_NOTE = ("Claude Code was unavailable (an update replacing it, or its background service restarting). Nothing was "
                     "stopped: the native sessions keep running. Once `claude` works, resume with: "
                     "python -m workflow automatic {directory} --live --by operator")
@@ -1998,6 +2018,8 @@ def final_stop(runtime, state) -> tuple[str, bool] | None:
     if not state.next:
         return None  # The graph finished: back on the source branch, drive checks the integrated commit.
     pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
+    if pending == ["integration_approval"] and awaits_approval(runtime.plan):
+        return None  # Waiting for the operator's approval: switching back, approve goes on.
     if pending == ["worker_handoff"]:
         try:
             handoffs_after_stop(runtime, lanes(runtime))
@@ -2045,8 +2067,24 @@ def note_controller_drift(runtime, current: str | None = None) -> None:
     runtime.event("controller", "warning", message)
 
 
+def await_approval(runtime, state) -> None:
+    """The stop of a run whose finish is "approval" (C51), once its review approved: the report, one note on the approval node
+    and one `awaiting_approval` attention record, each naming the approve command with the exact bundle and --by operator.
+    A controller started again while the run waits repeats neither."""
+    from .pipeline import approve_command, complete_events, report
+    digest = next(item.value.get("bundle_sha256") for task in state.tasks for item in task.interrupts)
+    command = approve_command(runtime.directory, digest)
+    report(runtime, state)
+    message = f"Awaiting your approval (finish approval): {command}. Nothing is fast-forwarded or pushed until then"
+    if not any(event.get("node") == "approval" and event.get("message") == message for event in complete_events(runtime.directory)):
+        runtime.event("approval", "note", message)
+    attention_record(runtime.directory, "awaiting_approval", f"Awaiting your approval: {command}. Nothing is fast-forwarded or pushed "
+                                                             "until then.", node="approval")
+
+
 def drive(runtime, *, single_step=False) -> str | None:
-    """Advance persisted graph state; CLI supervision restarts this process at joins."""
+    """Advance persisted graph state; CLI supervision restarts this process at joins. Returns the integrated commit, None
+    after a single step, or AWAITING_APPROVAL when the run stopped for the operator's approval (finish "approval")."""
     from .pipeline import advance, build_pipeline, graph_config, report
     from .repair import refuse_recorded
     validate_automatic(runtime.plan)
@@ -2085,6 +2123,9 @@ def drive(runtime, *, single_step=False) -> str | None:
                 return commit
             pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
             value = None
+            if pending == ["integration_approval"] and awaits_approval(runtime.plan):
+                await_approval(runtime, state)
+                return AWAITING_APPROVAL
             if pending == ["worker_handoff"]:
                 try:
                     wait_handoffs(runtime)

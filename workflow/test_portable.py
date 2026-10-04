@@ -425,10 +425,14 @@ class InitScaffold(Isolated):
         self.assertNotIn("sidecar", manifest)  # The README shows the optional key; the scaffold declares none.
         self.assertIn('"sidecar": {"prompt": "builtin:senior-review"}', (folder / "README.md").read_text())
         self.assertEqual((manifest["version"], manifest["branch_prefix"], manifest["reviewers"]),
-                         ("2.3.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
+                         ("2.4.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
+        # C51: the grill sets `critical: true` when the operator confirms the code is critical; the scaffold starts at false.
+        self.assertIs(manifest["critical"], False)
         # decisions.md has the grill's four sections in order (C4): the operator's answers, which alone bind, apart from the grill's own
         # defaults. Changes after launch starts as "None yet", not a placeholder; the grill fills the other three.
         from .guardrails import CHECKS_DEFAULT, OPERATOR_DECISIONS, OPERATOR_NOTES, brief_problems, cut_conventions, has_operator_decisions, sections
+        # The starter CLAUDE.md's operator notes hold the critical-paths list the grill reads (decision 9); no session gets it.
+        self.assertIn("- Critical paths:", (target / "CLAUDE.md").read_text().split(OPERATOR_NOTES, 1)[1])
         decisions = sections((folder / "decisions.md").read_text())
         self.assertEqual(list(decisions), ["Operator decisions", "Grill defaults", "Changes after launch", "Deferred"])
         self.assertEqual(decisions["Changes after launch"].strip(), "None yet.")
