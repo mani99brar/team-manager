@@ -1135,6 +1135,45 @@ class NeverBlocks(SidecarRun):
         self.assertEqual((recorded["status"], recorded["reason"]), ("undeliverable", "herdr_timeout"))
         self.assertTrue(any("undeliverable after an error (TimeoutExpired)" in text for _, text in self.sidecar_events()))
 
+    def test_a_lane_git_call_that_hangs_fails_its_pass_and_the_wait_goes_on(self):
+        # A FIFO planted at the shared .git's info/exclude blocks `git diff` and `git ls-files` in every lane worktree (Git 2.43).
+        # The pass's Git calls run inside wait_handoffs' poll, so unbounded they would hold the whole controller in the worker phase.
+        # Bounded, each pass is recorded failed, the wait hands off, and with the FIFO removed (RUNBOOK) the next pass completes.
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.unlink(missing_ok=True)
+        os.mkfifo(exclude)
+        errors = []
+
+        def wait():
+            try:
+                self.wait_with_passes()
+            except BaseException as error:  # Reported by the test thread.
+                errors.append(error)
+        with patch("workflow.sidecar.GIT_TIMEOUT_SECONDS", 1):
+            thread = threading.Thread(target=wait, daemon=True)
+            thread.start()
+            thread.join(30)
+            hung = thread.is_alive()
+            if hung:  # A failing run leaves Git waiting on the FIFO: move it away and release the reader, so the suite goes on.
+                stale = exclude.with_name("exclude.fifo")
+                exclude.rename(stale)
+                for _ in range(40):
+                    with contextlib.suppress(OSError):  # No reader waits on it yet.
+                        os.close(os.open(stale, os.O_WRONLY | os.O_NONBLOCK))
+                    thread.join(0.5)
+                    if not thread.is_alive():
+                        break
+        self.assertFalse(hung, "a lane Git call of the sidecar waited on the FIFO")
+        self.assertEqual(errors, [])
+        passes = self.ledger()["passes"]
+        self.assertEqual([(item["trigger"], item["status"]) for item in passes], [("cadence", "failed"), ("final", "failed")])
+        self.assertTrue(all(item["summary"].startswith("failed: TimeoutExpired: ") for item in passes), passes)
+        self.assertEqual([text for status, text in self.sidecar_events() if status == "interactive"], [
+            "Review sidecar pass 1 (cadence) failed (TimeoutExpired); the run continues without it, see sidecar-1.stderr.log",
+            "Review sidecar pass 2 (final) failed (TimeoutExpired); the run continues without it, see sidecar-2.stderr.log"])
+        exclude.unlink()
+        self.assertEqual(self.run_pass()["status"], "completed")
+
     def test_a_controller_interrupted_between_the_merge_and_the_delivery_leaves_pane_and_ledger_agreeing(self):
         self.script_steps([{"output": output([upsert()], [message()])}])
         with patch("workflow.sidecar.deliver_one", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):

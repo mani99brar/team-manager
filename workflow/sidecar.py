@@ -64,6 +64,7 @@ LANE_STATES = frozenset({"idle", "working", "blocked", "done"})
 OPEN = ("open", "acknowledged", "fix_reported")
 RANK = {"P1": 1, "P0": 2}  # The severities that page the operator when no lane takes them (Pass.page); P2 never does.
 GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0"}  # The sidecar never takes a worker's index.lock.
+GIT_TIMEOUT_SECONDS = 60  # A lane Git call that waits longer (on a FIFO planted in the shared .git) fails its pass, not the poll.
 LEDGER = "sidecar.ledger.json"
 LOCK = "sidecar.lock"
 RUNNING = "sidecar.running.json"
@@ -435,7 +436,11 @@ def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path)
 # ---- Pass inputs ---------------------------------------------------------------------------------------------------
 
 def lane_git(worktree: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(worktree), *args], env={**os.environ, **GIT_ENV}, check=True, capture_output=True).stdout.decode(errors="replace")
+    """Git in a lane worktree, without optional locks, for at most GIT_TIMEOUT_SECONDS. A pass runs inside wait_handoffs' poll,
+    and a FIFO planted at the shared .git's info/exclude blocks `git diff` and `git ls-files` there: past the bound Git is
+    killed and TimeoutExpired fails the pass (Scheduler.guard records it `failed`), and the run goes on."""
+    return subprocess.run(["git", "-C", str(worktree), *args], env={**os.environ, **GIT_ENV}, check=True, capture_output=True,
+                          timeout=GIT_TIMEOUT_SECONDS).stdout.decode(errors="replace")
 
 
 def safe_text(value: str) -> str:
