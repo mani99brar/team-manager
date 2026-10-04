@@ -602,23 +602,28 @@ class ReviewCompletionTests(unittest.TestCase):
 
     def test_every_coverage_brief_blocks_only_in_its_four_cases(self):
         # Decision 4 (C34): a coverage gap is P1 only for a failure shown on the candidate, a contradicted quoted line, a quoted worker
-        # disclosure, or a line it could not check because its test source, packet or screenshot was unreadable, each case listed; every other
+        # disclosure, or a line it could not check because its test source or packet was unreadable, each case listed; every other
         # gap, a missing or weak test that an Acceptance line names included, is a P2 row. Every md-manager feature's coverage brief
-        # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test".
+        # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test". The cases are
+        # the bundled brief's, which names no md-manager specifics (scenario builtin-briefs), so case (4) names no screenshot: a brief
+        # whose proofs include browser scenarios says in its first paragraph that a scenario's screenshot is part of its packet.
         tool = Path(__file__).resolve().parents[1]
         briefs = [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]
         self.assertEqual(len(briefs), 8)
         for path in briefs:
             text = " ".join(path.read_text().split())
+            first = " ".join(path.read_text().split("\n\n")[0].split())
             with self.subTest(brief=str(path.relative_to(tool))):
                 for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things"):
                     self.assertNotIn(absent, text)
                 for value in ("A gap is P1 only in these four cases: (1) a failure you show on the candidate: the inputs, the expected behaviour quoted, "
                               "the actual behaviour, and path:line; (2) a candidate behaviour that contradicts a quoted line of a task, of a document a "
-                              "task cites, or of decisions.md", "(3) a worker's disclosure, quoted, that something fails", "(4) a line you could not check "
-                              "because its test source, packet or screenshot was unreadable: name the line and say why", "Every other gap is one P2 finding per",
+                              "task cites, or of", "(3) a worker's disclosure, quoted, that something fails", "(4) a line you could not check "
+                              "because its test source or packet was unreadable: name the line and say why", "Every other gap is one P2 finding per",
                               "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)
+                self.assertEqual("A browser scenario's screenshot is part of its verification packet: a line whose screenshot you could not read is one "
+                                 "you could not check." in first, "browser" in first, first)
 
     def test_every_coverage_brief_applies_its_cases_the_same_way(self):
         # The replay (C34 follow-up) found cases (2) and (3) applied unevenly. (2): revamp-004 never rated a second useNow P1 because it
