@@ -5,7 +5,7 @@ Feature run for slice 1 of `docs/PRD_PORTABLE_WORKFLOW.md`. One lane, `controlle
 Launch from md-manager's main checkout, in a new Herdr tab:
 
 ```
-ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch portable-workflow --live --automatic --reviewer-transport print --worker-timeout-seconds 5400 --review-timeout-seconds 3600
+.venv/bin/python -m workflow launch portable-workflow --live --automatic --reviewer-transport print --worker-timeout-seconds 5400 --review-timeout-seconds 3600 --worker-model claude-opus-5-5 --judge-model claude-opus-5-5
 ```
 
 The lane task is written as an outcome brief (Goal, Context, Constraints, Acceptance, Stop), the form slice 2 will enforce.

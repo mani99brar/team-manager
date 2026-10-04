@@ -31,7 +31,7 @@ from .attention import attention
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, pin_roles, plan_excluded, run_claude, plan_workers,
+from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, override_note, pin_roles, plan_excluded, run_claude, plan_workers,
                        prepare, read_json, review_node, reviewer_ids, run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id,
                        worker_authority, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
@@ -1235,6 +1235,9 @@ def main():
             reviewers = parse_reviewer_files(args.reviewer, declared)
             # C52: the roles' models and efforts, refused before anything is written; WORKFLOW_WORKER_EFFORT is read here, once.
             roles = pin_roles(args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
+            note = override_note(os.environ, args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
+            if note:
+                print(f"Note: {note}", file=sys.stderr, flush=True)
             if args.profile and not args.automatic:
                 parser.error("--profile applies to --automatic runs only")
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)

@@ -19,7 +19,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
                          has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
-from .sessions import EFFORT_LEVELS, pin_roles, read_json, validate_node_id, validate_reviewer_id
+from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
 from .verification import validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
@@ -388,6 +388,10 @@ def main(argv=None):
             conventions, cut = conventions_summary(repo) if migration is None else (None, None)
             if cut:
                 notes.append(cut)
+            # A live launch shows prepare's own output, which says it; a dry run runs no prepare.
+            override = override_note(os.environ, **roles)
+            if override:
+                notes.append(override)
             printed = {"repository": str(repo), "run_directory": str(run), "source_checkout": str(source_checkout(run)), "workers": selected,
                        "reviewers": reviewers, "commands": commands, "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
                        "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,

@@ -329,6 +329,20 @@ class FeatureLaunchTests(unittest.TestCase):
                   "--automatic", "--profile", "attended"])
         self.assertTrue(output.getvalue().splitlines()[0].startswith(f"Run {(self.root / 'runs' / 'attended').resolve()} (profile attended): automatic"))
 
+    def test_a_dry_run_says_when_a_scrubbed_model_override_would_have_chosen_the_model(self):
+        # A live launch leaves the note to prepare, whose output it shows; a dry run runs no prepare, so it says it itself.
+        with patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": ""}), patch("workflow.launch.run_command"), \
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--worker-model", "claude-opus-5-5"])
+        note = ("ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: pin it with "
+                "--judge-model; unpinned, a session runs Claude Code's default model.")
+        self.assertIn(note, json.loads(output.getvalue())["notes"])
+        self.assertIn(f"Note: {note}", errors.getvalue())
+        with patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-opus-5-5"}), patch("workflow.launch.run_command"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-id", "noted", "--run-root", str(self.root / "runs")])
+        self.assertNotIn("ANTHROPIC_MODEL", errors.getvalue())
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--repo", str(self.repo), "--dry-run"])

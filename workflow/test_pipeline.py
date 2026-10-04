@@ -1309,6 +1309,21 @@ class RecordTests(unittest.TestCase):
         _, code, err = self.prepare_cli("refused-run", env={"WORKFLOW_WORKER_EFFORT": "med"})
         self.assertIn("not one of low, medium, high, xhigh, max", err)
 
+    def test_prepare_says_when_a_scrubbed_model_or_effort_override_would_have_chosen_the_model(self):
+        # The sessions' environment drops ANTHROPIC_MODEL and the CLI's other overrides (scrub_env): a launch line that relied on
+        # one is told which flags pin it now. A role pinned by its flag needs no note.
+        overrides = {"ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": "", "CLAUDE_CODE_SUBAGENT_MODEL": ""}
+        _, code, err = self.prepare_cli("model-run", env=overrides)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Note: ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: "
+                      "pin it with --worker-model and --judge-model; unpinned, a session runs Claude Code's default model.", err)
+        _, code, err = self.prepare_cli("pinned-model-run", "--worker-model", "claude-opus-5-5", env={**overrides, "CLAUDE_CODE_EFFORT_LEVEL": "low"})
+        self.assertIn("Note: ANTHROPIC_MODEL, CLAUDE_CODE_EFFORT_LEVEL are set here but never reach the run's sessions, which the workflow starts "
+                      "without them: pin them with --judge-model, --worker-effort and --judge-effort; unpinned, a session runs Claude Code's "
+                      "default model, the workers take WORKFLOW_WORKER_EFFORT and the judges high effort.", err)
+        _, code, err = self.prepare_cli("all-pinned-run", "--worker-model", "a", "--judge-model", "b", env=overrides)
+        self.assertNotIn("never reach", err)
+
     def test_prepare_in_this_suite_reads_the_stand_in_cli_never_the_operators(self):
         # setUpModule puts a stand-in `claude` first on PATH (stub_claude_cli), for prepare in process and in a child.
         from .sessions import controller_record

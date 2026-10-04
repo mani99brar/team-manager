@@ -431,6 +431,25 @@ def scrub_env(env) -> dict:
     return {key: value for key, value in env.items() if key not in SCRUBBED_ENV and not SCRUBBED_PATTERN.fullmatch(key)}
 
 
+def override_note(env, worker_model=None, worker_effort=None, judge_model=None, judge_effort=None) -> str | None:
+    """What prepare (and a launch dry run) says when `env` sets a model or effort override that scrub_env keeps from the
+    run's sessions and no role flag pins in its place: launch lines written before C52 relied on ANTHROPIC_MODEL."""
+    models = [key for key in sorted(env) if env[key] and (key in {"ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} or re.fullmatch(r"ANTHROPIC_DEFAULT_.+_MODEL", key))]
+    efforts = [key for key in ("CLAUDE_CODE_EFFORT_LEVEL",) if env.get(key)]
+    model_flags = [flag for flag, value in (("--worker-model", worker_model), ("--judge-model", judge_model)) if not value] if models else []
+    effort_flags = [flag for flag, value in (("--worker-effort", worker_effort), ("--judge-effort", judge_effort)) if not value] if efforts else []
+    names = (models if model_flags else []) + (efforts if effort_flags else [])
+    if not names:
+        return None
+    flags = model_flags + effort_flags
+    joined = flags[0] if len(flags) == 1 else f"{', '.join(flags[:-1])} and {flags[-1]}"
+    one = len(names) == 1
+    unpinned = (["a session runs Claude Code's default model"] if model_flags else []) + (
+        ["the workers take WORKFLOW_WORKER_EFFORT and the judges high effort"] if effort_flags else [])
+    return (f"{', '.join(names)} {'is' if one else 'are'} set here but never {'reaches' if one else 'reach'} the run's sessions, which the "
+            f"workflow starts without {'it' if one else 'them'}: pin {'it' if one else 'them'} with {joined}; unpinned, {', '.join(unpinned)}.")
+
+
 def job_env() -> dict:
     """The environment of a print job and of the --bg helper: this process's, scrubbed (scrub_env) and without the Herdr
     variables, so a job never targets the controller's pane."""
