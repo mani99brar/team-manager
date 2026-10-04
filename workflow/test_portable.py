@@ -275,7 +275,9 @@ class MdManagerDefaults(Isolated):
         with contextlib.chdir(TOOL):
             printed = self.dry_run("viewer-clarity", "--automatic", "--reviewer-transport", "print")
             self.assertEqual((printed["repository"], printed["run_directory"], printed["commands"]), (str(TOOL), str(run), expected))
-            self.assertEqual((printed["workers"], printed["reviewers"], printed["notes"]), (["ui", "adapter"], ["general", "coverage"], []))
+            # viewer-clarity (2.1.0) has a browser check on ui: the one note is C7's migration hint.
+            self.assertEqual((printed["workers"], printed["reviewers"], printed["notes"]), (["ui", "adapter"], ["general", "coverage"], [
+                'Lane ui has a browser check: to have each run tried before the merge to main, move feature.json to 2.4.0 and set "tryout": true.']))
             calls = self.live("viewer-clarity", "--automatic", "--reviewer-transport", "print")
         self.assertEqual(calls, [(command, TOOL) for command in expected])  # Every command still runs in md-manager's checkout.
 

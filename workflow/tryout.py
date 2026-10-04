@@ -42,9 +42,18 @@ def verdicts(directory: Path) -> list[dict]:
 
 
 def record_verdict(directory: Path, plan: dict, result: str, note: str | None, actor: str) -> dict:
-    """Append one verdict to tryout.json (the history is kept) and return it."""
+    """Append one verdict to tryout.json (the history is kept) and return it. A tryout.json that cannot be read, or holds no
+    verdicts list, is refused, never replaced: the earlier verdicts would be lost."""
     if result not in RESULTS:
         raise ValueError(f"--result must be one of {', '.join(RESULTS)}")
+    path = Path(directory) / TRYOUT
+    if path.exists():
+        try:
+            record = read_json(path)
+        except (OSError, ValueError):
+            record = None
+        if not isinstance(record, dict) or not isinstance(record.get("verdicts"), list):
+            raise ValueError(f"{TRYOUT} cannot be read: fix or move it; nothing was recorded ({path})")
     entry = {"result": result, "note": note, "at": now(), **actor_record(actor)}
     save_json(Path(directory) / TRYOUT, {"version": TRYOUT_VERSION, "run_id": plan["run_id"], "verdicts": [*verdicts(directory), entry]})
     return entry
@@ -88,6 +97,25 @@ def untried_features(runs_root: Path, repository: Path | None = None, feature: s
             others.append({"project_id": project, "workflow_id": workflow, "run_id": latest["run_id"], "directory": latest["directory"]})
     latest = latest_integrated(list(mine.values()))
     return others, latest is not None and is_untried(latest)
+
+
+def policy_feature(repository: Path, policy: Path | None) -> str | None:
+    """The feature whose `features/<name>/` folder in `repository` holds `policy`, as launch names it; None elsewhere."""
+    if policy is None:
+        return None
+    try:
+        parts = Path(policy).resolve().relative_to(Path(repository).resolve() / "features").parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) > 1 else None
+
+
+def launch_check(runs_root: Path, repository: Path, policy: Path | None, *, follows: bool = False, allow_untried: str | None = None,
+                 registry: Path | None = None) -> str | None:
+    """untried_check for launch and preflight alike, so the two decide "the same feature" one way: the feature whose runs
+    live in `runs_root`, or the registered workflow named by the features/<name>/ folder that holds `policy`."""
+    return untried_check(runs_root, repository=repository, feature=policy_feature(repository, policy), follows=follows,
+                         allow_untried=allow_untried, registry=registry)
 
 
 def untried_check(runs_root: Path, *, repository: Path | None = None, feature: str | None = None, follows: bool = False,

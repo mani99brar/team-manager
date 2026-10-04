@@ -1514,13 +1514,14 @@ function reviewBlockedNow(context: Context): Draft | null {
     headline: [`✗ Blocked by review at ${label} · `, clock(review.reviewed_at), ' (', ago(review.reviewed_at), `).${DID_NOT_COMPLETE}`],
     reason: [reviewers.map(line => /[.!?]$/.test(line) ? line : `${line}.`).join(' ')], reasonSource: 1,
     next: {
-      action: 'required', label: 'Findings after review are fixed in a follow-up run of the same feature, not repaired in place', caveat: null,
+      action: 'required', label: 'Findings after review are fixed in a follow-up run, not repaired in place', caveat: null,
       runbook: [RUNBOOK.changedCode, RUNBOOK.verdict, RUNBOOK.contract],
       // C30: the brief prints each lane's restore recipe, every reviewer's findings and the workers' claims; the follow-up is a
-      // new run id of the same feature that pins what it follows (launch --follows).
+      // new run id of the same feature that pins what it follows (launch --follows). The label and the text step stay short: at
+      // 390×844 the whole banner fits the first screen (ux-run [scenario:narrow-run]).
       steps: [
         command(workflow('brief')),
-        prose('Paste what each lane needs from the brief (its restore recipe, the findings to fix, its untested claims) into that lane\'s task, then commit the feature files in the target.'),
+        prose('Paste what each lane needs from the brief (restore recipe, findings, untested claims) into its task and commit it.'),
         command(`"$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic ${BY_OPERATOR}`),
       ],
     },

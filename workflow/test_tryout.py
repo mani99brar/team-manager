@@ -121,6 +121,18 @@ class TryoutTests(unittest.TestCase):
         self.assertIn(f'python -m workflow export "{run}"', output)
         self.assertEqual([item["result"] for item in read_json(run / "tryout.json")["verdicts"]], ["works"])
 
+    def test_a_tryout_json_that_cannot_be_read_is_refused_not_replaced(self):
+        # The history is kept: a hand-edited file that is not JSON, or has no verdicts list, is never overwritten.
+        run = tryout_run(self.root)
+        for text in ("{not json", json.dumps({"version": "1.0.0", "verdicts": {"result": "works"}}), json.dumps(["works"])):
+            with self.subTest(text=text):
+                (run / "tryout.json").write_text(text)
+                code, output = tryout_cli(str(run), "--result", "works", "--by", "operator")
+                self.assertEqual(code, 1, output)
+                self.assertIn("tryout.json cannot be read: fix or move it; nothing was recorded", output)
+                self.assertEqual((run / "tryout.json").read_text(), text)
+                self.assertFalse((run / "events.jsonl").exists() and "Tryout recorded" in (run / "events.jsonl").read_text())
+
     def test_the_maintainer_and_a_missing_actor_are_refused(self):
         run = tryout_run(self.root)
         code, output = tryout_cli(str(run), "--result", "works", "--by", "maintainer")

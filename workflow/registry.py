@@ -331,7 +331,7 @@ def registered_runs(path: Path | None = None, since: datetime | None = None) -> 
     """Each run under each runs root the registry at `path` (default registry_path()) names, once per runs root, with its
     project_id, workflow_id, resolved runs_root and the project's repository (your checkout, which launch registers); with
     `since`, only runs whose events.jsonl was modified since (the others are never parsed). A missing or malformed registry
-    has no runs."""
+    has no runs; a runs root that cannot be expanded (`~` of an unknown user) is skipped."""
     try:
         document = json.loads((path or registry_path()).read_text())
     except (OSError, ValueError):
@@ -341,7 +341,10 @@ def registered_runs(path: Path | None = None, since: datetime | None = None) -> 
         for workflow in project.get("workflows", []) if isinstance(project, dict) and isinstance(project.get("workflows"), list) else []:
             if not isinstance(workflow, dict) or not isinstance(workflow.get("runs_root"), str):
                 continue
-            root = Path(workflow["runs_root"]).expanduser().resolve()
+            try:
+                root = Path(workflow["runs_root"]).expanduser().resolve()
+            except RuntimeError:  # `~user` naming an unknown user: a root no run can be read from.
+                continue
             if root in seen:
                 continue
             seen.add(root)
