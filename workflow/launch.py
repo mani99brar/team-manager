@@ -357,13 +357,15 @@ def launch_notes(repo: Path, policy: dict, selected: list[str], run: Path) -> li
     with no test kind, kinds and checks removed since the feature's previous run in this runs root), then overlap_notes'
     (C23: owned paths a recent run of another feature on this repository also owns, its work not in HEAD)."""
     lanes = [worker for worker in policy["workers"] if worker["node_id"] in selected]
-    previous = previous_policy(run.parent, run)
-    notes = policy_lint({**policy, "workers": lanes}, previous[1] if previous else None, since=previous[0] if previous else None)
-    code, base = read_git(repo, "rev-parse", "HEAD")
+    notes: list[str] = []
     try:
-        return notes + (overlap_notes(repo, lanes, run.parent, base) if code == 0 else [])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return notes  # Another run's files this controller cannot read: no note rather than a refused launch.
+        previous = previous_policy(run.parent, run)
+        notes += policy_lint({**policy, "workers": lanes}, previous[1] if previous else None, since=previous[0] if previous else None)
+        code, base = read_git(repo, "rev-parse", "HEAD")
+        notes += overlap_notes(repo, lanes, run.parent, base) if code == 0 else []
+    except Exception:
+        pass  # Another run's files (a corrupt pinned policy, a registry root it cannot expand): fewer notes, never a refused launch.
+    return notes
 
 
 def challenge_paused(run: Path) -> bool:

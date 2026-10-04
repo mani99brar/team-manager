@@ -102,11 +102,12 @@ def policy_lint(policy: dict, previous: dict | None, since: str | None = None) -
     the feature's previous run (`since` names it), had and this one removed. Added checks and owned paths are no note."""
     notes = []
     before = {}
-    if previous is not None:
-        for worker in previous.get("workers", []):
+    workers = previous.get("workers") if isinstance(previous, dict) else None
+    if isinstance(workers, list):  # A previous policy whose workers are not a list lists nothing removed.
+        for worker in workers:
             try:
                 before[worker["node_id"]] = (set(required_kinds(previous, worker)), {check["id"] for check in worker["checks"]})
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, AttributeError):
                 continue  # A previous policy this controller cannot read lists nothing removed.
     for worker in policy["workers"]:
         node, kinds = worker["node_id"], required_kinds(policy, worker)

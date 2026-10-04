@@ -627,6 +627,20 @@ class LaunchNotes(unittest.TestCase):
             run_id, policy = previous_policy(self.own_root, self.own_root / "project-workflows-002")
         self.assertEqual((run_id, [worker["node_id"] for worker in policy["workers"]]), ("project-workflows-001", ["adapter"]))
 
+    def test_a_malformed_previous_policy_or_registry_root_never_refuses_the_launch(self):
+        previous = self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "adapter", "owned_paths": ["server"]}])
+        valid = read_json(previous / "policy.json")
+        for workers in (None, ["adapter"]):  # Hand-edited or corrupt: no list, or an entry that is not an object.
+            with self.subTest(workers=workers):
+                save_json(previous / "policy.json", {**read_json(previous / "policy.json"), "workers": workers})
+                self.assertIsInstance(self.notes(), list)
+        save_json(previous / "policy.json", valid)
+        # A registry runs_root naming an unknown user: Path.expanduser raises RuntimeError.
+        save_json(self.registry, {"version": 1, "projects": [{"project_id": "target", "name": "target", "repository": str(self.repo), "workflows": [
+            {"workflow_id": "first", "runs_root": "~no-such-user-m5/runs"},
+            {"workflow_id": "project-workflows", "runs_root": str(self.own_root)}]}]})
+        self.assertIsInstance(self.notes(), list)
+
     def test_a_linked_worktree_and_a_clone_of_the_same_repository_each_give_one(self):
         worktree, clone = self.root / "linked", self.root / "clone"
         git(self.repo, "worktree", "add", "-q", "--detach", str(worktree))
