@@ -1394,19 +1394,35 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
     def test_a_reviewer_waiting_in_its_pane_is_named_again_after_each_note_of_the_grace(self):
         # The viewer and the server show a pane that needs attention only while it is the review node's latest record. Each note
         # of the grace (its start, another reviewer's late verdict) is a later record, so the attention is said again after it.
+        # The `pane` attention record, beside a temporary registry, is one line while the pane waits, from before the block through
+        # the grace's notes; a second once it worked and blocks again inside the grace. A late verdict read while its row still
+        # reads blocked forgets the state (wait_grace's ended), so its pane needs nobody any more.
+        import shlex
+        from .attention import feed_path
         from .automatic import ReviewStatus, wait_reviews
         self.reviewers = ["general", "coverage", "security"]
         self.setUp()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+        def lines():
+            return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed_path().read_text().splitlines())] if feed_path().exists() else []
         self.rows["general"]["state"] = "blocked"  # A question in its pane, seen before the block.
         self.rows["security"]["state"] = "working"
         self.write("coverage", verdict="blocked", findings=[])
+        seen = {}
 
         def finishes(now):
+            seen[now] = lines()
             if now == 160:
                 self.write("security")
-            if now == 280:  # Answered in its pane.
+            if now == 280:  # Answered in its pane: it works.
+                self.rows["general"]["state"] = "working"
+            if now == 340:  # A second prompt in its pane.
+                self.rows["general"]["state"] = "blocked"
+            if now == 400:  # Answered: it wrote its verdict, and its row still reads blocked.
                 self.write("general")
-                self.rows["general"]["state"] = "idle"
         clock, sleep, _ = self.ticking(100, 60, finishes)
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
         self.assertEqual(sorted(decisions), sorted(self.ids))
@@ -1415,7 +1431,15 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
             ("interactive", "Reviewer general needs attention in its pane (native state blocked); waiting until the deadline"),
             ("note", "Reviewer coverage blocked the candidate"), ("interactive", pane),
             ("note", "Reviewer security's late verdict recorded"), ("interactive", pane),
+            ("interactive", pane),  # Blocked again after it worked.
             ("note", "Reviewer general's late verdict recorded")])
+        attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", self.node("general")])
+        line = ("pane", self.node("general"), f"Reviewer general needs attention in its pane (native state blocked): answer it there. "
+                                              f"Reattach the pane with: {attach}")
+        self.assertEqual(seen[280], [line])  # wait_reviews' record, not repeated by the grace's start or by security's late verdict.
+        self.assertEqual(lines(), [line, line])
+        self.assertEqual(feed_path(), self.root / "config" / "attention.jsonl")
+        self.assertEqual(read_json(self.root / "attention.json")["states"], [])
 
     def test_a_reviewer_still_working_at_the_end_of_the_grace_ends_superseded_without_a_verdict(self):
         from .automatic import REVIEW_GRACE_SECONDS, ReviewStatus, wait_reviews
