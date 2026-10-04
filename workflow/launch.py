@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from .guardrails import (DECISIONS, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, has_operator_decisions, is_guarded, migration_note,
-                         prd_path, refusals, resume_command)
+                         prd_path, refusals, resolve_commit, resume_command)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -166,8 +166,10 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                    reviewer_transport: str | None = None, workers: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
-    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here."""
+                    reviewer_transport: str | None = None, workers: str | None = None,
+                    restore_from: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
+    `restore_from` (C12) is resolved to its commit here, before any Git action, and prepare gets that commit."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
     repo = repo.resolve()
@@ -231,6 +233,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         if review_sidecar:
             bounds = {key: value for key, value in review_sidecar.items() if key != "prompt"}
             prepare.extend(["--sidecar-brief", str(sidecar_brief), "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
+    if restore_from is not None:
+        prepare.extend(["--restore-from", resolve_commit(repo, restore_from)])
     commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -275,6 +279,8 @@ def main(argv=None):
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m, max 24h)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
+    parser.add_argument("--restore-from", metavar="COMMIT", help="A follow-up run: each lane starts by restoring its owned paths from this commit "
+                                                              "(pinned in the plan; the design challenge reads a read-only copy)")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
@@ -283,7 +289,8 @@ def main(argv=None):
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
-                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
+                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
+                                               args.restore_from)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
@@ -306,6 +313,8 @@ def main(argv=None):
                        "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
                        "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
                                       "migration_note": migration, "conventions": conventions}}
+            if args.restore_from is not None:
+                printed["restore_from"] = {"name": args.restore_from, "commit": prepare[prepare.index("--restore-from") + 1]}
             if review_sidecar:
                 # What prepare pins as plan.sidecar (the brief's text in place of its path); a feature without one prints no key.
                 printed["sidecar"] = {**review_sidecar, "brief": str(sidecar.brief_path(feature_folder(repo, args.feature), review_sidecar["prompt"]))}

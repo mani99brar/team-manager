@@ -1159,6 +1159,8 @@ def main():
                                                          "into plan.sidecar")
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
+    parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
+                                                                   "(pinned as plan.restore_from; the challenge reads a read-only copy)")
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -1235,6 +1237,8 @@ def main():
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
+            from .guardrails import pin_restore, resolve_commit
+            restore = resolve_commit(args.repo.resolve(), args.restore_from) if args.restore_from is not None else None  # Before the run directory.
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if reviewers:
                 plan["reviewers"] = reviewers
@@ -1249,6 +1253,8 @@ def main():
             if args.sidecar_brief:
                 from .sidecar import pin
                 pin(plan, args.sidecar_brief, sidecar_settings)
+            if restore:
+                pin_restore(plan, directory, policy, restore)
             if args.automatic:
                 from .automatic import automatic_settings
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)

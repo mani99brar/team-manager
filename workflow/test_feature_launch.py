@@ -123,6 +123,23 @@ class FeatureLaunchTests(unittest.TestCase):
                 self.assertEqual(output.getvalue().splitlines()[0],
                                  f"Run {run}: {finish.format(branch=f'feature/project-workflows/{run_id}')}.")
 
+    def test_restore_from_is_resolved_and_passed_to_prepare_and_the_dry_run_shows_it(self):
+        # C12: launch resolves --restore-from in the target before any Git action and hands prepare the commit.
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), restore_from="HEAD")
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--restore-from") + 1], head)
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"))
+        self.assertNotIn("--restore-from", commands[2])
+        with self.assertRaisesRegex(ValueError, "--restore-from no-such-commit is not a commit"):
+            launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), restore_from="no-such-commit")
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--restore-from", "HEAD"])
+        command.assert_not_called()
+        printed = json.loads(output.getvalue())
+        self.assertEqual(printed["restore_from"], {"name": "HEAD", "commit": head})
+        self.assertIn(head, printed["commands"][2])
+
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()):
             main(["project-workflows", "--repo", str(self.repo), "--dry-run"])
