@@ -74,6 +74,56 @@ class CompletionTests(unittest.TestCase):
                       "## Design (settled) in the documents your task cites, each naming its proof: a test (file::name), a check id, "
                       "a self-report, or none.", prompt)
 
+    def test_a_reading_that_departs_from_a_task_line_is_asked_or_recorded_as_the_runs_profile_says(self):
+        # C16 step 1: before building on a reading of a task line that departs from its plain words (its own, or one an advisory
+        # note or a sidecar message suggests), the worker of an attended run writes a question, that of an unattended run records
+        # an open assumption starting "reading:" and goes on, and a manual run's worker asks in its pane. Untestable behaviour
+        # stays in untested. Slice 3 pins the profile (plan.automatic.profile); until then an automatic run is unattended. A
+        # 1.0.0 run has no question status and is told nothing new.
+        from .automatic import completion_prompt
+        from .interactive import worker_prompt
+        reading = ("When you would build on a reading of a task line that departs from its plain words (your own reading, or one an "
+                   "advisory note or a sidecar message suggests), ")
+        untested = " A behaviour you could not test is no such reading: list it in untested."
+        self.assertNotIn("reading of a task line", completion_prompt(self.root, self.plan, "ui"))
+        self.plan["completion_version"] = "1.1.0"
+        self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        unattended = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn(reading + 'record an open assumption that starts with "reading:" and quotes that line, and go on.' + untested, unattended)
+        self.assertNotIn("status question quoting", unattended)
+        self.plan["automatic"]["profile"] = "attended"
+        attended = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn(reading + "write the completion file with status question quoting that line before building on it." + untested, attended)
+        self.assertIn("Your deadline is 1970-01-01T04:00:00Z (UTC), 4 hours after this launch", attended)  # C16 step 6 stays.
+        self.assertEqual(worker_prompt(self.root, self.plan, "ui").count("reading of a task line"), 1)  # In the protocol only.
+        manual = " ".join(worker_prompt(self.root, {key: value for key, value in self.plan.items() if key != "automatic"}, "ui").split())
+        self.assertIn(reading + "ask in this pane, quoting that line, before building on it.", manual)
+        self.assertEqual(manual.count("reading of a task line"), 1)
+
+    def test_an_automatic_worker_runs_targeted_tests_by_default_and_every_worker_hears_the_setup_has_not_run(self):
+        # C16 step 8: unless its task says otherwise, an automatic worker runs targeted tests while iterating, its lane's
+        # non-browser policy checks once before the completion and browser specs only through check-report; a manual worker has
+        # no Bash, so its prompt has no such line. C15 step 1: each lane's worktree is a fresh checkout in which the policy's
+        # setup has not run (nor does it during the challenge); the prompt names the commands.
+        from .guardrails import CHECKS_DEFAULT
+        from .interactive import worker_prompt
+        self.plan["nodes"]["ui"]["task"] = "Build it."
+        manual = {key: value for key, value in self.plan.items() if key != "automatic"}
+        for version in ("1.0.0", "1.1.0"):
+            self.plan["completion_version"] = version
+            prompt = worker_prompt(self.root, self.plan, "ui")
+            self.assertIn("Unless your task says otherwise: " + CHECKS_DEFAULT, prompt)
+            self.assertIn("Your deadline is 1970-01-01T04:00:00Z (UTC)", prompt)
+        self.assertNotIn(CHECKS_DEFAULT, worker_prompt(self.root, manual, "ui"))
+        self.assertNotIn("the policy's setup", worker_prompt(self.root, self.plan, "ui"))  # No pinned policy.json.
+        save_json(self.root / "policy.json", {"setup": [{"argv": ["npm", "ci"], "timeout_seconds": 600},
+                                                        {"argv": ["uv", "sync", "--frozen"], "timeout_seconds": 60}], "workers": []})
+        for plan in (self.plan, manual):
+            self.assertIn("Completion of a turn is not workflow approval. This worktree is a fresh checkout: the policy's setup has not run in "
+                          "it (`npm ci`, then `uv sync --frozen`).\n\nBuild it.", worker_prompt(self.root, plan, "ui"))
+        save_json(self.root / "policy.json", {"workers": []})  # A policy without setup: nothing to say.
+        self.assertNotIn("the policy's setup", worker_prompt(self.root, self.plan, "ui"))
+
     def test_idle_without_signal_times_out_not_completes(self):
         ticks = iter([1, 1, DEFAULTS["worker_timeout_seconds"] + 1])
         with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):

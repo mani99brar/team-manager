@@ -70,8 +70,10 @@ def reviewer_transport(plan: dict) -> str:
 
 
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
-    """An automatic worker's completion protocol; its deadline counts from `launched_at` when given (deadline_sentence)."""
-    from .guardrails import COMPLETION_VERSION, MAX_QUESTIONS, completion_version, stop_rule
+    """An automatic worker's completion protocol: its bounds, the default on running checks (C16 step 8; a manual worker has no
+    Bash), the completion file, and for 1.1.0 the evidence, questions and the reading rule (C16 step 1). Its deadline counts
+    from `launched_at` when given (deadline_sentence)."""
+    from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, completion_version, reading_rule, stop_rule
     version = completion_version(plan)
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
                "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
@@ -93,11 +95,11 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
                     "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
                     "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
                     f"At most {MAX_QUESTIONS} questions for this lane: after the third, decide yourself and record an open assumption; "
-                    "a fourth question is treated as blocked."
+                    "a fourth question is treated as blocked.\n" + reading_rule(plan)
                     + (f"\nStop (from your task, the bound on this work): {' '.join(stop.split())}" if stop else ""))
     return ("\n\nAUTOMATIC MODE: permission checks are bypassed and Bash is available. "
             "Do not wait for a human handoff. Stay within assigned ownership; do not commit, merge, push, "
-            "launch agents, change runtime evidence or switch billing/provider. "
+            f"launch agents, change runtime evidence or switch billing/provider. Unless your task says otherwise: {CHECKS_DEFAULT} "
             "On completion write the following JSON shape atomically (temporary file then rename) to "
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "

@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .guardrails import conventions_block, decisions_block
+from .guardrails import conventions_block, decisions_block, reading_rule
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
                        review_nodes, run_claude, save_json, worker_effort)
@@ -287,15 +287,30 @@ SIDECAR_NOTE = ("\n\nReview sidecar: an independent reviewer reads your diff and
                 "keep your ## Stop bound, and never stop or wait for the sidecar.\n")
 
 
+def setup_note(directory: Path) -> str:
+    """C15 step 1: a lane's worktree is a fresh checkout, in which the pinned policy's setup has not run (the verifier runs it
+    in its own worktrees; nothing runs it before the workers, nor during the design challenge). Nothing without setup."""
+    path = directory / "policy.json"
+    setup = read_json(path).get("setup") if path.exists() else None
+    if not setup:
+        return ""
+    commands = ", then ".join(f"`{shlex.join(item['argv'])}`" for item in setup)
+    return f" This worktree is a fresh checkout: the policy's setup has not run in it ({commands})."
+
+
 def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
-    """What a native worker session receives: the rules, its pinned task, the project's conventions (CLAUDE.md), the run's
-    decisions.md, a note on the review sidecar when the plan has one, and in automatic mode the completion protocol, whose
-    deadline counts from `launched_at` (the launch time the receipt records), else from the receipt on disk."""
+    """What a native worker session receives: the rules (with the policy's setup, which has not run in its worktree), its
+    pinned task, the project's conventions (CLAUDE.md), the run's decisions.md, a manual run's reading rule, a note on the
+    review sidecar when the plan has one, and in automatic mode the completion protocol, whose deadline counts from
+    `launched_at` (the launch time the receipt records), else from the receipt on disk."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
-              "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + conventions_block(plan)
-              + decisions_block(plan))
+              "Completion of a turn is not workflow approval." + setup_note(directory) + "\n\n" + plan["nodes"][node]["task"]
+              + conventions_block(plan) + decisions_block(plan))
+    reading = "" if plan.get("automatic") else reading_rule(plan)  # An automatic run's completion protocol carries its own.
+    if reading:
+        prompt += f"\n\n{reading}\n"
     if isinstance(plan.get("sidecar"), dict):
         prompt += SIDECAR_NOTE
     if plan.get("automatic"):

@@ -230,6 +230,27 @@ def completion_version(plan: dict) -> str:
     return plan.get("completion_version", LEGACY_COMPLETION_VERSION)
 
 
+READING = ("When you would build on a reading of a task line that departs from its plain words (your own reading, or one an advisory "
+           "note or a sidecar message suggests), ")
+
+
+def reading_rule(plan: dict) -> str:
+    """C16 step 1, for a run whose completions are 1.1.0: what a worker does before it builds on its own reading of a task line.
+    An attended run's worker asks (status question) and a manual run's asks in its pane; an unattended run's records the reading
+    where reviewers read it and goes on. Slice 3 pins the profile as plan.automatic.profile; until then an automatic run is
+    unattended. Empty for a 1.0.0 run, which has no question status."""
+    if completion_version(plan) != COMPLETION_VERSION:
+        return ""
+    automatic = plan.get("automatic")
+    if not isinstance(automatic, dict):
+        return READING + "ask in this pane, quoting that line, before building on it."
+    if automatic.get("profile") == "attended":
+        rule = READING + "write the completion file with status question quoting that line before building on it."
+    else:
+        rule = READING + "record an open assumption that starts with \"reading:\" and quotes that line, and go on."
+    return rule + " A behaviour you could not test is no such reading: list it in untested."
+
+
 def decisions_text(plan: dict) -> str | None:
     decisions = plan.get("decisions")
     return decisions.get("text") if isinstance(decisions, dict) and isinstance(decisions.get("text"), str) else None
