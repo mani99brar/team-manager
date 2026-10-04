@@ -825,6 +825,16 @@ class UntriedLimit(unittest.TestCase):
                 save_json(self.waiting[2] / "tryout.json", {"verdicts": [{"result": result, "note": None, "at": ago(0), "by": "operator"}]})
                 self.launch()
 
+    def test_a_registry_root_naming_an_unknown_user_is_skipped(self):
+        # Path.expanduser raises RuntimeError for `~no-such-user`: the root is left out, and the launch is refused, not a traceback.
+        registry = read_json(self.registry)
+        registry["projects"][0]["workflows"].append({"workflow_id": "lost", "runs_root": "~no-such-user-c29/runs"})
+        save_json(self.registry, registry)
+        self.assertIn("3 other features wait for your tryout", self.refused())
+        code, _, errors = self.dry_run()
+        self.assertEqual(code, 1)
+        self.assertIn("3 other features wait for your tryout", errors)
+
     def test_a_verdict_on_an_older_run_leaves_a_newer_untried_run_counting(self):
         # The latest integrated run is the one whose `Fast-forwarded to` row is latest, not the one written to last: the tryout
         # row (and `automatic --live`'s action row) on an older run moves its last event, never its integration.
