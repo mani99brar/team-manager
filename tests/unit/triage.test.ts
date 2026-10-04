@@ -647,8 +647,12 @@ describe('deriveNow', () => {
     assert.equal(now.interruption, 'a')
     assert.equal(now.reasonSource, 0)
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs · 10:30: the controller stopped; sessions keep running/)
-    assert.equal(now.next.label, 'Switch the target checkout back to feature/skeleton/skeleton-001, then resume the controller: it relaunches nothing')
-    assert.deepEqual(now.next.steps, [{ kind: 'text', text: 'In the target repository: git switch feature/skeleton/skeleton-001' },
+    assert.equal(now.next.label, "Switch the run's source checkout back to feature/skeleton/skeleton-001, then resume the controller: it relaunches nothing")
+    // The run's source checkout (its own worktree since C56), never the operator's own: switching that one fails or moves it. The
+    // server redacts the stop's path to <path>, so the step says where to find it instead of copying the placeholder.
+    assert.deepEqual(now.next.steps, [
+      { kind: 'text', text: "In the run's source checkout, the path status prints as source_checkout (the run directory's path plus .source, for runs launched since per-run checkouts):" },
+      { kind: 'text', text: 'git -C <source checkout> switch feature/skeleton/skeleton-001' },
       { kind: 'command', text: '"$PY" -m workflow automatic "$RUN" --live' }])
     assert.deepEqual(now.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Source feature branch changed' }])
     assert.doesNotMatch(prose(now), /new run|Blocked/)
@@ -681,7 +685,8 @@ describe('deriveNow', () => {
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'a')
     assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
-    assert.match(now.next.label, /^Switch the target checkout back to feature\/workflow-guardrails\/workflow-guardrails-001,/)
+    assert.ok(now.next.steps.some(step => step.text === 'git -C <source checkout> switch feature/workflow-guardrails/workflow-guardrails-001'))
+    assert.match(now.next.label, /^Switch the run's source checkout back to feature\/workflow-guardrails\/workflow-guardrails-001,/)
   })
 
   const REVIEWED ={ challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded' } as const
@@ -837,6 +842,9 @@ describe('deriveNow', () => {
     assert.match(textToString(now.headline, T0), /^‖ Paused: the design challenge found 1 P1; no worker launched/)
     assert.match(textToString(now.reason, T0), /Seats can be squatted\./)
     assert.deepEqual(commands(now), ['"$PY" -m workflow resume "$RUN"', '"$PY" -m workflow resume "$RUN" --accept-challenge "<reason>"'])
+    // Edited where the run reads them: its source checkout, not the operator's own (C56).
+    assert.equal(now.next.steps[0].kind === 'command' ? now.next.steps[0].caption : null,
+      "After editing the tasks, decisions.md or the PRD in the run's source checkout (the paused message and status name it):")
   })
 
   it('awaiting_approval', () => {

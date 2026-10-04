@@ -248,7 +248,9 @@ class SubsetSelection(LaneRun):
         tasks = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--task"]
         self.assertEqual([task.split("=", 1)[0] for task in tasks], ["ui", "docs"])
         self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs)."])
-        # Run the real prepare command: no agent launches, the selection is pinned, only the selected worktrees exist.
+        # Run the real prepare command in the run's own worktree: no agent launches, the selection is pinned, only the
+        # selected worktrees exist.
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Lanes: ui, docs (excluded: adapter)", result.stdout)
@@ -295,9 +297,9 @@ class SubsetSelection(LaneRun):
         self.assertFalse(self.run_root.exists())
         self.assertEqual(parse_lane_selection("docs,ui", LANES), ["ui", "docs"])
         self.assertEqual(parse_lane_selection(None, LANES), LANES)
-        # Through the CLI on the committed feature: nothing runs, not even `git switch`.
+        # Through the CLI on the committed feature: nothing runs, not even `git worktree add`.
         for bad in ("ui,nope", "ui,ui"):
-            with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
+            with patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit):
                     launch_main(["lanes", "--repo", str(self.repo), "--live", "--workers", bad, "--run-root", str(self.run_root)])
             command.assert_not_called()
@@ -317,6 +319,7 @@ class SubsetSelection(LaneRun):
     def test_drill_naming_an_excluded_lane_is_skipped_and_injects_nothing(self):
         self.feature_dir(drill={"node_id": "adapter", "phase": "worker", "attempt": 1})
         run, commands, notes = launch_commands(self.repo, "lanes", "lanes-001", self.run_root, herdr=False, workers="ui,docs")
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.attach(run)
@@ -326,7 +329,7 @@ class SubsetSelection(LaneRun):
         self.assertEqual([event["message"] for event in events if "drill" in event["message"].lower()],
                          ["Failure drill skipped: its lane adapter is not selected for this run"])
         commit = self.manual_run()
-        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(self.run_root / "lanes-001.source", "rev-parse", "HEAD"), commit)  # The run's own worktree.
         self.assertFalse((run / "failure-drill.json").exists())
         self.assertFalse((run / "failure-report.json").exists())
         for node in ("ui", "docs"):
@@ -353,8 +356,9 @@ class DeclaredReviewers(LaneRun):
         prepare_command = commands[2]
         briefs = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--reviewer"]
         self.assertEqual([item.split("=", 1)[0] for item in briefs], ["general", "coverage"])
-        self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))
         self.assertEqual(notes, [])
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))  # In the run's own worktree.
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Reviewers: general, coverage", result.stdout)
@@ -370,7 +374,7 @@ class DeclaredReviewers(LaneRun):
             save_json(self.repo / "features/lanes/feature.json", plain)
             _, commands, _ = launch_commands(self.repo, "lanes", "lanes-003", self.run_root, herdr=False)
             self.assertNotIn("--reviewer", commands[2])
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output:
             launch_main(["lanes", "--repo", str(self.repo), "--dry-run"])  # The feature file now declares no reviewers.
         command.assert_not_called()
         self.assertEqual(json.loads(output.getvalue())["reviewers"], ["review"])
@@ -407,6 +411,8 @@ class DeclaredReviewers(LaneRun):
         return path
 
     def test_manual_import_requires_every_declared_reviewer_before_approval(self):
+        # The run's source checkout is its own worktree (`<run>.source`), as launch adds it: approve says how it merges.
+        self.repo = self.repo.rename(self.root / "run.source")
         self.prepare(LANES, reviewers=["general", "coverage"])
         with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
             graph = build_pipeline(saver, self.runtime)
@@ -452,6 +458,13 @@ class DeclaredReviewers(LaneRun):
         result = self.cli("approve", str(self.directory), "--bundle-sha256", digest)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), read_json(self.directory / "run-state.json")["values"]["integrated_commit"])
+        branch = self.plan["source_branch"]
+        note = (f"Merge the run branch from your checkout without switching it: git merge --ff-only {branch}. Once the run is finished, "
+                f"remove its source checkout: git worktree remove {self.repo}")
+        self.assertIn(note, result.stdout)
+        # status's finished next step says it too.
+        result = self.cli("status", str(self.directory))
+        self.assertIn(f"none: {branch} was fast-forwarded to {git(self.repo, 'rev-parse', 'HEAD')}; nothing was pushed. {note}", result.stdout)
         exported = read_json(self.directory / "run-state.json")
         self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["verdict"]) for entry in exported["review"]["reviewers"]],
                          [("general", "manual", "approved"), ("coverage", "manual", "approved")])
@@ -733,10 +746,10 @@ class LegacyFeatureAndRun(LaneRun):
         """Scenario legacy-feature-refused: a 1.0.0 feature.json is refused with a message to use 2.x; nothing runs."""
         self.two_lane_features()
         _, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
-        self.assertEqual((commands_new[1], notes_new), (["git", "switch", "-c", "feature/two/r1"], []))
+        self.assertEqual((commands_new[1], notes_new), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"], []))
         with self.assertRaisesRegex(ValueError, r"version 1\.0\.0 .*no longer supported: rewrite it as version 2\.x"):
             launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
                 launch_main(["old", "--repo", str(self.repo), "--dry-run", "--automatic"])
         command.assert_not_called()
@@ -759,7 +772,9 @@ class LegacyFeatureAndRun(LaneRun):
         # The finished project-workflows feature (a fixture copy) launches without a drill note; --workers narrows it.
         # Its only stderr line is the migration note every feature before 2.2.0 prints (PRD_PORTABLE_WORKFLOW 4.3).
         shutil.copytree(TESTDATA / "project-workflows", self.repo / "features/project-workflows")
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+        subprocess.run(["git", "-C", str(self.repo), "add", "features/project-workflows"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Finished feature"], check=True)
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--workers", "adapter", "--run-root", str(self.run_root)])
         command.assert_not_called()
         printed = json.loads(output.getvalue())

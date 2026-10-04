@@ -170,12 +170,17 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
     def prepare(self, run_id: str, automatic: bool = False) -> Path:
-        """The exact prepare command a launch runs, executed against the target."""
+        """The exact worktree and prepare commands a launch runs, executed against the target.
+
+        The run's own worktree is its source checkout from then on: self.repo and self.folder follow it, as the operator
+        edits a paused run's feature files where the paused message says. A later prepare launches from there.
+        """
         run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic)
-        if automatic:  # Automatic preparation needs the feature branch the launch switches to first.
-            subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.repo = Path(commands[1][-2])
+        self.folder = self.repo / "features" / FEATURE
         return run
 
     def sessions(self, directory: Path) -> FakeSessions:
@@ -238,8 +243,9 @@ class BriefHeadings(GuardedFeature):
         commit_all(self.repo)
         printed = self.dry_run(FEATURE, "--repo", str(self.repo), "--no-herdr")
         prepare = printed["commands"][2]
-        self.assertEqual(prepare[prepare.index("--guardrails"):], ["--guardrails", "--decisions", str(self.folder / "decisions.md"),
-                                                                     "--prd", str(self.repo / "docs/PRD.md")])
+        source = Path(printed["source_checkout"])  # The same committed files, in the run's own worktree.
+        self.assertEqual(prepare[prepare.index("--guardrails"):], ["--guardrails", "--decisions", str(source / f"features/{FEATURE}/decisions.md"),
+                                                                     "--prd", str(source / "docs/PRD.md")])
         self.assertEqual(printed["guardrails"], {"feature_version": "2.2.0", "enforced": True, "challenge": True, "migration_note": None,
                                                  "conventions": "none"})
         self.assertEqual(printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"][0]["node_id"], "challenge")
@@ -250,7 +256,7 @@ class BriefHeadings(GuardedFeature):
         manifest = {key: value for key, value in self.manifest.items() if key != "prd"}
         save_json(self.folder / "feature.json", {**manifest, "version": "2.1.0"})
         commit_all(self.repo)
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             from .launch import main as launch_main
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
@@ -290,6 +296,7 @@ class DecisionsRequired(GuardedFeature):
         # Pinned at prepare like the task text.
         directory = self.prepare("decisions-001")
         plan = read_json(directory / "plan.json")
+        decisions = self.folder / "decisions.md"  # In the run's source checkout, where a paused run's feature files are edited.
         self.assertEqual(plan["decisions"], {"path": str(decisions.resolve()), "text": DECISIONS})
         self.assertEqual((plan["completion_version"], plan["challenge"], plan["feature_version"]), ("1.1.0", True, "2.2.0"))
         self.assertEqual(plan["task_files"], {lane: str((self.folder / f"{lane}-task.md").resolve()) for lane in LANES})
@@ -410,7 +417,7 @@ class Conventions(GuardedFeature):
     def dry_run_output(self) -> tuple[dict, str]:
         """The dry run's JSON and its stderr (the notes)."""
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
         command.assert_not_called()
@@ -752,7 +759,7 @@ class ChallengeHeartbeat(FailingChallenge):
                 raise KeyboardInterrupt
 
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
+        with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
                 launch_main([FEATURE, "--repo", str(self.repo), "--live", "--automatic", "--run-root", str(self.runs)])
@@ -770,7 +777,7 @@ class ChallengeAttention(GuardedFeature):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 0, output)
         text = (f"Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s). Edit the task files, decisions.md "
-                f"or the PRD, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
+                f"or the PRD in the source checkout {self.repo}, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
                 '--accept-challenge "<reason>"')
         [line] = lines()
         self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
@@ -1024,8 +1031,8 @@ class ClaudeUpdateAroundTheChallenge(GuardedFeature):
     def test_start_and_resume_name_stale_claude_sessions_and_resume_exits_75_when_claude_code_is_unavailable(self):
         from .sessions import TransientInfraError
         stale = "Warning: 1 running Claude Code process(es) still run an executable that an update deleted.\n  pid 7 in /work: claude"
-        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/auto-001")
         run, commands, _ = launch_commands(self.repo, FEATURE, "auto-001", self.runs, herdr=False, automatic=True)
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.challenge_says([concern("P1", "The lanes overlap")])
@@ -1147,11 +1154,12 @@ class ChallengePauses(GuardedFeature):
                 save_json(directory / "challenge.json", {"status": "paused"})
 
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--run-root", str(self.runs)])
         self.assertEqual([command[3] if command[0] != "git" else "git" for command in calls], ["preflight", "git", "prepare", "start"])
-        self.assertIn("Launch paused at the design challenge; no worker was launched", output.getvalue())
+        run = (self.runs / f"{FEATURE}-001").resolve()
+        self.assertIn(f"Launch paused at the design challenge; no worker was launched. Run: {run}\nSource checkout: {run}.source\n", output.getvalue())
 
 
 class ChallengeResumeSupervises(GuardedFeature):
@@ -1175,6 +1183,9 @@ class ChallengeResumeSupervises(GuardedFeature):
         # Supervised once, with the run directory, after both workers launched.
         self.assertEqual(supervised, [(directory, ["challenge", "challenge", "adapter", "ui"])])
         self.assertIn("Automatic run reached a verified feature branch", output)
+        # The run's branch is in its own worktree: merged from your checkout without switching, then the worktree removed.
+        self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, remove its source checkout: "
+                      f"git worktree remove {self.repo}", output)
 
 
 class ChallengeRevision(GuardedFeature):
@@ -1530,7 +1541,9 @@ class ChallengeRevision(GuardedFeature):
                 self.assertIn("Blocked: Design challenge attempt 1 paused this run, and nothing it read has changed since", output)
                 # The commands it suggests keep --herdr, as the paused message does: without it the workers launch with no panes.
                 herdr = " --herdr" if flags else ""
-                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory}{herdr}\n", output)
+                # It names the run's own worktree, where the edit is made; an edit in the target checkout is not seen.
+                self.assertIn(f"Edit the task files, decisions.md or the PRD in the source checkout {self.repo}, then rerun the challenge: "
+                              f"{PY} -m workflow resume {directory}{herdr}\n", output)
                 self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --accept-challenge "<reason>"{herdr}\n', output)
                 self.assertIn("A concern outside the feature files (the code at the base, the policy) needs a new run.", output)
                 self.assertNotIn("Report:", output)
@@ -1591,6 +1604,74 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 1, output)
         self.assertIn("Design challenge attempt 3 paused this run, and nothing it read has changed since", output)
         self.assertEqual(len(self.challenge_calls()), 2)
+
+
+class PerRunCheckout(GuardedFeature):
+    """C56: each run gets its own worktree of the target (`<run>.source`), so the target checkout never switches."""
+
+    paused, edit_task, run_worktrees, assert_moved = (ChallengeRevision.paused, ChallengeRevision.edit_task, ChallengeRevision.run_worktrees,
+                                                      ChallengeRevision.assert_moved)
+
+    def integrate(self, directory: Path) -> str:
+        """From the workers' handoff through freeze, both reviewers and the approval to the fast-forward; the integrated commit."""
+        runtime = self.runtime(directory)
+        with SqliteSaver.from_conn_string(str(directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, runtime)
+            config = graph_config(runtime)
+            verified = graph.invoke(Command(resume={"freeze": True}), config)
+            self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+            bundle, digest = runtime.validate_bundle()
+            imports = {reviewer: {"imported_at": now(), "review": {"run_id": directory.name, "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
+                                                                  "reviewer": f"{reviewer}-session", "independent": True, "verdict": "approved", "findings": []}}
+                       for reviewer in ("general", "coverage")}
+            approved = graph.invoke(Command(resume=combine_imported_reviews(bundle, digest, imports)), config)
+            self.assertEqual(approved["__interrupt__"][0].value["kind"], "integration_approval")
+            return graph.invoke(Command(resume={"approve": digest}), config)["integrated_commit"]
+
+    def test_two_runs_from_one_checkout_integrate_in_their_own_worktrees_and_a_revision_commits_there(self):
+        from .guardrails import paused_message
+        target = self.repo
+        mine = (git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD"))
+        first, base = self.paused("first-001")
+        first_source = self.repo
+        self.assertEqual(first_source, self.runs.resolve() / "first-001.source")
+        self.assertEqual(read_json(first / "plan.json")["source_branch"], f"feature/{FEATURE}/first-001")
+        # The paused message, start's refusal and status name the run's worktree, where its feature files are edited.
+        self.assertIn(f"Edit the task files, decisions.md or the PRD in the source checkout {first_source}, then rerun", paused_message(first))
+        output, code = self.cli(pipeline.main, ["start", str(first), "--live"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"edit the feature files in the source checkout {first_source}, then:", output)
+        output, code = self.cli(pipeline.main, ["status", str(first)])
+        self.assertEqual(json.loads(output.split("\nReport:")[0])["source_checkout"], str(first_source))
+        # A second run launched from the same checkout while the first is paused gets its own worktree and branch.
+        self.repo, self.folder = target, target / "features" / FEATURE
+        self.challenge_says([concern("P2", "Minor")])
+        second = self.prepare("second-001")
+        second_source = self.repo
+        output, code = self.cli(pipeline.main, ["start", str(second), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD")), mine)
+        # The first run's revision is edited and committed in its own worktree; the target and the second run do not move.
+        self.repo, self.folder = first_source, first_source / "features" / FEATURE
+        self.edit_task()
+        output, code = self.cli(resume_main, [str(first)])
+        self.assertEqual(code, 0, output)
+        revision = git(first_source, "rev-parse", "HEAD")
+        self.assertEqual((git(first_source, "rev-parse", f"{revision}^"), git(first_source, "symbolic-ref", "--short", "HEAD")),
+                         (base, f"feature/{FEATURE}/first-001"))
+        self.assertEqual(git(first_source, "diff-tree", "--no-commit-id", "--name-only", "-r", revision), f"features/{FEATURE}/ui-task.md")
+        self.assert_moved(first, revision)
+        self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD"), git(target, "status", "--porcelain")), (*mine, ""))
+        self.assertEqual(git(second_source, "rev-parse", "HEAD"), base)
+        # Both reach integrate: each fast-forwards its own branch in its own worktree.
+        for directory, source in ((first, first_source), (second, second_source)):
+            commit = self.integrate(directory)
+            self.assertEqual((git(source, "rev-parse", "HEAD"), git(source, "status", "--porcelain")), (commit, ""))
+        self.assertEqual(git(first_source, "rev-list", "--count", f"{revision}..HEAD"), "2")
+        self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD")), mine)
+        # Merged from the target without switching it, as the finished message says.
+        git(target, "merge", "-q", "--ff-only", f"feature/{FEATURE}/first-001")
+        self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD")), (mine[0], git(first_source, "rev-parse", "HEAD")))
 
 
 class OverrideFromAnotherController(GuardedFeature):

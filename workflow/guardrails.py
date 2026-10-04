@@ -296,11 +296,11 @@ def decisions_block(plan: dict) -> str:
 def git_read(repo: Path, *arguments: str, stdin: bytes = b"") -> bytes:
     """The stdout of a git command that only reads, fed `stdin`; CalledProcessError when it fails.
 
-    It runs through Popen for a test constraint, not a production one: about 20 dry-run tests patch
-    workflow.launch.subprocess.run (the one `subprocess` module, so every caller's run) to fake launch's steps, and
+    It runs through Popen for a test constraint, not a production one: dry-run tests used to patch
+    workflow.launch.subprocess.run (the one `subprocess` module, so every caller's run) to fake launch's steps, while
     conventions_summary reads CLAUDE.md during such a dry run. Routed through subprocess.run, sessions.git or check_output
-    (both call run), it would get the mock's return value and fail with "not enough values to unpack". Moving it needs a
-    seam for launch's steps that those tests patch instead."""
+    (both call run), it would get the mock's return value and fail with "not enough values to unpack". Those tests now
+    patch launch.run_command, the seam for launch's steps, so this could move to sessions.git."""
     with subprocess.Popen(["git", "-C", str(repo), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         output, errors = process.communicate(stdin)
     if process.returncode:
@@ -616,7 +616,8 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
         paused = f"Design challenge attempt {attempt} paused the run before any worker launch: {len(blocking)} P0/P1 concern(s)"
         runtime.event(CHALLENGE, "paused", paused)
         from .attention import attention
-        attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD, then run: {resume_command(directory, herdr)}; "
+        attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD {edited_in(plan)}, then run: "
+                                                 f"{resume_command(directory, herdr)}; "
                                                  f"or accept it: {resume_command(directory, herdr, accept=True)}", node=CHALLENGE)
     else:
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {attempt} passed ({len(output['concerns'])} P2 concern(s)); launching workers")
@@ -649,10 +650,41 @@ def challenge_gate(runtime, herdr: bool = False) -> bool:
     if current is not None:
         if current["status"] in {"passed", "accepted"}:
             return True
-        raise RuntimeError(f"The design challenge paused this run; edit the feature files, then: {resume_command(directory, herdr)}")
+        raise RuntimeError(f"The design challenge paused this run; edit the feature files {edited_in(plan)}, then: {resume_command(directory, herdr)}")
     if (directory / "challenge.running.json").exists():
         raise RuntimeError(f"A design challenge job was started and never decided; rerun it with: {resume_command(directory, herdr)}")
     return run_challenge(runtime, 1, herdr)["status"] == "passed"
+
+
+def source_checkout(directory: Path) -> Path:
+    """The run's own checkout that `launch` adds with `git worktree add`: `<run>.source`, beside the run directory and so
+    outside it, where run_worktrees and move_base would take it for one of the run's. plan.repository names it."""
+    return directory.parent / f"{directory.name}.source"
+
+
+def edited_in(plan: dict) -> str:
+    """Where a paused run's feature files are edited: its source checkout, the run's own worktree since launch adds one."""
+    return f"in the source checkout {plan.get('repository')}"
+
+
+def finished_note(source: Path, branch: str, checkout: Path | None = None) -> str:
+    """How a run launched on its own worktree ends: the branch merges into your checkout without switching it, and the
+    worktree is removed by hand (C47's cleanup is later)."""
+    where = f"git -C {checkout} " if checkout else "git "
+    return (f"Merge the run branch from your checkout without switching it: {where}merge --ff-only {branch}. Once the run is "
+            f"finished, remove its source checkout: {where}worktree remove {source}")
+
+
+# Set by launch on the `automatic` it runs: launch prints finished_note itself, in its `git -C <your checkout>` form.
+LAUNCH_NOTE_ENV = "WORKFLOW_LAUNCH_PRINTS_FINISH_NOTE"
+
+
+def run_finished_note(directory: Path, plan: dict) -> str | None:
+    """finished_note for a run whose plan.repository is its own source checkout; None for a run prepared in your checkout."""
+    source = source_checkout(directory)
+    if Path(plan.get("repository", "")) != source:
+        return None
+    return finished_note(source, plan["source_branch"])
 
 
 def resume_command(directory: Path, herdr: bool = False, accept: bool = False) -> str:
@@ -671,7 +703,8 @@ def paused_message(directory: Path, herdr: bool = False) -> str:
                 lines.append(f"  {severity} [{concern['kind']}] {concern['message']}\n      Consequence: {concern['consequence']}")
     lines.append(f"Simpler alternative: {record.get('simpler_alternative')}")
     lines.append(f"Cheap experiment: {record.get('cheap_experiment')}")
-    lines.append("Edit the task files, decisions.md or the PRD, then rerun the challenge:\n  " + resume_command(directory, herdr))
+    plan = read_json(directory / "plan.json")
+    lines.append(f"Edit the task files, decisions.md or the PRD {edited_in(plan)}, then rerun the challenge:\n  " + resume_command(directory, herdr))
     lines.append("Or record an override and launch the workers:\n  " + resume_command(directory, herdr, accept=True))
     return "\n".join(lines)
 
@@ -999,7 +1032,7 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
         return record
     if current is not None and current["status"] == "paused" and unchanged_since(directory, plan, current):
         raise ValueError(f"Design challenge attempt {current['attempt']} paused this run, and nothing it read has changed since: a rerun "
-                         "would only sample the same challenge again. Edit the task files, decisions.md or the PRD, then rerun the "
+                         f"would only sample the same challenge again. Edit the task files, decisions.md or the PRD {edited_in(plan)}, then rerun the "
                          f"challenge: {resume_command(directory, herdr)}\nOr record an override and launch the workers: "
                          f"{resume_command(directory, herdr, accept=True)}\nA concern outside the feature files (the code at the base, the "
                          "policy) needs a new run.")
@@ -1359,6 +1392,9 @@ def resume_main(argv=None):
             except TransientInfraError as error:
                 parser.exit(75, f"Interrupted: {error}\n")  # Resumable, like `automatic --live`.
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
+            note = run_finished_note(directory, runtime.plan)
+            if note:
+                print(note)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
 

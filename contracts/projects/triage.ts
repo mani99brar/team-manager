@@ -1153,7 +1153,7 @@ function challengeNow(context: Context): Draft | null {
     reason: first ? [`${first.severity}: ${first.message}${blocking.length > 1 ? ` (+${blocking.length - 1} more)` : ''}`] : null,
     next: {
       action: 'required', label: 'Revise the feature files and rerun the challenge, or accept it with a reason', runbook: [RUNBOOK.challenge], caveat: null,
-      steps: [command(workflow('resume'), 'After editing the tasks, decisions.md or the PRD in the target:'),
+      steps: [command(workflow('resume'), "After editing the tasks, decisions.md or the PRD in the run's source checkout (the paused message and status name it):"),
         command(workflow('resume', '--accept-challenge', '"<reason>"'), 'Or record an override with your reason and launch the workers:')],
     },
   }
@@ -1192,9 +1192,13 @@ function resumableStopNext(context: Context, raw: string): NextStep | null {
   const resume = command(workflow('automatic', '--live'))
   if (BRANCH_CHANGED.test(raw)) {
     const branch = context.run.inputs?.source_branch ?? '<source branch>'
+    // The stop names the checkout (automatic.py source_branch_note), but the server redacts every path in a message, so the step
+    // says where to find it: the run's own worktree since C56, the target checkout before. Text, not a command step: those are
+    // the workflow CLI's own.
+    const where = "In the run's source checkout, the path status prints as source_checkout (the run directory's path plus .source, for runs launched since per-run checkouts):"
     return {
-      action: 'required', label: `Switch the target checkout back to ${branch}, then resume the controller: it relaunches nothing`,
-      runbook: [RUNBOOK.sourceBranch], steps: [prose(`In the target repository: git switch ${branch}`), resume], caveat: null,
+      action: 'required', label: `Switch the run's source checkout back to ${branch}, then resume the controller: it relaunches nothing`,
+      runbook: [RUNBOOK.sourceBranch], steps: [prose(where), prose(`git -C <source checkout> switch ${branch}`), resume], caveat: null,
     }
   }
   if (!START_INCOMPLETE.test(raw)) return null
