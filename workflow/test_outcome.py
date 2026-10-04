@@ -258,6 +258,20 @@ class OutcomeBlock(OutcomeRun):
         self.assertIn("  S-1 still validates late.", items)
         self.assertNotIn("Sidecar findings still open (no final pass wrote its unresolved list):", items)
 
+    def test_the_block_ends_with_the_run_cost_split_by_role_leaving_out_unknown_parts(self):
+        # C49: one line, the run total and its known parts; the approval stop's open items never carry it.
+        self.review("approved", [("general", "approved"), ("coverage", "approved")])
+        for reviewer in REVIEWERS:
+            self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
+        save_json(self.directory / "ui.stop.json", {"background_id": "b", "session_id": "s-ui", "pid": 1, "stopped": True})
+        save_json(self.directory / "ui.cost.json", {"session_id": "s-ui", "cost_usd": 3.084, "duration_ms": 1000, "models": ["m"], "recorded_at": "2026-10-01T23:00:00Z"})
+        save_json(self.directory / "review-general.cost.json", {"session_id": "s-general", "cost_usd": 2.75, "duration_ms": 1000, "models": ["m"], "recorded_at": "2026-10-01T23:00:00Z"})
+        save_json(self.directory / "review-coverage.stdout.json", {"is_error": False, "total_cost_usd": 1.5, "duration_ms": 10})
+        save_json(self.directory / "challenge-1.stdout.json", {"is_error": False, "total_cost_usd": 0.4, "duration_ms": 10})
+        self.assertEqual(outcome_block(self.directory).splitlines(),
+                         ["Outcome: approved by general and coverage; no open P0/P1.", "Cost: $7.73 (workers $3.08, reviewers $4.25, challenge $0.40)"])
+        self.assertNotIn("Cost:", outcome_block(self.directory, open_items_only=True))
+
 
 class OutcomePrinted(OutcomeRun):
     def blocked_run(self) -> None:

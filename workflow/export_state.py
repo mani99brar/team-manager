@@ -45,17 +45,22 @@ Version 1.7.0 (additive, C52) records what prepare pinned about who runs the run
 as it was; everything else is 1.6.0 unchanged. Within 1.7.0 (C8), `inputs.challenge`
 gains `hold` ({held_at, released_at, released_by, dropped}) when `challenge-hold.json`
 records the attempt shown: a run held after a passing challenge, and its release. The
-status stays `passed`; the key is left out for every other run.
+status stays `passed`; the key is left out for every other run. Within 1.7.0 (C49), `inputs.challenge`
+gains `history`: each archived attempt (`challenge-<n>.json`) with its status, decision time and P0/P1 concerns, left
+out for a single attempt; and the top-level `costs` section (workflow/costs.py) lists what each session cost by role, with
+a run total, null where unknown.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from .costs import costs_section
 from .guardrails import HOLD, MAX_QUESTIONS, decisions_text, has_challenge
 from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
@@ -247,6 +252,25 @@ def worker_questions(path: Path) -> list:
 
 
 HOLD_KEYS = ("held_at", "released_at", "released_by", "dropped")
+ARCHIVED_CHALLENGE = re.compile(r"challenge-(\d+)\.json")
+
+
+def challenge_history(directory: Path) -> list[dict]:
+    """1.7.0 (C49): each attempt save_challenge archived (`challenge-<n>.json`), in order, as `{attempt, status, decided_at,
+    concerns}` with its P0/P1 concerns only. An archive that fails the schema is left out, never guessed."""
+    from jsonschema.exceptions import ValidationError
+    from .verification import validate_schema
+    archives = sorted((int(match.group(1)), path) for path in directory.iterdir() if (match := ARCHIVED_CHALLENGE.fullmatch(path.name)))
+    history = []
+    for _, path in archives:
+        item = load_optional(path)
+        try:
+            validate_schema("challenge", item)
+        except ValidationError:
+            continue
+        history.append({"attempt": item["attempt"], "status": item["status"], "decided_at": item["decided_at"],
+                        "concerns": [concern for concern in item["concerns"] if concern["severity"] in {"P0", "P1"}]})
+    return history
 
 
 def challenge_section(directory: Path) -> dict | None:
@@ -266,6 +290,9 @@ def challenge_section(directory: Path) -> dict | None:
     hold = load_optional(directory / HOLD)
     if isinstance(hold, dict) and hold.get("attempt") == item["attempt"]:  # 1.7.0, C8: only the hold of the attempt shown.
         section["hold"] = {key: hold.get(key) for key in HOLD_KEYS}
+    history = challenge_history(directory)
+    if history:  # 1.7.0, C49: left out for a single attempt, as for every run exported before.
+        section["history"] = history
     return section
 
 
@@ -368,7 +395,8 @@ def export_state(runtime, state) -> dict:
              "verification_packets": packets,
              "review": review_section(runtime.directory),
              "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None,
-             "sidecar": sidecar_section(runtime.directory, runtime.plan)}
+             "sidecar": sidecar_section(runtime.directory, runtime.plan),
+             "costs": costs_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous
     value["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

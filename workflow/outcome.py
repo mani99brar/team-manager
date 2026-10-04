@@ -5,7 +5,7 @@ reviewers' status files (`automatic-review*.json`), never from an orchestrator's
 derived one, and the one its file says when they differ), or `no verdict accepted` with the reason and whether a file was
 written; late verdicts; open P0/P1 with their first sentences; accepted P2s as "Known limits"; each lane's untested and
 verify_yourself items; and the review sidecar's unresolved list. A clean approval is one line, `no open P0/P1` with the count of
-open P2s (never "nothing open": most approved runs keep open P2s). Every completed 1.1.0 lane carries a verify_yourself line, so those lines alone never make an approval unclean (they show once the block is longer,
+open P2s (never "nothing open": most approved runs keep open P2s), then the cost line when any cost is known (C49). Every completed 1.1.0 lane carries a verify_yourself line, so those lines alone never make an approval unclean (they show once the block is longer,
 and always in `open_items_only`).
 
 `status`, the success lines, the Blocked handlers and report.html print it. It reads files the controller replaces atomically
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .costs import cost_line, costs_section
 from .export_state import completion_signal, load_optional, review_section, sidecar_section, worker_questions
 from .sessions import plan_workers, review_node, reviewer_ids
 
@@ -180,33 +181,49 @@ def held_line(directory: Path, plan: dict) -> str | None:
 
 def outcome_block(directory: Path, open_items_only: bool = False) -> str:
     """The run's outcome as text; "" when the run records nothing to report yet (no review, no lane evidence, no sidecar list).
+    A block ends with the run's cost line (C49) when any session's cost is known.
 
     `open_items_only`: just the sections that need the operator (open P0/P1, the open P2s, known limits, lane items, the
-    sidecar's unresolved list), without the outcome line and the reviewers' verdicts, for the approval stop (C51).
+    sidecar's unresolved list), without the outcome line, the reviewers' verdicts and the cost, for the approval stop (C51).
     """
     directory = Path(directory)
     try:  # It never raises: the Blocked handlers print it inside their `except`.
         plan = load_optional(directory / "plan.json")
         if not isinstance(plan, dict):
             return ""
-        verdict, ids, derived, findings = reviews(directory, plan)
-        items, open_ = open_items(directory, plan, findings, open_p2=open_items_only)
         if open_items_only:
-            return "\n".join(items)
-        if not ids:
-            held = held_line(directory, plan)
-            if held:
-                return held
-            return "\n".join(["Outcome: no review recorded yet", *items]) if items else ""
-        lines, caveat = reviewer_lines(directory, ids, derived)
-        if verdict == "approved":
-            header = f"Outcome: approved by {listing(ids)}"
-            if not caveat and not open_:
-                # Never "nothing open": an approved run usually keeps open P2s, which review.json lists (automatic.open_counts' words).
-                p2 = sum(isinstance(item, dict) and item.get("severity") == "P2" and item.get("disposition") == "open" for item in findings)
-                return header + "; no open P0/P1" + (f" ({p2} open P2 in review.json)" if p2 else "") + "."
-            return "\n".join([header, "Reviewers:", *lines, *items])
-        header = f"Outcome: {verdict}" if verdict else "Outcome: no review.json recorded"
-        return "\n".join([header, "Reviewers:", *lines, *items])
+            return "\n".join(open_items(directory, plan, reviews(directory, plan)[3], open_p2=True)[0])
+        block = outcome_lines(directory, plan)
+        cost = run_cost(directory, plan) if block else None
+        return block + "\n" + cost if cost else block
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         return f"Outcome: unavailable ({type(error).__name__}: {error})"
+
+
+def run_cost(directory: Path, plan: dict) -> str | None:
+    """The cost line; None when nothing is known or the records cannot be read (the outcome never fails on a cost)."""
+    try:
+        return cost_line(costs_section(directory, plan))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def outcome_lines(directory: Path, plan: dict) -> str:
+    """The block without its cost line."""
+    verdict, ids, derived, findings = reviews(directory, plan)
+    items, open_ = open_items(directory, plan, findings)
+    if not ids:
+        held = held_line(directory, plan)
+        if held:
+            return held
+        return "\n".join(["Outcome: no review recorded yet", *items]) if items else ""
+    lines, caveat = reviewer_lines(directory, ids, derived)
+    if verdict == "approved":
+        header = f"Outcome: approved by {listing(ids)}"
+        if not caveat and not open_:
+            # Never "nothing open": an approved run usually keeps open P2s, which review.json lists (automatic.open_counts' words).
+            p2 = sum(isinstance(item, dict) and item.get("severity") == "P2" and item.get("disposition") == "open" for item in findings)
+            return header + "; no open P0/P1" + (f" ({p2} open P2 in review.json)" if p2 else "") + "."
+        return "\n".join([header, "Reviewers:", *lines, *items])
+    header = f"Outcome: {verdict}" if verdict else "Outcome: no review.json recorded"
+    return "\n".join([header, "Reviewers:", *lines, *items])

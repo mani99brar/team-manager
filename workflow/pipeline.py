@@ -31,6 +31,7 @@ from langgraph.types import Command, interrupt
 from .actor import BY_OPERATOR, actor_text, add_actor_argument, require_actor
 from .attention import attention
 from .checks import now, recheck_packet, verify_revision
+from .costs import record_session_cost
 from .export_state import export_state
 from .outcome import outcome_block
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
@@ -450,6 +451,9 @@ class Pipeline:
                 raise RuntimeError(f"{node} termination is not established; retry after reconciliation")
             intent["stopped"] = True
             save_json(marker, intent)
+            record_session_cost(self.directory, node, intent["session_id"])  # C49: what the session cost, at its confirmed stop.
+        elif not (self.directory / f"{node}.cost.json").exists():
+            record_session_cost(self.directory, node, intent["session_id"])  # A stop confirmed before its cost was recorded.
 
     def stop_workers(self):
         """Stop every lane, continuing past failures, so no session keeps using quota for a run that cannot continue (the lane
