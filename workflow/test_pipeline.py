@@ -20,6 +20,7 @@ from langgraph.types import Command
 from .actor import OPERATOR_ONLY
 from .automatic import automatic_settings
 from .checks import execute, now
+from .costs import record_session_cost
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
 from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json
 from .verification import CONTRACTS, policy_digest
@@ -214,6 +215,8 @@ class OfflinePipeline(Pipeline):
         receipt = read_json(self.directory / f"{node}.interactive.json")
         save_json(self.directory / f"{node}.stop.json", {"background_id": receipt["background_id"], "session_id": receipt["session_id"],
                                                          "pid": None, "stopped": True, "synthetic": True})
+        # And its cost record, as the real stop writes it for a session without a transcript (C49): all null.
+        record_session_cost(self.directory, node, receipt["session_id"], root=self.directory / "no-transcripts")
         self.event("review", "stopped", f"Fake reviewer {reviewer_id} has no background process")
 
 
