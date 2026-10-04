@@ -14,7 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals, resume_command
+from .guardrails import (DECISIONS, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, has_operator_decisions, is_guarded, migration_note,
+                         prd_path, refusals, resume_command)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -27,7 +28,6 @@ from .worktrees import controller_git_config
 TOOL = Path(__file__).resolve().parents[1]
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
 BUILTIN_PREFIX = "builtin:"
-PLACEHOLDER = "TODO:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
@@ -192,6 +192,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     refused = refusals(repo, folder, manifest, tasks)
     if refused:
         raise ValueError(f"features/{feature} does not meet the 2.2.0 guardrails:\n  " + "\n  ".join(refused))
+    if is_guarded(manifest) and not has_operator_decisions((folder / DECISIONS).read_text()):
+        notes.append(LEGACY_DECISIONS_NOTE)  # Launched as before: the whole file binds, in the prompts' old wording.
     reviewers = {}
     for reviewer in manifest.get("reviewers") or []:
         path = reviewer_brief(folder, reviewer["prompt"])
@@ -295,10 +297,15 @@ def main(argv=None):
         # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
         migration = migration_note(manifest)
         if args.dry_run:
+            # The conventions prepare would pin (a guarded feature only): CLAUDE.md at HEAD, its source and size or "none", and a
+            # note for each section the operator-notes heading cuts.
+            conventions, cut = conventions_summary(repo) if migration is None else (None, None)
+            if cut:
+                notes.append(cut)
             printed = {"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
                        "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
                        "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
-                                      "migration_note": migration}}
+                                      "migration_note": migration, "conventions": conventions}}
             if review_sidecar:
                 # What prepare pins as plan.sidecar (the brief's text in place of its path); a feature without one prints no key.
                 printed["sidecar"] = {**review_sidecar, "brief": str(sidecar.brief_path(feature_folder(repo, args.feature), review_sidecar["prompt"]))}

@@ -23,7 +23,7 @@ from langgraph.types import Command
 
 from . import attention as attention_record  # Not `attention`: the waits keep sets of that name.
 from .checks import now
-from .guardrails import decisions_block, epoch, iso
+from .guardrails import conventions_block, decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
                        run_lock, save_json, terminate)
@@ -70,8 +70,11 @@ def reviewer_transport(plan: dict) -> str:
     return plan["automatic"].get("reviewer_transport", "native")
 
 
-def completion_prompt(directory: Path, plan: dict, node: str) -> str:
-    from .guardrails import COMPLETION_VERSION, MAX_QUESTIONS, completion_version, stop_rule
+def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+    """An automatic worker's completion protocol: its bounds, the default on running checks (C16 step 8; a manual worker has no
+    Bash), the completion file, and for 1.1.0 the evidence, questions and the reading rule (C16 step 1). Its deadline counts
+    from `launched_at` when given (deadline_sentence)."""
+    from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, completion_version, reading_rule, stop_rule
     version = completion_version(plan)
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
                "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
@@ -93,16 +96,16 @@ def completion_prompt(directory: Path, plan: dict, node: str) -> str:
                     "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
                     "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
                     f"At most {MAX_QUESTIONS} questions for this lane: after the third, decide yourself and record an open assumption; "
-                    "a fourth question is treated as blocked."
+                    "a fourth question is treated as blocked.\n" + reading_rule(plan)
                     + (f"\nStop (from your task, the bound on this work): {' '.join(stop.split())}" if stop else ""))
     return ("\n\nAUTOMATIC MODE: permission checks are bypassed and Bash is available. "
             "Do not wait for a human handoff. Stay within assigned ownership; do not commit, merge, push, "
-            "launch agents, change runtime evidence or switch billing/provider. "
+            f"launch agents, change runtime evidence or switch billing/provider. Unless your task says otherwise: {CHECKS_DEFAULT} "
             "On completion write the following JSON shape atomically (temporary file then rename) to "
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
             "then finish your turn and do not modify more files. Controller checks and independent review "
-            "still determine acceptance." + deadline_sentence(directory, plan, node) + "\n" + json.dumps(example) + evidence)
+            "still determine acceptance." + deadline_sentence(directory, plan, node, launched_at) + "\n" + json.dumps(example) + evidence)
 
 
 def duration(seconds: int) -> str:
@@ -112,17 +115,17 @@ def duration(seconds: int) -> str:
             return f"{seconds // size} {unit}{'' if seconds // size == 1 else 's'}"
 
 
-def deadline_sentence(directory: Path, plan: dict, node: str) -> str:
-    """The worker prompt's deadline (C16 step 6): the lane deadline in UTC, from the receipt the launch saves before it builds the
-    prompt (interactive.py), so what the worker reads is what wait_handoffs holds it to. Only the bound when no receipt is
-    readable; nothing for a plan without a worker timeout."""
+def deadline_sentence(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+    """The worker prompt's deadline (C16 step 6): the lane deadline in UTC, from the launch time the receipt records (`launched_at`,
+    which the launch passes before it saves the receipt: interactive.py; else the receipt on disk), so what the worker reads is
+    what wait_handoffs holds it to. Only the bound when neither is readable; nothing for a plan without a worker timeout."""
     from .guardrails import iso
     seconds = (plan.get("automatic") or {}).get("worker_timeout_seconds")
     if type(seconds) is not int:
         return ""
     bound = f"{duration(seconds)} after this launch"
     try:
-        deadline = deadline_at(directory, plan, node)
+        deadline = deadline_at(directory, plan, node, launched_at)
     except (OSError, ValueError, KeyError, TypeError):
         deadline = None
     when = f"{iso(int(deadline))} (UTC), {bound}" if deadline is not None else bound
@@ -231,14 +234,16 @@ class Stalls:
                                                     "accepted once the state is idle or done, or the status idle")
 
 
-def deadline_at(directory: Path, plan: dict, node: str) -> float | None:
-    """A lane's own deadline: its launch plus worker_timeout_seconds plus its answered questions' pauses; None while a question waits."""
+def deadline_at(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> float | None:
+    """A lane's own deadline: its launch (`launched_at`, else its receipt's launch_requested_at) plus worker_timeout_seconds plus
+    its answered questions' pauses; None while a question waits."""
     from .guardrails import deadline_extension
     extension = deadline_extension(directory, node)
     if extension is None:
         return None
-    receipt = read_json(directory / f"{node}.interactive.json")
-    return datetime.fromisoformat(receipt["launch_requested_at"]).timestamp() + plan["automatic"]["worker_timeout_seconds"] + extension
+    if launched_at is None:
+        launched_at = read_json(directory / f"{node}.interactive.json")["launch_requested_at"]
+    return datetime.fromisoformat(launched_at).timestamp() + plan["automatic"]["worker_timeout_seconds"] + extension
 
 
 def lane_deadline(runtime, node: str) -> float | None:
@@ -515,7 +520,7 @@ def review_brief(reviewer: dict | None) -> str:
 # control) and SEC-GH gaps went to P2 because no task cited SEC-GH. Decision 4's stricter bar (a gap is P1 only when shown on the
 # candidate, or in the brief's other cases) is coverage's, in its brief: a general or security reviewer that cannot state the
 # inputs of a defect it read in the code still rates it P1. Of decisions.md only what binds counts (C4): its Operator decisions, or
-# all of a file without that heading.
+# all of a file without that heading; decisions_block tells reviewers which departures from the rest are no contradiction.
 REVIEW_RUBRIC = ("Severity. Your brief defines severity for its own subject, in both directions: where it defines a P0, P1 or P2, or "
                  "limits what is P1, its definition wins over the generic scale below, whether it rates a finding higher or lower (for "
                  "example a security brief's P0 for forged claims or unverified integrity and its P1 for a missing required control, "
@@ -572,8 +577,8 @@ def worker_claims(runtime) -> str:
 
 def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
     """The brief, then the rubric and the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the
-    lane repairs, a 1.1.0 run's inputs and worker claims. Both transports build on it (print_review_prompt; the native
-    completion protocol), so a replay can too."""
+    lane repairs, a 1.1.0 run's inputs and worker claims, the project's conventions and decisions.md. Both transports build on
+    it (print_review_prompt; the native completion protocol), so a replay can too."""
     from .repair import repair_note
     return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
@@ -583,7 +588,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
-            + repair_note(runtime.directory) + worker_claims(runtime) + decisions_block(runtime.plan))
+            + repair_note(runtime.directory) + worker_claims(runtime) + conventions_block(runtime.plan) + decisions_block(runtime.plan))
 
 
 def print_review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:

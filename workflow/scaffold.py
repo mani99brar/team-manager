@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 
+from .guardrails import CHECKS_DEFAULT, OPERATOR_NOTES
 from .launch import FEATURE_NAME, git_root
 from .sessions import validate_node_id
 
@@ -38,6 +39,7 @@ def feature_files(feature: str) -> dict[str, str]:
             "## Context\n\nTODO: where to start reading, or delete this section.\n\n"
             "## Constraints\n\nTODO: what the lane must not change, or delete this section.\n\n"
             "## Acceptance\n\nTODO: the observable results and the checks that prove them (the worker's Proof table names a proof for each).\n\n"
+            + CHECKS_DEFAULT + "\n\n"  # Process, not a result: alone it leaves the Acceptance empty (brief_problems).
             "Browser checks (delete this paragraph, the command and the line after it if the lane has none): each scenario id appears in "
             "exactly one test title as `[scenario:<id>]`, and that test, when it passes, attaches exactly one image/png named "
             "`screenshot:<id>` (other attachments are fine). The verifier refuses anything else. Before completing, run the spec "
@@ -51,9 +53,13 @@ def feature_files(feature: str) -> dict[str, str]:
             "## Stop\n\nTODO: when to stop and report `blocked` instead of continuing.\n")
     decisions = (f"# Decisions: {feature}\n\n"
                  f"Written with the workflow-grill skill (`/workflow-grill {feature}`) before launch. Every worker and reviewer "
-                 "prompt includes this file, and launch refuses the feature while it is empty.\n\n"
-                 "## Decisions\n\nTODO: each decision that could change the design or the acceptance, with its consequence.\n\n"
-                 "## Assumptions\n\nTODO: what the lanes may assume without asking, or \"None\".\n\n"
+                 "prompt includes this file, and launch refuses the feature while it is empty. Only the Operator decisions bind the "
+                 "run and win over the task; the design challenge may question the rest.\n\n"
+                 "## Operator decisions\n\nTODO: each answer of the operator as [O<n>], with its question number, the chosen option's "
+                 "text and the operator's words verbatim; never edited in place.\n\n"
+                 "## Grill defaults\n\nTODO: each default the grill chose as [G<n>], delegations with the items they cover and riders "
+                 "tagged [added, not asked], or \"None\".\n\n"
+                 "## Changes after launch\n\nNone yet.\n\n"
                  "## Deferred\n\nTODO: what this feature leaves for later, or \"Nothing\".\n")
     readme = (f"# {feature}\n\n"
               "TODO: why this feature exists and where its specification lives.\n\n"
@@ -65,19 +71,26 @@ def feature_files(feature: str) -> dict[str, str]:
               "`pass_timeout_seconds` (600), `max_passes` (16) and `max_messages_per_lane` (6).\n"
               "- `policy.json`: each lane's owned paths and the checks the controller runs independently.\n"
               f"- `{LANE}-task.md`: the lane's task as an outcome brief (## Goal, ## Acceptance and ## Stop are required).\n"
-              "- `decisions.md`: the operator's decisions, assumptions and deferrals from the workflow-grill interview.\n\n"
+              "- `decisions.md`: from the workflow-grill interview, the operator's decisions (only these bind the run), the grill's "
+              "defaults, changes after launch and deferrals.\n\n"
               f"Launch: `python -m workflow launch {feature} --repo <this repository> --dry-run`, then `--live`.\n")
     return {"feature.json": json.dumps(manifest, indent=2) + "\n", "policy.json": json.dumps(policy, indent=2) + "\n",
             f"{LANE}-task.md": task, "decisions.md": decisions, "README.md": readme}
 
 
-STARTER_CLAUDE = """# Project conventions
-
-Workflow workers start in a worktree of this repository and read this file. Keep it short and specific.
+# Workflow sessions start with --safe-mode, which does not load CLAUDE.md. The last heading is the cut point
+# (guardrails.OPERATOR_NOTES): what is above it, the project's conventions, every session's prompt gets; what is under it is
+# for the operator only, so the note on how the file reaches the sessions is there.
+STARTER_CLAUDE = f"""# Project conventions
 
 - Build and test commands: list them here.
 - Code style: what to match, and what to avoid.
 - Boundaries: directories and files a worker must never change.
+
+{OPERATOR_NOTES}
+
+- Keep this file short and specific. Workflow sessions start with --safe-mode, which does not load it: for a feature at feature.json 2.2.0 or 2.3.0 the controller pins what is above this heading, as the run's base commit holds it, and puts it in every worker, design challenge and reviewer prompt. No session gets this section.
+- Notes for you and the orchestrator about running workflows in this repository.
 """
 
 

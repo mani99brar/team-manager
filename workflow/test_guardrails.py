@@ -5,6 +5,7 @@ a patched subprocess. Workers are FakeSessions; the design challenge is a fake `
 Claude model calls.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -26,7 +27,7 @@ from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wa
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
 from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, iso, pinned_task, repin, resume_main, stop_rule
-from .interactive import worker_prompt
+from .interactive import worker_prompt, write_private
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
@@ -40,6 +41,14 @@ FEATURE = "guarded"
 LANES = ["ui", "adapter"]
 BRIEF = "## Goal\n\nChange {lane}.\n\n## Acceptance\n\nThe {lane} check passes.\n\n## Stop\n\nAfter three failed fixes, report blocked.\n"
 DECISIONS = "# Decisions\n\n## Decisions\n\n- Keep the lanes apart: DECISION-MARKER-42.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n"
+# What the workflow-grill skill writes since C4: the operator's answers apart from the grill's own defaults.
+SPLIT_DECISIONS = ("# Decisions: guarded\n\nFrom the grill session of 3 Oct 2026 with the operator.\n\n## Operator decisions\n\n"
+                   "- [O1] Q1: Keep the lanes apart. Operator: \"yes, DECISION-MARKER-42\".\n\n## Grill defaults\n\n"
+                   "- [G1] The adapter keeps VALUE an integer [added, not asked].\n\n## Changes after launch\n\nNone yet.\n\n"
+                   "## Deferred\n\n- Nothing.\n")
+# A target's CLAUDE.md (C15): the project's conventions above the operator-notes heading, the operator's notes below it.
+CONVENTIONS = "# Project conventions\n\n- Run the unit tests with `python -m unittest`: CONVENTION-MARKER-9.\n\n"
+OPERATOR_NOTES = "\n\n- Workers run targeted tests only: OPERATOR-NOTE-3.\n"
 
 
 def setUpModule():
@@ -89,14 +98,17 @@ def concern(severity: str, message: str = "A concern") -> dict:
 
 
 class RecordingSessions(FakeSessions):
-    """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends."""
+    """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends,
+    which they also keep as `<lane>.prompt.txt`, as InteractiveSessions.run does (the viewer shows it)."""
 
     def __init__(self, directory, plan, given: dict):
         super().__init__(directory, plan)
         self.given = given
 
     def run(self, node):
-        self.given[node] = {"plan_digest": plan_digest(self.plan), "prompt": worker_prompt(self.directory, self.plan, node)}
+        prompt = worker_prompt(self.directory, self.plan, node)
+        self.given[node] = {"plan_digest": plan_digest(self.plan), "prompt": prompt}
+        write_private(self.directory / f"{node}.prompt.txt", prompt)
         return super().run(node)
 
 
@@ -138,7 +150,8 @@ assert '--print' in args and '--bg' not in args and '--dangerously-skip-permissi
 prompt = sys.stdin.read()
 add_dirs = [args[index + 1] for index, item in enumerate(args) if item == '--add-dir']
 with open({str(self.calls)!r}, 'a') as handle:
-    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs}}) + '\\n')
+    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs,
+                              "schema": json.loads(args[args.index('--json-schema') + 1])}}) + '\\n')
 with (Path.cwd().parent / 'fake-launches.log').open('a') as log:  # The worker fake logs its launches to the same file.
     log.write('challenge\\n')
 print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
@@ -225,7 +238,8 @@ class BriefHeadings(GuardedFeature):
         prepare = printed["commands"][2]
         self.assertEqual(prepare[prepare.index("--guardrails"):], ["--guardrails", "--decisions", str(self.folder / "decisions.md"),
                                                                      "--prd", str(self.repo / "docs/PRD.md")])
-        self.assertEqual(printed["guardrails"], {"feature_version": "2.2.0", "enforced": True, "challenge": True, "migration_note": None})
+        self.assertEqual(printed["guardrails"], {"feature_version": "2.2.0", "enforced": True, "challenge": True, "migration_note": None,
+                                                 "conventions": "none"})
         self.assertEqual(printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"][0]["node_id"], "challenge")
         # The same feature at 2.1.0: nothing is refused (not even a task without headings), the commands carry no
         # guardrail flag and the launch prints the migration note beside its (empty) notes.
@@ -245,6 +259,7 @@ class BriefHeadings(GuardedFeature):
         self.assertEqual([node["node_id"] for node in printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"]][:2], ["launch_ui", "launch_adapter"])
         self.assertIn("Note: feature.json 2.1.0: no guardrail is enforced", errors.getvalue())
         self.assertIn('set "version": "2.2.0"', printed["guardrails"]["migration_note"])
+        self.assertIsNone(printed["guardrails"]["conventions"])  # Prepare pins no conventions for it (C15).
         # A 2.1.0 file cannot use the 2.2.0 keys.
         save_json(self.folder / "feature.json", {**manifest, "version": "2.1.0", "challenge": False})
         self.assertIn("challenge and prd need version 2.2.0", self.refused(FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"))
@@ -288,9 +303,217 @@ class DecisionsRequired(GuardedFeature):
         runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
         for reviewer in [None, *plan["reviewers"]]:
             self.assertIn("DECISION-MARKER-42", review_prompt(runtime, directory / "review.diff", reviewer))
+        # This file has no `## Operator decisions` heading: it binds as a whole, as every decisions.md before C4 did.
+        self.assertIn("Decisions recorded before launch (decisions.md; they bind this run):\n" + DECISIONS, worker_prompt(directory, plan, "ui"))
+        # A split file reaches the same prompts with its precedence: only the Operator decisions bind (DecisionsPrecedence).
+        plan["decisions"]["text"] = SPLIT_DECISIONS
+        for prompt in (worker_prompt(directory, plan, "ui"), *(review_prompt(runtime, directory / "review.diff", reviewer) for reviewer in plan["reviewers"])):
+            self.assertIn(guardrails.decisions_block(plan), prompt)
+            self.assertIn("Its Operator decisions are the operator's own answers: they bind this run and win over the task.", prompt)
         # A run without decisions (every run before slice 2) gets no decisions block.
         plan.pop("decisions")
         self.assertNotIn("Decisions recorded before launch", worker_prompt(directory, plan, "ui") + review_prompt(runtime, directory / "review.diff"))
+
+
+class DecisionsPrecedence(unittest.TestCase):
+    """C4 (decision 8): a decisions.md with the `## Operator decisions` heading binds only those, and they win over the task; the
+    challenge may reopen one only as a P1 that shows it cannot hold, the rest like the tasks. A file without the heading (every
+    one written before) keeps today's wording: all of it binds. Keyed on the heading alone; no section is parsed."""
+
+    def plan(self, text: str) -> dict:
+        return {"run_id": "precedence-001", "workers": ["ui"], "nodes": {"ui": {"task": BRIEF.format(lane="ui")}},
+                "decisions": {"path": "/target/features/guarded/decisions.md", "text": text}}
+
+    def challenge_prompt(self, plan: dict) -> str:
+        with tempfile.TemporaryDirectory() as root:
+            return guardrails.challenge_prompt(Path(root), plan)
+
+    # What a split file tells reviewers (and the workers, who read the same block): a permitted departure from a grill default is
+    # no contradicted requirement, so the rubric's "P1 at least" does not block the candidate for it.
+    REVIEWER_RULE = ("For reviewers: a candidate behaviour that contradicts an Operator decision is P1 at least, and one that an Operator "
+                     "decision requires contradicts no line of a task or of a document a task cites. A departure from another section that "
+                     "is named so, stays inside the lane's owned paths and changes nothing another lane reads is no contradicted "
+                     "requirement: judge only what it does. An unnamed or out-of-lane departure is a contradicted requirement.")
+
+    def test_a_split_file_binds_only_the_operator_decisions_and_leaves_the_rest_open_to_the_challenge(self):
+        plan = self.plan(SPLIT_DECISIONS)
+        self.assertEqual(guardrails.decisions_block(plan),
+                         "\n\nDecisions recorded before launch (decisions.md). Its Operator decisions are the operator's own answers: they bind "
+                         "this run and win over the task. Workers follow its other sections too, and may depart from a grill default or a "
+                         "change after launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only "
+                         "inside their own lane's owned paths; a departure that would change anything another lane reads is a question for "
+                         "the operator instead. Each departure is named, with the bullet's id, in the completion's open_assumptions. "
+                         + self.REVIEWER_RULE + " The file:\n" + SPLIT_DECISIONS.rstrip() + "\n")
+        prompt = self.challenge_prompt(plan)
+        self.assertIn("raise one only for a consequence you can name; reopen an Operator decision of decisions.md (the operator's own "
+                      "answer) only by showing it cannot hold, and then as a P1; the rest of decisions.md is open to challenge, like the "
+                      "tasks. kind is assumption", prompt)
+        self.assertNotIn("do not reopen what decisions.md settles", prompt)
+        self.assertIn(f"=== decisions.md ===\n{SPLIT_DECISIONS}", prompt)
+        self.assertTrue(guardrails.has_operator_decisions("# D\n\n## Operator decisions  \n\n- [O1] Q1: x.\n"))  # Trailing blanks count.
+
+    def test_a_file_without_the_heading_binds_as_a_whole_with_todays_wording(self):
+        lookalikes = (DECISIONS, DECISIONS + "\n### Operator decisions\n\n- A level-3 heading.\n", DECISIONS + "\nSee ## Operator decisions.\n",
+                      DECISIONS.replace("## Decisions", "## Operator decisions made"), DECISIONS.replace("## Decisions", "## Operator Decisions"))
+        for text in lookalikes:
+            with self.subTest(text=text):
+                plan = self.plan(text)
+                self.assertFalse(guardrails.has_operator_decisions(text))
+                self.assertEqual(guardrails.decisions_block(plan), "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n"
+                                 + text.rstrip() + "\n")
+                self.assertIn("raise one only for a consequence you can name; do not reopen what decisions.md settles unless you show it "
+                              "cannot hold. kind is assumption", self.challenge_prompt(plan))
+        self.assertEqual(guardrails.decisions_block({}), "")  # A run without decisions (every run before slice 2).
+
+    def test_every_reviewer_of_a_split_file_gets_the_reviewer_rule_in_both_transports_and_a_legacy_file_reaches_them_unchanged(self):
+        # The rubric makes a contradicted line of decisions.md P1 at least and says a disclosure never lowers a severity. For a split
+        # file only an Operator decision is such a line: a worker's permitted, named departure from a grill default must not block the
+        # candidate. A file without the heading still binds as a whole, in the wording runs always had.
+        from .automatic import REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_prompt
+        self.assertIn("A candidate behaviour that contradicts a quoted line of a task, of a document a task cites or of an Operator decision "
+                      "in decisions.md (all of decisions.md when it has no Operator decisions heading) is P1 at least", REVIEW_RUBRIC)
+        self.assertNotIn("or of decisions.md is P1", REVIEW_RUBRIC)
+        coverage = {"reviewer_id": "coverage", "prompt": (TOOL / "workflow/prompts/reviewers/coverage.md").read_text()}
+        with tempfile.TemporaryDirectory() as root:
+            patch_path = Path(root) / "review.diff"
+            for text, split in ((SPLIT_DECISIONS, True), (DECISIONS, False)):
+                runtime = SimpleNamespace(directory=Path(root), plan=self.plan(text), workers=["ui"])
+                for reviewer in (None, coverage):
+                    printed = print_review_prompt(runtime, patch_path, reviewer)
+                    native = review_prompt(runtime, patch_path, reviewer) + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40)
+                    for transport, prompt in (("print", printed), ("native", native)):
+                        with self.subTest(split=split, reviewer=(reviewer or {}).get("reviewer_id", "review"), transport=transport):
+                            self.assertIn(REVIEW_RUBRIC, prompt)
+                            self.assertIn(guardrails.decisions_block(runtime.plan), prompt)
+                            self.assertEqual(self.REVIEWER_RULE in prompt, split)
+                            self.assertEqual("For reviewers" in prompt, split)
+                            if not split:
+                                self.assertIn("\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + DECISIONS.rstrip() + "\n", prompt)
+
+
+class Conventions(GuardedFeature):
+    """C15 (decision 6): sessions start with --safe-mode, which loads no CLAUDE.md, so prepare pins the target's CLAUDE.md as the
+    run's base commit holds it, cut at the operator-notes heading, and every worker, challenge and reviewer prompt gets it
+    before decisions.md. A target without the file pins an empty text; a plan pinned before C15 has no key; both get nothing."""
+
+    def commit_claude(self, text: str) -> str:
+        (self.repo / "CLAUDE.md").write_text(text)
+        commit_all(self.repo, "CLAUDE.md")
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def dry_run_output(self) -> tuple[dict, str]:
+        """The dry run's JSON and its stderr (the notes)."""
+        from .launch import main as launch_main
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
+        command.assert_not_called()
+        return json.loads(output.getvalue()), errors.getvalue()
+
+    def test_the_base_commits_claude_md_is_pinned_up_to_the_operator_notes_heading_whatever_the_tree_holds(self):
+        # A heading quoted in a code fence cuts nothing; a section above the heading is a convention like any other.
+        above = (CONVENTIONS + "Notes about runs go under this heading:\n\n```\n" + guardrails.OPERATOR_NOTES + "\n```\n\n"
+                 "## Boundaries\n\n- Never change vendor/.\n\n")
+        base = self.commit_claude(above + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        directory = self.prepare("conventions-001")
+        plan = read_json(directory / "plan.json")
+        self.assertEqual(plan["base_commit"], base)
+        self.assertEqual(plan["conventions"], {"commit": base, "sha256": hashlib.sha256(above.encode()).hexdigest(), "text": above})
+        self.assertEqual(guardrails.conventions_block(plan), f"\n\nProject conventions (CLAUDE.md at {base}; the controller's rules, the "
+                                                             f"task and decisions.md take precedence):\n{above.rstrip()}\n")
+        # Always the base commit's text: neither an edit in the checkout nor a later commit changes what that base pins.
+        (self.repo / "CLAUDE.md").write_text("# Edited in the checkout: TREE-MARKER\n")
+        self.assertEqual(guardrails.conventions(plan), plan["conventions"])
+        self.commit_claude("# Committed later: LATER-MARKER\n")
+        self.assertEqual(guardrails.conventions(plan), plan["conventions"])
+        # repin re-reads the feature files only: resume commits nothing else, so CLAUDE.md is the same at every base it moves to.
+        (self.folder / "ui-task.md").write_text(BRIEF.format(lane="ui") + "\nRe-pinned.\n")
+        repin(directory, plan, read_json(directory / "policy.json"))
+        self.assertEqual(read_json(directory / "plan.json")["conventions"], {"commit": base, "sha256": hashlib.sha256(above.encode()).hexdigest(),
+                                                                              "text": above})
+
+    def test_a_file_without_the_heading_is_sent_whole_and_none_or_a_link_out_of_the_target_pins_an_empty_text(self):
+        whole = self.commit_claude(CONVENTIONS)
+        plan = {"repository": str(self.repo), "base_commit": whole}
+        self.assertEqual(guardrails.conventions(plan), {"commit": whole, "sha256": hashlib.sha256(CONVENTIONS.encode()).hexdigest(), "text": CONVENTIONS})
+        # A link inside the target is followed, as Claude Code follows it on disk.
+        (self.repo / "AGENTS.md").write_text(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        (self.repo / "CLAUDE.md").unlink()
+        (self.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        commit_all(self.repo, "Linked")
+        self.assertEqual(guardrails.conventions({**plan, "base_commit": git(self.repo, "rev-parse", "HEAD")})["text"], CONVENTIONS)
+        empty = {"sha256": hashlib.sha256(b"").hexdigest(), "text": ""}
+        (self.repo / "CLAUDE.md").unlink()
+        (self.repo / "CLAUDE.md").symlink_to("../outside.md")
+        commit_all(self.repo, "Linked out of the target")
+        outside = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(guardrails.conventions({**plan, "base_commit": outside}), {"commit": outside, **empty})
+        (self.repo / "CLAUDE.md").unlink()
+        commit_all(self.repo, "No CLAUDE.md")
+        directory = self.prepare("no-conventions-001")
+        pinned = read_json(directory / "plan.json")
+        self.assertEqual(pinned["conventions"], {"commit": pinned["base_commit"], **empty})
+        self.assertEqual(guardrails.conventions_block(pinned), "")
+
+    def test_the_dry_run_prints_the_source_and_size_or_none_and_notes_each_section_below_the_heading(self):
+        (self.folder / "decisions.md").write_text(SPLIT_DECISIONS)  # No legacy Note: the notes below are the conventions' own.
+        commit_all(self.repo, "Split decisions")
+        printed, errors = self.dry_run_output()
+        self.assertEqual((printed["guardrails"]["conventions"], printed["notes"]), ("none", []))
+        head = self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        (self.repo / "CLAUDE.md").write_text("# An edit not committed yet\n")  # The dry run reads HEAD, which prepare pins.
+        printed, errors = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"], f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, up to the operator-notes heading")
+        self.assertEqual((printed["notes"], errors), ([], ""))
+        head = self.commit_claude(CONVENTIONS)
+        printed, _ = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"],
+                         f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, the whole file (it has no operator-notes heading)")
+        # A section below the heading is cut with the operator's notes: the dry run names it, in its notes and on stderr. A
+        # line inside a code fence is no section.
+        head = self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES + "\n## Hazards\n\n- Chains differ.\n\n```\n## not a heading\n```\n")
+        printed, errors = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"], f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, up to the operator-notes heading")
+        [note] = printed["notes"]
+        self.assertEqual(note, f"CLAUDE.md at {head} has ## Hazards below '{guardrails.OPERATOR_NOTES}': that text is cut with the operator's "
+                               "notes, so no session gets it. Move what sessions must follow above the heading.")
+        self.assertIn(f"Note: {note}\n", errors)
+        # Nothing above the heading: nothing is sent.
+        self.commit_claude(guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        self.assertEqual(self.dry_run_output()[0]["guardrails"]["conventions"], "none")
+
+    def test_every_worker_challenge_and_reviewer_prompt_gets_the_block_before_decisions_and_older_plans_get_none(self):
+        from .automatic import completion_protocol_prompt, print_review_prompt
+        self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        directory = self.prepare("roles-001")
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        plan = read_json(directory / "plan.json")
+        block, decisions = guardrails.conventions_block(plan), guardrails.decisions_block(plan)
+        self.assertIn("CONVENTION-MARKER-9", block)
+        challenge = self.challenge_calls()[-1]["prompt"]
+        self.assertLess(challenge.index(block), challenge.index("=== decisions.md ==="))
+        prompts = {"challenge": challenge, **{f"worker {lane}": self.given[lane]["prompt"] for lane in LANES},
+                   "automatic worker": worker_prompt(directory, {**plan, "automatic": dict(DEFAULTS)}, "ui")}
+        runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
+        for reviewer in [None, *plan["reviewers"]]:
+            name = (reviewer or {}).get("reviewer_id", "review")
+            prompts[f"print reviewer {name}"] = print_review_prompt(runtime, directory / "review.diff", reviewer)
+            prompts[f"native reviewer {name}"] = (review_prompt(runtime, directory / "review.diff", reviewer)
+                                                  + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40, name))
+        for role, prompt in prompts.items():
+            with self.subTest(role=role):
+                self.assertEqual(prompt.count(block), 1)
+                self.assertNotIn("OPERATOR-NOTE-3", prompt)
+                if role != "challenge":
+                    self.assertLess(prompt.index(block), prompt.index(decisions))
+        # A plan pinned before C15 has no conventions key, and an empty text adds nothing either.
+        for older in ({key: value for key, value in plan.items() if key != "conventions"}, {**plan, "conventions": {**plan["conventions"], "text": "\n"}}):
+            with self.subTest(conventions=older.get("conventions")):
+                self.assertEqual(guardrails.conventions_block(older), "")
+                prompts = (worker_prompt(directory, older, "ui"), review_prompt(SimpleNamespace(directory=directory, plan=older, workers=LANES),
+                                                                                  directory / "review.diff"), guardrails.challenge_prompt(directory, older))
+                self.assertFalse(any("Project conventions" in prompt for prompt in prompts))
 
 
 class FailingChallenge(GuardedFeature):
@@ -645,6 +868,95 @@ class ChallengePasses(GuardedFeature):
         self.assertEqual((disabled["status"], disabled["attempt"], disabled["session_id"], disabled["concerns"]), ("disabled", 0, None, []))
         self.assertEqual(self.launches(off), ["adapter", "ui"])
         self.assertEqual(len(self.challenge_calls()), 1)
+        # A disabled challenge gives the workers no notes (C9).
+        self.assertEqual(guardrails.challenge_block(off, read_json(off / "plan.json")), "")
+        self.assertFalse(any("Design challenge notes" in self.given[lane]["prompt"] for lane in LANES))
+
+    # What a passed attempt's P2 concerns become in every worker prompt (C9, decision 11): numbered as in challenge.json, with
+    # severity, kind, message and consequence, under one header line; for a manual run the operator is asked in the pane.
+    NOTES = ("\n\nDesign challenge notes (advisory, attempt 1)\nDo each note's recommendation, or say in your completion why not; a "
+             "fallback such as \"or at least\" is not the recommendation. A note marked \"Acts: operator\" is the operator's decision: if "
+             "your work depends on it, ask in this pane instead of choosing.\n"
+             "1. P2 [assumption] Naming is loose\n   Consequence: Naming is loose breaks the run\n"
+             "2. P2 [assumption] One test is slow\n   Consequence: One test is slow breaks the run\n")
+
+    def test_the_workers_get_the_final_challenge_as_numbered_advisory_notes_and_the_reviewers_never_do(self):
+        from .automatic import completion_protocol_prompt, print_review_prompt
+        directory = self.prepare("notes-001")
+        self.challenge_says([concern("P2", "Naming is loose"), concern("P2", "One test is slow")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        plan = read_json(directory / "plan.json")
+        self.assertEqual(guardrails.challenge_block(directory, plan), self.NOTES)
+        for lane in LANES:
+            for prompt in (self.given[lane]["prompt"], (directory / f"{lane}.prompt.txt").read_text()):
+                with self.subTest(lane=lane):
+                    self.assertEqual(prompt.count(self.NOTES), 1)
+                    self.assertLess(prompt.index(guardrails.decisions_block(plan)), prompt.index(self.NOTES))  # Right after decisions.md.
+                    for left_out in ("One lane instead of two", "Prototype the ui change first"):  # The alternative and the experiment.
+                        self.assertNotIn(left_out, prompt)
+            self.assertNotIn("Naming is loose", plan["nodes"][lane]["task"])  # Never pinned into the task.
+        # An automatic worker asks with a question.
+        automatic = worker_prompt(directory, {**plan, "automatic": dict(DEFAULTS)}, "ui")
+        self.assertIn(self.NOTES.replace("ask in this pane", "write the completion file with status question"), automatic)
+        # Reviewers never get the notes, in either transport (decision 11).
+        runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
+        for reviewer in [None, *plan["reviewers"]]:
+            native = review_prompt(runtime, directory / "review.diff", reviewer) + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40)
+            for prompt in (print_review_prompt(runtime, directory / "review.diff", reviewer), native):
+                self.assertNotIn("Design challenge notes", prompt)
+                self.assertNotIn("Naming is loose", prompt)
+        # The seam for slice 3's --drop at a hold release: a dropped note is left out, its neighbours keep their numbers.
+        self.assertEqual(guardrails.challenge_block(directory, plan, {1}),
+                         self.NOTES.replace("1. P2 [assumption] Naming is loose\n   Consequence: Naming is loose breaks the run\n", ""))
+        self.assertEqual(guardrails.challenge_block(directory, plan, {1, 2}), "")
+
+    def test_an_accepted_challenge_lists_the_overridden_p0_p1_apart_as_context_only(self):
+        directory = self.prepare("accepted-notes-001")
+        self.challenge_says([concern("P1", "The lanes overlap"), concern("P2", "Minor")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Ownership is checked at freeze"])
+        self.assertEqual(code, 0, output)
+        expected = ("\n\nDesign challenge notes (advisory, attempt 1)\n"
+                    "Do each note's recommendation, or say in your completion why not; a fallback such as \"or at least\" is not the "
+                    "recommendation. A note marked \"Acts: operator\" is the operator's decision: if your work depends on it, ask in this "
+                    "pane instead of choosing.\n"
+                    "2. P2 [assumption] Minor\n   Consequence: Minor breaks the run\n"
+                    "Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
+                    "it with the reason: Ownership is checked at freeze\n"
+                    "1. P1 [assumption] The lanes overlap\n   Consequence: The lanes overlap breaks the run\n")
+        for lane in LANES:
+            self.assertIn(expected, self.given[lane]["prompt"])
+            self.assertIn(expected, (directory / f"{lane}.prompt.txt").read_text())
+
+    def test_the_challenge_asks_for_a_recommendation_its_actor_and_file_evidence_and_its_schema_is_unchanged(self):
+        # C10, prompt only: each concern's message ends with a recommendation and who acts on it; the severity sentence and the
+        # pause rule stay, and the job gets the same schema (challenge 1.0.0), so an operator's P2 pauses nothing.
+        directory = self.prepare("acts-001")
+        message = "The adapter's interface is unsettled.\nRecommendation: keep VALUE an integer; done when the unit check passes.\nActs: operator"
+        self.challenge_says([concern("P2", message)])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+        [call] = self.challenge_calls()
+        prompt = " ".join(call["prompt"].split())
+        for asked in ("End each concern's message with two lines: \"Recommendation: <one action and its done-condition>\" and \"Acts: "
+                      "operator | worker | note\"", "A recommendation never offers a fallback such as \"or at least\": when two options "
+                      "remain, the concern is a decision for the operator (Acts: operator), with the recommended option first.",
+                      "Each P0 and P1 message cites the file:line it rests on, or says \"no file evidence\".",
+                      "A P0 or P1 pauses the run for the operator, so raise one only for a consequence you can name;",
+                      "P0 when the plan cannot work as written, P1 when it is likely to produce the wrong result or major rework and must "
+                      "be settled before any worker starts, P2 when it is worth recording and the run can continue."):
+            self.assertIn(asked, prompt)
+        schema = call["schema"]
+        self.assertEqual(schema, guardrails.output_schema())
+        self.assertEqual((schema["required"], schema["additionalProperties"]), (["concerns", "simpler_alternative", "cheap_experiment"], False))
+        item = schema["properties"]["concerns"]["items"]
+        self.assertEqual((item["required"], item["additionalProperties"]), (["severity", "kind", "message", "consequence"], False))
+        self.assertEqual(guardrails.challenge_schema()["properties"]["version"], {"const": "1.0.0"})
+        self.assertIn(f"1. P2 [assumption] {message}\n   Consequence: ", self.given["ui"]["prompt"])
 
 
 class ClaudeUpdateAroundTheChallenge(GuardedFeature):
@@ -972,6 +1284,38 @@ class ChallengeRevision(GuardedFeature):
         exported = read_json(directory / "run-state.json")
         self.assertEqual((exported["base_commit"], exported["inputs"]["challenge"]["status"], exported["inputs"]["challenge"]["attempts"]), (revision, "paused", 2))
         self.assertEqual(self.launches(directory), ["challenge", "challenge"])
+
+    def test_resume_refuses_a_todo_line_in_decisions_or_a_task_before_anything_is_committed_or_re_pinned(self):
+        """C5: a grill question never answered (`TODO: Q<n>`) or any line that begins with `TODO:`, as launch refuses it."""
+        directory, base = self.paused("todo-001")
+        plan = (directory / "plan.json").read_bytes()
+
+        def refused(path: Path, line: str) -> None:
+            output, code = self.cli(resume_main, [str(directory)])
+            self.assertEqual(code, 1, output)
+            number = path.read_text().splitlines().index(line) + 1
+            self.assertIn(f"{path.resolve()}:{number}: {line.strip()}", output)
+            self.assertIn("launch refuses it too", output)
+            # Nothing was committed, moved or re-pinned, the challenge did not rerun and the edit stays in the checkout.
+            self.assertEqual((git(self.repo, "rev-parse", "HEAD"), (directory / "plan.json").read_bytes()), (base, plan))
+            self.assertFalse((directory / guardrails.REVISION_INTENT).exists())
+            self.assertEqual(len(self.challenge_calls()), 1)
+            self.assertIn(line, path.read_text())
+
+        decisions = self.folder / "decisions.md"
+        decisions.write_text(SPLIT_DECISIONS.replace("## Grill defaults", "TODO: Q2 Who owns contracts/?\n\n## Grill defaults"))
+        refused(decisions, "TODO: Q2 Who owns contracts/?")
+        git(self.repo, "checkout", "--", f"features/{FEATURE}/decisions.md")
+        task = self.edit_task()
+        task.write_text(task.read_text() + "  TODO: name the adapter's port.\n")  # Indented, as launch reads it: stripped.
+        refused(task, "  TODO: name the adapter's port.")
+        # Answered, resume commits the task and reruns the challenge on it.
+        task.write_text(task.read_text().replace("  TODO: name the adapter's port.\n", "The adapter listens on port 8080.\n"))
+        self.challenge_says([concern("P2", "Minor")])
+        output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 0, output)
+        self.assertIn("port 8080", read_json(directory / "plan.json")["nodes"]["ui"]["task"])
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
 
     def test_accept_challenge_refuses_edited_pinned_files_and_accepts_on_a_clean_checkout(self):
         directory, base = self.paused("accept-edited-001")
@@ -2209,10 +2553,76 @@ class GrillSkill(unittest.TestCase):
         self.assertEqual(fields["name"], "workflow-grill")
         self.assertGreater(len(fields["description"]), 40)
         for rule in ("at most five questions", "one at a time", "recommended default", "consequence", "features/<feature>/decisions.md",
-                     "## Decisions", "## Assumptions", "## Deferred", "never writes code"):
+                     "## Operator decisions", "## Grill defaults", "## Changes after launch", "## Deferred", "never writes code"):
             self.assertIn(rule.lower(), (fields["description"] + body).lower(), rule)
         readme = (TOOL / "workflow/README.md").read_text()
         self.assertIn('ln -s "$HOME/dev/md-manager/workflow/skills/workflow-grill" ~/.claude/skills/workflow-grill', readme)
+
+    def test_the_skill_plays_back_limits_commits_no_riders_records_answers_verbatim_and_always_reads_back_before_launch(self):
+        """C1-C5 (slice 2): phrases only; whether a model follows them needs a live grill, which belongs to a replay case (C39)."""
+        body = " ".join((TOOL / "workflow/skills/workflow-grill/SKILL.md").read_text().split("\n---\n", 1)[1].split())
+        intro, read, ask, write, back = (body[body.index(start):body.index(end)] for start, end in (
+            ("You interview", "## 1."), ("## 1.", "## 2."), ("## 2.", "## 3."), ("## 3.", "## 4."), ("## 4.", "The design challenge then")))
+        # Line 10: both guarded versions, and only the operator's answers bind (C4, decision 8).
+        self.assertIn("A `feature.json` 2.2.0 or 2.3.0 feature cannot launch without a non-empty `decisions.md`", intro)
+        self.assertIn("Only the operator's answers bind the run", intro)
+        self.assertNotIn("binds the whole run", body)
+        # §1: the target's CLAUDE.md, values kept by hand that the repository records (C3), and every limit played back (C1).
+        self.assertIn("Read the target's `CLAUDE.md`, `feature.json`", read)
+        self.assertIn("values the drafts or your defaults keep by hand that the repository already records (ids, routes, address lists; "
+                      "cite the file that records them)", read)
+        self.assertIn("A limit on what the feature delivers (only, never, except, excluded, deferred), one that excludes data or behaviour, "
+                      "never counts as settled by the documents, even when it quotes the operator's own words. Ownership lines are not limits.", read)
+        self.assertIn('Question 1 plays them all back in one question: "You wrote X; the drafts read it as Y, so Z is excluded. Correct?"', read)
+        # §2: no riders (C2), the repository's own mechanism and run limits (C3), restated answers, scoped delegations, open questions (C5).
+        self.assertIn("Options differ only on the dimension the question asks.", ask)
+        self.assertIn("The `decisions.md` bullet an answer writes commits to nothing its option did not state (the plain-text line, or an "
+                      "AskUserQuestion option's label and description).", ask)
+        self.assertIn("(an interface, a data shape or field, a rule about another file, a scope change) becomes its own question, or a "
+                      "Grill default tagged `[added, not asked]`.", ask)
+        self.assertIn("When the drafts or your defaults keep a table, a list or a generator by hand, offer the repository's own mechanism for "
+                      "the analogous artifact as an option, citing its file", ask)
+        self.assertIn("is a run limit, not a product reason: label it as a run limit and name the setup that would lift it.", ask)
+        # The read-back's question is not a sixth question: the limit of five never skips or softens it (C1).
+        self.assertIn("never more than five questions in total. The read-back's confirm question (§4) is not one of the five.", ask)
+        self.assertIn("After the fifth answer, ask nothing more until the read-back.", ask)
+        self.assertIn("restate the answer in one sentence at the start of your next message", ask)
+        self.assertIn("record it as a Grill default that names the items it covers", ask)
+        self.assertIn("A question asked but not answered, including a \"clarify\" reply that was never settled, stays open: write it as "
+                      "`TODO: Q<n> <question>` under `## Operator decisions`.", ask)
+        # §3: four sections in order; each Operator decision with its question number, the option's text and the words verbatim (C2, C4).
+        template = write[write.index("```markdown"):write.index("``` -")]
+        self.assertEqual([heading for heading in re.findall(r"## [A-Z][a-z]+(?: [a-z]+)*", template)],
+                         ["## Operator decisions", "## Grill defaults", "## Changes after launch", "## Deferred"])
+        self.assertIn('- [O1] Q1: <the chosen option\'s text>. Operator: "<the operator\'s words, verbatim>".', template)
+        self.assertIn("## Changes after launch None yet.", template)
+        self.assertIn("Each `[O<n>]` records its question number, the chosen option's text and the operator's words verbatim", write)
+        self.assertIn("Never edit one in place: a later reading or change is a new bullet that cites the id it changes.", write)
+        self.assertIn("riders tagged `[added, not asked]`", write)
+        self.assertIn("`## Changes after launch` holds `[L<n>]` items, each with the run id and attempt", write)
+        self.assertNotIn("No `TODO:` line may remain", body)
+        self.assertNotIn("## Assumptions", body)
+        self.assertIn("Do not edit the tasks, the policy, the PRD or any code.", write)
+        # An older file says nothing of whose each bullet was: its bullets become grill defaults until the operator names them as their
+        # own at the read-back, so a re-grill neither binds the grill's guesses nor silently demotes the operator's decisions.
+        self.assertIn("An older file without `## Operator decisions` does not record which bullets were the operator's answers: carry its "
+                      "decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which "
+                      "carried-over bullets are the operator's own (§4).", write)
+        self.assertNotIn("that you cannot trace to an operator's answer", body)
+        # §4: the read-back always runs before the hand-back, the bullets the operator did not choose first, then one short question (C1).
+        self.assertIn("Always read back before the hand-back, also when the operator asked up front to grill and launch.", back)
+        self.assertIn("lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, "
+                      "every Deferred bullet and any `TODO:` line), then each Operator decision on one line.", back)
+        self.assertIn("End it with one short question: confirm, or say what to change. After carrying over an older file, the same question "
+                      "also asks which carried-over bullets are the operator's own.", back)
+        self.assertLess(back.index("Always read back"), back.index("--dry-run"))
+        # The read-back's answer is the operator's: it becomes an Operator decision, never an edit of a grill default in place (C4).
+        self.assertIn("The answer is the operator's own: record it before you hand back. Each bullet the answer changes, and each one it "
+                      "confirms by its id, becomes a new `[O<n>]` with the date and the operator's words verbatim, citing what it changes", back)
+        self.assertIn("A Grill default or Deferred bullet so replaced leaves its section, and a `TODO: Q<n>` line it answers gives way to its "
+                      "`[O<n>]`, since launch refuses the line; an Operator decision stays as written. A plain \"confirm\" changes nothing.", back)
+        self.assertNotIn("Change `decisions.md` as the answer says", body)
+        self.assertLess(back.index("The answer is the operator's own"), back.index("--dry-run"))
 
 if __name__ == "__main__":
     unittest.main()

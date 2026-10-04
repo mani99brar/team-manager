@@ -1,14 +1,22 @@
 """The guardrails of feature.json 2.2.0 (docs/PRD_PORTABLE_WORKFLOW.md sections 2 and 4.3 to 4.6).
 
-- Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections.
+- Outcome briefs: every lane task has non-empty `## Goal`, `## Acceptance` and `## Stop` sections; init's default
+  line on running the checks alone leaves a section empty.
 - Decisions: the feature directory holds a non-empty `decisions.md` (written by the `workflow-grill` skill); it is
-  pinned into the plan and every worker and reviewer prompt includes it after the task.
+  pinned into the plan and every worker and reviewer prompt includes it after the task. With the `## Operator
+  decisions` heading only those bind and win over the task, the rest stays open to the challenge, and reviewers
+  count a worker's named departure from the rest inside its lane as no contradicted requirement; a file without it
+  (every one written before) binds as a whole, as before, and launch prints a note saying so.
+- Project conventions: sessions run with --safe-mode, which loads no CLAUDE.md, so prepare pins the target's CLAUDE.md as
+  the base commit holds it, up to the operator-notes heading, and every worker, challenge and reviewer prompt gets it
+  right before decisions.md.
 - Design challenge: one read-only `claude --print` job reads the pinned PRD, tasks and decisions before any worker
   starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
   A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
   that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override. A `resume` with
-  nothing edited since the paused attempt is refused: it would only re-roll the same challenge.
+  nothing edited since the paused attempt is refused: it would only re-roll the same challenge. The final record's
+  concerns reach every worker prompt as advisory notes (challenge_block), never a reviewer's.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
   in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane, only while that pane
   shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
@@ -46,7 +54,12 @@ GUARDED_VERSION = "2.2.0"
 # 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py).
 GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
+# The one default line init's Acceptance template keeps (C16 step 8). It says how a lane runs its checks, not what the lane
+# delivers, so a section that holds nothing else is empty (brief_problems), as it was before the line existed (1943ea8).
+CHECKS_DEFAULT = ("Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; "
+                  "run browser specs only through check-report on this lane's own specs.")
 DECISIONS = "decisions.md"
+PLACEHOLDER = "TODO:"  # What launch refuses in the files `init` writes, and resume in the tasks and decisions.md it re-pins.
 COMPLETION_VERSION = "1.1.0"
 LEGACY_COMPLETION_VERSION = "1.0.0"
 MAX_QUESTIONS = 3
@@ -62,6 +75,17 @@ HERDR_HINT = "add --herdr for the worker panes, as launch opens them unless --no
 MIGRATION_NOTE = ("feature.json {version}: no guardrail is enforced (outcome-brief headings, decisions.md, design challenge, "
                   "completion evidence). To migrate, set \"version\": \"2.2.0\", give every task non-empty ## Goal, ## Acceptance "
                   "and ## Stop sections, and write decisions.md with the workflow-grill skill (workflow/README.md).")
+# The heading the workflow-grill skill writes the operator's own answers under (C4). Its presence alone decides how the
+# prompts word decisions.md's precedence; no section is parsed.
+OPERATOR_DECISIONS = "## Operator decisions"
+LEGACY_DECISIONS_NOTE = (f"{DECISIONS} has no '{OPERATOR_DECISIONS}' heading, so all of it binds the run, as before. Rerun the "
+                         "workflow-grill skill to bind only the operator's answers and leave its own defaults open to the design "
+                         "challenge (workflow/README.md, Guardrails).")
+# The target's own conventions file (C15). Sessions start with --safe-mode, which never loads it, so prepare pins it and the
+# prompts carry it. What sessions get ends at the operator-notes heading, a line of its own: below it are the operator's notes
+# about running workflows (init's starter CLAUDE.md ends with it).
+CLAUDE_MD = "CLAUDE.md"
+OPERATOR_NOTES = "## Workflow (operator notes; workers skip this section)"
 
 
 # ---- Outcome briefs and decisions (launch and prepare) -------------------------------------------------------
@@ -89,13 +113,15 @@ def sections(text: str) -> dict[str, str]:
 
 
 def brief_problems(text: str) -> list[str]:
-    """`missing ## Stop`, `empty ## Acceptance`, ...: a required heading needs at least one non-blank line before the next `## `."""
+    """`missing ## Stop`, `empty ## Acceptance`, ...: a required heading needs at least one non-blank line before the next `## `.
+    init's default line on running the checks (CHECKS_DEFAULT, however wrapped) is process, not content: alone it leaves the
+    section empty, so an Acceptance emptied of everything init wrote but that line is still refused."""
     found = sections(text)
     problems = []
     for heading in REQUIRED_HEADINGS:
         if heading not in found:
             problems.append(f"missing ## {heading}")
-        elif not found[heading].strip():
+        elif not " ".join(found[heading].split()).replace(CHECKS_DEFAULT, "").strip():
             problems.append(f"empty ## {heading}")
     return problems
 
@@ -175,12 +201,13 @@ def authored_task(task: str) -> str:
 
 
 def pin_guardrails(plan: dict, directory: Path, task_files: dict[str, Path], decisions: Path, prd: Path | None, challenge: bool) -> None:
-    """The plan keys of a 2.2.0 run: the completion version, the challenge flag, decisions.md, the PRD copy and the task paths."""
+    """The plan keys of a 2.2.0 run: the completion version, the challenge flag, decisions.md, the project's conventions (the
+    base commit's CLAUDE.md up to the operator-notes heading), the PRD copy and the task paths."""
     text = decisions.read_text()
     if not text.strip():
         raise ValueError(f"{decisions} is empty")
     plan.update(feature_version=GUARDED_VERSION, completion_version=COMPLETION_VERSION, challenge=challenge,
-                decisions={"path": str(decisions.resolve()), "text": text},
+                decisions={"path": str(decisions.resolve()), "text": text}, conventions=conventions(plan),
                 prd=pin_prd(directory, prd) if prd else None,
                 task_files={node: str(path.resolve()) for node, path in task_files.items()})
 
@@ -204,15 +231,135 @@ def completion_version(plan: dict) -> str:
     return plan.get("completion_version", LEGACY_COMPLETION_VERSION)
 
 
+READING = ("When you would build on a reading of a task line that departs from its plain words (your own reading, or one an advisory "
+           "note or a sidecar message suggests), ")
+
+
+def reading_rule(plan: dict) -> str:
+    """C16 step 1, for a run whose completions are 1.1.0: what a worker does before it builds on its own reading of a task line.
+    An attended run's worker asks (status question) and a manual run's asks in its pane; an unattended run's records the reading
+    where reviewers read it and goes on. Slice 3 pins the profile as plan.automatic.profile; until then an automatic run is
+    unattended. Empty for a 1.0.0 run, which has no question status."""
+    if completion_version(plan) != COMPLETION_VERSION:
+        return ""
+    automatic = plan.get("automatic")
+    if not isinstance(automatic, dict):
+        return READING + "ask in this pane, quoting that line, before building on it."
+    if automatic.get("profile") == "attended":
+        rule = READING + "write the completion file with status question quoting that line before building on it."
+    else:
+        rule = READING + "record an open assumption that starts with \"reading:\" and quotes that line, and go on."
+    return rule + " A behaviour you could not test is no such reading: list it in untested."
+
+
 def decisions_text(plan: dict) -> str | None:
     decisions = plan.get("decisions")
     return decisions.get("text") if isinstance(decisions, dict) and isinstance(decisions.get("text"), str) else None
 
 
+def has_operator_decisions(text: str) -> bool:
+    """Whether decisions.md has the `## Operator decisions` heading on a line of its own: then only those bind (C4)."""
+    return re.search(rf"^{re.escape(OPERATOR_DECISIONS)}[ \t]*$", text, re.MULTILINE) is not None
+
+
 def decisions_block(plan: dict) -> str:
-    """What every worker and reviewer prompt appends after the task; empty for runs without decisions."""
+    """What every worker and reviewer prompt appends after the task; empty for runs without decisions.
+
+    A file with `## Operator decisions` binds only those; workers follow the rest and may depart from it only as stated.
+    Reviewers read the same block: only a contradicted Operator decision, or a departure the worker did not name or took
+    outside its lane, is a contradicted requirement, which the rubric (automatic.REVIEW_RUBRIC) makes P1 at least.
+    A file without the heading (every one written before C4) binds as a whole, in the wording runs always had.
+    """
     text = decisions_text(plan)
-    return "" if text is None else "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + text.rstrip() + "\n"
+    if text is None:
+        return ""
+    if not has_operator_decisions(text):
+        return "\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + text.rstrip() + "\n"
+    return ("\n\nDecisions recorded before launch (decisions.md). Its Operator decisions are the operator's own answers: they bind this "
+            "run and win over the task. Workers follow its other sections too, and may depart from a grill default or a change after "
+            "launch only to apply a design-challenge note, or when the code shows the bullet cannot hold, and only inside their own "
+            "lane's owned paths; a departure that would change anything another lane reads is a question for the operator instead. "
+            "Each departure is named, with the bullet's id, in the completion's open_assumptions. For reviewers: a candidate behaviour "
+            "that contradicts an Operator decision is P1 at least, and one that an Operator decision requires contradicts no line of a "
+            "task or of a document a task cites. A departure from another section that is named so, stays inside the lane's owned "
+            "paths and changes nothing another lane reads is no contradicted requirement: judge only what it does. An unnamed or "
+            "out-of-lane departure is a contradicted requirement. The file:\n" + text.rstrip() + "\n")
+
+
+def git_read(repo: Path, *arguments: str, stdin: bytes = b"") -> bytes:
+    """The stdout of a git command that only reads, fed `stdin`; CalledProcessError when it fails. It runs through Popen, never
+    subprocess.run, which is how `launch` runs each of its steps: a dry run runs none of them, it only reads."""
+    with subprocess.Popen(["git", "-C", str(repo), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        output, errors = process.communicate(stdin)
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args, output, errors)
+    return output
+
+
+def claude_md(repo: Path, commit: str) -> str | None:
+    """The target's CLAUDE.md as `commit` holds it at the root, or None when it holds none. A link inside the repository is
+    followed, as Claude Code follows it on disk; one that leaves the repository or dangles is none."""
+    found = git_read(repo, "cat-file", "--batch", "--follow-symlinks", stdin=f"{commit}:{CLAUDE_MD}\n".encode())
+    header, _, body = found.partition(b"\n")
+    fields = header.split()
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None  # `<name> missing`, `symlink`, `dangling`, `loop` or `notdir` with its size, or a directory.
+    return body[:int(fields[2])].decode(errors="replace")
+
+
+def cut_conventions(text: str) -> tuple[str, list[str] | None]:
+    """What sessions get of a CLAUDE.md: its text above the first OPERATOR_NOTES line, with the `## ` headings below that line,
+    whose sections are cut with the operator's notes; the whole text and None without that line. As in sections(), a line
+    inside a fenced code block is never a heading."""
+    lines = text.splitlines(keepends=True)
+    fence, cut, below = None, None, []
+    for index, line in enumerate(lines):
+        marker = re.match(r"(`{3,}|~{3,})", line.strip())
+        if marker and (fence is None or marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence)):
+            fence = None if fence else marker.group(1)
+        elif fence is None and re.match(r"## \S", line):
+            if cut is not None:
+                below.append(line.strip())
+            elif line.rstrip() == OPERATOR_NOTES:
+                cut = index
+    return ("".join(lines[:cut]), below) if cut is not None else (text, None)
+
+
+def conventions(plan: dict) -> dict:
+    """plan['conventions'] (C15): CLAUDE.md as the run's base commit holds it, cut at the operator-notes heading, with that
+    commit and the text's sha256; a base without the file pins an empty text. Pinned once at prepare: `repin` keeps it, since
+    resume commits only the pinned feature files, so CLAUDE.md is the same at every base a run moves to."""
+    commit = plan["base_commit"]
+    text = cut_conventions(claude_md(Path(plan["repository"]), commit) or "")[0]
+    return {"commit": commit, "sha256": digest_bytes(text.encode()), "text": text}
+
+
+def conventions_block(plan: dict) -> str:
+    """The project's conventions as every session's prompt has them, right before decisions_block: workers, reviewers (both
+    transports) and the design challenge. Empty for a plan that pinned none (a feature before 2.2.0, a run prepared before
+    C15) or an empty text."""
+    pinned = plan.get("conventions")
+    text = pinned.get("text") if isinstance(pinned, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    return (f"\n\nProject conventions ({CLAUDE_MD} at {pinned.get('commit')}; the controller's rules, the task and {DECISIONS} take "
+            f"precedence):\n{text.rstrip()}\n")
+
+
+def conventions_summary(repo: Path) -> tuple[str, str | None]:
+    """What `launch --dry-run` says of the conventions a guarded run would pin: CLAUDE.md at HEAD (the commit prepare pins)
+    with the size of the text sessions get, or "none"; and a note naming each section below the operator-notes heading, which
+    no session gets, or None."""
+    text = claude_md(repo, "HEAD")
+    if text is None:
+        return "none", None
+    sent, below = cut_conventions(text)
+    commit = git_read(repo, "rev-parse", "HEAD").decode().strip()
+    source = ("none" if not sent.strip() else f"{CLAUDE_MD} at {commit}: {len(sent.encode())} bytes, "
+              + ("up to the operator-notes heading" if below is not None else "the whole file (it has no operator-notes heading)"))
+    note = (f"{CLAUDE_MD} at {commit} has {', '.join(below)} below '{OPERATOR_NOTES}': that text is cut with the operator's notes, so "
+            "no session gets it. Move what sessions must follow above the heading." if below else None)
+    return source, note
 
 
 def has_challenge(plan: dict) -> bool:
@@ -258,7 +405,8 @@ def validate_output(value) -> None:
 
 
 def task_block(plan: dict, node: str) -> str:
-    """A lane's pinned task as the challenge prompt shows it; another block (`\\n\\n=== `) always follows it."""
+    """A lane's pinned task as the challenge prompt shows it; another block (`\\n\\n=== `: a task, CLAUDE.md or decisions.md)
+    always follows it."""
     return f"\n\n=== Task of lane {node} ===\n{plan['nodes'][node]['task']}"
 
 
@@ -283,8 +431,14 @@ def changed_since(directory: Path, plan: dict, record: dict) -> list[str]:
 
 def challenge_prompt(directory: Path, plan: dict) -> str:
     """The job's prompt. A rerun after a paused attempt (attempt 2 on) also gets that attempt's P0/P1 concerns and the
-    feature files changed since, and is asked to raise each concern again unless the change resolves it."""
+    feature files changed since, and is asked to raise each concern again unless the change resolves it. What decisions.md
+    settles follows decisions_block: with `## Operator decisions` only those, otherwise all of it. Each concern's message ends
+    with its recommendation and who acts on it, which challenge_block shows the workers (C10: text only, the schema stays
+    1.0.0 and the pause rule as it was)."""
     prd = plan.get("prd")
+    settled = ("reopen an Operator decision of decisions.md (the operator's own answer) only by showing it cannot hold, and then as a "
+               "P1; the rest of decisions.md is open to challenge, like the tasks" if has_operator_decisions(decisions_text(plan) or "")
+               else "do not reopen what decisions.md settles unless you show it cannot hold")
     parts = ["You are the design challenge of a workflow run: a skeptical senior engineer who reads the plan before any worker "
              "starts. You only read; you change nothing and launch nothing. Your working directory is the repository at the "
              "run's base commit; read its code when a concern depends on it.\n\n"
@@ -292,15 +446,22 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
              "that could change the choice. Tie every concern to a concrete consequence and give it a severity: P0 when the plan "
              "cannot work as written, P1 when it is likely to produce the wrong result or major rework and must be settled before "
              "any worker starts, P2 when it is worth recording and the run can continue. A P0 or P1 pauses the run for the "
-             "operator, so raise one only for a consequence you can name; do not reopen what decisions.md settles unless you "
-             "show it cannot hold. kind is assumption, failure_mode, complexity or other. Return the requested JSON schema: "
-             "concerns (possibly empty), simpler_alternative and cheap_experiment."]
+             f"operator, so raise one only for a consequence you can name; {settled}. kind is assumption, failure_mode, complexity "
+             "or other. End each concern's message with two lines: \"Recommendation: <one action and its done-condition>\" and "
+             "\"Acts: operator | worker | note\" (operator: a decision only the operator can make; worker: a lane acts on it; note: "
+             "nobody needs to act). A recommendation never offers a fallback such as \"or at least\": when two options remain, the "
+             "concern is a decision for the operator (Acts: operator), with the recommended option first. Each P0 and P1 message "
+             "cites the file:line it rests on, or says \"no file evidence\". Return the requested JSON schema: concerns (possibly "
+             "empty), simpler_alternative and cheap_experiment."]
     if prd:
         parts.append(f"\n\nThe PRD this feature implements: {directory / prd['copy']} (read it).")
     else:
         parts.append("\n\nThe feature names no PRD; challenge the tasks and decisions below.")
     for node in plan_workers(plan):
         parts.append(task_block(plan, node))
+    conventions = conventions_block(plan)
+    if conventions:  # Under a banner like every other block here, so it never reads as part of the last lane's task.
+        parts.append(f"\n\n=== {CLAUDE_MD} ==={conventions}")
     parts.append(f"\n\n=== decisions.md ===\n{decisions_text(plan) or ''}")
     previous = load_challenge(directory)
     if previous is not None and previous["status"] == "paused":
@@ -503,8 +664,44 @@ def paused_message(directory: Path, herdr: bool = False) -> str:
     return "\n".join(lines)
 
 
+def challenge_block(directory: Path, plan: dict, dropped: set[int] | frozenset[int] = frozenset()) -> str:
+    """The final design challenge as advisory notes for the worker prompt only, after decisions_block (C9, decision 11):
+    reviewers never get it, and it is never pinned into a lane's task. A passed or accepted challenge.json's concerns keep its
+    numbering, each with severity, kind, message and consequence; the simpler alternative and the cheap experiment are left
+    out. An accepted record lists the P0/P1s the operator overrode apart, with the reason, as context only. Nothing for a
+    disabled, paused or absent record, nor for a note whose number is in `dropped` (slice 3's --drop at a hold release)."""
+    record = load_challenge(directory)
+    if record is None or record["status"] not in {"passed", "accepted"}:
+        return ""
+    numbered = [(number, concern) for number, concern in enumerate(record["concerns"], 1) if number not in dropped]
+    if not numbered:
+        return ""
+    accepted = record["status"] == "accepted"
+    notes = [(number, concern) for number, concern in numbered if not (accepted and concern["severity"] in BLOCKING)]
+    overridden = [(number, concern) for number, concern in numbered if accepted and concern["severity"] in BLOCKING]
+    ask = "write the completion file with status question" if isinstance(plan.get("automatic"), dict) else "ask in this pane"
+    item = lambda number, concern: f"{number}. {concern['severity']} [{concern['kind']}] {concern['message']}\n   Consequence: {concern['consequence']}"
+    lines = [f"\n\nDesign challenge notes (advisory, attempt {record['attempt']})\nDo each note's recommendation, or say in your completion "
+             "why not; a fallback such as \"or at least\" is not the recommendation. A note marked \"Acts: operator\" is the operator's "
+             f"decision: if your work depends on it, {ask} instead of choosing.", *(item(*note) for note in notes)]
+    if overridden:
+        lines.append("Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
+                     f"it with the reason: {record['accepted_reason']}")
+        lines += [item(*concern) for concern in overridden]
+    return "\n".join(lines) + "\n"
+
+
+def refuse_placeholders(path: Path, text: str) -> None:
+    """Refuse a Markdown feature file with a line that begins with `TODO:`, as launch refuses one (launch.placeholders): a
+    placeholder, or a question the grill asked and never had answered (`TODO: Q<n> <question>`)."""
+    left = [f"{path}:{number}: {line.strip()}" for number, line in enumerate(text.splitlines(), 1) if line.strip().startswith(PLACEHOLDER)]
+    if left:
+        raise ValueError(f"{'; '.join(left)} (launch refuses it too: answer or remove each line that begins with {PLACEHOLDER}, then rerun resume)")
+
+
 def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
-    """The lanes' tasks and decisions.md as the paths pinned at prepare hold them now; refused as prepare refuses them."""
+    """The lanes' tasks and decisions.md as the paths pinned at prepare hold them now; refused as prepare refuses them, and
+    as launch refuses a line that begins with `TODO:` in them (`resume` calls it before it commits anything)."""
     tasks = {}
     for node in plan_workers(plan):
         path = Path(plan["task_files"][node])
@@ -512,11 +709,13 @@ def read_pinned(plan: dict) -> tuple[dict[str, str], str]:
         problems = brief_problems(text)
         if problems:
             raise ValueError(f"{path}: {', '.join(problems)}")
+        refuse_placeholders(path, text)
         tasks[node] = text
     decisions = Path(plan["decisions"]["path"])
     text = decisions.read_text()
     if not text.strip():
         raise ValueError(f"{decisions} is empty")
+    refuse_placeholders(decisions, text)
     if plan.get("prd") and not Path(plan["prd"]["path"]).is_file():
         raise ValueError(f"PRD {plan['prd']['path']} does not exist")
     return tasks, text

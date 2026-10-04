@@ -17,16 +17,28 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .guardrails import decisions_block
+from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
                        review_nodes, run_claude, save_json, worker_effort, worker_settings)
 
 REVIEW = "review"
+# A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
+# exec, after the launch receipt is written. Refused below that, before the receipt; there is no separate CLAUDE.md cap.
+PROMPT_ARGV_LIMIT = 120_000
 
 
 def is_review_node(node: str) -> bool:
     return node == REVIEW or node.startswith("review-")
+
+
+def refuse_long_prompt(node: str, prompt: str) -> None:
+    """Refuse a prompt over PROMPT_ARGV_LIMIT bytes; the launch calls it before it writes the receipt."""
+    size = len(prompt.encode())
+    if size > PROMPT_ARGV_LIMIT:
+        raise RuntimeError(f"{node_title(node)}'s prompt is {size} bytes, over the {PROMPT_ARGV_LIMIT} bytes one command-line argument can "
+                           "safely carry; nothing was launched and no receipt was written. Shorten what the run pinned into it (the "
+                           "task or the reviewer's brief, CLAUDE.md above its operator-notes heading, decisions.md) and prepare a new run.")
 
 
 def pane_label(node: str) -> str:
@@ -205,6 +217,10 @@ class InteractiveSessions(ClaudeSessions):
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"],
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        # Built before the receipt is saved, from the launch time it records (so the deadline the prompt states is the one
+        # wait_handoffs applies): a prompt too long for argv is refused while nothing is recorded or launched.
+        prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
+        refuse_long_prompt(node, prompt)
         save_json(path, receipt)
         automatic = bool(self.plan.get("automatic"))
         if automatic:
@@ -213,7 +229,6 @@ class InteractiveSessions(ClaudeSessions):
         tools = "Read,Glob,Grep,Edit,Write" if self.plan["allow_edits"] else "Read,Glob,Grep"
         if automatic:
             tools += ",Bash"
-        prompt = worker_prompt(self.directory, self.plan, node)
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # One --settings for workers only: background_settings with the deny rules and Git variables (worker_settings).
@@ -249,6 +264,7 @@ class InteractiveSessions(ClaudeSessions):
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"], "candidate_commit": candidate_commit,
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+        refuse_long_prompt(node, prompt)  # Before the receipt: nothing is recorded or launched.
         save_json(path, receipt)
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # Claude permission rules spell absolute paths as //absolute/path, and file writes are
@@ -272,18 +288,36 @@ SIDECAR_NOTE = ("\n\nReview sidecar: an independent reviewer reads your diff and
                 "keep your ## Stop bound, and never stop or wait for the sidecar.\n")
 
 
-def worker_prompt(directory: Path, plan: dict, node: str) -> str:
-    """What a native worker session receives: the rules, its pinned task, the run's decisions.md, a note on the review sidecar
-    when the plan has one, and in automatic mode the completion protocol."""
+def setup_note(directory: Path) -> str:
+    """C15 step 1: a lane's worktree is a fresh checkout, in which the pinned policy's setup has not run (the verifier runs it
+    in its own worktrees; nothing runs it before the workers, nor during the design challenge). Nothing without setup."""
+    path = directory / "policy.json"
+    setup = read_json(path).get("setup") if path.exists() else None
+    if not setup:
+        return ""
+    commands = ", then ".join(f"`{shlex.join(item['argv'])}`" for item in setup)
+    return f" This worktree is a fresh checkout: the policy's setup has not run in it ({commands})."
+
+
+def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+    """What a native worker session receives: the rules (with the policy's setup, which has not run in its worktree), its
+    pinned task, the project's conventions (CLAUDE.md), the run's decisions.md, the design challenge's advisory notes (never
+    the reviewers'), a manual run's reading rule, a note on the review sidecar when the plan has one, and in automatic mode
+    the completion protocol, whose deadline counts from `launched_at` (the launch time the receipt records), else from the
+    receipt on disk."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
-              "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + decisions_block(plan))
+              "Completion of a turn is not workflow approval." + setup_note(directory) + "\n\n" + plan["nodes"][node]["task"]
+              + conventions_block(plan) + decisions_block(plan) + challenge_block(directory, plan))
+    reading = "" if plan.get("automatic") else reading_rule(plan)  # An automatic run's completion protocol carries its own.
+    if reading:
+        prompt += f"\n\n{reading}\n"
     if isinstance(plan.get("sidecar"), dict):
         prompt += SIDECAR_NOTE
     if plan.get("automatic"):
         from .automatic import completion_prompt
-        prompt += completion_prompt(directory, plan, node)
+        prompt += completion_prompt(directory, plan, node, launched_at)
     return prompt
 
 

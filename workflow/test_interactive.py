@@ -108,7 +108,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("ui.completion.json", command[-1])
         self.assertIn(self.plan["nodes"]["ui"]["session_id"], command[-1])
         self.assertNotIn("manual", command)
-        # The receipt is saved before the prompt is built, so the prompt states the lane's deadline in UTC (C16 step 6).
+        # The prompt is built with the launch time its receipt records, so it states the lane's deadline in UTC (C16 step 6).
         from datetime import datetime
         from .guardrails import iso
         launched = datetime.fromisoformat(read_json(self.directory / "ui.interactive.json")["launch_requested_at"]).timestamp()
@@ -517,6 +517,34 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(prompt.read_text(), launch.call_args.args[0][-1])
         self.assertIn(self.plan["nodes"]["ui"]["task"], prompt.read_text())
         self.assertEqual(prompt.stat().st_mode & 0o777, 0o600)
+
+    def test_a_prompt_too_long_for_one_argument_is_refused_before_any_receipt(self):
+        # C15: a native session gets its prompt as one argv string, which Linux caps at 128 KiB; exec would fail (E2BIG) only
+        # after the receipt is written, leaving a launch to reconcile. Over PROMPT_ARGV_LIMIT bytes (bytes, not characters) a
+        # worker or reviewer launch is refused first: no receipt, no prompt file, no launch. There is no separate CLAUDE.md cap.
+        from .interactive import PROMPT_ARGV_LIMIT
+        self.assertEqual(PROMPT_ARGV_LIMIT, 120_000)
+        self.plan["nodes"]["ui"]["task"] = "é" * (PROMPT_ARGV_LIMIT // 2)  # Half the limit in characters, past it in bytes.
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        launches = {"ui": ("Worker ui", lambda: self.sessions.run("ui")),
+                    "review": ("Reviewer review", lambda: self.sessions.run_reviewer("review", "x" * (PROMPT_ARGV_LIMIT + 1), self.TOKEN, candidate))}
+        for node, (title, launch_one) in launches.items():
+            with self.subTest(node=node), patch.object(self.sessions, "inventory", return_value=[]), \
+                    patch("workflow.interactive.git", side_effect=[candidate, ""]), patch("workflow.interactive.subprocess.run") as launch:
+                with self.assertRaisesRegex(RuntimeError, rf"^{title}'s prompt is \d+ bytes, over the 120000 bytes one command-line argument "
+                                                          r"can safely carry; nothing was launched and no receipt was written\."):
+                    launch_one()
+                launch.assert_not_called()
+                for suffix in ("interactive.json", "prompt.txt", "launch.log"):
+                    self.assertFalse((self.directory / f"{node}.{suffix}").exists(), f"{node}.{suffix}")
+        # A prompt of exactly the limit launches.
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=self.started) as launch:
+            self.sessions.run_reviewer("review", "x" * PROMPT_ARGV_LIMIT, self.TOKEN, candidate)
+        self.assertEqual(len(launch.call_args.args[0][-1].encode()), PROMPT_ARGV_LIMIT)
 
     def test_panels_attach_reviewer_as_third_pane_when_its_receipt_exists(self):
         from .sessions import plan_digest
