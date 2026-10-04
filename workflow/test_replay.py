@@ -158,6 +158,16 @@ print(json.dumps({{"session_id": args[args.index("--session-id") + 1], "is_error
             replay.main(arguments)
         self.assertEqual(len(self.logged()), 2)
 
+    def test_a_path_that_extends_a_run_name_is_not_rewritten_whichever_name_is_longer(self):
+        # The copy rewrites the run's own paths, where it lies (archive/run-1) and where it ran (state/run-1), and nothing else: a
+        # sibling whose name extends either one (run-1-2, run-1.old) keeps its text, the longer name's sibling included.
+        log = self.run / "verification" / "candidate" / "ui" / "1" / "check-1.log"
+        log.write_text(f"{self.run}/a {self.recorded}/b {self.run}-2/c {self.recorded}-2/d {self.run}.old/e {self.recorded}.old/f\n")
+        copy = self.root / "copy"
+        replay.stage(self.run, copy)
+        self.assertEqual((copy / log.relative_to(self.run)).read_text(),
+                         f"{copy}/a {copy}/b {self.run}-2/c {self.recorded}-2/d {self.run}.old/e {self.recorded}.old/f\n")
+
     def test_a_candidate_gone_from_the_repository_is_rebuilt_from_the_base_and_the_diff(self):
         for args in (["switch", "-q", "main"], ["branch", "-qD", "candidate"], ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
             subprocess.run(["git", "-C", str(self.repo), *args], check=True)
