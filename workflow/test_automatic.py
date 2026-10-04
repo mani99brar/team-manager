@@ -637,20 +637,23 @@ class ReviewCompletionTests(unittest.TestCase):
         # The replay (C34 follow-up) found cases (2) and (3) applied unevenly. (2): revamp-004 never rated a second useNow P1 because it
         # was already at the base, and one sample excused it as unchanged; the candidate is what merges. (3): revamp-006 blocked once and
         # rated P2 twice on a failure the worker disclosed in open_assumptions in its own words. A PRD line that conflicts with a task line
-        # the worker followed and disclosed (sidecar-001 blocked 3/3 where sidecar-002 approved) is one P2 for the operator, while a
-        # contradicted task line or Operator decision stays P1. The map gains ## Goal and ## Constraints rows (okiya's Normal depth,
+        # the worker followed (sidecar-001 blocked 3/3 where sidecar-002 approved) is one P2 for the operator, whether or not the worker
+        # disclosed the conflict: a disclosure never lowers a severity (C34 step 3), it moves the decision to the operator, and decision 4
+        # blocks on a contradicted task line, not on a PRD line alone, so two lanes that follow the same task line get the same verdict.
+        # A contradicted task line or Operator decision stays P1. The map gains ## Goal and ## Constraints rows (okiya's Normal depth,
         # absent 3/3) and a row per Operator decision, and a gap on any row is at least a P2.
         tool = Path(__file__).resolve().parents[1]
         for path in [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]:
             text = " ".join(path.read_text().split())
             with self.subTest(brief=str(path.relative_to(tool))):
+                self.assertNotIn("followed and disclosed", text)
                 for value in ("(contradictions are yours to report, not the general reviewer's), anywhere in the candidate, code the diff did not "
                               "change included: the candidate is what merges, so \"unchanged\" never excuses it;",
                               "in any completion field (summary, open_assumptions, untested, verify_yourself, the Proof table) or in the worker's own words",
                               "an item that is only untested is a P2 finding, not a disclosed failure",
-                              "A line of the PRD, or of another cited document, that conflicts with a task line the worker followed and disclosed is not "
-                              "a P1: it is one P2 finding that quotes both lines and ends, after its Consequence, with \"Acts: operator\", because the "
-                              "operator settles conflicts between their own documents.",
+                              "A line of the PRD, or of another cited document, that conflicts with a task line the worker followed is not a P1, whether "
+                              "or not the worker disclosed the conflict: it is one P2 finding that quotes both lines and ends, after its Consequence, with "
+                              "\"Acts: operator\", because the operator settles conflicts between their own documents.",
                               "A contradiction of a task line (## Goal, ## Acceptance, ## Constraints, ## Design (settled)) or of an Operator decision "
                               "stays case (2), P1.",
                               "Your tested/untested map has one row per line under ## Goal, ## Acceptance, ## Constraints and ## Design (settled) in "
