@@ -2050,6 +2050,25 @@ test('[B1] on a lane named controller, the stops said bare off the source branch
   }
 })
 
+test('[B1] on a lane named controller, a gate action\'s actor row (C17) belongs to the run, never touching the lane', async () => {
+  // pipeline.py action_event: `<Action> by the operator|maintainer…` as a `controller` `running` row.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Start by the operator (via a Claude Code session)' },
+      { sequence: 2, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 4, time: T1, node: 'controller', status: 'interactive', message: 'Worker controller needs attention in its pane (native state blocked); waiting until its deadline' },
+      { sequence: 5, time: T2, node: 'controller', status: 'running', message: 'Automatic by the maintainer: the supervisor continues the run' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id]), [[1, null], [2, 'launch_controller'], [3, 'launch_ui'], [4, 'launch_controller'], [5, null]])
+  })
+})
+
 test('[B1] candidate events name the lane whose combined check they report', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'combined', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets })
@@ -2109,11 +2128,16 @@ test('[B2] a run summary carries its activity: feature, recency, focus, attentio
     await writeRun(rootDir, { ...waitingRun, runId: 'approval', events: launchEvents, inputs: inputsSection({ mode: 'manual', automatic: null }, { ui: liveWorker, adapter: liveWorker }) })
     const interrupted = { sequence: 5, time: T2, node: 'controller', status: 'interrupted', message: `Supervisor interrupted. Native workers were NOT stopped and keep running; resume with: python -m workflow automatic ${root}/runs/alpha/main/interrupted --live` }
     await writeRun(rootDir, { ...waitingRun, runId: 'interrupted', events: [...launchEvents, interrupted], inputs: inputsSection({}, { ui: liveWorker, adapter: liveWorker }) })
+    // `note` and `answer` need no controller: their plain records (raw status `note`) on a lane keep the interruption.
+    const noted: RawEvent[] = [...launchEvents, { ...interrupted, message: interrupted.message.replace('/interrupted --live', '/noted --live') },
+      { sequence: 6, time: T2, node: 'ui', status: 'note', message: 'Note N-1 from the operator to worker ui: undeliverable, not typed (lane_blocked)' },
+      { sequence: 7, time: T2, node: 'adapter', status: 'note', message: 'Question 1 of adapter answered by the operator' }]
+    await writeRun(rootDir, { ...waitingRun, runId: 'noted', events: noted, inputs: inputsSection({}, { ui: liveWorker, adapter: liveWorker }) })
     await writeRun(rootDir, { runId: 'paused', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: [], events: [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' }] })
 
     const feature = 'Review verdict and findings in the viewer'
     const details = new Map<string, RunDetail>()
-    for (const runId of ['fresh', 'integrated', 'failed', 'approval', 'interrupted', 'paused']) {
+    for (const runId of ['fresh', 'integrated', 'failed', 'approval', 'interrupted', 'noted', 'paused']) {
       const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
       assert.equal(detail.summary.contract_version, '1.5.0', runId)
       assert.equal(detail.run_dir, null, `${runId}: the temporary run roots are outside $HOME and the project is not listed`)
@@ -2140,6 +2164,10 @@ test('[B2] a run summary carries its activity: feature, recency, focus, attentio
     })
     assert.match(stopped.headline!, /^Freeze worker handoffs · Supervisor interrupted\. Native workers were NOT stopped/)
     assert.ok(stopped.headline!.length <= 160 && !stopped.headline!.includes(root), stopped.headline!)
+    const notedActivity = activity('noted')!
+    assert.deepEqual({ focus: notedActivity.focus, attention: notedActivity.attention }, { focus: stopped.focus, attention: stopped.attention })
+    const timeline = (await get(app, url('alpha', 'main', 'noted', '/events'))).json() as { events: { node_id: string | null; status: string | null; type: string }[] }
+    assert.deepEqual(timeline.events.slice(-2).map(event => [event.node_id, event.status, event.type]), [['launch_ui', null, 'log'], ['launch_adapter', null, 'log']])
     assert.deepEqual(activity('paused'), {
       ...none, feature: null, last_activity_at: T1, finished_at: null, headline: 'Freeze worker handoffs · Immutable snapshots captured',
       focus: { node_id: 'handoff', label: 'Freeze worker handoffs', status: 'paused', since: T1 }, attention: { kind: 'paused', node_id: 'handoff', since: T1 },

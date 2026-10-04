@@ -157,7 +157,7 @@ export function launchSectionEntries(worker: RunInputWorker | null, frozen: Work
  * to type it into.
  */
 export function answerNext(lane: string): NextStep {
-  const answer = `"$PY" -m workflow answer "$RUN" ${lane} "<your answer>"`
+  const answer = `"$PY" -m workflow answer "$RUN" ${lane} "<your answer>" --by operator`
   return {
     action: 'required', label: `Answer ${lane}'s question`, runbook: [{ section: 'Guardrails (feature.json 2.2.0)', topic: 'Worker questions' }],
     steps: [

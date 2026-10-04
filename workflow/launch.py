@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .actor import BY_OPERATOR, add_actor_argument, require_actor
 from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, finished_note, has_operator_decisions,
                          is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
@@ -204,13 +205,13 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                    reviewer_transport: str | None = None, workers: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator") -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
     checkout of a new branch at its HEAD (`source_checkout`, beside the run directory). Every later command gets that
     worktree as `--repo`, and the feature files it reads are the same committed files at their paths in it; built-in
-    briefs stay in the tool's own folder.
+    briefs stay in the tool's own folder. `start` and `automatic` carry launch's --by (`by`).
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -276,7 +277,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     base = [sys.executable, "-m", "workflow"]
     preflight = [*base, "preflight", str(run), "--repo", str(repo), "--policy", str(policy_path)]
-    start = [*base, "start", str(run), "--live", "--repo", str(source)]
+    start = [*base, "start", str(run), "--live", "--repo", str(source), "--by", by]
     if herdr:
         preflight.append("--herdr")
         start.append("--herdr")
@@ -309,7 +310,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
                             "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
                             "--reviewer-transport", settings["reviewer_transport"]])
-        commands.append([*base, "automatic", str(run), "--live", "--repo", str(source)])
+        commands.append([*base, "automatic", str(run), "--live", "--repo", str(source), "--by", by])
     elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None:
         raise ValueError("Timeouts and the reviewer transport apply to --automatic runs only")
     drill = policy.get("failure_drill")
@@ -345,9 +346,13 @@ def main(argv=None):
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
+    add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
     try:
+        # A launch is the operator's decision; a dry run decides nothing, and without --by prints the operator's commands. With
+        # --by maintainer it is refused too: it would print commands for a launch the maintainer may not run.
+        by = "operator" if args.dry_run and args.by is None else require_actor(args, "launch")
         repo = resolve_target(args.repo, Path.cwd())
         owner = run_of_source(repo)
         if owner is not None:
@@ -355,7 +360,7 @@ def main(argv=None):
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
-                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
+                                               args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers, by)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
@@ -439,13 +444,13 @@ def main(argv=None):
                                  f"run the design challenge and launch the workers with:  {resume_command(run, herdr=not args.no_herdr)}\n")
             parser.exit(130, f"Launch interrupted. Nothing was rolled back. If workers were started they are still running;\n"
                              f"inspect with: {sys.executable} -m workflow status {run}\n"
-                             + (f"resume with:  {sys.executable} -m workflow automatic {run} --live\n" if args.automatic else ""))
+                             + (f"resume with:  {sys.executable} -m workflow automatic {run} --live {BY_OPERATOR}\n" if args.automatic else ""))
         except subprocess.CalledProcessError as error:
             if not (args.automatic and error.returncode == 75):
                 raise
             # `automatic` exits 75 when Claude Code itself was unavailable: nothing was stopped and the run is resumable.
             parser.exit(75, f"Launch interrupted: Claude Code was unavailable; nothing was stopped. Once `claude` works,\n"
-                            f"resume with:  {sys.executable} -m workflow automatic {run} --live\n")
+                            f"resume with:  {sys.executable} -m workflow automatic {run} --live {BY_OPERATOR}\n")
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
             print(finished_note(source, branch, repo))

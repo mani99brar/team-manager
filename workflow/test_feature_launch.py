@@ -89,7 +89,7 @@ class FeatureLaunchTests(unittest.TestCase):
 
         with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
-            main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr", "--run-root", str(runs)])
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-root", str(runs)])
         source = (runs / "project-workflows-001.source").resolve()
         run_branch = "feature/project-workflows/project-workflows-001"
         self.assertEqual((self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain")), (branch, head, ""))
@@ -109,7 +109,7 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertEqual([(item["name"], item["repository"]) for item in project], [("target", str(self.repo))])
         # A second run from the same checkout gets its own worktree; your checkout still does not move.
         with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr", "--run-root", str(runs), "--run-id", "second"])
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-root", str(runs), "--run-id", "second"])
         self.assertTrue((runs / "second.source").is_dir())
         self.assertEqual((self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD")), (branch, head))
         self.assertEqual(len(json.loads((self.root / "projects.json").read_text())["projects"]), 1)
@@ -118,7 +118,7 @@ class FeatureLaunchTests(unittest.TestCase):
         runs = self.root / "runs"
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
-            main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         self.assertTrue(all("env" not in call.kwargs for call in command.call_args_list))
         source, branch = (runs / "project-workflows-001.source").resolve(), "feature/project-workflows/project-workflows-001"
         self.assertIn(f"Once it integrates: Merge the run branch from your checkout without switching it: git -C {self.repo} merge --ff-only "
@@ -131,7 +131,7 @@ class FeatureLaunchTests(unittest.TestCase):
         self.git("worktree", "add", "-q", "-b", "feature/project-workflows/a-001", str(source), "HEAD")
         (runs / "a-001").mkdir()
         save_json(runs / "a-001" / "plan.json", {"run_id": "a-001", "repository": str(source.resolve())})
-        for argv in (["--repo", str(source / "features")], ["--repo", str(source), "--live"]):
+        for argv in (["--repo", str(source / "features")], ["--repo", str(source), "--live", "--by", "operator"]):
             with self.subTest(argv=argv), patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit) as exited:
@@ -160,7 +160,7 @@ class FeatureLaunchTests(unittest.TestCase):
         runs = self.root / "runs"
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
-                main(["hidden", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+                main(["hidden", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         command.assert_not_called()
         self.assertIn("Not committed at HEAD (new, ignored or excluded): features/hidden/policy.json", errors.getvalue())
         self.assertEqual(self.git("branch", "--list", "feature/*"), "")
@@ -191,7 +191,7 @@ class FeatureLaunchTests(unittest.TestCase):
         self.git("worktree", "add", "-q", "-b", branch, str(source), "HEAD")  # What a launch whose prepare failed leaves.
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         command.assert_not_called()
         # -d, which refuses a branch that is not merged: the branch is named for deletion only while your HEAD holds its tip.
         self.assertIn(f"Source checkout already exists: {source}. A run's worktree is never reused; remove it (git -C {self.repo} worktree "
@@ -203,7 +203,7 @@ class FeatureLaunchTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(source), "commit", "-qm", "Revision"], check=True)
         with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         self.assertNotIn("branch -d", errors.getvalue())
         self.assertNotIn("branch -D", errors.getvalue())
         self.assertIn(f"remove it (git -C {self.repo} worktree remove {source}) or launch with another --run-id. Its branch {branch} has "
@@ -214,7 +214,7 @@ class FeatureLaunchTests(unittest.TestCase):
         source.mkdir(parents=True)
         with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         self.assertIn(f"remove it (git -C {self.repo} worktree remove {source}) or launch with another --run-id.", errors.getvalue())
 
     def test_an_existing_source_checkout_path_is_refused_before_any_command(self):
@@ -222,7 +222,7 @@ class FeatureLaunchTests(unittest.TestCase):
         (runs / "project-workflows-001.source").mkdir(parents=True)
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exited:
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-root", str(runs)])
         command.assert_not_called()
         self.assertEqual(exited.exception.code, 1)
         self.assertIn(f"Source checkout already exists: {(runs / 'project-workflows-001.source').resolve()}", errors.getvalue())
@@ -243,6 +243,28 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertEqual(printed["commands"][1], ["git", "worktree", "add", "-b", "feature/project-workflows/project-workflows-001", source, "HEAD"])
         self.assertEqual((printed["repository"], printed["source_checkout"]), (str(self.repo), source))
         self.assertEqual(printed["registry"]["entry"]["repository"], str(self.repo))
+
+    def test_launch_passes_its_by_to_start_and_automatic_and_refuses_the_maintainer(self):
+        """C17: the steps a launch runs carry its --by; a launch is the operator's decision."""
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "by-test", Path("/tmp/workflow-launch-tests"), automatic=True, by="operator")
+        self.assertEqual([command[3:] for command in commands if command[3:4] in (["start"], ["automatic"])],
+                         [["start", "/tmp/workflow-launch-tests/by-test", "--live", "--repo", "/tmp/workflow-launch-tests/by-test.source", "--by", "operator", "--herdr"],
+                          ["automatic", "/tmp/workflow-launch-tests/by-test", "--live", "--repo", "/tmp/workflow-launch-tests/by-test.source", "--by", "operator"]])
+        calls = []
+        with tempfile.TemporaryDirectory() as root, patch("workflow.launch.run_command", side_effect=lambda command, cwd, check, **_: calls.append(command)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-root", root])
+        self.assertEqual([command[-2:] for command in calls if command[3:4] in (["start"], ["automatic"])], [["--by", "operator"]] * 2)
+        # The missing --by names only the actor a launch takes; a dry run prints no commands the maintainer would be refused.
+        for argv, refusal in (([], "launch requires --by operator: "), (["--by", "maintainer"], "launch is the operator's decision"),
+                              (["--dry-run", "--by", "maintainer"], "launch is the operator's decision")):
+            with self.subTest(argv=argv), patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors, \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
+                with self.assertRaises(SystemExit):
+                    main(["project-workflows", "--repo", str(self.repo), *([] if "--dry-run" in argv else ["--live"]), *argv])
+            command.assert_not_called()
+            self.assertIn(refusal, errors.getvalue())
+            self.assertNotIn("--by maintainer", printed.getvalue())
 
     def test_automatic_plan_keeps_launches_in_graph_and_adds_supervision(self):
         _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
@@ -294,7 +316,7 @@ class FeatureLaunchTests(unittest.TestCase):
             with self.subTest(returncode=returncode), patch("workflow.launch.run_command", side_effect=run), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit) as exited:
-                    main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr",
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr",
                           "--run-id", f"auto-{returncode}", "--run-root", str(self.root / "runs")])
                 self.assertEqual(exited.exception.code, expected_code)
                 self.assertIn(expected, errors.getvalue())
@@ -310,7 +332,7 @@ class FeatureLaunchTests(unittest.TestCase):
             run_id = "finish-automatic" if automatic else "finish-manual"
             with self.subTest(automatic=automatic), patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()) as output, \
                     contextlib.redirect_stderr(io.StringIO()):
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
                       *(["--automatic"] if automatic else [])])
                 run = (self.root / "runs" / run_id).resolve()
                 self.assertEqual(output.getvalue().splitlines()[0],
@@ -332,7 +354,7 @@ class FeatureLaunchTests(unittest.TestCase):
             (Path(root) / "project-workflows-001").mkdir()
             with patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    main(["project-workflows", "--repo", str(self.repo), "--live", "--run-root", root])
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--run-root", root])
             command.assert_not_called()
 
     def test_run_id_cannot_escape_storage(self):

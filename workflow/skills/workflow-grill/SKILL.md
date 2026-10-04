@@ -77,7 +77,7 @@ Then end with the path of `decisions.md` and the next commands; while a `TODO: Q
 
 ```bash
 python -m workflow launch <feature> --repo <target> --dry-run
-python -m workflow launch <feature> --repo <target> --live --automatic
+python -m workflow launch <feature> --repo <target> --live --automatic --by operator
 ```
 
 The design challenge then reads the PRD, the tasks and this file before any worker starts.

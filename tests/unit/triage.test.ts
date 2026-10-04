@@ -223,7 +223,13 @@ function assertRealCli(now: Now) {
     const parser = CLI[verb] ?? PIPELINE
     assert.equal(tokens[2], verb === 'attach-one' ? 'workflow.interactive' : 'workflow', command)
     assert.ok(parser.includes(verb === 'attach-one' ? '"attach-one"' : CLI[verb] ? 'argparse' : `"${verb}"`), `${verb} is a CLI action (${command})`)
-    for (const flag of tokens.filter(token => token.startsWith('--'))) assert.ok(parser.includes(`add_argument("${flag}"`), `${verb} takes ${flag} (${command})`)
+    // --by (C17) is declared by actor.add_actor_argument on every gate's parser.
+    for (const flag of tokens.filter(token => token.startsWith('--'))) {
+      assert.ok(parser.includes(flag === '--by' ? 'add_actor_argument(parser)' : `add_argument("${flag}"`), `${verb} takes ${flag} (${command})`)
+    }
+    if (['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'launch'].includes(verb)) {
+      assert.ok(command.endsWith(' --by operator') || command.includes(' --by operator '), `a gate command names the operator (${command})`)
+    }
     if (tokens.includes('"$RUN"')) assert.equal(tokens[4], '"$RUN"', `the run directory follows the verb (${command})`)
   }
 }
@@ -431,6 +437,18 @@ describe('buildTimeline', () => {
     }
   })
 
+  it('reads who ran a gate action (C17) as a log row, never a blocked controller, before B1 too', () => {
+    const rows = (status: NodeStatusName | null) => synthetic({
+      status: 'running', nodes: { challenge: 'succeeded', launch_game: 'running' },
+      events: [...LAUNCHED, [60, null, status, 'Automatic by the maintainer (via a Claude Code session): the supervisor continues the run'],
+        [61, null, status, 'Retry by the operator: worker/game attempt 2']],
+    })
+    for (const status of ['running', null] as const) {
+      const markers = buildTimeline(rows(status)).markers.filter(marker => / by the (operator|maintainer)/.test(marker.raw))
+      assert.deepEqual(markers.map(marker => [marker.kind, marker.blocked]), [['log', false], ['log', false]], `status ${status}`)
+    }
+  })
+
   it('keeps a retried attempt running while the export still serves its node failed; a later controller start ends it', () => {
     const retrying = buildTimeline(skeletonRetrying())
     assert.deepEqual(retrying.byNode.get('verify_game')?.map(span => [span.attempt, span.status, span.end === null, span.live]),
@@ -464,7 +482,7 @@ describe('deriveNow', () => {
     assert.deepEqual(now.next.steps.map(step => step.kind), ['command', 'text', 'command'])
     assert.deepEqual(commands(now), [
       '"$PY" -m workflow init <fixes-feature> --repo <target repo>',
-      '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic',
+      '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator',
     ])
     assert.match((now.next.steps[1] as { text: string }).text, /\/workflow-grill <fixes-feature>.*decisions\.md.*commit/)
     const everything = JSON.stringify(now.next)
@@ -488,10 +506,10 @@ describe('deriveNow', () => {
     assert.match(textToString(now.headline, T0), /^✗ Blocked at Verify combined candidate · lane ui failed identically on attempts 1 and 2 · 20:27/)
     assert.match(textToString(now.reason, T0), /project-workflows-browser/)
     assert.deepEqual(commands(now), [
-      '"$PY" -m workflow repair "$RUN" ui --workspace',
-      '"$PY" -m workflow repair "$RUN" ui --commit <sha> --reason "<why>" --dry-run',
-      '"$PY" -m workflow repair "$RUN" ui --commit <sha> --reason "<why>"',
-      '"$PY" -m workflow automatic "$RUN" --live',
+      '"$PY" -m workflow repair "$RUN" ui --workspace --by operator',
+      '"$PY" -m workflow repair "$RUN" ui --commit <sha> --reason "<why>" --dry-run --by operator',
+      '"$PY" -m workflow repair "$RUN" ui --commit <sha> --reason "<why>" --by operator',
+      '"$PY" -m workflow automatic "$RUN" --live --by operator',
     ])
     assert.match((now.next.steps[1] as { text: string }).text, /\$RUN\/repair-workspace-<n>.*never on the source branch/)
     assert.doesNotMatch(prose(now), /[Ii]nterrupted|Claude Code|retry/, 'the four stale [Errno] rows are out of scope')
@@ -541,7 +559,7 @@ describe('deriveNow', () => {
       assert.equal(automatic.situation, 'check_failed')
       assert.match(textToString(automatic.headline, T0), /^✗ Verify game failed attempt 1 of 3: unit, integration — /)
       assert.deepEqual(commands(automatic), [], 'the supervisor retries by itself')
-      assert.deepEqual(commands(checked(repaired('manual'))), ['"$PY" -m workflow retry "$RUN" --phase worker --node game'])
+      assert.deepEqual(commands(checked(repaired('manual'))), ['"$PY" -m workflow retry "$RUN" --phase worker --node game --by operator'])
       const withoutAttempt2 = deriveNow({ ...repaired('automatic'), results: new Map([[uri(3), result(3, NEW)]]) })
       assert.deepEqual(withoutAttempt2.missing, [], 'attempt 2 checked another revision, so it is not read')
     })
@@ -567,7 +585,7 @@ describe('deriveNow', () => {
     assert.equal(now.tone, 'waiting')
     assert.match(textToString(now.headline, T0 + 1200_000), /^\? Waiting on you: game asked question 1 of 3 · 10 min ago · deadline paused/)
     assert.match(textToString(now.reason, T0), /Keep the seed on rematch, or reroll it\?/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow answer "$RUN" game "<your answer>"', '"$PY" -m workflow answer "$RUN" game "<your answer>" --no-herdr'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow answer "$RUN" game "<your answer>" --by operator', '"$PY" -m workflow answer "$RUN" game "<your answer>" --by operator --no-herdr'])
     assert.match(now.next.caveat ?? '', /exits 1/)
   })
 
@@ -589,6 +607,11 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow.interactive attach-one "$RUN" --node game'])
     const later = deriveNow(synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, pane, [960, 'launch_game', 'running', 'Awaiting explicit completion signal; idle is not acceptance']] }))
     assert.equal(later.situation, 'running', 'a later event for the node clears it')
+    // pipeline.py/notes.py send_note: a note's outcome row on the lane says nothing about the pane's state.
+    for (const outcome of ['undeliverable, not typed (lane_blocked)', 'typed into its pane']) {
+      const noted = deriveNow(synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, pane, [930, 'launch_game', 'running', `Note N-1 from the maintainer to worker game: ${outcome}`]] }))
+      assert.equal(noted.situation, 'pane_attention', `a note row (${outcome}) does not clear the pane`)
+    }
     const reviewer = deriveNow(synthetic({
       status: 'running', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'running' },
       events: [[0, 'review', 'running', 'Launching the native reviewer session general'], [60, 'review', 'running', 'Reviewer general needs attention in its pane (native state blocked); waiting until the deadline']],
@@ -605,7 +628,7 @@ describe('deriveNow', () => {
     assert.equal(now.interruption, 'a')
     assert.equal(now.reasonSource, 0)
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs · 10:30: the controller stopped; sessions keep running/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
   })
 
   it('interrupted (a): the resumed controller\'s PID row ends it, before B1 (no status) and with B1 (running)', () => {
@@ -653,9 +676,27 @@ describe('deriveNow', () => {
     assert.deepEqual(now.next.steps, [
       { kind: 'text', text: "In the run's source checkout, the path status prints as source_checkout (the run directory's path plus .source, for runs launched since per-run checkouts):" },
       { kind: 'text', text: 'git -C <source checkout> switch feature/skeleton/skeleton-001' },
-      { kind: 'command', text: '"$PY" -m workflow automatic "$RUN" --live' }])
+      { kind: 'command', text: '"$PY" -m workflow automatic "$RUN" --live --by operator' }])
     assert.deepEqual(now.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Source feature branch changed' }])
     assert.doesNotMatch(prose(now), /new run|Blocked/)
+  })
+
+  it('interrupted (a): a note or an answer sent while no controller runs keeps the interruption', () => {
+    // notes.py send_note and guardrails.py answer_main need no controller. They write plain records (raw status `note`),
+    // which the server serves on the lane with no status, as log lines: they neither end the scope nor read as running.
+    const RESUME_NOTE = 'Supervisor interrupted. Native workers were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live'
+    const stops: EventSpec[] = [[1800, null, null, RESUME_NOTE], [1800, null, 'paused', BRANCH_STOP]]
+    const records = ['Note N-1 from the operator to worker game: undeliverable, not typed (lane_blocked)', 'Note N-1 from the maintainer to worker game: typed into its pane',
+      'Question 1 of game answered by the operator', 'Question 1 of game answered by the maintainer (via a Claude Code session)']
+    for (const stop of stops) {
+      for (const record of records) {
+        const now = checked(synthetic({ status: 'paused', nodes: { ...WORKING, handoff: 'paused' }, events: [...LAUNCHED, stop, [1900, 'launch_game', null, record]] }))
+        assert.equal(now.situation, 'interrupted', `${stop[3].slice(0, 20)} then ${record}`)
+        assert.equal(now.interruption, 'a', record)
+        assert.ok(commands(now).includes('"$PY" -m workflow automatic "$RUN" --live --by operator'), record)
+        assert.doesNotMatch(prose(now), /No action needed/, record)
+      }
+    }
   })
 
   it('interrupted (a): a start that did not complete is reconciled, or started when the run never was, then resumed', () => {
@@ -665,14 +706,14 @@ describe('deriveNow', () => {
     }))
     assert.equal(reconcile.situation, 'interrupted')
     assert.equal(reconcile.interruption, 'a')
-    assert.deepEqual(commands(reconcile), ['"$PY" -m workflow reconcile "$RUN"', '"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(reconcile), ['"$PY" -m workflow reconcile "$RUN" --by operator', '"$PY" -m workflow automatic "$RUN" --live --by operator'])
     assert.equal(reconcile.next.label, 'Reconcile the launches that did not complete, then resume the controller: nothing is relaunched')
     assert.deepEqual(reconcile.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Ambiguous startup' }])
     assert.doesNotMatch(prose(reconcile), /new run|Blocked before freeze/)
     const never = checked(synthetic({ status: 'running', nodes: { challenge: 'succeeded' }, events: [[5, null, 'running', 'Automatic checkpoint controller PID 4242'], [6, null, 'paused', NEVER_STARTED_STOP]] }))
     assert.equal(never.situation, 'interrupted')
     assert.equal(never.interruption, 'a')
-    assert.deepEqual(commands(never), ['"$PY" -m workflow start "$RUN" --live', '"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(never), ['"$PY" -m workflow start "$RUN" --live --by operator', '"$PY" -m workflow automatic "$RUN" --live --by operator'])
   })
 
   it('interrupted (a): on a lane named controller, a resumable stop belongs to the run, not to the lane', () => {
@@ -684,7 +725,7 @@ describe('deriveNow', () => {
     }))
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'a')
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
     assert.ok(now.next.steps.some(step => step.text === 'git -C <source checkout> switch feature/workflow-guardrails/workflow-guardrails-001'))
     assert.match(now.next.label, /^Switch the run's source checkout back to feature\/workflow-guardrails\/workflow-guardrails-001,/)
   })
@@ -701,7 +742,7 @@ describe('deriveNow', () => {
     assert.equal(now.tone, 'interrupted')
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Independent review/)
     assert.doesNotMatch(prose(now), /Failed/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
   })
 
   it('interrupted (b): the review recorded an outage, and keeps its graph error, so it is served failed (automatic.py:811)', () => {
@@ -713,7 +754,7 @@ describe('deriveNow', () => {
     assert.equal(now.interruption, 'b')
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Independent review/)
     assert.doesNotMatch(prose(now), /Failed/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
   })
 
   const FREEZE_NOTE: EventSpec = [1800, 'handoff', 'paused', `${OUTAGE} The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches nothing. Once \`claude\` works, resume with: python -m workflow automatic <path> --live`]
@@ -724,7 +765,7 @@ describe('deriveNow', () => {
     assert.equal(now.interruption, 'b')
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs/)
     assert.doesNotMatch(prose(now), /Failed/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
     // Resumed: the freeze runs again (automatic.py resume_interrupted_freeze) while the handoff still reads failed.
     const resumed = checked(synthetic({
       status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'failed' },
@@ -750,7 +791,7 @@ describe('deriveNow', () => {
     const now = checked({ ...run, controller: [{ at: t(100), value: 'running' }, { at: t(120), value: 'not_running' }, { at: t(140), value: 'not_running' }] })
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'c')
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
     assert.equal(deriveNow({ ...run, controller: [{ at: t(120), value: 'not_running' }] }).situation, 'running')
     assert.equal(controllerNotRunning([{ at: t(120), value: 'not_running' }, { at: t(130), value: 'not_running' }]), false, '10 s is a checkpoint hand-over')
   })
@@ -784,8 +825,8 @@ describe('deriveNow', () => {
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'd')
     assert.match(textToString(now.headline, T0), /^‖ Repair 1 applied; the run continues when you resume it/)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live'])
-    assert.deepEqual(commands(checked(repaired('retry'))), ['"$PY" -m workflow retry "$RUN"'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
+    assert.deepEqual(commands(checked(repaired('retry'))), ['"$PY" -m workflow retry "$RUN" --by operator'])
   })
 
   describe('blocked_before_freeze', () => {
@@ -800,7 +841,7 @@ describe('deriveNow', () => {
         assert.equal(now.reasonSource, 0)
         assert.match(textToString(now.headline, T0), /^✗ Blocked before freeze at Freeze worker handoffs · Worker game deadline exhausted; no automatic relaunch/)
         assert.match(textToString(now.reason, T0), /11:00.*Worker game deadline exhausted/)
-        assert.deepEqual(commands(now), ['"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic'])
+        assert.deepEqual(commands(now), ['"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic --by operator'])
         assert.match(now.next.label, /`repair` refuses a lane blocked before freeze; an automatic run then needs a new run/)
         assert.doesNotMatch(prose(now), /retry/)
       }
@@ -841,7 +882,7 @@ describe('deriveNow', () => {
     assert.equal(now.situation, 'challenge_paused')
     assert.match(textToString(now.headline, T0), /^‖ Paused: the design challenge found 1 P1; no worker launched/)
     assert.match(textToString(now.reason, T0), /Seats can be squatted\./)
-    assert.deepEqual(commands(now), ['"$PY" -m workflow resume "$RUN"', '"$PY" -m workflow resume "$RUN" --accept-challenge "<reason>"'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow resume "$RUN" --by operator', '"$PY" -m workflow resume "$RUN" --accept-challenge "<reason>" --by operator'])
     // Edited where the run reads them: its source checkout, not the operator's own (C56).
     assert.equal(now.next.steps[0].kind === 'command' ? now.next.steps[0].caption : null,
       "After editing the tasks, decisions.md or the PRD in the run's source checkout (the paused message and status name it):")
@@ -856,7 +897,7 @@ describe('deriveNow', () => {
     }))
     assert.equal(now.situation, 'awaiting_approval')
     assert.match(textToString(now.headline, T0 + 720_000), /^\? Awaiting your approval since 10:00 \(12 min ago\)/)
-    assert.deepEqual(commands(now), [`"$PY" -m workflow approve "$RUN" --bundle-sha256 ${fixes.review!.bundle_sha256}`])
+    assert.deepEqual(commands(now), [`"$PY" -m workflow approve "$RUN" --bundle-sha256 ${fixes.review!.bundle_sha256} --by operator`])
     assert.match(prose(now), /viewing approves nothing/)
   })
 
@@ -876,7 +917,7 @@ describe('deriveNow', () => {
       results: { [GAME_1]: skeletonGame1 }, inputs: inputs => { inputs.mode = 'manual'; inputs.automatic = null },
     }))
     assert.equal(manual.situation, 'check_failed')
-    assert.deepEqual(commands(manual), ['"$PY" -m workflow retry "$RUN" --phase worker --node game'])
+    assert.deepEqual(commands(manual), ['"$PY" -m workflow retry "$RUN" --phase worker --node game --by operator'])
   })
 
   it('check_failed: while the retry runs, the headline reads the failed attempt and never asks for the running one', () => {
@@ -1081,6 +1122,14 @@ describe('deriveAttention', () => {
     assert.equal(deriveAttention(lanes([], { approval: true })).top?.kind, 'approval')
   })
 
+  it('keeps a pane on a lane named controller past the controller\'s own action rows and a note', () => {
+    for (const message of ['Automatic by the maintainer: the supervisor continues the run', 'Start by the operator (via a Claude Code session)', 'Note N-2 from the operator to worker controller: undeliverable, not typed (lane_blocked)']) {
+      const kept = deriveAttention(lanes([pane, [50, 'launch_controller', 'running', message]]))
+      assert.equal(kept.top?.kind, 'pane', message)
+      assert.equal(kept.top?.node_id, 'launch_controller', message)
+    }
+  })
+
   it('clears a pane once any later event names that node', () => {
     const cleared = deriveAttention(lanes([pane, [50, 'launch_controller', 'running', 'Awaiting explicit completion signal; idle is not acceptance']]))
     assert.equal(cleared.top, null)
@@ -1117,6 +1166,13 @@ describe('deriveFocus, humanizeEvent, attemptResultUris, laneLines', () => {
       'gate blocked on attempt 2: Executed check failed: npm test; unit: exit 1')
     assert.equal(humanizeEvent({ message: '[adapter] Candidate gate passed on attempt 3 after attempt 2 failed' }), 'gate passed on attempt 3 after attempt 2 failed')
     assert.equal(humanizeEvent({ message: '[ui] Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae' }), 'combined revision 1ab6b95', 'the verdict reads as before')
+  })
+
+  it('humanizes a repair whoever recorded it (C17)', () => {
+    const rest = 'snapshot 50b14b3c = 5c1a734e + b27d726a on snapshot 5c1a734e (vitest.config.ts). Reason: Vitest summaries.'
+    for (const actor of ['the operator', 'the operator (via a Claude Code session)', 'the maintainer']) {
+      assert.equal(humanizeEvent({ message: `Repair 1 by ${actor}: ${rest}` }), 'repair 1: snapshot 50b14b3 = 5c1a734 + b27d726 (1 file)', actor)
+    }
   })
 
   it('lists attempt result URIs per lane, oldest first', () => {

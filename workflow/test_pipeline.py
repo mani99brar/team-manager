@@ -17,6 +17,7 @@ from unittest.mock import patch
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from .actor import OPERATOR_ONLY
 from .automatic import automatic_settings
 from .checks import execute, now
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
@@ -32,9 +33,10 @@ def isolate_registry() -> None:
     """setUpModule of every test module whose runs can record attention (an integration, a paused design challenge, the
     automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
     temporary directory, so attention.jsonl never lands beside the operator's registry. Child processes inherit it, and
-    a test that sets the variable itself still wins."""
+    a test that sets the variable itself still wins. CLAUDECODE is emptied too: run from a Claude Code session the event texts
+    would name it (actor.actor_text), and the tests that expect the marker set it themselves."""
     temp = tempfile.TemporaryDirectory()
-    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json")})
+    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": ""})
     environment.start()
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
@@ -42,6 +44,18 @@ def isolate_registry() -> None:
 
 def setUpModule():
     isolate_registry()
+
+
+GATES = frozenset({"start", "automatic", "retry", "reconcile", "approve"})
+
+
+def by_operator(argv: list, gate: bool | None = None) -> list:
+    """`argv` with `--by operator` when it runs a gate action (C17) and names no actor itself: the pipeline's own gates by
+    their action word, `gate=True` for resume, answer, repair and note. The tests of the actor rule name theirs."""
+    argv = list(argv)
+    if "--by" in argv or not (gate if gate is not None else bool(argv) and argv[0] in GATES):
+        return argv
+    return [*argv, "--by", "operator"]
 
 
 class FakeSessions:
@@ -859,7 +873,7 @@ def pipeline_cli(*arguments: str) -> tuple[int, str, str]:
     from . import pipeline
     out, err = io.StringIO(), io.StringIO()
     code = 0
-    with patch.object(sys, "argv", ["workflow", *arguments]), patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with patch.object(sys, "argv", ["workflow", *by_operator(arguments)]), patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             pipeline.main()
         except SystemExit as exit_:
@@ -1112,12 +1126,12 @@ class RecordTests(unittest.TestCase):
         code, _, err = pipeline_cli("export", str(f.directory))
         self.assertEqual(code, 0, err)
         printed, _ = self.status()
-        self.assertTrue(printed["next_step"].startswith(f"no worker started yet: {run('start')} --live ({hint}). Then: "), printed["next_step"])
+        self.assertTrue(printed["next_step"].startswith(f"no worker started yet: {run('start')} --live --by operator ({hint}). Then: "), printed["next_step"])
         # (a) A challenge job started and never decided (Ctrl-C during it, or start or resume still running it): resume reruns
         # it with no edit, and the override is refused without a paused record, so it is never offered.
         running = f.directory / "challenge.running.json"
         save_json(running, {"attempt": 1, "session_id": "00000000-0000-4000-8000-000000000001", "started_at": now()})
-        rerun = f"if no start or resume is running, {run('resume')} reruns it (no edit needed; {hint}). Then: "
+        rerun = f"if no start or resume is running, {run('resume')} --by operator reruns it (no edit needed; {hint}). Then: "
         printed, _ = self.status()
         self.assertTrue(printed["next_step"].startswith(f"design challenge attempt 1 was started and not decided: {rerun}"), printed["next_step"])
         self.assertNotIn("--accept-challenge", printed["next_step"])
@@ -1128,15 +1142,15 @@ class RecordTests(unittest.TestCase):
         printed, _ = self.status()
         self.assertTrue(printed["next_step"].startswith(
             f"design challenge attempt 1 paused the run: edit the task files, decisions.md or the PRD in the source checkout {f.plan['repository']}, "
-            f"then {run('resume')}, "
-            f"or accept it with {run('resume')} --accept-challenge \"<reason>\" ({hint}). Then: "), printed["next_step"])
+            f"then {run('resume')} --by operator, "
+            f"or accept it with {run('resume')} --by operator --accept-challenge \"<reason>\" ({hint}). Then: "), printed["next_step"])
         # A rerun started after the pause and never decided; a resume that stopped before it pinned the revised files; one that
         # pinned them and failed before its job (its checkout): each is rerun by resume, and the override is refused.
         for state, said in ((lambda: save_json(running, {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()}),
                              f"design challenge attempt 2 was started and not decided: {rerun}"),
                             (lambda: save_json(f.directory / REVISION_INTENT, {"base_commit": f.plan["base_commit"], "paths": []}),
                              f"an interrupted resume has not finished moving the run to the revised feature files: if no resume is running, "
-                             f"{run('resume')} finishes it and reruns the design challenge ({hint}). Then: "),
+                             f"{run('resume')} --by operator finishes it and reruns the design challenge ({hint}). Then: "),
                             (lambda: save_json(f.directory / "challenge.json", {**paused, "pinned": {**paused["pinned"], "tasks_sha256": "0" * 64}}),
                              f"design challenge attempt 1 read other feature files than the plan now pins, and no later attempt was decided: {rerun}")):
             with self.subTest(said.split(":")[0]):
@@ -1170,7 +1184,7 @@ class RecordTests(unittest.TestCase):
         code, _, err = pipeline_cli("export", str(f.directory))
         self.assertEqual(code, 0, err)
         save_json(f.directory / "challenge.json", {"status": "paused", "attempt": 1, "pinned": pinned_digests(f.directory, f.plan)})
-        resume = f"{sys.executable} -m workflow resume {f.directory}"
+        resume = f"{sys.executable} -m workflow resume {f.directory} --by operator"
         hint = "add --herdr for the worker panes, as launch opens them unless --no-herdr"
         offered = f"or accept it with {resume} --accept-challenge \"<reason>\" ({hint}). Then: "
         self.assertIn(offered, self.status()[0]["next_step"])
@@ -1321,6 +1335,89 @@ class AdvanceTests(unittest.TestCase):
             self.assertEqual(graph.get_state(config).values, {"first": "done", "second": "done"})
         self.assertEqual(seen[1], ({"first": "done", "second": "done"}, ()))
         self.assertIn("disk full", "".join(str(call) for call in stderr.write.call_args_list))
+
+
+def append_many(directory: str, node: str, count: int) -> None:
+    from .pipeline import append_event
+    for index in range(count):
+        append_event(Path(directory), node, "running", f"{node} row {index}")
+
+
+class EventLogTests(unittest.TestCase):
+    def test_processes_appending_at_once_number_their_events_strictly_increasing(self):
+        """`answer` and `note` append beside a running automatic controller, each from its own process: the events lock
+        keeps one sequence per line, which the viewer's reader requires (server/projects.ts readEvents)."""
+        import multiprocessing
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as temp:
+            writers = [context.Process(target=append_many, args=(temp, f"lane{index}", 40)) for index in range(4)]
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join(60)
+                self.assertEqual(writer.exitcode, 0)
+            events = [json.loads(line) for line in (Path(temp) / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["sequence"] for event in events], list(range(1, 161)))
+
+
+class ActorTests(unittest.TestCase):
+    """C17: every gate action names who runs it (--by operator|maintainer, no default); the maintainer, a Claude session acting
+    for the operator, is refused the operator's decisions. Both refusals come before the run directory is read."""
+
+    def run_main(self, main, argv: list) -> tuple[int, str]:
+        output = io.StringIO()
+        code = 0
+        with patch.object(sys, "argv", ["workflow", *argv]), patch.dict(os.environ), contextlib.redirect_stdout(output), \
+                contextlib.redirect_stderr(output):
+            try:
+                main() if argv and main.__module__ == "workflow.pipeline" else main(argv)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, output.getvalue()
+
+    def gates(self, missing: Path) -> list:
+        from . import pipeline
+        from .guardrails import answer_main, resume_main
+        from .launch import main as launch_main
+        from .notes import note_main
+        from .repair import repair_main
+        run = str(missing)
+        return [("start", pipeline.main, ["start", run, "--live"]), ("automatic", pipeline.main, ["automatic", run, "--live"]),
+                ("retry", pipeline.main, ["retry", run]), ("reconcile", pipeline.main, ["reconcile", run]),
+                ("approve", pipeline.main, ["approve", run, "--bundle-sha256", "0" * 64]), ("resume", resume_main, [run]),
+                ("accept-challenge", resume_main, [run, "--accept-challenge", "fine"]), ("answer", answer_main, [run, "ui", "A"]),
+                ("repair", repair_main, [run, "ui", "--commit", "HEAD", "--reason", "fix"]),
+                ("launch", launch_main, ["demo", "--repo", run, "--live"]), ("note", note_main, [run, "ui", "Hold the tests."])]
+
+    def test_every_gate_refuses_a_missing_by_before_it_reads_the_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for action, main, argv in self.gates(Path(temp) / "missing"):
+                with self.subTest(action=action):
+                    code, output = self.run_main(main, argv)
+                    self.assertNotEqual(code, 0)
+                    # An operator decision names only the operator: --by maintainer would be refused next.
+                    self.assertIn(f"{action} requires --by operator: " if action in OPERATOR_ONLY else f"{action} requires --by operator|maintainer", output)
+                    self.assertNotIn("No such file", output)
+
+    def test_the_maintainer_is_refused_the_operators_decisions_before_it_reads_the_run(self):
+        refused = {"approve", "accept-challenge", "answer", "repair", "launch"}
+        with tempfile.TemporaryDirectory() as temp:
+            for action, main, argv in self.gates(Path(temp) / "missing"):
+                code, output = self.run_main(main, [*argv, "--by", "maintainer"])
+                with self.subTest(action=action):
+                    self.assertNotEqual(code, 0)  # The run does not exist: every gate stops, the allowed ones on the missing run.
+                    if action in refused:
+                        self.assertIn(f"{action} is the operator's decision: --by maintainer is refused", output)
+                    else:
+                        self.assertNotIn("--by maintainer is refused", output)
+
+    def test_the_actor_text_names_a_claude_code_session_without_refusing_it(self):
+        from .actor import actor_text, require_actor
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            self.assertEqual(actor_text("operator"), "the operator (via a Claude Code session)")
+            self.assertEqual(require_actor(SimpleNamespace(by="operator"), "approve"), "operator")
+        with patch.dict(os.environ, {"CLAUDECODE": ""}):
+            self.assertEqual(actor_text("maintainer"), "the maintainer")
 
 
 if __name__ == "__main__":

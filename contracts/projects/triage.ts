@@ -200,7 +200,10 @@ export const CONTROLLER_DEBOUNCE_MS = 15_000
 /** A silence longer than this becomes a gap row (5.2 rule 6). */
 export const GAP_MS = 120_000
 
-const workflow = (verb: string, ...args: string[]) => ['"$PY" -m workflow', verb, '"$RUN"', ...args].join(' ')
+/** The gate actions (workflow/actor.py, C17): each requires `--by`, and the commands the viewer offers are the operator's. */
+const GATES: ReadonlySet<string> = new Set(['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair'])
+export const BY_OPERATOR = '--by operator'
+const workflow = (verb: string, ...args: string[]) => ['"$PY" -m workflow', verb, '"$RUN"', ...args, ...(GATES.has(verb) ? [BY_OPERATOR] : [])].join(' ')
 const command = (text: string, caption?: string): Step => caption ? { kind: 'command', text, caption } : { kind: 'command', text }
 const prose = (text: string): Step => ({ kind: 'text', text })
 
@@ -236,9 +239,9 @@ const ERRNO_ROW = /^\[Errno \d+\]/
 const STOP_UNCONFIRMED = /^Could not confirm worker stop: /
 /** automatic.py:983 (`<phase>/<lane>`), written by advance_or_block as a `blocked` controller row (:1011). */
 const IDENTICAL = /\b(worker|candidate)\/([a-z][a-z0-9-]*) failed identically on attempts (\d+) and (\d+)/
-/** repair.py:450 and :442. */
+/** repair.py:450 and :442; the actor (C17) is the operator, or the maintainer before the rule refused it, maybe via Claude Code. */
 const REPAIR_APPLIED = /^Repair (\d+) applied/
-const REPAIR_BY_OPERATOR = /^Repair (\d+) by the operator: snapshot ([0-9a-f]+) = [^(]*\(([^)]*)\)/
+const REPAIR_BY_OPERATOR = /^Repair (\d+) by the (?:operator|maintainer)(?: \(via a Claude Code session\))?: snapshot ([0-9a-f]+) = [^(]*\(([^)]*)\)/
 /** repair.py:109-114: the continuation a repair names for its run's mode. */
 const CONTINUE_WITH = /Continue with python -m workflow (automatic|retry)\b/
 /** automatic.py RESUME_NOTE (:1116) and UNAVAILABLE_NOTE (:1121). */
@@ -268,9 +271,13 @@ const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed a
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
   /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
+/** pipeline.py action_event: who ran a gate action (C17), a log line. */
+const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, ...BARE_STOPS]
+/** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
+const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/
@@ -362,7 +369,7 @@ const PHRASES: Phrase[] = [
   [/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:, [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})*$/, () => 'verdict recorded'],
   [/^\[Errno (\d+)\] No such file or directory: (.+)$/, (n, what) => `[Errno ${n}] ${what} not found`],
   [/^(?:worker|candidate)\/([a-z][a-z0-9-]*) (failed identically on attempts \d+ and \d+); not transient, inspect \S+ ?(.*)$/, (lane, what, rest) => `${lane} ${what}; not transient. ${rest}`.trim()],
-  [/^Repair (\d+) by the operator: snapshot (\S+) = (\S+) \+ (\S+) on \S+ \S+ \(([^)]*)\)[\s\S]*$/,
+  [/^Repair (\d+) by the (?:operator|maintainer)(?: \(via a Claude Code session\))?: snapshot (\S+) = (\S+) \+ (\S+) on \S+ \S+ \(([^)]*)\)[\s\S]*$/,
     (n, snapshot, base, fix, files) => `repair ${n}: snapshot ${snapshot} = ${base} + ${fix} (${plural(files.split(', ').length, 'file')})`],
 ]
 /** 40/64-character SHAs and 8-character abbreviations; session UUIDs are matched first and kept whole. */
@@ -581,7 +588,7 @@ function computeTimeline(run: RunData): Timeline {
     const started = worker.launch.native_started_at ?? worker.launch.launch_requested_at
     const span = newSpan(worker.launch_node_id, worker.node_id, 1, { at: started, source: 'receipt', note: worker.launch.native_started_at ? 'launch receipt' : 'launch requested (receipt)' })
     span.status = status
-    const latest = rows.filter(row => row.node === worker.launch_node_id && !row.marker).at(-1)
+    const latest = rows.filter(row => row.node === worker.launch_node_id && !row.marker && !NOTE_ROW.test(row.event.message)).at(-1)
     span.outcome = latest?.text ?? ''
     if (worker.stop?.confirmed_at) close(span, status, { at: worker.stop.confirmed_at, source: 'receipt', note: 'stop receipt' }, 'worked · stopped cleanly')
     spans.push(span)
@@ -910,7 +917,7 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
   const found: Pane[] = []
   for (const node of run.detail.definition.nodes) {
     if (!node.node_id.startsWith('launch_') && node.node_id !== 'review') continue
-    const latest = rows.filter(row => row.node === node.node_id && row.marker === null).at(-1)
+    const latest = rows.filter(row => row.node === node.node_id && row.marker === null && !NOTE_ROW.test(row.event.message)).at(-1)
     const match = latest ? PANE.exec(latest.event.message) : null
     if (!latest || !match) continue
     const reviewer = PANE_REVIEWER.exec(latest.event.message)?.[1]
@@ -1290,7 +1297,7 @@ function blockedBeforeFreezeNow(context: Context): Draft | null {
   const steps: Step[] = [
     ...(unconfirmed ? [prose('Stop the sessions the controller could not confirm stopped, by their exact ids from each lane\'s <lane>.interactive.json (claude stop <background_id>).')] : []),
     prose('Fix the cause in the feature files if it lies there, and commit them in the target.'),
-    command(`"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic`),
+    command(`"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic ${BY_OPERATOR}`),
   ]
   return {
     situation: 'blocked_before_freeze', tone: 'blocked', glyph: '✗', since: row?.at ?? focus.since, lane: fourth?.[1] ?? blocked?.node_id ?? null,
@@ -1464,7 +1471,7 @@ function reviewBlockedNow(context: Context): Draft | null {
       steps: [
         command('"$PY" -m workflow init <fixes-feature> --repo <target repo>'),
         prose('Fill in the TODOs it writes (/workflow-grill <fixes-feature> writes decisions.md), then commit the feature files in the target.'),
-        command('"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic'),
+        command(`"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic ${BY_OPERATOR}`),
       ],
     },
   }

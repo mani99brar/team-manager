@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from .actor import BY_OPERATOR, actor_record, actor_text, add_actor_argument, require_actor
 from .checks import now
 from .sessions import TransientInfraError, git, plan_workers, popen_claude, read_json, run_lock, save_json, stale_claude_warning, terminate
 from .verification import CONTRACTS, validate_schema
@@ -630,29 +631,35 @@ def disabled_record(directory: Path, plan: dict) -> dict:
             "accepted_reason": None, "decided_at": now()}
 
 
-def challenge_gate(runtime, herdr: bool = False) -> bool:
+def challenge_gate(runtime, herdr: bool = False, announce=None) -> bool:
     """Called by `start` before any worker launch. True: launch the workers. False: the challenge paused the run.
 
     Runs without the plan's `challenge` key (every feature before 2.2.0 and every earlier run) pass untouched. The
-    `resume` commands it names keep `start`'s --herdr (`herdr`).
+    `resume` commands it names keep `start`'s --herdr (`herdr`). `announce`, when given, is called once the start is
+    not refused, before the challenge runs or the workers launch: `start` records who ran it there.
     """
+    announce = announce or (lambda: None)
     plan, directory = runtime.plan, runtime.directory
     if "challenge" not in plan:
+        announce()
         return True
     if (directory / REVISION_INTENT).exists():
         raise RuntimeError(f"{UNFINISHED_REVISION}; no worker launches before it does. Rerun it with: {resume_command(directory, herdr)}")
     current = load_challenge(directory)
     if plan["challenge"] is False:
+        announce()
         if current is None:
             save_challenge(directory, disabled_record(directory, plan))
             runtime.event("controller", "running", "Design challenge disabled by the feature (challenge: false)")
         return True
     if current is not None:
         if current["status"] in {"passed", "accepted"}:
+            announce()
             return True
         raise RuntimeError(f"The design challenge paused this run; edit the feature files {edited_in(plan)}, then: {resume_command(directory, herdr)}")
     if (directory / "challenge.running.json").exists():
         raise RuntimeError(f"A design challenge job was started and never decided; rerun it with: {resume_command(directory, herdr)}")
+    announce()
     return run_challenge(runtime, 1, herdr)["status"] == "passed"
 
 
@@ -688,7 +695,7 @@ def run_finished_note(directory: Path, plan: dict) -> str | None:
 
 
 def resume_command(directory: Path, herdr: bool = False, accept: bool = False) -> str:
-    command = f"{sys.executable} -m workflow resume {directory}"
+    command = f"{sys.executable} -m workflow resume {directory} {BY_OPERATOR}"
     if accept:
         command += ' --accept-challenge "<reason>"'
     return command + (" --herdr" if herdr else "")
@@ -990,13 +997,42 @@ def unchanged_since(directory: Path, plan: dict, record: dict) -> bool:
             and unused_edits(directory, plan) is None)
 
 
+def interrupted_rerun(directory: Path, plan: dict, record: dict) -> bool:
+    """A rerun started after `record`'s paused attempt and never decided: its job was started (a newer
+    challenge.running.json), it re-pinned the files and failed before its job (stale_pins), or it was moving the run to the
+    revised files (REVISION_INTENT). The operator decided that rerun; finishing it decides nothing new."""
+    running = directory / "challenge.running.json"
+    return ((running.exists() and read_json(running)["attempt"] > record["attempt"]) or (directory / REVISION_INTENT).exists()
+            or bool(stale_pins(directory, plan, record)))
+
+
+def refuse_maintainer(directory: Path, plan: dict, current: dict | None, actor: str) -> None:
+    """`resume --by maintainer` only where it decides nothing (C17, decision 2a): no record yet, a challenge passed or accepted
+    (the workers' launch), or an interrupted rerun newer than the paused record. A paused challenge itself, with or without
+    edits, waits on the operator: a rerun of edits is theirs to commit, a bare rerun re-rolls their challenge. So does a
+    pinned file edited after the interrupted rerun: that rerun committed its own edits before its re-pin and its job (an
+    interrupted commit lists them in REVISION_INTENT), so any other is a later edit, perhaps half-written."""
+    if actor != "maintainer" or current is None or current["status"] != "paused":
+        return
+    if interrupted_rerun(directory, plan, current):
+        intent = directory / REVISION_INTENT
+        committing = set(read_json(intent)["paths"]) if intent.exists() else set()
+        later = [path for path in dirty_paths(Path(plan["repository"])) if path in pinned_paths(plan) and path not in committing]
+        if not later:
+            return
+        raise ValueError(f"Feature files were edited after the interrupted rerun ({', '.join(later)}): committing them is the operator's "
+                         f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
+    raise ValueError(f"Design challenge attempt {current['attempt']} paused this run: rerunning or accepting it is the operator's "
+                     f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
+
+
 def launched_workers(directory: Path, plan: dict) -> list[str]:
     """Lanes with a launch receipt, which InteractiveSessions saves before `claude --bg`. `<lane>.json` is none: only the
     legacy print workers write it, and a lane may share its name with a run file (plan.json, policy.json, terminals.json)."""
     return [node for node in plan_workers(plan) if (directory / f"{node}.interactive.json").exists()]
 
 
-def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = False) -> dict:
+def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = False, actor: str = "operator") -> dict:
     """`resume`: rerun the challenge on the re-pinned feature files as the next attempt, or record `accepted` with a reason.
 
     Only before any worker launch. Edited feature files are committed on the run's branch first and the run moves to
@@ -1004,8 +1040,10 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     is returned as it is. The override accepts only an attempt that read what the plan pins now: a rerun that failed
     after its re-pin leaves the paused record of the previous attempt, which read other files. A rerun of a paused
     attempt is refused while nothing changed since it (unchanged_since): it would only re-roll the same challenge.
-    The commands the refusal and a paused rerun's record name keep `resume`'s --herdr (`herdr`).
+    The commands the refusal and a paused rerun's record name keep `resume`'s --herdr (`herdr`). `actor` (resume's --by)
+    is checked by refuse_maintainer and named in the event each path writes, never in challenge.json.
     """
+    from .pipeline import action_event
     directory, plan = runtime.directory, runtime.plan
     if not has_challenge(plan):
         raise ValueError("This run has no design challenge to resume (feature.json before 2.2.0, or challenge: false)")
@@ -1013,7 +1051,9 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     if launched:
         raise ValueError(f"Workers already launched ({', '.join(launched)}); resume applies only before any worker starts")
     current = load_challenge(directory)
+    refuse_maintainer(directory, plan, current, actor)
     if current is not None and current["status"] in {"passed", "accepted"}:
+        action_event(runtime.event, actor, "resume", f"design challenge attempt {current['attempt']} {current['status']}; launching the workers")
         return current
     if accept_reason is not None:
         if not accept_reason.strip():
@@ -1028,7 +1068,7 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
                              "files no challenge read; rerun resume without --accept-challenge")
         record = {**current, "status": "accepted", "accepted_reason": accept_reason.strip(), "decided_at": now()}
         save_challenge(directory, record)
-        runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by the operator: {record['accepted_reason']}")
+        runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {record['attempt']} accepted by {actor_text(actor)}: {record['accepted_reason']}")
         return record
     if current is not None and current["status"] == "paused" and unchanged_since(directory, plan, current):
         raise ValueError(f"Design challenge attempt {current['attempt']} paused this run, and nothing it read has changed since: a rerun "
@@ -1042,6 +1082,7 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     commit_revision(runtime, attempt - 1)
     repin(directory, plan, runtime.policy)  # The moved base and the re-pinned files in one plan.json write.
     (directory / REVISION_INTENT).unlink()
+    action_event(runtime.event, actor, "resume", f"rerunning the design challenge as attempt {attempt}")
     runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt} on base {plan['base_commit']}")
     return run_challenge(runtime, attempt, herdr)
 
@@ -1132,11 +1173,11 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
         deadline["paused_at"] = iso(at)
         save_json(directory / f"{node}.deadline.json", deadline)
     runtime.event(node, "interactive", f"Worker {node} asked question {number} of {MAX_QUESTIONS}; its deadline is paused until "
-                                       f"`python -m workflow answer {directory} {node} \"<text>\"`: {item['question']}")
+                                       f"`python -m workflow answer {directory} {node} {BY_OPERATOR} \"<text>\"`: {item['question']}")
     from .attention import attention
     asked = " ".join(item["question"].split())
     attention(directory, "question", f"Worker {node} asked question {number} of {MAX_QUESTIONS}: {asked}{'' if asked.endswith(('.', '?', '!')) else '.'} "
-                                     f"Answer: python -m workflow answer {directory} {node} \"<text>\"", node=node)
+                                     f"Answer: python -m workflow answer {directory} {node} {BY_OPERATOR} \"<text>\"", node=node)
     return entry
 
 
@@ -1154,13 +1195,14 @@ def went_on(directory: Path, node: str) -> str | None:
     return None
 
 
-def record_answer(directory: Path, node: str, text: str, clock=None, delivered: bool | None = None) -> dict:
+def record_answer(directory: Path, node: str, text: str, clock=None, delivered: bool | None = None, actor: str | None = None) -> dict:
     """The latest question's answer; the deadline restarts now. Refused when no question waits.
 
     `answer` records `delivered: false` and sets it once the text reached the worker, so a failed delivery can be
     retried. It also replaces PANE_ANSWER, which the controller records (without the flag) once the session works
     again: that deadline already runs, and the text still reaches the worker while it is on that question. Once it
-    went on, the text would reach no question (or a shell), so nothing is recorded.
+    went on, the text would reach no question (or a shell), so nothing is recorded. `actor` (answer's --by) is kept as
+    `answered_by`, with `via` when it ran from a Claude Code session.
     """
     if not text.strip():
         raise ValueError("The answer is empty")
@@ -1174,6 +1216,8 @@ def record_answer(directory: Path, node: str, text: str, clock=None, delivered: 
                              "nothing is typed into its pane")
         at = (clock or time.time)()
         questions[-1].update(answer=text, answered_at=iso(at))
+        if actor is not None:
+            questions[-1].update(actor_record(actor, "answered_by"))
         if delivered is not None:
             questions[-1]["delivered"] = delivered
         save_questions(directory, node, questions)
@@ -1350,8 +1394,13 @@ def resume_main(argv=None):
     parser.add_argument("directory", type=Path)
     parser.add_argument("--accept-challenge", metavar="REASON", help="Record the override with this reason and continue without rerunning")
     parser.add_argument("--herdr", action="store_true", help="Attach the worker panes after the launch")
+    add_actor_argument(parser)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
+    try:
+        actor = require_actor(args, "accept-challenge" if args.accept_challenge is not None else "resume")
+    except ValueError as error:
+        parser.exit(1, f"Blocked: {error}\nNothing was changed.\n")
     from langgraph.checkpoint.sqlite import SqliteSaver
     from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
     warning = stale_claude_warning()
@@ -1370,7 +1419,7 @@ def resume_main(argv=None):
                                   (directory / "plan.json", directory / "challenge.json", directory / "challenge.running.json"))
             before = moved()
             try:
-                record = resume_challenge(runtime, args.accept_challenge, args.herdr)
+                record = resume_challenge(runtime, args.accept_challenge, args.herdr, actor)
             except BaseException:
                 # A rerun that failed after its re-pin has moved the base and the files: the viewer refuses an export
                 # whose base is not plan.json's, and shows the failed attempt's event. A refusal that changed nothing
@@ -1400,7 +1449,7 @@ def resume_main(argv=None):
 
 
 def answer_command(directory: Path, node: str, text: str, herdr: bool = True) -> str:
-    return f"{sys.executable} -m workflow answer {directory} {node} {shlex.quote(text)}" + ("" if herdr else " --no-herdr")
+    return f"{sys.executable} -m workflow answer {directory} {node} {BY_OPERATOR} {shlex.quote(text)}" + ("" if herdr else " --no-herdr")
 
 
 def answer_main(argv=None):
@@ -1413,16 +1462,21 @@ def answer_main(argv=None):
     parser.add_argument("node", help="The lane whose latest question this answers")
     parser.add_argument("text")
     parser.add_argument("--no-herdr", action="store_true", help="Print the claude attach command instead of typing into the pane")
+    add_actor_argument(parser)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
     entry = delivered = None
     try:
+        actor = require_actor(args, "answer")
         plan = read_json(directory / "plan.json")
         if args.node not in plan_workers(plan):
             raise ValueError(f"{args.node} is not a lane of this run ({', '.join(plan_workers(plan))})")
         entry = undelivered_answer(directory, args.node, args.text)
         if entry is None:
-            entry = record_answer(directory, args.node, args.text, delivered=False)
+            entry = record_answer(directory, args.node, args.text, delivered=False, actor=actor)
+            from .pipeline import append_event
+            # A plain record, like a note's: no lane status, so an interrupted controller stays visible.
+            append_event(directory, args.node, "note", f"Question {entry['n']} of {args.node} answered by {actor_text(actor)}")
             print(f"Recorded the answer to question {entry['n']} of {args.node}; its deadline runs again.")
         else:
             typed = " (typed into its pane, not submitted)" if entry.get("typed") else ""

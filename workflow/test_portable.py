@@ -96,7 +96,7 @@ class Isolated(unittest.TestCase):
     def refused(self, *argv: str) -> str:
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
-                launch_main(list(argv))
+                launch_main(list(argv) if "--by" in argv or "--dry-run" in argv else [*argv, "--by", "operator"])
         command.assert_not_called()
         self.assertEqual(exit_.exception.code, 1)
         return errors.getvalue()
@@ -106,7 +106,7 @@ class Isolated(unittest.TestCase):
         calls = []
         with patch("workflow.launch.run_command", side_effect=lambda command, cwd, check, **_: calls.append((command, cwd))), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            launch_main([*argv, "--live"])
+            launch_main([*argv, "--live", "--by", "operator"])
         return calls
 
 
@@ -265,8 +265,8 @@ class MdManagerDefaults(Isolated):
              "--task", f"ui={copy / 'ui-task.md'}", "--task", f"adapter={copy / 'adapter-task.md'}",
              "--reviewer", f"general={copy / 'reviewers/general.md'}", "--reviewer", f"coverage={copy / 'reviewers/coverage.md'}",
              "--automatic", "--worker-timeout-seconds", "14400", "--review-timeout-seconds", "1800", "--reviewer-transport", "print"],
-            [*base, "start", str(run), "--live", "--repo", str(source), "--herdr"],
-            [*base, "automatic", str(run), "--live", "--repo", str(source)],
+            [*base, "start", str(run), "--live", "--repo", str(source), "--by", "operator", "--herdr"],
+            [*base, "automatic", str(run), "--live", "--repo", str(source), "--by", "operator"],
         ]
         with contextlib.chdir(TOOL):
             printed = self.dry_run("viewer-clarity", "--automatic", "--reviewer-transport", "print")
@@ -396,7 +396,7 @@ class DecisionsNote(Isolated):
         calls = []
         with patch("workflow.launch.run_command", side_effect=lambda command, cwd, check, **_: calls.append(command)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
-            launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--live"])
+            launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--live", "--by", "operator"])
         self.assertEqual(len(calls), 4)  # Nothing is refused: preflight, the branch, prepare and start run as before.
         self.assertIn(f"Note: {LEGACY_DECISIONS_NOTE}\n", errors.getvalue())
         # Split by the grill, it prints no note.

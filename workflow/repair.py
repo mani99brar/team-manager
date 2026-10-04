@@ -23,6 +23,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from .actor import BY_OPERATOR, actor_record, add_actor_argument, require_actor
 from .checks import now
 from .pipeline import Pipeline, build_pipeline, commit_env, digest_file, graph_config, report
 from .sessions import git, read_json, run_lock, save_json
@@ -65,7 +66,7 @@ def candidate_paths(directory: Path, generation: int) -> tuple[Path, Path]:
 
 def repair_command(directory: Path, entry: dict) -> str:
     return (f"{sys.executable} -m workflow repair {shlex.quote(str(directory))} {','.join(entry['lanes'])} "
-            f"--commit {entry['source_commit']} --reason {shlex.quote(entry['reason'])}")
+            f"--commit {entry['source_commit']} --reason {shlex.quote(entry['reason'])} {BY_OPERATOR}")
 
 
 def refuse_recorded(directory: Path) -> None:
@@ -75,13 +76,19 @@ def refuse_recorded(directory: Path) -> None:
             raise RuntimeError(f"Repair {entry['n']} is recorded but not applied; rerun exactly: {repair_command(directory, entry)}")
 
 
+def repaired_by(entry: dict) -> str:
+    """Who recorded the repair: the journal's `by` (C17); entries recorded before it was kept were the operator's."""
+    return f"the {entry.get('by', 'operator')}" + (" (via a Claude Code session)" if entry.get("via") == "claude-code" else "")
+
+
 def repair_note(directory: Path) -> str:
     """The reviewer prompt's line per applied repair: the lanes the operator changed, why, and where that change is."""
     note = ""
     for entry in applied_repairs(directory):
         diff = directory / f"repair-{entry['n']}.diff"
-        note += (f" Lane(s) {', '.join(entry['lanes'])} were repaired by the operator before review (repair {entry['n']}: {entry['reason']}); "
-                 f"the operator's change is {diff}; the rest of review.diff is the workers' work.")
+        by = f"the {entry.get('by', 'operator')}"
+        note += (f" Lane(s) {', '.join(entry['lanes'])} were repaired by {by} before review (repair {entry['n']}: {entry['reason']}); "
+                 f"{by}'s change is {diff}; the rest of review.diff is the workers' work.")
     return note
 
 
@@ -110,15 +117,15 @@ def continuation(runtime, executable: str = sys.executable) -> str:
     """Automatic plans continue only under the supervisor; manual plans with retry, up to the review gate."""
     directory = shlex.quote(str(runtime.directory))
     if runtime.plan.get("automatic"):
-        return f"{executable} -m workflow automatic {directory} --live"
-    return f"{executable} -m workflow retry {directory}"
+        return f"{executable} -m workflow automatic {directory} --live {BY_OPERATOR}"
+    return f"{executable} -m workflow retry {directory} {BY_OPERATOR}"
 
 
 def check_retry(runtime, phase: str, nodes: list[str], executable: str = sys.executable) -> str:
     """Rerunning checks at their next attempts: `retry` runs each on a manual plan; on an automatic plan `retry` only raises
     the attempts, and the supervisor's controller runs them."""
     directory = shlex.quote(str(runtime.directory))
-    commands = ", ".join(f"{executable} -m workflow retry {directory} --phase {phase} --node {node}" for node in nodes)
+    commands = ", ".join(f"{executable} -m workflow retry {directory} --phase {phase} --node {node} {BY_OPERATOR}" for node in nodes)
     return f"{commands}, then {continuation(runtime, executable)}" if runtime.plan.get("automatic") else commands
 
 
@@ -439,7 +446,7 @@ def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
     answers = " ".join(f"Answers {packet['phase']}/{packet['node_id']} attempt {packet['attempt']}: {'; '.join(packet['reasons'])}."
                        for packet in entry["blocked"]["packets"])
     for lane, item in entry["lanes"].items():
-        runtime.event(f"verify_{lane}", "paused", f"Repair {n} by the operator: snapshot {item['commit'][:8]} = {item['previous_commit'][:8]} + "
+        runtime.event(f"verify_{lane}", "paused", f"Repair {n} by {repaired_by(entry)}: snapshot {item['commit'][:8]} = {item['previous_commit'][:8]} + "
                                                   f"{entry['source_commit'][:8]} on {entry['base_kind']} {entry['base_commit'][:8]} "
                                                   f"({', '.join(item['fix_files'])}). Reason: {entry['reason']}. {answers} "
                                                   f"Continue with {continuation(runtime, 'python')}")
@@ -454,7 +461,7 @@ def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
     report(runtime, graph.get_state(config))
 
 
-def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: str, dry_run: bool) -> None:
+def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: str, dry_run: bool, actor: str = "operator") -> None:
     directory, repo = runtime.directory, Path(runtime.plan["repository"])
     source = resolve_commit(repo, commit)
     entries = load_repairs(directory)
@@ -474,7 +481,7 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
     derived = derive(runtime, lanes, source, blocked["packets"][0]["phase"], previous)
     if recorded is None:
         targets = attempt_targets(directory, lanes, runtime.workers)
-        entry = {"n": len(entries) + 1, "status": "recorded", "mode": "commit", "reason": reason, "recorded_at": now(), "blocked": blocked,
+        entry = {"n": len(entries) + 1, "status": "recorded", "mode": "commit", "reason": reason, **actor_record(actor), "recorded_at": now(), "blocked": blocked,
                  "source_commit": source, "base_kind": derived["base_kind"], "base_commit": derived["base_commit"],
                  "expected_candidate_tree": derived["expected_candidate_tree"],
                  "lanes": {lane: {"previous_commit": item["previous_commit"], "fix_files": item["fix_files"]} for lane, item in derived["lanes"].items()},
@@ -535,7 +542,7 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
     path = directory / f"repair-workspace-{number}"
     git_worktree(repo, "add", "--detach", str(path), base)
     command = (f"{sys.executable} -m workflow repair {shlex.quote(str(directory))} {','.join(lanes)} --commit $(git -C {shlex.quote(str(path))} rev-parse HEAD) "
-               f"--reason {shlex.quote(reason or '<why the fix is needed>')}")
+               f"--reason {shlex.quote(reason or '<why the fix is needed>')} {BY_OPERATOR}")
     brief = [f"# Repair workspace {number} of run {runtime.plan['run_id']}", "",
              f"Detached at {base}, {what}. Commit the fix here, never on the source branch {runtime.plan['source_branch']}: "
              f"integration needs it at the run's base {runtime.plan['base_commit']}.", "", f"## Blocked: {blocked['step']}"]
@@ -567,9 +574,11 @@ def repair_main(argv=None):
     parser.add_argument("--reason", help="Why: recorded in the journal, the timeline, the snapshot summary and the reviewer prompt")
     parser.add_argument("--workspace", action="store_true", help="Create a detached worktree at the right base, with a brief, to commit the fix in")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print what --commit would do; write nothing")
+    add_actor_argument(parser)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
     try:
+        actor = require_actor(args, "repair")
         if bool(args.commit) == args.workspace:
             raise ValueError("Give exactly one of --commit <sha> (apply a fix) and --workspace (make a worktree to commit one in)")
         if args.commit and not (args.reason or "").strip():
@@ -588,6 +597,6 @@ def repair_main(argv=None):
                 if args.workspace:
                     make_workspace(runtime, graph, config, lanes, args.reason)
                 else:
-                    apply_repair(runtime, graph, config, lanes, args.commit, args.reason.strip(), args.dry_run)
+                    apply_repair(runtime, graph, config, lanes, args.commit, args.reason.strip(), args.dry_run, actor)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. Nothing launched.\n")

@@ -405,10 +405,12 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
  * The controller process's own rows. `controller` is not a reserved lane ID (C6), so on a lane of that name the raw
  * `controller` node would alias these onto the lane's launch node; they concern the run, so they stay node-less (B1).
  * Then automatic.py's resumable stops (resumable_stop): a changed source branch, a start that did not complete; and the
- * reason drive gives before a stop it does not retry (record_blocked, `Controller blocked: …`).
+ * reason drive gives before a stop it does not retry (record_blocked, `Controller blocked: …`), and who ran a gate
+ * action (pipeline.py action_event, C17).
  */
 const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
   /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/, /^Controller blocked: /,
+  /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/,
   // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them. Then the
   // failed wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a missing session) and
   // read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).

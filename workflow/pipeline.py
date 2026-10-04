@@ -9,6 +9,7 @@ selected lane around the fixed tail. Excluded lanes keep their owned paths off-l
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import html
 import json
@@ -27,6 +28,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from .actor import BY_OPERATOR, actor_text, add_actor_argument, require_actor
 from .attention import attention
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
@@ -36,6 +38,8 @@ from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
+# The gate actions of this CLI: each requires --by (actor.require_actor) and records who ran it in one `controller` event.
+GATE_ACTIONS = frozenset({"start", "automatic", "retry", "reconcile", "approve"})
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 # The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
 REVIEWER_ENTRY_KEYS = frozenset({"reviewer_id", "session_id", "verdict", "accepted_at"})
@@ -255,6 +259,32 @@ def passed_message(packet: dict, retried: int | None = None) -> str:
     return "Required tests and artifacts passed; recorded for the candidate gate: " + ", ".join(deferred) + (f"; {retry}" if retry else "")
 
 
+def append_event(directory: Path, node: str, status: str, message: str) -> None:
+    """One events.jsonl line, numbered after the last one: Pipeline.event, and the commands that need no Pipeline (`answer`, `note`).
+
+    `answer` and `note` append from their own processes beside a running controller, so events.lock is held from the read
+    of the last sequence to the append: two lines never share a sequence, which the viewer refuses (readEvents)."""
+    path = directory / "events.jsonl"
+    with (directory / "events.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            prior = path.read_text().splitlines() if path.exists() else []
+            sequence = json.loads(prior[-1])["sequence"] + 1 if prior else 1
+            record = {"sequence": sequence, "time": now(), "node": node, "status": status, "message": message}
+            with path.open("a") as handle:
+                handle.write(json.dumps(record) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def action_event(event, actor: str, action: str, detail: str = "") -> None:
+    """`<Action> by the operator|maintainer[ (via a Claude Code session)][: detail]` through `event` (Pipeline.event, or a
+    writer of the same shape): a `controller` row, which the viewer reads as a log line."""
+    event("controller", "running", f"{action.capitalize()} by {actor_text(actor)}" + (f": {detail}" if detail else ""))
+
+
 def merge_lanes(left: dict | None, right: dict | None) -> dict:
     """Parallel lane nodes each write their own key; the channel keeps every lane."""
     return {**(left or {}), **(right or {})}
@@ -312,14 +342,7 @@ class Pipeline:
 
     def event(self, node: str, status: str, message: str):
         with self._events_lock:
-            path = self.directory / "events.jsonl"
-            prior = path.read_text().splitlines() if path.exists() else []
-            sequence = json.loads(prior[-1])["sequence"] + 1 if prior else 1
-            record = {"sequence": sequence, "time": now(), "node": node, "status": status, "message": message}
-            with path.open("a") as handle:
-                handle.write(json.dumps(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+            append_event(self.directory, node, status, message)
 
     def launch(self, node: str) -> dict:
         self.event(node, "running", "Launching or reconciling the exact native session")
@@ -1047,13 +1070,13 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
         if waiting:
             return f"{waiting}. Then: {finish_policy(automatic, branch)}"
         from .guardrails import HERDR_HINT
-        supervise = f", then supervise them: {run('automatic')} --live" if automatic else ""
-        return f"no worker started yet: {run('start')} --live ({HERDR_HINT}){supervise}. Then: {finish_policy(automatic, branch)}"
+        supervise = f", then supervise them: {run('automatic')} --live {BY_OPERATOR}" if automatic else ""
+        return f"no worker started yet: {run('start')} --live {BY_OPERATOR} ({HERDR_HINT}){supervise}. Then: {finish_policy(automatic, branch)}"
     if automatic:
-        return (f"{finish_policy(automatic, branch)}. Its supervisor continues the run; if none is running: {run('automatic')} --live "
+        return (f"{finish_policy(automatic, branch)}. Its supervisor continues the run; if none is running: {run('automatic')} --live {BY_OPERATOR} "
                 "(it says why when the run cannot go on)")
     if "integration_approval" in gates:
-        return f"approve the fast-forward of {branch}: {run('approve')} --bundle-sha256 {gates['integration_approval'].get('bundle_sha256')}; nothing is pushed"
+        return f"approve the fast-forward of {branch}: {run('approve')} --bundle-sha256 {gates['integration_approval'].get('bundle_sha256')} {BY_OPERATOR}; nothing is pushed"
     if "independent_review" in gates:
         reviewer = " --reviewer <id>" if plan.get("reviewers") else ""
         return f"import each reviewer's review: {run('review')} --review-file <review.json>{reviewer}; then approve the fast-forward of {branch}"
@@ -1150,9 +1173,12 @@ def main():
                                                          "into plan.sidecar")
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
+    add_actor_argument(parser)
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
+        # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
+        actor = require_actor(args, args.action) if args.action in GATE_ACTIONS else None
         if args.action == "preflight":
             if not args.policy:
                 parser.error("preflight requires --policy")
@@ -1267,7 +1293,7 @@ def main():
             # Launch's word to this process only, so removed before supervise: steps, checks, workers and reviewers inherit os.environ.
             launch_prints_note = os.environ.pop(LAUNCH_NOTE_ENV, None) == "1"
             try:
-                supervise(directory)
+                supervise(directory, actor)
             except TransientInfraError as error:
                 # Resumable, not blocked: 75 (EX_TEMPFAIL). Stale long-lived sessions are the usual source of an update.
                 warning = stale_claude_warning()
@@ -1325,7 +1351,7 @@ def main():
                     if warning:
                         print(warning, file=sys.stderr)
                     # A 2.2.0 run's design challenge decides before any worker launch; a pause exits 0 with the resume commands.
-                    if not challenge_gate(runtime, args.herdr):
+                    if not challenge_gate(runtime, args.herdr, lambda: action_event(runtime.event, actor, "start")):
                         print(paused_message(directory, args.herdr))
                         print(f"Report: {report(runtime, state)}")
                         return
@@ -1380,16 +1406,17 @@ def main():
                     if args.bundle_sha256 != digest:
                         parser.error("Provide the exact --bundle-sha256 displayed at approval")
                     runtime.validate_review(read_json(directory / "review.json"))  # Every declared reviewer approved.
+                    action_event(runtime.event, actor, "approve", f"the fast-forward of bundle {digest[:12]}")
                     value = Command(resume={"approve": digest})
                 elif args.action == "reconcile":
                     if pending or not state.next or not any(step.startswith("launch_") for step in state.next):
                         parser.error("Reconcile requires failed launch steps")
-                    for step in state.next:
-                        if step.startswith("launch_"):
-                            node = step.removeprefix("launch_")
-                            if not (directory / f"{node}.interactive.json").exists():
-                                parser.error("No durable launch intent; cannot reconcile without potentially launching a new agent")
-                            runtime.sessions.run(node)  # Existing receipt path never starts a new process.
+                    launches = [step.removeprefix("launch_") for step in state.next if step.startswith("launch_")]
+                    if not all((directory / f"{node}.interactive.json").exists() for node in launches):
+                        parser.error("No durable launch intent; cannot reconcile without potentially launching a new agent")
+                    action_event(runtime.event, actor, "reconcile", ", ".join(launches))
+                    for node in launches:
+                        runtime.sessions.run(node)  # Existing receipt path never starts a new process.
                 elif args.action == "retry":
                     from .repair import refuse_recorded
                     refuse_recorded(directory)  # Its counters and refs may exist already: only rerunning the repair continues.
@@ -1413,6 +1440,7 @@ def main():
                                       f"An automatic run continues under its supervisor: {continuation(runtime)}")
                                 return
                         attempt = runtime.retry_check(args.phase, args.node)
+                        action_event(runtime.event, actor, "retry", f"{args.phase}/{args.node} attempt {attempt}")
                         if runtime.plan.get("automatic"):
                             # Invoked here, the graph would run the review node, reviewer launches included, in this
                             # process; the supervisor's controller reruns the check at the raised attempt instead.
@@ -1429,7 +1457,9 @@ def main():
                         # Review is still ahead: invoked here, the graph would launch the reviewers in this process, without --live.
                         from .repair import continuation
                         parser.error(f"An automatic run continues under its supervisor until its review is recorded: {continuation(runtime)} "
-                                     "(a check or candidate step that left no verdict first needs retry --phase <phase> --node <lane>)")
+                                     f"(a check or candidate step that left no verdict first needs retry --phase <phase> --node <lane> {BY_OPERATOR})")
+                    if not args.node:
+                        action_event(runtime.event, actor, "retry", ", ".join(state.next))
                 try:
                     advance(runtime, graph, value, config)
                 finally:

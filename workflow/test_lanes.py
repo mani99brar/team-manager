@@ -33,7 +33,7 @@ from .launch import LEGACY_FEATURE_MESSAGE, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, check_review, digest_file, export_run, graph_config, lane_positions, parse_lane_selection, report, validate_pipeline_policy
 from .sessions import git, plan_digest, prepare, read_json, save_json, validate_node_id
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry
 from .verification import CONTRACTS, policy_digest, required_kinds, validate_policy
 
 REPO = Path(__file__).resolve().parents[1]
@@ -156,7 +156,7 @@ class LaneRun(unittest.TestCase):
         return folder
 
     def cli(self, *arguments: str, timeout: int = 300) -> subprocess.CompletedProcess:
-        return subprocess.run([PY, "-m", "workflow", *arguments], cwd=REPO, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run([PY, "-m", "workflow", *by_operator(arguments)], cwd=REPO, capture_output=True, text=True, timeout=timeout)
 
 
 class ThreeLaneRun(LaneRun):
@@ -301,7 +301,7 @@ class SubsetSelection(LaneRun):
         for bad in ("ui,nope", "ui,ui"):
             with patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit):
-                    launch_main(["lanes", "--repo", str(self.repo), "--live", "--workers", bad, "--run-root", str(self.run_root)])
+                    launch_main(["lanes", "--repo", str(self.repo), "--live", "--workers", bad, "--run-root", str(self.run_root), "--by", "operator"])
             command.assert_not_called()
             self.assertIn("Launch blocked", errors.getvalue())
         # The step-by-step path refuses the same selections before allocating anything.
@@ -465,6 +465,9 @@ class DeclaredReviewers(LaneRun):
         # status's finished next step says it too.
         result = self.cli("status", str(self.directory))
         self.assertIn(f"none: {branch} was fast-forwarded to {git(self.repo, 'rev-parse', 'HEAD')}; nothing was pushed. {note}", result.stdout)
+        rows = [event["message"] for event in map(json.loads, (self.directory / "events.jsonl").read_text().splitlines()) if event["node"] == "controller"]
+        self.assertEqual(len(rows), 1, rows)  # C17: the approval names its actor.
+        self.assertRegex(rows[0], rf"^Approve by the operator( \(via a Claude Code session\))?: the fast-forward of bundle {digest[:12]}$")
         exported = read_json(self.directory / "run-state.json")
         self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["verdict"]) for entry in exported["review"]["reviewers"]],
                          [("general", "manual", "approved"), ("coverage", "manual", "approved")])

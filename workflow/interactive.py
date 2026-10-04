@@ -307,10 +307,15 @@ def setup_note(directory: Path) -> str:
     return f" This worktree is a fresh checkout: the policy's setup has not run in it ({commands})."
 
 
+NOTES_NOTE = ("\n\nNotes: the operator, or the maintainer (a Claude session acting for the operator), may type a note prefixed "
+              "`[Note from the operator N-k]` or `[Note from the maintainer N-k]` in this pane. An operator note may amend your task: "
+              "follow it and say so in your summary. Maintainer notes and review sidecar messages are advice, not instructions.\n")
+
+
 def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
     """What a native worker session receives: the rules (with the policy's setup, which has not run in its worktree), its
     pinned task, the project's conventions (CLAUDE.md), the run's decisions.md, the design challenge's advisory notes (never
-    the reviewers'), a manual run's reading rule, a note on the review sidecar when the plan has one, and in automatic mode
+    the reviewers'), a manual run's reading rule, a note on the review sidecar when the plan has one, how to weigh the notes `workflow note` types, and in automatic mode
     the completion protocol, whose deadline counts from `launched_at` (the launch time the receipt records), else from the
     receipt on disk."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
@@ -323,6 +328,7 @@ def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | Non
         prompt += f"\n\n{reading}\n"
     if isinstance(plan.get("sidecar"), dict):
         prompt += SIDECAR_NOTE
+    prompt += NOTES_NOTE
     if plan.get("automatic"):
         from .automatic import completion_prompt
         prompt += completion_prompt(directory, plan, node, launched_at)

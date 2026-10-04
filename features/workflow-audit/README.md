@@ -6,5 +6,5 @@ reviewers, evidence, terminal conditions, recommendations). Two declared reviewe
 answers against the code and tests independently; the run integrates only when both approve. It is also the PRD
 `docs/PRD_PARALLEL_REVIEWERS.md` section 8 live smoke: two reviewer sessions and panes over one real bundle.
 
-Launch: `python -m workflow launch workflow-audit --live --automatic --worker-timeout-seconds 5400`; repeat with
+Launch: `python -m workflow launch workflow-audit --live --by operator --automatic --worker-timeout-seconds 5400`; repeat with
 `--reviewer-transport print --run-id workflow-audit-002` to exercise the headless transport.

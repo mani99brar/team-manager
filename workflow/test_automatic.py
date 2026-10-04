@@ -551,7 +551,7 @@ class WorkerAttentionTests(unittest.TestCase):
             "open_assumptions": [], "untested": None, "falsifying_check": "", "verify_yourself": "", "question": "Option A\nor B?"})
         self.states.update(ui="idle", adapter="blocked")
         self.wait(lambda: None, lambda: None)
-        question = ("question", "ui", f'Worker ui asked question 1 of 3: Option A or B? Answer: python -m workflow answer {self.root} ui "<text>"')
+        question = ("question", "ui", f'Worker ui asked question 1 of 3: Option A or B? Answer: python -m workflow answer {self.root} ui --by operator "<text>"')
         attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", "adapter"])
         pane = ("pane", "adapter", f"Worker adapter needs attention in its pane (native state blocked): answer it there. Reattach the pane with: {attach}")
         self.assertEqual(self.lines(), [question, pane])
@@ -823,6 +823,26 @@ class ReviewCompletionTests(unittest.TestCase):
                 self.assertIn(other, prompt)
         self.assertEqual(completion_protocol_prompt(self.runtime, self.TOKEN, self.digest, "c" * 40),
                          completion_protocol_prompt(self.runtime, self.TOKEN, self.digest, "c" * 40, "review"))
+
+    def test_review_prompt_lists_the_notes_that_reached_a_worker_and_never_the_sidecars_messages(self):
+        """C17: an operator note may amend a lane's task, so the reviewer reads it beside the repairs; a maintainer note is
+        advice. A note that never reached the pane, and every review sidecar message (decision 11), stay out."""
+        from .automatic import review_prompt
+        note = lambda n, author, text, delivery: {"n": n, "id": f"N-{n}", "author": author, "text": text, "sent_at": "2026-10-04T10:00:00Z",
+                                                  "delivery": delivery, "reason": None if delivery == "delivered" else "pane_busy"}
+        save_json(self.root / "ui.notes.json", {"version": "1.0.0", "node_id": "ui", "notes": [
+            note(1, "operator", "Keep the old label as an alias.", "delivered"), note(2, "maintainer", "NEVER-TYPED", "undeliverable")]})
+        save_json(self.root / "adapter.notes.json", {"version": "1.0.0", "node_id": "adapter", "notes": [note(1, "maintainer", "Run the unit tests.", "delivered")]})
+        save_json(self.root / "sidecar.ledger.json", {"messages": [{"id": "M-1", "lane": "ui", "text": "SIDECAR-MESSAGE", "status": "delivered"}]})
+        prompt = review_prompt(self.runtime, self.root / "review.diff")
+        self.assertIn(" Notes typed into the workers' panes during the run (an operator note may amend that lane's task; judge the work against "
+                      "the task as amended): N-1 to ui from the operator (may amend its task): 'Keep the old label as an alias.'; "
+                      "N-1 to adapter from the maintainer (advice): 'Run the unit tests.'.", prompt)
+        self.assertNotIn("NEVER-TYPED", prompt)
+        self.assertNotIn("SIDECAR-MESSAGE", prompt)
+        (self.root / "ui.notes.json").unlink()
+        (self.root / "adapter.notes.json").unlink()
+        self.assertNotIn("Notes typed", review_prompt(self.runtime, self.root / "review.diff"))  # A run without notes: as before.
 
     def test_review_prompt_is_the_brief_plus_the_fixed_blocks(self):
         from .automatic import BUILTIN_REVIEW_BRIEF, REVIEW_RUBRIC, review_brief, review_prompt
@@ -2527,9 +2547,10 @@ class ClaudeUnavailableTests(GraphFixture):
     def cli(self, argv):
         """`python -m workflow <argv>` in process with the fake sessions; (exit code, stderr)."""
         from . import pipeline
+        from .test_pipeline import by_operator
         errors = io.StringIO()
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda directory, timeout: self.fixture.sessions), \
-                patch("sys.argv", ["workflow", *argv]), contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
+                patch("sys.argv", ["workflow", *by_operator(argv)]), contextlib.redirect_stderr(errors), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as exited:
                 pipeline.main()
         return exited.exception.code, errors.getvalue()
@@ -2548,10 +2569,14 @@ class ClaudeUnavailableTests(GraphFixture):
         stale = "Warning: 1 running Claude Code process(es) still run an executable that an update deleted.\n  pid 7 in /work: claude"
         with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], UNAVAILABLE_EXIT)) as step, \
                 patch("workflow.pipeline.stale_claude_warning", return_value=stale):
-            code, errors = self.cli(["automatic", str(f.directory), "--live"])
+            code, errors = self.cli(["automatic", str(f.directory), "--live", "--by", "maintainer"])
         self.assertEqual((code, step.call_count), (75, 1))
         self.assertIn("Interrupted: Claude Code was unavailable", errors)
-        self.assertIn(f"resume with: python -m workflow automatic {f.directory} --live", errors)
+        self.assertIn(f"resume with: python -m workflow automatic {f.directory} --live --by operator", errors)
+        # C17: crash recovery is the maintainer's to run; the supervisor records who started it once it holds the run.
+        last = json.loads((f.directory / "events.jsonl").read_text().splitlines()[-1])
+        self.assertEqual((last["node"], last["status"], last["message"]),
+                         ("controller", "running", "Automatic by the maintainer: the supervisor continues the run"))
         self.assertIn("pid 7 in /work: claude", errors)
         self.assertNotIn("Blocked", errors)
         # A blocked step is still blocked.
@@ -2781,7 +2806,7 @@ class ControllerStopTests(GraphFixture):
         repository = shlex.quote(f.plan["repository"])
         stop = (f"Source feature branch changed: {repository} is on feature/elsewhere, not feature/automatic-test. Nothing was stopped "
                 f"or relaunched: switch it back with: git -C {repository} switch feature/automatic-test, then resume with: "
-                f"python -m workflow automatic {f.directory} --live")
+                f"python -m workflow automatic {f.directory} --live --by operator")
         for _ in range(2):
             with self.assertRaisesRegex(RuntimeError, f"^{re.escape(stop)}$"):
                 drive(f.runtime)
@@ -2848,7 +2873,7 @@ class ControllerStopTests(GraphFixture):
         repository = shlex.quote(f.plan["repository"])
         interrupted = (f"Source feature branch changed: {repository} is on feature/elsewhere, not feature/automatic-test. Nothing was stopped "
                        f"or relaunched: switch it back with: git -C {repository} switch feature/automatic-test, then resume with: "
-                       f"python -m workflow automatic {f.directory} --live")
+                       f"python -m workflow automatic {f.directory} --live --by operator")
 
         def task(name, error=None, *kinds):
             return SimpleNamespace(name=name, error=error, interrupts=[SimpleNamespace(value={"kind": kind}) for kind in kinds])
@@ -2900,9 +2925,9 @@ class ControllerStopTests(GraphFixture):
         # Launches that did not complete are reconciled (RUNBOOK, Ambiguous startup), and a run that was never started is started;
         # then `automatic --live` continues it. Nothing was stopped or relaunched, so nothing says `Controller blocked:`.
         f = self.fixture
-        resume = f"then resume with: python -m workflow automatic {f.directory} --live"
+        resume = f"then resume with: python -m workflow automatic {f.directory} --live --by operator"
         never = (f"Automatic supervision requires a completed start: the run was never started, so no worker was launched. Start it "
-                 f"with: python -m workflow start {f.directory} --live, {resume}")
+                 f"with: python -m workflow start {f.directory} --live --by operator, {resume}")
 
         def launches(*steps):
             return SimpleNamespace(values={"run_id": "run"}, next=steps, tasks=[
@@ -2911,7 +2936,7 @@ class ControllerStopTests(GraphFixture):
 
         def reconcile(steps, receipts):
             return (f"Automatic supervision requires a completed start: {steps} did not complete. Nothing was stopped or relaunched: "
-                    f"inspect {receipts} and `claude agents --json`, reconcile with: python -m workflow reconcile {f.directory}, {resume}")
+                    f"inspect {receipts} and `claude agents --json`, reconcile with: python -m workflow reconcile {f.directory} --by operator, {resume}")
         for message, state in ((never, SimpleNamespace(values={}, next=(), tasks=[])),  # Prepared, and `start` never ran the graph.
                                (reconcile("launch_ui", "its receipt"), launches("launch_ui")),
                                (reconcile("launch_ui and launch_adapter", "their receipts"), launches("launch_ui", "launch_adapter"))):
@@ -3814,14 +3839,14 @@ class FinishNote(unittest.TestCase):
                 # The flag is launch's word to this process only: nothing supervise starts (steps, checks, workers) inherits it.
                 inherited = []
                 with self.subTest(repository=repository.name, environment=environment), \
-                        patch("workflow.automatic.supervise", side_effect=lambda _: inherited.append(os.environ.get(LAUNCH_NOTE_ENV))) as supervised, \
-                        patch.dict(os.environ, environment), patch.object(sys, "argv", ["workflow", "automatic", str(directory), "--live"]), \
+                        patch("workflow.automatic.supervise", side_effect=lambda *_: inherited.append(os.environ.get(LAUNCH_NOTE_ENV))) as supervised, \
+                        patch.dict(os.environ, environment), patch.object(sys, "argv", ["workflow", "automatic", str(directory), "--live", "--by", "operator"]), \
                         contextlib.redirect_stdout(io.StringIO()) as output:
                     if not environment:
                         os.environ.pop(LAUNCH_NOTE_ENV, None)  # Independent of the shell this test runs in.
                     main()
                     self.assertEqual(inherited, [None])
-                    supervised.assert_called_once_with(directory)
+                    supervised.assert_called_once_with(directory, "operator")
                 printed = output.getvalue()
                 self.assertIn("Automatic run reached a verified feature branch.", printed)
                 (self.assertIn if expected else self.assertNotIn)(note, printed)

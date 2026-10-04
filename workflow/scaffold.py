@@ -73,7 +73,7 @@ def feature_files(feature: str) -> dict[str, str]:
               f"- `{LANE}-task.md`: the lane's task as an outcome brief (## Goal, ## Acceptance and ## Stop are required).\n"
               "- `decisions.md`: from the workflow-grill interview, the operator's decisions (only these bind the run), the grill's "
               "defaults, changes after launch and deferrals.\n\n"
-              f"Launch: `python -m workflow launch {feature} --repo <this repository> --dry-run`, then `--live`.\n")
+              f"Launch: `python -m workflow launch {feature} --repo <this repository> --dry-run`, then `--live --by operator`.\n")
     return {"feature.json": json.dumps(manifest, indent=2) + "\n", "policy.json": json.dumps(policy, indent=2) + "\n",
             f"{LANE}-task.md": task, "decisions.md": decisions, "README.md": readme}
 

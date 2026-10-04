@@ -24,7 +24,7 @@ from . import automatic, checks, pipeline, repair
 from .automatic import advance_failed_checks, automatic_settings, drive
 from .pipeline import ExportRuntime, Pipeline, build_pipeline, export_run, graph_config
 from .sessions import git, prepare, read_json, run_lock, save_json
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry
 from .verification import policy_digest
 from .worktrees import WorktreeError
 
@@ -112,7 +112,7 @@ class RepairFixture(unittest.TestCase):
         code = 0
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
-                repair.repair_main([str(self.directory), *arguments])
+                repair.repair_main(by_operator([str(self.directory), *arguments], True))
             except SystemExit as exit:
                 code = exit.code
         return code, out.getvalue(), err.getvalue()
@@ -120,7 +120,7 @@ class RepairFixture(unittest.TestCase):
     def pipeline_cli(self, *arguments: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         code = 0
-        with patch.object(sys, "argv", ["workflow", *arguments]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with patch.object(sys, "argv", ["workflow", *by_operator(arguments)]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 pipeline.main()
             except SystemExit as exit:
@@ -206,10 +206,19 @@ class CandidateRepairEndToEnd(RepairFixture):
         git(workspace, "commit", "-qam", "ui: the final text")
         fix = git(workspace, "rev-parse", "HEAD")
 
-        code, out, err = self.cli("ui", "--commit", fix, "--reason", REASON)
+        code, _, err = self.cli("ui", "--commit", fix, "--reason", REASON, "--by", "maintainer")
+        self.assertEqual(code, 1)
+        self.assertIn("repair is the operator's decision: --by maintainer is refused", err)
+        self.assertFalse((directory / "repairs.json").exists())
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            code, out, err = self.cli("ui", "--commit", fix, "--reason", REASON)
         self.assertEqual(code, 0, err)
-        self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live", out)
+        self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live --by operator", out)
         [entry] = self.entries()
+        # C17: who recorded it, in the journal and on the timeline.
+        self.assertEqual((entry["by"], entry["via"]), ("operator", "claude-code"))
+        messages = [json.loads(line)["message"] for line in (directory / "events.jsonl").read_text().splitlines()]
+        self.assertTrue(any(message.startswith(f"Repair 1 by the operator (via a Claude Code session): snapshot ") for message in messages), messages)
         self.assertEqual((entry["status"], entry["base_kind"], entry["base_commit"], entry["source_commit"], entry["expected_candidate_tree"]),
                          ("applied", "candidate", candidate, fix, self.tree(fix)))
         self.assertEqual(entry["attempt_targets"], {"worker:ui": 2, "candidate:adapter": 2, "candidate:ui": 3})
@@ -286,7 +295,7 @@ class ForkPoint(RepairFixture):
         with patch.object(Pregel, "update_state", autospec=True, side_effect=Pregel.update_state) as update:
             code, out, err = self.cli("ui", "--commit", fix, "--reason", "first try")
         self.assertEqual(code, 0, err)
-        self.assertIn(f"{sys.executable} -m workflow retry {self.directory}", out)
+        self.assertIn(f"{sys.executable} -m workflow retry {self.directory} --by operator", out)
         # Never the bare thread config: the fork point's own config, which carries its checkpoint_id.
         self.assertEqual(update.call_count, 1)
         self.assertEqual(update.call_args.args[1]["configurable"]["checkpoint_id"], boundary)
@@ -576,8 +585,8 @@ class RefusedStates(RepairFixture):
         with self.subTest("no blocked packet"):
             # The candidate step reuses adapter's passing packet: raising ui's attempt, which has none, reruns the step.
             self.refused(f"not a check verdict (an infrastructure error, a cherry-pick conflict, a partial candidate); inspect, then rerun it "
-                         f"with: {sys.executable} -m workflow retry {self.directory} --phase candidate --node ui, then "
-                         f"{sys.executable} -m workflow automatic {self.directory} --live\n", *arguments)
+                         f"with: {sys.executable} -m workflow retry {self.directory} --phase candidate --node ui --by operator, then "
+                         f"{sys.executable} -m workflow automatic {self.directory} --live --by operator\n", *arguments)
             (self.directory / "attempts.json").unlink()
         self.assertEqual(self.untouched(), before)
         with self.subTest("MAX_REPAIRS"):
@@ -621,8 +630,8 @@ class InterruptedCheckOnAnAutomaticRun(RepairFixture):
             drive(self.runtime)
         folder = directory / "verification/worker/ui/1"
         self.assertTrue(folder.is_dir() and not (folder / "packet.json").exists())
-        retry = f"{sys.executable} -m workflow retry {directory} --phase worker --node ui"
-        automatic = f"{sys.executable} -m workflow automatic {directory} --live"
+        retry = f"{sys.executable} -m workflow retry {directory} --phase worker --node ui --by operator"
+        automatic = f"{sys.executable} -m workflow automatic {directory} --live --by operator"
         code, _, err = self.cli("ui", "--workspace")
         self.assertEqual(code, 1)
         self.assertIn(f"Interrupted check at {folder}; rerun it at its next attempt with: {retry}, then {automatic}\n", err)
@@ -699,7 +708,7 @@ class ReviewFailedBeforeALaunch(RepairFixture):
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
             code, _, err = self.pipeline_cli("retry", str(directory))
         self.assertNotEqual(code, 0)
-        self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live", err)
+        self.assertIn(f"{sys.executable} -m workflow automatic {directory} --live --by operator", err)
         self.assertNotIn("review", self.sessions.starts)
         # The operator fixes the cause and runs automatic --live again: its supervisor clears the marker when it starts, and
         # its controller re-enters the review once more, launches each reviewer once and reaches the feature branch.
@@ -734,7 +743,7 @@ class ReviewFailedBeforeALaunch(RepairFixture):
         events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
         self.assertEqual([event["message"] for event in events if (event["node"], event["status"]) == ("controller", "blocked")],
                          [f"Controller blocked: Partial review worktree {worktree} left by the failed review; remove it with git worktree remove "
-                          f"--force {worktree}, then rerun: python -m workflow automatic {directory} --live"])
+                          f"--force {worktree}, then rerun: python -m workflow automatic {directory} --live --by operator"])
 
 
 class InterruptedCheckOnAManualRun(RepairFixture):
@@ -750,11 +759,15 @@ class InterruptedCheckOnAManualRun(RepairFixture):
         code, _, err = self.cli("ui", "--workspace")
         self.assertEqual(code, 1)
         self.assertIn(f"Interrupted check at {folder}; rerun it at its next attempt with: {sys.executable} -m workflow retry {directory} "
-                      "--phase worker --node ui\n", err)
+                      "--phase worker --node ui --by operator\n", err)
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
-            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui")
+            code, out, err = self.pipeline_cli("retry", str(directory), "--phase", "worker", "--node", "ui", "--by", "maintainer")
         self.assertEqual(code, 0, err)
         self.assertEqual(read_json(directory / "verification/worker/ui/2/packet.json")["gate"]["status"], "passed")
+        # C17: a retry is mechanical recovery, so the maintainer may run it; the timeline says who did.
+        events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
+        self.assertIn(("controller", "running", "Retry by the maintainer: worker/ui attempt 2"),
+                      [(event["node"], event["status"], event["message"]) for event in events])
         with self.graph() as (graph, config):
             state = graph.get_state(config)
         self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["independent_review"])
@@ -782,8 +795,8 @@ class CandidateStepWithoutAVerdictOnAnAutomaticRun(RepairFixture):
         with candidate_worktree_fails_once(), patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(self.runtime)
         self.assertFalse((directory / "verification/candidate").exists())
-        retry = f"{sys.executable} -m workflow retry {directory} --phase candidate --node adapter"
-        automatic = f"{sys.executable} -m workflow automatic {directory} --live"
+        retry = f"{sys.executable} -m workflow retry {directory} --phase candidate --node adapter --by operator"
+        automatic = f"{sys.executable} -m workflow automatic {directory} --live --by operator"
         code, _, err = self.cli("ui", "--workspace")
         self.assertEqual(code, 1)
         self.assertIn("The failed step has no blocked packet at its current attempt, so it is not a check verdict (an infrastructure error, "
@@ -820,7 +833,7 @@ class CandidateStepWithoutAVerdictOnAManualRun(RepairFixture):
             graph.invoke(Command(resume={"freeze": True}), config)
         code, _, err = self.cli("ui", "--workspace")
         self.assertEqual(code, 1)
-        self.assertIn(f"a partial candidate); inspect, then rerun it with: {sys.executable} -m workflow retry {directory}\n", err)
+        self.assertIn(f"a partial candidate); inspect, then rerun it with: {sys.executable} -m workflow retry {directory} --by operator\n", err)
         with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
             code, _, err = self.pipeline_cli("retry", str(directory))
         self.assertEqual(code, 0, err)
@@ -842,7 +855,7 @@ class StoppedBetweenSteps(RepairFixture):
             graph.invoke(Command(resume={"freeze": True}), config, interrupt_before=["candidate"])
             state = graph.get_state(config)
         self.assertEqual((state.next, [task.name for task in state.tasks if task.error or task.interrupts]), (("candidate",), []))
-        continuation = f"automatic {self.directory} --live" if self.automatic else f"retry {self.directory}"
+        continuation = f"automatic {self.directory} --live --by operator" if self.automatic else f"retry {self.directory} --by operator"
         code, _, err = self.cli("ui", "--workspace")
         self.assertEqual(code, 1)
         self.assertIn("The run did not stop at a check verdict of the candidate or a verify_<lane> step; inspect, then continue it with: "
@@ -1013,7 +1026,7 @@ class RepairCommandLine(RepairFixture):
         env = {**os.environ, "PATH": f"{bin_directory}{os.pathsep}{os.environ['PATH']}"}
         for lock in ("controller.lock", "automatic-supervisor.lock"):
             (self.directory / lock).touch()  # A real run's controllers made them.
-        command = [sys.executable, "-m", "workflow", "repair", str(self.directory), "ui", "--commit", fix, "--reason", REASON]
+        command = [sys.executable, "-m", "workflow", "repair", str(self.directory), "ui", "--commit", fix, "--reason", REASON, "--by", "operator"]
         cwd = Path(__file__).resolve().parents[1]
         before, launches = self.listing(), (self.directory / "fake-launches.log").read_text()
         result = subprocess.run([*command, "--dry-run"], cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
@@ -1024,7 +1037,7 @@ class RepairCommandLine(RepairFixture):
         self.assertEqual(git(self.repo, "for-each-ref", "refs/workflow-repair"), "")
         result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"-m workflow automatic {self.directory} --live", result.stdout)
+        self.assertIn(f"-m workflow automatic {self.directory} --live --by operator", result.stdout)
         self.assertFalse(calls.exists())
         self.assertEqual((self.directory / "fake-launches.log").read_text(), launches)
         self.assertEqual(self.entries()[0]["status"], "applied")
