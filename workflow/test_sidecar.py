@@ -860,6 +860,62 @@ class Paging(SidecarRun):
                                                                          f"(undeliverable, interrupted): The adapter drops a row. {where}")])
 
 
+    @contextlib.contextmanager
+    def sigint_in_write(self, which: int):
+        """A real SIGINT, as an operator's Ctrl-C, sent from inside the `which`-th write of the ledger from now (1: the next)."""
+        real, seen = sidecar.save_json, []
+
+        def write(path, value):
+            if Path(path).name == "sidecar.ledger.json":
+                seen.append(path)
+                if len(seen) == which:
+                    os.kill(os.getpid(), signal.SIGINT)
+            return real(path, value)
+        with patch("workflow.sidecar.save_json", side_effect=write), self.assertRaises(KeyboardInterrupt):
+            yield
+        self.assertGreaterEqual(len(seen), which)
+
+    def test_a_ctrl_c_during_a_ledger_write_still_pages_what_that_write_records(self):
+        # A Ctrl-C waits for the write and for the pages that write triggers: in a delivery's flip, in the merge write and in
+        # recover's write. Raised between them, it would leave a ledger that no longer holds the message pending, so recover()
+        # could never page it. The delivery's own Herdr calls take as long as the flip, so a Ctrl-C often lands here.
+        where = f"Read it in {self.directory / 'sidecar.ledger.json'} or on the run's sidecar page."
+        # The flip: ui holds a draft, so M-1 ends undeliverable; the Ctrl-C lands in the write that records it (the pass's second).
+        self.herdr.screens["pane-ui"] = claude_screen("my own draft")
+        self.script_steps([{"output": output([upsert()], [message()])}])
+        with self.sigint_in_write(2):
+            self.run_pass()
+        flipped = [("sidecar", "ui", f"Review sidecar pass 1: P1 S-1 on lane ui did not reach the lane (undeliverable, pane_busy): The ui text is wrong. {where}")]
+        self.assertEqual(self.records(), flipped)
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in self.ledger()["messages"]], [("M-1", "undeliverable", "pane_busy")])
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records(), flipped)
+        # The merge write: ui has completed, so its P1 is refused (lane_finished), and the pass escalates it. Both page, and the
+        # escalation's event is written, before the Ctrl-C is raised.
+        del self.herdr.screens["pane-ui"]
+        self.completion("ui")
+        self.script_steps([{}, {"output": output([upsert(problem="Leaks the token.")], [message()],
+                                                 [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])}])
+        with self.sigint_in_write(1):
+            self.run_pass()
+        merged = [("sidecar", "ui", f"Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (refused, lane_finished): Leaks the token. {where}"),
+                  ("sidecar", "ui", f"Review sidecar pass 2: escalation S-2 (security) on lane ui: The token reaches the log. {where}")]
+        self.assertEqual(self.records(), [*flipped, *merged])
+        self.assertIn(("interactive", "escalation S-2 (security): see the sidecar page"), self.sidecar_events())
+        (self.directory / "ui.completion.json").unlink()
+        # recover's write: a delivery cut short left M-3 pending; the next controller's Ctrl-C lands in the write that records it
+        # interrupted, and its page is still written, once.
+        self.interrupted_pass([upsert(problem="The ui footer is wrong.")], [message()])
+        with self.sigint_in_write(1):
+            sidecar.recover(self.runtime, self.clock)
+        interrupted = ("sidecar", "ui", f"Review sidecar pass 3: P1 S-3 on lane ui did not reach the lane (undeliverable, interrupted): "
+                                        f"The ui footer is wrong. {where}")
+        self.assertEqual(self.records(), [*flipped, *merged, interrupted])
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records(), [*flipped, *merged, interrupted])
+        validate_schema("sidecar", self.ledger())
+
+
 class LedgerLock(SidecarRun):
     """Every ledger write waits for <run>/sidecar.lock: held here by another open file, as `sidecar-pass` or freeze would."""
 

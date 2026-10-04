@@ -188,17 +188,24 @@ def ledger_lock(directory: Path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+DEFERRING = []  # The main thread's active deferred_interrupt blocks: an inner one only yields.
+
+
 @contextmanager
 def deferred_interrupt():
-    """A Ctrl-C during the block is raised once the block finished, so a ledger write is never cut short (main thread only)."""
-    if threading.current_thread() is not threading.main_thread():
+    """A Ctrl-C during the block is raised once the block finished, so a ledger write is never cut short (main thread only).
+    Re-entrant: inside an active block an inner one only yields, so a block that holds a write and the pages it triggers
+    (Pass.merge, Pass.deliver, recover) raises after the pages, not after save_ledger's own block."""
+    if threading.current_thread() is not threading.main_thread() or DEFERRING:
         yield
         return
     caught = []
     previous = signal.signal(signal.SIGINT, lambda *_: caught.append(True))
+    DEFERRING.append(True)
     try:
         yield
     finally:
+        DEFERRING.pop()
         signal.signal(signal.SIGINT, previous)
     if caught:
         raise KeyboardInterrupt
@@ -897,21 +904,26 @@ class Pass:
         at = iso(self.clock())
         record = {"n": self.n, "trigger": self.trigger, "started_at": self.started_at, "finished_at": at, "status": "completed",
                   "session_id": self.session_id, "lanes": self.lanes}
-        try:
-            with ledger_lock(directory):
-                before = load_ledger(directory, plan)
-                merged, messages, escalations = merge(before, output, record, plan_workers(plan), at, lambda lane: refusal(directory, plan, lane))
-                save_ledger(directory, merged)  # Before anything is typed: a pane never holds an id the ledger does not.
-        except Rejected as error:
-            self.reject(error)
+        with deferred_interrupt():  # A Ctrl-C waits for the write and for what it pages: recover() could not page it later.
+            try:
+                with ledger_lock(directory):
+                    before = load_ledger(directory, plan)
+                    merged, messages, escalations = merge(before, output, record, plan_workers(plan), at, lambda lane: refusal(directory, plan, lane))
+                    save_ledger(directory, merged)  # Before anything is typed: a pane never holds an id the ledger does not.
+            except Rejected as error:
+                rejected = error
+            else:
+                rejected = None
+                self.release()
+                earlier = {finding["id"]: finding for finding in before["findings"]}
+                blocking = {finding["id"]: finding for finding in merged["findings"] if became_blocking(earlier.get(finding["id"]), finding)}
+                # Said and paged before anything is typed: a controller stopped while typing (a Ctrl-C, a kill) loses neither.
+                for escalation in escalations:
+                    self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
+                self.page(merged, blocking, messages, escalations)
+        if rejected is not None:
+            self.reject(rejected)
             return
-        self.release()
-        earlier = {finding["id"]: finding for finding in before["findings"]}
-        blocking = {finding["id"]: finding for finding in merged["findings"] if became_blocking(earlier.get(finding["id"]), finding)}
-        # Said and paged before anything is typed: a controller stopped while typing (a Ctrl-C, a kill) loses neither.
-        for escalation in escalations:
-            self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
-        self.page(merged, blocking, messages, escalations)
         outcomes = self.deliver([message for message in messages if message["status"] == "pending"], blocking)
         counts = merged["passes"][-1]["counts"]
         resolved = sum(1 for upsert in output["findings"] if upsert["disposition"] == "verified_resolved")
@@ -956,23 +968,24 @@ class Pass:
                 raise  # It stays pending; the next controller makes it undeliverable (interrupted) and pages it (recover).
             except BaseException as caught:
                 status, reason, error = "undeliverable", failure_reason(caught), caught
-            try:
-                flip(self.directory, self.plan, message["id"], status, reason, iso(self.clock()))
-                recorded = True
-            except KeyboardInterrupt:
-                raise
-            except BaseException as caught:
-                error, recorded = error or caught, False
-            if error is not None:
+            with deferred_interrupt():  # A Ctrl-C waits for the flip and its page: the message is no longer pending for recover().
                 try:
-                    log_error(self.log, f"message {message['id']} undeliverable", error)
-                except Exception:
-                    pass
-                self.event("interactive", f"{self.label}: message {message['id']} to {message['lane']} undeliverable after an error "
-                                          f"({type(error).__name__}); see {self.log.name}")
-            outcomes.append({**message, "status": status, "reason": reason})
-            if recorded and status != "delivered":
-                self.page_outcome(outcomes[-1], blocking)  # A flip that failed leaves it pending: recover() pages it, so never twice.
+                    flip(self.directory, self.plan, message["id"], status, reason, iso(self.clock()))
+                    recorded = True
+                except KeyboardInterrupt:
+                    raise
+                except BaseException as caught:
+                    error, recorded = error or caught, False
+                if error is not None:
+                    try:
+                        log_error(self.log, f"message {message['id']} undeliverable", error)
+                    except Exception:
+                        pass
+                    self.event("interactive", f"{self.label}: message {message['id']} to {message['lane']} undeliverable after an error "
+                                              f"({type(error).__name__}); see {self.log.name}")
+                outcomes.append({**message, "status": status, "reason": reason})
+                if recorded and status != "delivered":
+                    self.page_outcome(outcomes[-1], blocking)  # A flip that failed leaves it pending: recover() pages it, so never twice.
         return outcomes
 
 
@@ -1021,50 +1034,51 @@ def recover(runtime, clock=time.time) -> None:
     killed. Then the running marker is removed."""
     directory, plan = runtime.directory, runtime.plan
     marker = directory / RUNNING
-    with deferred_interrupt(), ledger_lock(directory):
-        path = ledger_path(directory)
-        ledger = load_ledger(directory, plan)
-        changed = False
-        at = iso(clock())
-        pending = [message for message in ledger["messages"] if message["status"] == "pending"]
-        for message in pending:
-            message.update(status="undeliverable", reason="interrupted", at=at)
-            changed = True
-        stale = None
-        if marker.exists():
-            try:
-                stale = read_json(marker)
-                n = int(stale["pass"])
-            except (ValueError, KeyError, TypeError):
-                stale, n = None, None
-            if stale is not None:
-                killed = kill_orphan(stale.get("pid"), stale.get("session_id"))
-                stale["killed"] = killed
-                if not any(item["n"] == n for item in ledger["passes"]):
-                    lanes = {}
-                    manifest = directory / INPUTS / str(n) / "manifest.json"
-                    try:
-                        for lane, item in read_json(manifest)["lanes"].items():
-                            lanes[lane] = {"head_commit": item["head_commit"], "pane_captured": item["pane_file"] is not None}
-                    except (OSError, ValueError, KeyError, TypeError):
+    with deferred_interrupt():  # A Ctrl-C waits for the write and the pages it triggers: no message is pending any more.
+        with ledger_lock(directory):
+            path = ledger_path(directory)
+            ledger = load_ledger(directory, plan)
+            changed = False
+            at = iso(clock())
+            pending = [message for message in ledger["messages"] if message["status"] == "pending"]
+            for message in pending:
+                message.update(status="undeliverable", reason="interrupted", at=at)
+                changed = True
+            stale = None
+            if marker.exists():
+                try:
+                    stale = read_json(marker)
+                    n = int(stale["pass"])
+                except (ValueError, KeyError, TypeError):
+                    stale, n = None, None
+                if stale is not None:
+                    killed = kill_orphan(stale.get("pid"), stale.get("session_id"))
+                    stale["killed"] = killed
+                    if not any(item["n"] == n for item in ledger["passes"]):
                         lanes = {}
-                    trigger = stale.get("trigger") if stale.get("trigger") in {"cadence", "completion", "final", "manual"} else "cadence"
-                    started = stale.get("started_at") if isinstance(stale.get("started_at"), str) and stale["started_at"] else at
-                    ledger["passes"].append({"n": n, "trigger": trigger, "started_at": started, "finished_at": at, "status": "interrupted",
-                                             "session_id": None, "lanes": lanes, "counts": {"new": 0, "changed": 0, "messages": 0},
-                                             "summary": "interrupted: the controller stopped while the pass ran"})
-                    changed = True
-                    stale["recorded"] = True
-        if changed and (path.exists() or stale is not None):
-            save_ledger(directory, ledger)
-        marker.unlink(missing_ok=True)
-    if pending:
-        runtime.event(SIDECAR, "interactive", f"Review sidecar: {len(pending)} message(s) left pending by a stopped controller recorded "
-                                              f"undeliverable (interrupted): {', '.join(message['id'] for message in pending)}")
-        page_interrupted(directory, ledger, pending)  # After the write: stopped before it, the next controller pages them; never twice.
-    if stale is not None and stale.get("recorded"):
-        runtime.event(SIDECAR, "interactive", f"Review sidecar pass {stale['pass']} recorded interrupted: the controller stopped while it ran"
-                                              + ("; its orphaned job was stopped" if stale["killed"] else ""))
+                        manifest = directory / INPUTS / str(n) / "manifest.json"
+                        try:
+                            for lane, item in read_json(manifest)["lanes"].items():
+                                lanes[lane] = {"head_commit": item["head_commit"], "pane_captured": item["pane_file"] is not None}
+                        except (OSError, ValueError, KeyError, TypeError):
+                            lanes = {}
+                        trigger = stale.get("trigger") if stale.get("trigger") in {"cadence", "completion", "final", "manual"} else "cadence"
+                        started = stale.get("started_at") if isinstance(stale.get("started_at"), str) and stale["started_at"] else at
+                        ledger["passes"].append({"n": n, "trigger": trigger, "started_at": started, "finished_at": at, "status": "interrupted",
+                                                 "session_id": None, "lanes": lanes, "counts": {"new": 0, "changed": 0, "messages": 0},
+                                                 "summary": "interrupted: the controller stopped while the pass ran"})
+                        changed = True
+                        stale["recorded"] = True
+            if changed and (path.exists() or stale is not None):
+                save_ledger(directory, ledger)
+            marker.unlink(missing_ok=True)
+        if pending:
+            runtime.event(SIDECAR, "interactive", f"Review sidecar: {len(pending)} message(s) left pending by a stopped controller recorded "
+                                                  f"undeliverable (interrupted): {', '.join(message['id'] for message in pending)}")
+            page_interrupted(directory, ledger, pending)  # After the write: stopped before it, the next controller pages them; never twice.
+        if stale is not None and stale.get("recorded"):
+            runtime.event(SIDECAR, "interactive", f"Review sidecar pass {stale['pass']} recorded interrupted: the controller stopped while it ran"
+                                                  + ("; its orphaned job was stopped" if stale["killed"] else ""))
 
 
 def summary_line(ledger: dict) -> str:
