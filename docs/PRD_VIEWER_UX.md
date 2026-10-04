@@ -515,7 +515,7 @@ Hiding single-value columns is decided over the whole review, not per group, and
 Design challenge                                         [✓ Succeeded] · one print job
 Passed on attempt 3 · 8 P2 notes · decided 08:50:49 · 11m07s over 3 attempts
 Attempts  [#1 ? 08:39 · ended without a record]  [#2 ✗ 08:45 · 46s · interrupted]  [#3 ✓ 08:48 · 2m29s]
-[Concerns 8] [Alternative & experiment] [Earlier attempts 2] [History 7]
+[Concerns 8] [Alternative & experiment] [History 7]
 ── Concerns: P0/P1 open by default; P2 one line each, expandable to message and consequence
 ```
 
@@ -523,7 +523,7 @@ Attempts  [#1 ? 08:39 · ended without a record]  [#2 ✗ 08:45 · 46s · interr
 - edit the feature files, then `"$PY" -m workflow resume "$RUN" --by operator`; or
 - `"$PY" -m workflow resume "$RUN" --accept-challenge "<reason>" --by operator`.
 
-Earlier challenge attempts show only what the events say. Their P0/P1 concerns are served as `challenge.history` (export 1.7.0, C49) and listed under "Earlier attempts" on the challenge page; their P2 notes are not served, and their chips have no link.
+Earlier challenge attempts show only what the events say. Their P0/P1 concerns are served as `challenge.history` (export 1.7.0, C49) and listed under "Earlier attempts" on the challenge page; their P2 notes are not served, and their chips have no link. The "Earlier attempts" section and its index chip appear only when an earlier attempt left a record. The run above has none: attempt 1 ended without a record and attempt 2 was interrupted, so neither wrote `challenge.json`. An accepted attempt's own paused record is not an earlier attempt; its concerns are the Concerns section.
 
 ### 4.9 Handoff, approval, integrate
 

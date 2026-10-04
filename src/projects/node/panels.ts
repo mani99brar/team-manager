@@ -107,11 +107,19 @@ export function challengeHeadline(challenge: Challenge, spans: readonly Span[]):
   return { lead, notes: p2 > 0 ? `${p2} P2 ${p2 === 1 ? 'note' : 'notes'}` : null, decidedAt: challenge.decided_at, totalMs, attempts: challenge.attempts }
 }
 
+/**
+ * The records of attempts before the shown one (C49), in attempt order. An accepted attempt keeps its own paused record under
+ * its number: that is the shown attempt's first decision, whose concerns the page already shows, so it is left out.
+ */
+export function earlierAttempts(challenge: Challenge): NonNullable<Challenge['history']> {
+  return (challenge.history ?? []).filter(entry => entry.attempt < challenge.attempt)
+}
+
 /** A challenge's index entries: its concerns when it raised any, the alternative and the experiment, then the earlier attempts (C49) when there are any,
  * keyed apart from the node's own event History ('history'), which ends every node's index. */
 export function challengeSectionEntries(challenge: Challenge | null): SectionEntry[] {
   if (challenge === null) return []
-  const history = challenge.history ?? []
+  const history = earlierAttempts(challenge)
   return [
     ...(challenge.concerns.length > 0 ? [{ key: 'concerns', label: 'Concerns', count: challenge.concerns.length }] : []),
     { key: 'alternative', label: 'Alternative & experiment' },

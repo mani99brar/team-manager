@@ -577,7 +577,7 @@ class CostTests(unittest.TestCase):
         from .export_state import challenge_section
         directory = legacy_run(self.root)
         save_json(directory / "challenge.json", challenge_record(3, "passed", [concern("P2", "Naming is loose")]))
-        self.assertNotIn("history", challenge_section(directory))  # No archive: a single attempt exports as before.
+        self.assertNotIn("history", challenge_section(directory))  # No archive: exported as before.
         save_json(directory / "challenge-1.json", challenge_record(1, "paused", [concern("P1", "Both lanes edit the contract"), concern("P2", "Wordy")]))
         save_json(directory / "challenge-2.json", challenge_record(2, "paused", [concern("P0", "The PRD contradicts the task")]))
         save_json(directory / "challenge-hold-2.json", {"attempt": 2, "held_at": "2026-10-03T09:00:00Z", "released_at": None, "released_by": None, "dropped": []})

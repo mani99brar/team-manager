@@ -257,7 +257,7 @@ export const runChallengeSchema = z.strictObject({
   /**
    * 1.7.0 (C49): the records this one replaced, `challenge-<n>.json` in attempt order: each one's status, decision time and
    * P0/P1 concerns (its P2 notes are left out). An accepted attempt keeps its paused record here under the same attempt
-   * number. Empty for a single attempt (or absent, from a server before it).
+   * number; the viewer leaves that one out of the earlier attempts. Empty when no earlier record was archived (or absent, from a server before it).
    */
   history: z.array(z.strictObject({
     attempt: z.number().int().positive(),

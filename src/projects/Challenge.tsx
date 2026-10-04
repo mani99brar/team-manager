@@ -1,6 +1,6 @@
 import type { Span } from '../../contracts/projects/triage.ts'
 import type { RunInputs } from './api.ts'
-import { challengeHeadline } from './node/panels.ts'
+import { challengeHeadline, earlierAttempts } from './node/panels.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
 
@@ -74,7 +74,7 @@ export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
           <dt>Attempts</dt>
           <dd data-testid="challenge-attempts">
             {challenge.attempts} {challenge.attempts === 1 ? 'attempt' : 'attempts'}; this is attempt {challenge.attempt}
-            {challenge.attempts > 1 && <span className="projects-muted">{(challenge.history ?? []).length > 0
+            {challenge.attempts > 1 && <span className="projects-muted">{earlierAttempts(challenge).length > 0
               ? " (earlier attempts' P0/P1 are listed below; their full records stay in the run directory)"
               : ' (earlier attempts are kept in the run directory)'}</span>}
           </dd>
@@ -146,11 +146,12 @@ export function ChallengeAlternative({ challenge }: { challenge: Challenge }) {
 }
 
 /**
- * The records the shown attempt replaced (C49), in attempt order: each one's outcome, decision time and P0/P1 concerns. An
- * accepted attempt keeps its paused record under the same number. Nothing for a single attempt or a server before 1.7.0.
+ * The records of the attempts before the shown one (C49), in attempt order: each one's outcome, decision time and P0/P1
+ * concerns. An accepted attempt's own paused record is left out (its concerns are the Concerns section). Nothing when no
+ * earlier record was archived, or from a server before 1.7.0.
  */
 export function ChallengeHistory({ challenge }: { challenge: Challenge }) {
-  const history = challenge.history ?? []
+  const history = earlierAttempts(challenge)
   if (history.length === 0) return null
   return (
     <ol className="challenge-history" data-testid="challenge-history">

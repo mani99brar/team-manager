@@ -2,6 +2,7 @@ import type { RunInputs } from '../api.ts'
 import { ChallengeAccepted, ChallengeAlternative, ChallengeConcerns, ChallengeFacts, ChallengeHistory } from '../Challenge.tsx'
 import { ErrorPanel, LoadingPanel } from '../panels.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
+import { earlierAttempts } from './panels.ts'
 import type { Resource } from '../useResource.ts'
 import './review.css'
 
@@ -27,7 +28,7 @@ export function ChallengeSections({ inputs, onRetryInputs }: { inputs: Resource<
       <NodeSection sectionKey="alternative" title="Alternative & experiment">
         <ChallengeAlternative challenge={challenge} />
       </NodeSection>
-      {(challenge.history ?? []).length > 0 && (
+      {earlierAttempts(challenge).length > 0 && (
         <NodeSection sectionKey="challenge-history" title="Earlier attempts" testId="challenge-history-section">
           <ChallengeHistory challenge={challenge} />
         </NodeSection>

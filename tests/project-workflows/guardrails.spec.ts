@@ -200,6 +200,61 @@ test(`[scenario:challenge-held] A run held after a passing design challenge show
   await attach(page, testInfo, 'challenge-held')
 })
 
+test(`[scenario:challenge-history] An accepted challenge lists the attempts before its own under Earlier attempts, with their P0/P1, and never its own paused record; without one nothing is shown (${phase})`, async ({ page }, testInfo) => {
+  // C49: run-guarded accepted on attempt 2. Its own paused record is archived under attempt 2 next to attempt 1's.
+  const runId = RUN_GUARDED
+  const runPath = apiRun(runId, GUARDED_WORKFLOW_ID)
+  const earlier = { severity: 'P0' as const, kind: 'failure_mode' as const, message: 'Both lanes rewrite the adapter.', consequence: 'The candidate merge conflicts.' }
+  const inputs = structuredClone(runInputs[runId])
+  inputs.challenge = {
+    ...inputs.challenge!,
+    history: [
+      { attempt: 1, status: 'paused', decided_at: '2026-01-01T11:40:00Z', concerns: [earlier] },
+      { attempt: 2, status: 'paused', decided_at: '2026-01-01T11:50:00Z', concerns: inputs.challenge!.concerns.flatMap(concern => (concern.severity === 'P2' ? [] : [{ ...concern, severity: concern.severity }])) },
+    ],
+  }
+  const json = (body: unknown) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  let served = inputs
+  await page.route(url => url.pathname === `${runPath}/inputs`, route => route.fulfill(json(served)))
+  await page.goto(guardedRunUrl('challenge'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'challenge')
+
+  // The Attempts fact points below, and the index has one Earlier attempts chip apart from the node's History.
+  await expect(page.getByTestId('challenge-attempts')).toContainText("2 attempts; this is attempt 2 (earlier attempts' P0/P1 are listed below")
+  const chip = page.getByTestId('section-index').locator('a[data-section="challenge-history"]')
+  await expect(chip).toHaveText('Earlier attempts 1')
+  await expect(page.getByTestId('section-index').locator('a[data-section="history"]')).toHaveCount(1)
+
+  // Attempt 1 only, with its P0 and consequence; attempt 2's paused record is the Concerns section, not an earlier attempt.
+  const section = page.getByTestId('challenge-history-section')
+  await expect(section.getByRole('heading', { name: 'Earlier attempts' })).toBeVisible()
+  const attempts = section.getByTestId('challenge-history-attempt')
+  await expect(attempts).toHaveCount(1)
+  await expect(attempts.first()).toHaveAttribute('data-attempt', '1')
+  await expect(attempts.first()).toContainText('Attempt 1 · paused · decided')
+  await expect(attempts.first().getByTestId('challenge-history-concern')).toHaveAttribute('data-severity', 'P0')
+  await expect(attempts.first()).toContainText(earlier.message)
+  await expect(attempts.first()).toContainText(`Consequence: ${earlier.consequence}`)
+  await expect(section).not.toContainText(CHALLENGE_P1)
+  // The list carries no browser numbering that could contradict "Attempt n".
+  await expect(section.getByTestId('challenge-history')).toHaveCSS('list-style-type', 'none')
+  await chip.click()
+  await expect(section.getByRole('heading', { name: 'Earlier attempts' })).toBeFocused()
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
+  await attach(page, testInfo, 'challenge-history')
+
+  // Only its own record archived (accepted on its first decision), or an export before C49: no chip, no section.
+  for (const history of [[inputs.challenge!.history![1]], undefined]) {
+    served = structuredClone(inputs)
+    served.challenge!.history = history
+    await page.reload()
+    await expect(page.getByTestId('challenge-attempts')).toContainText('(earlier attempts are kept in the run directory)')
+    await expect(page.getByTestId('section-index').locator('a[data-section="alternative"]')).toHaveCount(1)
+    await expect(page.getByTestId('section-index').locator('a[data-section="challenge-history"]')).toHaveCount(0)
+    await expect(page.getByTestId('challenge-history-section')).toHaveCount(0)
+  }
+})
+
 test(`[scenario:completion-evidence-shown] The launch node shows untested, the falsifying check linked to the verify node's check, and verify-yourself; a legacy run says evidence was not recorded (${phase})`, async ({ page }, testInfo) => {
   await page.goto(guardedRunUrl('launch_ui'))
   const completion = page.getByTestId('worker-completion')

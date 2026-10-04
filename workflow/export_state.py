@@ -51,7 +51,7 @@ status stays `passed`; the key is left out for every other run. Within 1.7.0 (C7
 pinned); the key is left out for a run prepared before it.
 Within 1.7.0 (C49), `inputs.challenge`
 gains `history`: each archived attempt (`challenge-<n>.json`) with its status, decision time and P0/P1 concerns, left
-out for a single attempt; and the top-level `costs` section (workflow/costs.py) lists what each session cost by role, with
+out when no earlier record was archived; and the top-level `costs` section (workflow/costs.py) lists what each session cost by role, with
 a run total, null where unknown.
 """
 from __future__ import annotations
@@ -297,7 +297,7 @@ def challenge_section(directory: Path) -> dict | None:
     if isinstance(hold, dict) and hold.get("attempt") == item["attempt"] and hold.get("held") is not False:
         section["hold"] = {key: hold.get(key) for key in HOLD_KEYS}
     history = challenge_history(directory)
-    if history:  # 1.7.0, C49: left out for a single attempt, as for every run exported before.
+    if history:  # 1.7.0, C49: left out when no earlier record was archived, as for every run exported before.
         section["history"] = history
     return section
 
