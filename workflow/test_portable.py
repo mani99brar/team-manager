@@ -385,7 +385,7 @@ class DecisionsNote(Isolated):
         (folder / "decisions.md").write_text("# Decisions\n\n## Decisions\n\n- One lane.\n\n## Assumptions\n\nNone.\n\n## Deferred\n\nNothing.\n")
         save_json(folder / "feature.json", {**read_json(folder / "feature.json"), "version": "2.2.0"})
         commit_all(target, "Guarded")
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--dry-run"])
         command.assert_not_called()
@@ -394,7 +394,7 @@ class DecisionsNote(Isolated):
         self.assertIn("## Operator decisions", LEGACY_DECISIONS_NOTE)
         self.assertIn("workflow-grill", LEGACY_DECISIONS_NOTE)
         calls = []
-        with patch("workflow.launch.subprocess.run", side_effect=lambda command, cwd, check: calls.append(command)), \
+        with patch("workflow.launch.run_command", side_effect=lambda command, cwd, check, **_: calls.append(command)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--live"])
         self.assertEqual(len(calls), 4)  # Nothing is refused: preflight, the branch, prepare and start run as before.
@@ -402,7 +402,7 @@ class DecisionsNote(Isolated):
         # Split by the grill, it prints no note.
         (folder / "decisions.md").write_text("# Decisions: skeleton\n\n## Operator decisions\n\n- [O1] Q1: One lane. Operator: \"yes\".\n\n"
                                              "## Grill defaults\n\nNone.\n\n## Changes after launch\n\nNone yet.\n\n## Deferred\n\nNothing.\n")
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main(["skeleton", "--repo", str(target), "--no-herdr", "--dry-run", "--run-id", "skeleton-002"])
         self.assertEqual((json.loads(output.getvalue())["notes"], errors.getvalue()), ([], ""))

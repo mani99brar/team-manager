@@ -417,7 +417,7 @@ class Conventions(GuardedFeature):
     def dry_run_output(self) -> tuple[dict, str]:
         """The dry run's JSON and its stderr (the notes)."""
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
         command.assert_not_called()
