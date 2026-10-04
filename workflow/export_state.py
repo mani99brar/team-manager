@@ -44,7 +44,8 @@ Version 1.7.0 (additive, C52) records what prepare pinned about who runs the run
 (attended or unattended). Each key is left out for a run prepared before it,
 as it was; everything else is 1.6.0 unchanged. Within 1.7.0 (C8), `inputs.challenge`
 gains `hold` ({held_at, released_at, released_by, dropped}) when `challenge-hold.json`
-records the attempt shown: a run held after a passing challenge, and its release. The
+records the attempt shown, unless it is marked `"held": false` (a rerun that passed
+under resume --launch): a run held after a passing challenge, and its release. The
 status stays `passed`; the key is left out for every other run.
 """
 from __future__ import annotations

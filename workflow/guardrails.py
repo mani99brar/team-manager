@@ -881,7 +881,8 @@ def parse_drop(value: str | None) -> frozenset[int]:
 def release_hold(runtime, record: dict, actor: str, dropped: frozenset[int], held: bool = True) -> None:
     """`resume --launch`: record the release of `record`'s attempt (when, by whom, the notes left out). A rerun that passed under
     `--launch` was never held (`held` false): its record is written released and marked `"held": false`, which the export reads as
-    no hold. Records before it carry no `held` and were all held."""
+    no hold. Records before it carry no `held` and export as held, including a rerun that an earlier controller released under
+    `--launch`."""
     directory = runtime.directory
     found = load_hold(directory)
     held_at = found["held_at"] if found and found.get("attempt") == record["attempt"] else now()
@@ -891,7 +892,8 @@ def release_hold(runtime, record: dict, actor: str, dropped: frozenset[int], hel
 
 def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) -> str:
     """Why `--drop` is refused on a run that holds no attempt: only the release of a held attempt consumes it, so anywhere else it
-    would be ignored. A paused or undecided attempt's rerun numbers its own notes; a released hold recorded its drops already."""
+    would be ignored. A paused or undecided attempt's rerun numbers its own notes; a released hold recorded its drops already,
+    and a rerun that passed under `--launch` was never held."""
     numbers = ",".join(map(str, sorted(dropped)))
     if current is None or current["status"] == "paused":
         what = f"design challenge attempt {current['attempt']} paused this run" if current else "no design challenge attempt was decided"
@@ -899,6 +901,9 @@ def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) 
     if current["status"] == "accepted":
         return f"--drop {numbers}: design challenge attempt {current['attempt']} was accepted, and nothing holds it. Resume --launch without --drop"
     found = load_hold(directory) or {}
+    if found.get("attempt") == current["attempt"] and found.get("held") is False:
+        return (f"--drop {numbers}: design challenge attempt {current['attempt']} passed under resume --launch and was never held; the "
+                "workers launch with all its notes. Resume --launch without --drop")
     kept = found.get("dropped") or [] if found.get("attempt") == current["attempt"] else []
     earlier = f", with note {', '.join(map(str, kept))} dropped" if kept else ", with no note dropped"
     return (f"--drop {numbers}: the hold of design challenge attempt {current['attempt']} was released already{earlier}; the workers "

@@ -1500,6 +1500,20 @@ class ChallengeHold(GuardedFeature):
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
         for lane in LANES:
             self.assertNotIn("One test is slow", self.given[lane]["prompt"])
+        # A rerun that passed under resume --launch, whose launch failed: that attempt was never held, so nothing was released.
+        rerun = self.held("drop-rerun-001")
+        self.edit_task()
+        self.challenge_says([concern("P2", "Still minor")])
+        with patch("workflow.pipeline.start_workers", side_effect=RuntimeError("Claude launch exited 1")):
+            output, code = self.cli(resume_main, [str(rerun), "--launch"])
+        self.assertEqual(code, 1, output)
+        self.assertIs(read_json(rerun / "challenge-hold.json")["held"], False)
+        output, code = self.cli(resume_main, [str(rerun), "--launch", "--drop", "1"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 1: design challenge attempt 2 passed under resume --launch and was never held; the workers launch with all "
+                      "its notes. Resume --launch without --drop", output)
+        self.assertNotIn("released already", output)
+        self.assertEqual(self.launches(rerun), ["challenge", "challenge"])
         # An accepted attempt whose launch failed: the override was the release, and nothing holds it to drop notes from.
         accepted = self.prepare("drop-accepted-001", hold=True)
         self.challenge_says([concern("P1", "The lanes overlap")])
@@ -1576,6 +1590,10 @@ class ChallengeHold(GuardedFeature):
         self.assertIn("; nothing is accepted", output)
         self.assertNotIn("commits them", output)
         self.assertNotIn("reruns it and holds again", output)
+        # The outcome line under it names the same refusal, never the release that resume refuses too.
+        self.assertIn("Outcome: held at design challenge attempt 1 (passed, 2 P2 concern(s)); no worker launched, and feature files "
+                      "changed since it read them, but resume refuses: ", output)
+        self.assertNotIn("release it:", output)
         self.assertEqual(len(self.challenge_calls()), 1)
 
     def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):

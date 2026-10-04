@@ -13,6 +13,7 @@ and writes nothing, so `status` stays lock-free. The digest and PR pasting come 
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from .export_state import completion_signal, load_optional, review_section, sidecar_section, worker_questions
@@ -169,13 +170,21 @@ def open_items(directory: Path, plan: dict, findings: list, open_p2: bool = Fals
 
 
 def held_line(directory: Path, plan: dict) -> str | None:
-    """A run held after a passing design challenge (C8): what holds it and the command that releases it; None otherwise."""
-    from .guardrails import is_held, load_challenge, resume_command
+    """A run held after a passing design challenge (C8): what holds it and the command that releases it; None otherwise. As
+    challenge_step's held branch: with feature files edited since the attempt and resume's read-only checks failing, resume's
+    refusal instead of a release that refuses too."""
+    from .guardrails import is_held, load_challenge, resume_command, resume_refusal, unused_edits
     record = load_challenge(directory)
     if not is_held(directory, plan, record):
         return None
-    return (f"Outcome: held at design challenge attempt {record['attempt']} (passed, {len(record['concerns'])} P2 concern(s)); no worker "
-            f"launched. Read every concern, then release it: {resume_command(directory, launch=True)}")
+    held = f"Outcome: held at design challenge attempt {record['attempt']} (passed, {len(record['concerns'])} P2 concern(s)); no worker launched"
+    try:
+        refusal = unused_edits(directory, plan) and resume_refusal(plan)
+    except subprocess.SubprocessError as error:  # outcome_block catches the rest.
+        return f"{held}, and its source checkout {plan['repository']} could not be read ({error}): resume needs it"
+    if refusal:
+        return f"{held}, and feature files changed since it read them, but resume refuses: {refusal}"
+    return f"{held}. Read every concern, then release it: {resume_command(directory, launch=True)}"
 
 
 def outcome_block(directory: Path, open_items_only: bool = False) -> str:
