@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .checks import now
-from .sessions import TransientInfraError, git, plan_workers, popen_claude, read_json, run_lock, save_json, stale_claude_warning, terminate
+from .sessions import (TransientInfraError, git, plan_workers, popen_claude, read_json, real_path, run_lock, save_json, stale_claude_warning,
+                       terminate)
 from .verification import CONTRACTS, validate_schema
 from .worktrees import git_worktree
 
@@ -545,10 +546,14 @@ def commit_revision(runtime, answered: int) -> None:
 
 
 def run_worktrees(repo: Path, directory: Path) -> list[Path]:
-    """The repository's worktrees inside the run directory: before any launch, the lane worktrees and the challenge worktree."""
+    """The repository's worktrees inside the run directory: before any launch, the lane worktrees and the challenge worktree.
+
+    On macOS Git lists them in composed Unicode (core.precomposeunicode), which need not be the form the volume stores and
+    the plan pins, so they are compared in the stored spelling (real_path is Path.resolve() elsewhere).
+    """
     listing = subprocess.check_output(["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"], text=True)
     paths = [Path(field[len("worktree "):]) for field in listing.split("\0") if field.startswith("worktree ")]
-    return sorted(path for path in paths if path.resolve().is_relative_to(directory))
+    return sorted(path for path in paths if real_path(path).is_relative_to(directory))
 
 
 def check_run_worktrees(runtime, heads: set[str]) -> dict[Path, str]:
@@ -556,8 +561,8 @@ def check_run_worktrees(runtime, heads: set[str]) -> dict[Path, str]:
     directory, plan = runtime.directory, runtime.plan
     repo, base = Path(plan["repository"]), plan["base_commit"]
     worktrees = run_worktrees(repo, directory)
-    lanes = [Path(plan["nodes"][node]["worktree"]).resolve() for node in plan_workers(plan)]
-    missing = [str(path) for path in lanes if path not in [item.resolve() for item in worktrees]]
+    lanes = [real_path(plan["nodes"][node]["worktree"]) for node in plan_workers(plan)]
+    missing = [str(path) for path in lanes if path not in [real_path(item) for item in worktrees]]
     if missing:
         raise RuntimeError(f"Lane worktrees are not registered in {repo}: {', '.join(missing)}; reconcile before resume")
     found = {}
@@ -942,7 +947,7 @@ def resume_main(argv=None):
     parser.add_argument("--accept-challenge", metavar="REASON", help="Record the override with this reason and continue without rerunning")
     parser.add_argument("--herdr", action="store_true", help="Attach the worker panes after the launch")
     args = parser.parse_args(argv)
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     from langgraph.checkpoint.sqlite import SqliteSaver
     from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
     warning = stale_claude_warning()
@@ -1002,7 +1007,7 @@ def answer_main(argv=None):
     parser.add_argument("text")
     parser.add_argument("--no-herdr", action="store_true", help="Print the claude attach command instead of typing into the pane")
     args = parser.parse_args(argv)
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     entry = delivered = None
     try:
         plan = read_json(directory / "plan.json")

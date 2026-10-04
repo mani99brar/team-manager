@@ -57,6 +57,9 @@ export default defineConfig({
     browserName: 'chromium',
     // Reduced motion makes the force layout settle synchronously, so nothing waits on animation.
     reducedMotion: 'reduce',
+    // The Projects specs under tests/project-workflows run here too and read every clock in UTC, as their own config
+    // pins it; the machine's zone would shift them.
+    timezoneId: 'UTC',
   },
   webServer: [
     {

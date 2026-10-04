@@ -33,7 +33,7 @@ const editor = (page: Page) => page.locator('.cm-content')
 
 async function typeAtEnd(page: Page, text: string) {
   await editor(page).click()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ControlOrMeta+End')
   await page.keyboard.type(text)
 }
 

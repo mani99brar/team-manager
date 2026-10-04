@@ -10,10 +10,11 @@ The separate [LangGraph workflow runbook](workflow/RUNBOOK.md) covers two intera
 
 ## Start
 
-Requires **Linux with procfs mounted at `/proc`**, Node.js 22.12+ (tested with 24), and npm. The backend fails closed at startup without Linux/procfs descriptor access; macOS/Windows backends are not supported.
+Requires **Linux with procfs mounted at `/proc`** or **macOS with inode paths at `/.vol`** (APFS or HFS+; see “Running on macOS”), Node.js 22.12+ (tested with 24 on Linux, 22.14 on macOS), and npm. The backend fails closed at startup without descriptor access through one of the two (“Filesystem boundary”); Windows and other platforms are not supported.
 
 ```sh
 npm ci
+mkdir -p ~/.config/md-manager
 cp config/sources.example.json ~/.config/md-manager/sources.json   # then edit the paths (see “Live skills”)
 npm run dev
 ```
@@ -48,7 +49,7 @@ The API reads one JSON file at startup and never changes it:
 - `source` is `"Pi"` or `"Claude"`; `category` is `personal`, `package`, `plugin` or `project` (package and plugin locations show an “installed file” notice in the document view).
 - `path` must be absolute. `~`, environment variables and globs are not expanded. Roots must be distinct directories: identical, nested or aliased (symlinked) roots are rejected at startup, so every file belongs to exactly one location.
 - Locations are shown Pi first, then Claude, in configured order within each source.
-- A configured location whose directory is missing, unreadable or a symlink is reported **unavailable** (with a path-free reason) while the others keep working. Refresh retries it; restoring the directory needs no restart.
+- A configured location whose directory is missing, unreadable, a symlink or, on macOS, not reached by its inode path is reported **unavailable** (with a path-free reason) while the others keep working. Refresh retries it; restoring the directory needs no restart.
 
 Adding a location means editing the file and restarting the API (`npm run dev` again, or restart `npm run start:api`). There is no UI for attaching directories and no automatic scan on Refresh.
 
@@ -66,6 +67,30 @@ ssh -L 5173:127.0.0.1:5173 -L 3001:127.0.0.1:3001 user@your-vps
 
 then open http://127.0.0.1:5173 locally. Forwarding 3001 is only needed if you want to call the API directly; the web port proxies `/api` on its own. Nothing is exposed publicly.
 
+### Running on macOS
+
+The same setup runs on a Mac (tested on macOS 15.7, arm64, APFS). The configuration file is the same `$HOME/.config/md-manager/sources.json` (or `MD_MANAGER_CONFIG`), with macOS paths:
+
+```json
+{
+  "version": 1,
+  "locations": [
+    { "id": "pi-personal", "source": "Pi", "label": "Personal skills", "path": "/Users/you/.pi/agent/skills", "category": "personal" },
+    { "id": "claude-personal", "source": "Claude", "label": "Personal and synced skills", "path": "/Users/you/.claude/skills", "category": "personal" }
+  ]
+}
+```
+
+Each root must be on a volume with inode paths (APFS or HFS+); one its inode path does not reach is unavailable (“Filesystem boundary”). A tunnel to the VPS like the one above holds 5173 on the Mac (and 3001 when it forwards it), and Vite never moves to another port (`strictPort`). Give both local servers free ports: Vite proxies `/api` to the API port, and through a tunnel that forwards 3001 the default would reach the VPS’s API.
+
+```sh
+MD_MANAGER_WEB_PORT=5174 MD_MANAGER_API_PORT=3002 npm run dev   # then open http://127.0.0.1:5174
+```
+
+`npm run start:api` and `npm run preview` take the same two variables.
+
+The Mac sleeps while idle, which pauses whatever runs: wrap long suites in `caffeinate -i` (`caffeinate -i npm run test:e2e`), which holds off idle sleep only while the command runs and changes no setting. The workflow controller runs on macOS too; [the runbook's operator boundaries](workflow/RUNBOOK.md#operator-boundaries) cover what differs there: keeping the Mac awake for unattended runs, Finder's `.DS_Store`, case-only renames, and paths typed in another letter case or Unicode form.
+
 ## Checks
 
 ```sh
@@ -75,9 +100,9 @@ npm run lint
 npm run build
 ```
 
-`npm run test:unit` runs the configuration tests (`server/config.test.ts`: parsing, ids, ordering, absolute paths, duplicate and overlapping roots, missing config, conflicting modes), the API tests (temporary roots covering nested and empty directories, uppercase `.MD`, ignored extensions, `.git` exclusion, symlink exclusion, per-location unavailability and recovery, the `GET /api/file` validator, the `PUT /api/file` write pipeline, the `POST /api/mutate` matrix and the multi-location contract in `server/locations.test.ts`: duplicate relative paths, unknown/mismatched locations, unavailable roots, cross-location refusals, root replacement during a read, descriptor cleanup), the pure graph-model/URL tests and the edit-session state machine.
+`npm run test:unit` runs the configuration tests (`server/config.test.ts`: parsing, ids, ordering, absolute paths, duplicate and overlapping roots, missing config, conflicting modes), the API tests (temporary roots covering nested and empty directories, uppercase `.MD`, ignored extensions, `.git` exclusion, symlink exclusion, per-location unavailability and recovery, the `GET /api/file` validator, the `PUT /api/file` write pipeline, the `POST /api/mutate` matrix and the multi-location contract in `server/locations.test.ts`: duplicate relative paths, unknown/mismatched locations, unavailable roots, cross-location refusals, root replacement during a read, descriptor cleanup), the pure graph-model/URL tests and the edit-session state machine. Cases specific to one platform (the procfs probe on Linux; inode paths and every spelling of `.git` on macOS) are skipped on the other.
 
-`npm run test:e2e` starts the app on a single Playwright worker with reduced motion against **isolated temporary roots**: `playwright.config.ts` creates one temp directory per run (seeded from `fixtures/pi` and `fixtures/claude` as `pi-personal` and `claude-personal`, plus a `pi-package`, a `claude-plugin` and a deliberately missing `pi-missing` location), writes a `sources.json` there, passes it to the API through `MD_MANAGER_CONFIG`, and removes everything in `tests/global-teardown.ts`. No browser test reads or writes a live skill directory or the committed fixtures.
+`npm run test:e2e` starts the app on a single Playwright worker with reduced motion and the browser in UTC, whatever the machine’s time zone, against **isolated temporary roots**: `playwright.config.ts` creates one temp directory per run (seeded from `fixtures/pi` and `fixtures/claude` as `pi-personal` and `claude-personal`, plus a `pi-package`, a `claude-plugin` and a deliberately missing `pi-missing` location), writes a `sources.json` there, passes it to the API through `MD_MANAGER_CONFIG`, and removes everything in `tests/global-teardown.ts`. No browser test reads or writes a live skill directory or the committed fixtures.
 
 ### Isolated test ports and evidence
 
@@ -132,7 +157,7 @@ Every route identifies files by **source + location id + location-relative path*
 
 - The three parameters are ordinary query parameters, each exactly once (build them with `URLSearchParams`; values are decoded once, so a literal `%` in a filename works). `locationId` must be configured for `source`.
 - Only regular `.md` files are readable. `content` is the file decoded as UTF-8 without trimming or normalisation; `hash` is the SHA-256 of the exact bytes of that same read and is the `expectedHash` for `PUT`. Responses carry `Cache-Control: no-store`.
-- Errors are `{ "code", "error" }`: **400** `INVALID_QUERY`, `INVALID_SOURCE`, `INVALID_LOCATION` (missing, unknown or belonging to the other source), `INVALID_PATH` (traversal, absolute, dot components, backslashes, NULs, `.git`); **404** `NOT_FOUND` (missing, directory, non-Markdown, non-regular, symlinked) and `LOCATION_UNAVAILABLE` (the location’s root is missing, a symlink or unreadable); **500** `READ_FAILED`.
+- Errors are `{ "code", "error" }`: **400** `INVALID_QUERY`, `INVALID_SOURCE`, `INVALID_LOCATION` (missing, unknown or belonging to the other source), `INVALID_PATH` (traversal, absolute, dot components, backslashes, NULs, `.git`); **404** `NOT_FOUND` (missing, directory, non-Markdown, non-regular, symlinked) and `LOCATION_UNAVAILABLE` (the location’s root is missing, a symlink, unreadable or, on macOS, not reached by its inode path); **500** `READ_FAILED`.
 
 ### `PUT /api/file`
 
@@ -171,6 +196,8 @@ Stable codes: **400** `INVALID_BODY`, `INVALID_OP`, `INVALID_QUERY`, `INVALID_SO
 ### Filesystem boundary
 
 Configured roots are trusted administrator input; request parameters are not. For every operation the location’s configured path is opened `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` for the duration of that one operation (the path’s ancestors are trusted; the root itself is never followed as a symlink), each further component is opened relative to its already-open parent through `/proc/self/fd` with `O_NOFOLLOW`, and the final target uses `O_NOFOLLOW | O_NONBLOCK` plus a regular-file `fstat`. A root or directory replaced or symlinked mid-operation therefore either continues on the pinned original or fails safely; it can never redirect the operation. No handle outlives its operation, so there is nothing to leak on shutdown, and the next operation re-opens the configured path and reports it unavailable if it is gone. The listing is never used as a security check.
+
+macOS has no procfs, so there each step goes through the open parent’s inode path `/.vol/<device>/<inode>` instead, from one `fstat` of its handle (bigint: APFS inode numbers exceed 2^53). The kernel turns that path into the directory’s current path and looks it up within the same system call, so a directory renamed or replaced between two steps still reaches the pinned original, as through `/proc/self/fd`. Two limits remain that procfs does not have: an ancestor renamed or replaced during that one call can redirect it, and the lookup needs search permission on every ancestor. Inode paths are per volume (APFS and HFS+ have them): at startup the server re-opens the temporary directory through its inode path and refuses to start unless that reaches the same directory, and every operation checks that the root’s inode path reaches the root itself (same device and inode) before it forms any path below it. A root that fails is unavailable; it is never read through its configured path instead. macOS `link(2)` also follows a symlink given as its source, so there no file is published by linking a name that could be swapped for one: create-file and copy link the staged file by its own inode path while its handle is still open (a staging name replaced by a symlink leaves that inode with no name, and the link is refused), and rename and move first open the source as a regular file with `O_NOFOLLOW`, hold it for the whole step, and after the link require the destination to be that same file (device and inode), else remove the destination and keep the source. Either refusal answers **404** `NOT_FOUND`. These links go through inode paths, so the two limits above apply to them too. macOS volumes are case-insensitive by default, so there `.git` is matched in any letter case (`.GIT/x.md` reaches the real `.git`): every spelling is skipped in listings and refused in requests.
 
 ## Graph explorer
 

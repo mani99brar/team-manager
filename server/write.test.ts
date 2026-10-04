@@ -11,6 +11,8 @@ import { defaultFixtureRoot, fixtureLocations } from './config.ts'
 const PI = 'pi-fixtures'
 const CLAUDE = 'claude-fixtures'
 const loc = (source: string) => (source === 'Pi' ? PI : CLAUDE)
+/** Where descriptor-relative paths start: procfs magic links on Linux, inode paths on macOS. */
+const DESCRIPTOR_PATHS = process.platform === 'darwin' ? '/.vol/' : '/proc/self/fd/'
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -194,7 +196,7 @@ test('the temp file is created exclusively in the same directory, never ends in 
       assert.equal(response.statusCode, 200)
       assert.equal(created.length, 1)
       const tempName = created[0].slice(created[0].lastIndexOf('/') + 1)
-      assert.ok(created[0].startsWith('/proc/self/fd/'), created[0])
+      assert.ok(created[0].startsWith(DESCRIPTOR_PATHS), created[0])
       assert.ok(!tempName.toLowerCase().endsWith('.md'), tempName)
       assert.notEqual(tempName, 'review.md')
       // Sibling temp name: the directory only contains the original afterwards.

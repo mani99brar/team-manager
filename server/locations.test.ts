@@ -1,7 +1,7 @@
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import fs, { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import fs, { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from './app.ts'
@@ -22,6 +22,9 @@ const PACKAGE = 'pi-package'
 const CLAUDE_PERSONAL = 'claude-personal'
 const PLUGIN = 'claude-plugin'
 const MISSING = 'pi-missing'
+/** Where descriptor-relative paths start: procfs magic links on Linux, inode paths on macOS. */
+const DESCRIPTOR_PATHS = process.platform === 'darwin' ? '/.vol/' : '/proc/self/fd/'
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS behaviour'
 
 function locations(root: string, extra: LocationConfig[] = []): LocationConfig[] {
   return [
@@ -309,6 +312,48 @@ test('.git is excluded from listings and refused as a read or mutation target at
   })
 })
 
+test('on macOS every spelling of .git is excluded: a case-insensitive volume reaches the real one through any of them', { skip: MACOS_ONLY }, async () => {
+  await withRoots(async root => {
+    await mkdir(join(root, 'pi-personal', '.git'))
+    await writeFile(join(root, 'pi-personal', '.git', 'README.md'), 'git internals')
+    // Volumes may be case-sensitive too: a directory spelled differently is excluded all the same.
+    await mkdir(join(root, 'pi-package', '.Git'))
+    await writeFile(join(root, 'pi-package', '.Git', 'notes.md'), 'git internals')
+    const app = createApp(locations(root))
+    const before = await tree(root)
+    try {
+      const listing = await app.inject('/api/entries')
+      assert.deepEqual(listing.json().entries.filter((entry: { locationId: string }) => entry.locationId === PACKAGE), [
+        { source: 'Pi', locationId: PACKAGE, path: 'review', kind: 'directory' },
+        { source: 'Pi', locationId: PACKAGE, path: 'review/SKILL.md', kind: 'file' },
+      ])
+      assert.ok(!listing.body.includes('.git') && !listing.body.includes('.Git'))
+      for (const path of ['.GIT/README.md', '.Git/README.md', 'review/.GIT/HEAD.md', '.gIt']) {
+        const read = await app.inject(fileUrl({ source: 'Pi', locationId: PERSONAL, path }))
+        assert.equal(read.statusCode, 400, path)
+        assert.equal(read.json().code, 'INVALID_PATH', path)
+        assert.ok(!read.body.includes('git internals'))
+        const save = await put(app, { source: 'Pi', locationId: PERSONAL, path, content: 'x', expectedHash: sha256('git internals') })
+        assert.equal(save.statusCode, 400, path)
+      }
+      const mutations: unknown[] = [
+        { op: 'create-file', source: 'Pi', locationId: PERSONAL, path: '.GIT/new.md' },
+        { op: 'create-folder', source: 'Pi', locationId: PACKAGE, path: '.GIT' },
+        { op: 'delete', source: 'Pi', locationId: PACKAGE, path: '.Git/notes.md' },
+        { op: 'rename', source: 'Pi', locationId: PERSONAL, path: '.Git/README.md', destinationPath: '.Git/OTHER.md' },
+        { op: 'move', source: 'Pi', locationId: PERSONAL, path: 'review/SKILL.md', destinationPath: '.GIT/SKILL.md' },
+        { op: 'copy', source: 'Pi', locationId: PERSONAL, path: '.GIT/README.md', destinationSource: 'Claude', destinationLocationId: PLUGIN, destinationPath: 'copied.md' },
+      ]
+      for (const payload of mutations) {
+        const response = await mutate(app, payload)
+        assert.equal(response.statusCode, 400, `${JSON.stringify(payload)}: ${response.body}`)
+        assert.equal(response.json().code, 'INVALID_PATH', JSON.stringify(payload))
+      }
+      assert.deepEqual(await tree(root), before)
+    } finally { await app.close() }
+  })
+})
+
 test('copy lands in the chosen destination location under the other source and reports both locations', async () => {
   await withRoots(async root => {
     const app = createApp(locations(root))
@@ -374,6 +419,64 @@ test('a root replaced by another directory or a symlink during a read never redi
   }
 })
 
+test('on macOS a root whose volume has no working inode paths is unavailable and nothing below it is opened by pathname', { skip: MACOS_ONLY }, async () => {
+  for (const volume of ['refuses inode paths', 'addresses another directory'] as const) {
+    await withRoots(async root => {
+      const configured = join(root, 'pi-package')
+      const { dev, ino } = await stat(configured, { bigint: true })
+      const inodePath = `/.vol/${dev}/${ino}`
+      const elsewhere = await stat(join(root, 'outside'), { bigint: true })
+      const app = createApp(locations(root))
+      const statOriginal = fs.stat
+      const open = fs.open
+      const opened: string[] = []
+      const handles: Array<Awaited<ReturnType<typeof open>>> = []
+      try {
+        await app.ready()
+        const before = await tree(root)
+        mock.method(fs, 'stat', async (path: Parameters<typeof statOriginal>[0], options?: Parameters<typeof statOriginal>[1]) => {
+          if (String(path) !== inodePath) return statOriginal(path, options as never)
+          if (volume === 'refuses inode paths') throw Object.assign(new Error('Operation not supported'), { code: 'ENOTSUP' })
+          return elsewhere
+        })
+        mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+          opened.push(String(path))
+          const handle = await open(path, flags, mode)
+          handles.push(handle)
+          return handle
+        })
+        const listing = (await app.inject('/api/entries')).json()
+        assert.deepEqual(listing.locations.map((location: { id: string; status: string }) => [location.id, location.status]), [
+          [PERSONAL, 'available'], [PACKAGE, 'unavailable'], [CLAUDE_PERSONAL, 'available'], [PLUGIN, 'available'],
+        ], volume)
+        assert.match(listing.locations[1].error, /inode/, volume)
+        assert.ok(!JSON.stringify(listing).includes(root))
+        assert.ok(!listing.entries.some((entry: { locationId: string }) => entry.locationId === PACKAGE), volume)
+        const requests: Array<[string, () => Promise<{ statusCode: number; body: string; json: () => { code: string } }>]> = [
+          ['read', () => app.inject(fileUrl({ source: 'Pi', locationId: PACKAGE, path: 'review/SKILL.md' }))],
+          ['save', () => put(app, { source: 'Pi', locationId: PACKAGE, path: 'review/SKILL.md', content: 'x', expectedHash: sha256('package review\n') })],
+          ['create-file', () => mutate(app, { op: 'create-file', source: 'Pi', locationId: PACKAGE, path: 'new.md' })],
+          ['copy into', () => mutate(app, { op: 'copy', source: 'Claude', locationId: PLUGIN, path: 'ux-copy/SKILL.md', destinationSource: 'Pi', destinationLocationId: PACKAGE, destinationPath: 'x.md' })],
+        ]
+        for (const [label, send] of requests) {
+          const response = await send()
+          assert.equal(response.statusCode, 404, `${volume} ${label}: ${response.body}`)
+          assert.equal(response.json().code, 'LOCATION_UNAVAILABLE', label)
+          assert.ok(!response.body.includes('package review') && !response.body.includes(root), label)
+        }
+        // The root itself was opened by its configured path, as always; nothing below it by either kind of path.
+        assert.ok(opened.includes(configured))
+        assert.ok(!opened.some(path => path.startsWith(`${configured}/`) || path.startsWith(`${inodePath}/`)), opened.join('\n'))
+        assert.deepEqual(await tree(root), before)
+        for (const handle of handles) assert.equal(handle.fd, -1, 'every request descriptor is closed')
+        // A healthy volume serves the location again.
+        mock.restoreAll()
+        assert.equal((await app.inject(fileUrl({ source: 'Pi', locationId: PACKAGE, path: 'review/SKILL.md' }))).json().content, 'package review\n')
+      } finally { mock.restoreAll(); await app.close() }
+    })
+  }
+})
+
 test('every descriptor opened for listing, reads and mutations is closed afterwards; a closed registry refuses work', async () => {
   await withRoots(async root => {
     const app = createApp(locations(root, [missingLocation(root)]))
@@ -411,7 +514,7 @@ test('a failed capability probe closes what it opened and never opens a configur
     const handles: Array<Awaited<ReturnType<typeof open>>> = []
     mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
       opened.push(String(path))
-      if (String(path).startsWith('/proc/self/fd/')) throw Object.assign(new Error('unavailable descriptor access'), { code: 'EACCES' })
+      if (String(path).startsWith(DESCRIPTOR_PATHS)) throw Object.assign(new Error('unavailable descriptor access'), { code: 'EACCES' })
       const handle = await open(path, flags, mode)
       handles.push(handle)
       return handle

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import fs, { type FileHandle } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, fstatSync } from 'node:fs'
+import { constants as osConstants } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 import type { Source } from './config.ts'
 import type { LocationRegistry } from './registry.ts'
@@ -42,6 +43,11 @@ export const HASH_CONFLICT_MESSAGE = 'This file changed on disk. Reload it or co
 /** Version-control internals are never listed, read or changed, however a request addresses them. */
 export const EXCLUDED_DIRECTORY = '.git'
 
+/** Whether a name is the excluded directory. macOS volumes are case-insensitive by default, so there any spelling of it is. */
+export function isExcludedDirectory(name: string): boolean {
+  return process.platform === 'darwin' ? name.toLowerCase() === EXCLUDED_DIRECTORY : name === EXCLUDED_DIRECTORY
+}
+
 /**
  * Splits a relative path into safe components. Rejects before any normalisation: `..` and `.` components,
  * empty components (leading, trailing or doubled separators), backslashes, NULs, absolute forms including
@@ -54,7 +60,7 @@ export function splitRelativePath(path: string): string[] {
   const components = path.split('/')
   for (const component of components) {
     if (component === '' || component === '.' || component === '..') throw new PathError(400, INVALID_PATH)
-    if (component === EXCLUDED_DIRECTORY) throw new PathError(400, `Paths inside ${EXCLUDED_DIRECTORY} are not managed.`)
+    if (isExcludedDirectory(component)) throw new PathError(400, `Paths inside ${EXCLUDED_DIRECTORY} are not managed.`)
   }
   return components
 }
@@ -86,9 +92,51 @@ function filesystemError(error: unknown): never {
   throw error
 }
 
-/** A descriptor-relative path: the parent is an already-open directory, the name is one validated component. */
+/**
+ * Whether an open failed on a socket on macOS, which reports it as EOPNOTSUPP where Linux reports ENXIO. Node has
+ * no name for that errno there, so it is matched by number.
+ */
+export function isMacSocketOpen(error: unknown): boolean {
+  return process.platform === 'darwin' && (error as NodeJS.ErrnoException)?.errno === -osConstants.errno.EOPNOTSUPP
+}
+
+/** The inode path of each open directory, from one fstat of its handle. */
+const inodePaths = new WeakMap<FileHandle, string>()
+
+/**
+ * macOS has no procfs. `/.vol/<device>/<inode>` names an open directory by identity: the kernel turns it into the
+ * directory's current path and looks that up within the same system call, so a directory renamed or replaced between
+ * two steps still reaches the pinned original. Residual limits the procfs link does not have: an ancestor renamed or
+ * replaced during that one call can redirect it, and the lookup needs search permission on every ancestor. Bigint
+ * stats: APFS inode numbers exceed 2^53.
+ */
+function inodePath(directory: FileHandle): string {
+  let path = inodePaths.get(directory)
+  if (path === undefined) {
+    const { dev, ino } = fstatSync(directory.fd, { bigint: true })
+    path = `/.vol/${dev}/${ino}`
+    inodePaths.set(directory, path)
+  }
+  return path
+}
+
+/**
+ * macOS: whether an open directory's inode path reaches that same directory. Inode paths are per volume (APFS and
+ * HFS+ have them; other volumes may refuse them or address another file), so a root is checked before any path is
+ * formed below it, and one that fails is never read through its configured path instead.
+ */
+export async function inodePathReaches(directory: FileHandle): Promise<boolean> {
+  const path = inodePath(directory)
+  const reached = await fs.stat(path, { bigint: true }).catch(() => null)
+  return reached !== null && path === `/.vol/${reached.dev}/${reached.ino}`
+}
+
+/**
+ * A descriptor-relative path: the parent is an already-open directory, the name is one validated component.
+ * Linux reaches the parent through its procfs magic link, macOS through its inode path.
+ */
 export function at(parent: FileHandle, name?: string): string {
-  const base = `/proc/self/fd/${parent.fd}`
+  const base = process.platform === 'darwin' ? inodePath(parent) : `/proc/self/fd/${parent.fd}`
   return name === undefined ? base : `${base}/${name}`
 }
 
@@ -115,7 +163,8 @@ export function validateMarkdownPath(path: unknown): string[] {
  * Walks from an open location root to the directory containing the target, one no-follow open per component.
  * O_NOFOLLOW applies to ONE component at each step; the parent is an already-open directory.
  * Rename/symlink replacement can therefore only yield the pinned original or an unavailable target,
- * never re-resolve an earlier component. Keep all handles alive until the operation completes.
+ * never re-resolve an earlier component (on macOS, short of the one-call race `inodePath` describes).
+ * Keep all handles alive until the operation completes.
  */
 export async function withParentDirectory<T>(
   root: FileHandle, components: string[],
@@ -138,7 +187,7 @@ export async function openRegularFile(parent: FileHandle, name: string): Promise
   // ENXIO here identifies an unopenable special target (e.g. a socket), not a read failure.
   // O_NONBLOCK lets us fstat/reject FIFOs without waiting for a writer.
   const file = await fs.open(at(parent, name), FILE_FLAGS).catch(error => {
-    if ((error as NodeJS.ErrnoException).code === 'ENXIO') throw new PathError(404, NOT_FOUND)
+    if ((error as NodeJS.ErrnoException).code === 'ENXIO' || isMacSocketOpen(error)) throw new PathError(404, NOT_FOUND)
     throw error
   })
   try {

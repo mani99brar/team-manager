@@ -70,7 +70,7 @@ class LaneRun(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir(parents=True)  # No contracts/: the controller validates against the tool's bundled schemas.
         (self.repo / "ui.txt").write_text("before")
@@ -581,7 +581,7 @@ class PolicyRules(unittest.TestCase):
         policy["failure_drill"] = {"node_id": "docs", "phase": "worker", "attempt": 1}
         validate_pipeline_policy(policy)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             for tasks, message in (({"review": "task"}, "reserved"), ({}, "nonempty task"), ({"docs": " "}, "nonempty task"), ({"launch_x": "task"}, "must match")):
                 with self.assertRaisesRegex(ValueError, message):
                     prepare(root / "run", root, "HEAD", tasks, True)
@@ -606,7 +606,7 @@ class PolicyRules(unittest.TestCase):
         for ok in ("challenger", "challenges"):
             self.assertEqual(validate_node_id(ok), ok)
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             with self.assertRaisesRegex(ValueError, "reserved: challenge"):
                 prepare(root / "run", root, "HEAD", {"challenge": "task"}, True)
             self.assertFalse((root / "run").exists())
@@ -629,7 +629,7 @@ class FindingLanes(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.digest = "b" * 64
 
     reviewer = "review"  # The default reviewer; the subclass declares one of two.
@@ -845,7 +845,7 @@ class Panes(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         repo = self.root / "repo"
         (repo / "contracts/workflow").mkdir(parents=True)
         (repo / "contracts/workflow/workerResult.schema.json").write_text("{}")

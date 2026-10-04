@@ -36,7 +36,7 @@ class CheckReport(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.policy = self.root / "policy.json"
         save_json(self.policy, browser_policy(["npx", "--no-install", "playwright", "test"]))
         self.files = 0
@@ -225,7 +225,7 @@ class WorkerPhaseScenarioEvidence(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = Path(temp.name).resolve()
         self.repo = root / "repo"
         (self.repo / "src").mkdir(parents=True)
         (self.repo / "src/app.txt").write_text("before\n")

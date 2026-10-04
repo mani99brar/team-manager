@@ -29,8 +29,8 @@ from langgraph.types import Command, interrupt
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
-                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_effort)
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, real_path, review_node,
+                       reviewer_ids, run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import git_worktree
 
@@ -895,8 +895,12 @@ def main():
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
     args = parser.parse_args()
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     try:
+        if sys.platform == "darwin":
+            # As the volume spells them, like the run directory: prepare pins these or compares them with the repository.
+            args.repo, args.policy, args.decisions, args.prd, args.sidecar_brief = (
+                None if path is None else real_path(path) for path in (args.repo, args.policy, args.decisions, args.prd, args.sidecar_brief))
         if args.action == "preflight":
             if not args.policy:
                 parser.error("preflight requires --policy")
@@ -932,6 +936,8 @@ def main():
             declared = policy_workers(policy)
             selected = parse_lane_selection(args.workers, declared)
             task_files = parse_lane_files(args.task, "--task")
+            if sys.platform == "darwin":
+                task_files = {node: real_path(path) for node, path in task_files.items()}
             if set(task_files) != set(selected):
                 parser.error(f"--task must be given exactly once for each selected lane ({', '.join(selected)}); got {', '.join(task_files) or 'none'}")
             if args.automatic and not git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD").startswith("feature/"):

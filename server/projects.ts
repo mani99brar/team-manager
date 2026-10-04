@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -12,7 +13,7 @@ import {
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
-import { DIRECTORY_FLAGS, at } from './files.ts'
+import { DIRECTORY_FLAGS, at, inodePathReaches, isMacSocketOpen } from './files.ts'
 import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConfig, type ProjectsConfig, type WorkflowConfig } from './projectsConfig.ts'
 
 /**
@@ -415,6 +416,18 @@ const PROC_FILE_LIMIT = 64 * 1024
 const CLOCK_TICKS_PER_SECOND = 100
 /** A controller may start this much after the time its PID row records (tick and clock rounding). */
 const START_TOLERANCE_MS = 1000
+/** macOS `ps` gets this long to describe one process; a slower answer reads as unknown. */
+const PS_TIMEOUT_MS = 5000
+/** `ps -o lstart= -o command=` with C-format times in UTC: `Www Mmm dd hh:mm:ss yyyy`, padding, then the command line. */
+const PS_ROW = /^[A-Z][a-z]{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +(\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4}) +(.*)$/
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+/**
+ * The escapes ps prints for characters it cannot show (`^X`, `M-x`, `M^X` and `\ooo`), and U+FFFD, which an invalid
+ * UTF-8 byte that ps prints raw decodes to.
+ */
+const PS_ESCAPE = /\^[@-_?]|M[-^]|\\[0-7]{3}|\uFFFD/
+/** A controller's command line holds a few arguments; one that could hold more candidate paths than this is not tried. */
+const STEP_TARGET_LIMIT = 64
 const HEADLINE_LIMIT = 160
 
 const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
@@ -468,7 +481,7 @@ function errno(error: unknown): string | undefined {
 
 function isMissing(error: unknown): boolean {
   const code = errno(error)
-  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP' || code === 'ENXIO'
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP' || code === 'ENXIO' || isMacSocketOpen(error)
 }
 
 /**
@@ -752,6 +765,8 @@ export type RunStoreOptions = {
   refresh?: () => Promise<ProjectsConfig | null>
   /** The `/proc` tree the controller liveness check reads; tests pass a fake one. */
   procRoot?: string
+  /** The `ps` the controller liveness check runs on macOS, which has no `/proc`; tests pass a fake one. */
+  ps?: string
   /** The home directory a served `run_dir` is relative to; defaults to the server's `$HOME`. */
   home?: string
 }
@@ -770,6 +785,7 @@ export class RunStore {
       packetByteLimit: options.packetByteLimit ?? DEFAULT_PACKET_BYTE_LIMIT,
       artifactByteLimit: options.artifactByteLimit ?? DEFAULT_ARTIFACT_BYTE_LIMIT,
       procRoot: options.procRoot ?? '/proc',
+      ps: options.ps ?? '/bin/ps',
       home: options.home ?? homedir(),
       warn: options.warn,
       refresh: options.refresh,
@@ -820,7 +836,10 @@ export class RunStore {
     return { project, workflow }
   }
 
-  /** Opens the workflow's configured run root no-follow for one operation. An unusable root is a 503, never an empty list. */
+  /**
+   * Opens the workflow's configured run root no-follow for one operation. An unusable root is a 503, never an empty list;
+   * on macOS that includes a root on a volume without inode paths, which is never read by pathname instead.
+   */
   private async withRunsRoot<T>(scope: Scope, operation: (root: FileHandle) => Promise<T>): Promise<T> {
     let root: FileHandle
     try {
@@ -832,6 +851,9 @@ export class RunStore {
       throw new ProjectApiError(503, 'RUNS_ROOT_UNAVAILABLE', `The configured run storage for this workflow ${reason}. Check the registry configuration.`)
     }
     try {
+      if (process.platform === 'darwin' && !(await inodePathReaches(root))) {
+        throw new ProjectApiError(503, 'RUNS_ROOT_UNAVAILABLE', 'The configured run storage for this workflow is on a volume that cannot be opened by inode, which secure reads on macOS require. Check the registry configuration.')
+      }
       return await operation(root)
     } finally {
       await root.close()
@@ -1068,8 +1090,10 @@ export class RunStore {
       }
     }
     const reviewDiff = state.review?.diff ? { artifact_id: reviewArtifactId(state.review.diff.sha256), sha256: state.review.diff.sha256, bytes: state.review.diff.bytes } : null
-    const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
-    const run_dir = await this.runDirectory(scope, directory)
+    // Both callers open the run directory by its ID below the workflow's run root.
+    const opened = join(scope.workflow.runs_root, runId)
+    const activity = await this.runActivity(directory, opened, { detail, events, inputs, review }, rawEvents)
+    const run_dir = await this.runDirectory(scope, directory, opened)
     try {
       detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition, snapshot, run_dir })
     } catch (error) {
@@ -1083,7 +1107,7 @@ export class RunStore {
    * nothing else except each live lane's question record: no review file, lane result or packet is opened, so list polls
    * stay cheap. The focus, attention, headline and times follow the run page's triage rules, so the two agree.
    */
-  private async runActivity(directory: FileHandle, run: RunData, rawEvents: readonly RawEvent[]): Promise<RunActivity> {
+  private async runActivity(directory: FileHandle, opened: string, run: RunData, rawEvents: readonly RawEvent[]): Promise<RunActivity> {
     const status = run.detail.snapshot.status
     // A finished run waits on nobody: only a run that can still move reads its lanes' live question records.
     const current = !FINISHED_STATUSES.has(status) && run.inputs ? { ...run, inputs: await this.liveQuestions(directory, run.inputs) } : run
@@ -1099,7 +1123,7 @@ export class RunStore {
       attention: activityAttention(status, attention, now, focus),
       waiting_questions: [...attention.nodes.values()].filter(item => item.kind === 'question').length,
       headline: activityHeadline(current, focus, now),
-      controller: status === 'running' || status === 'paused' ? await this.controllerState(directory, rawEvents) : null,
+      controller: status === 'running' || status === 'paused' ? await this.controllerState(directory, opened, rawEvents) : null,
     }
   }
 
@@ -1125,24 +1149,26 @@ export class RunStore {
   }
 
   /**
-   * Whether the run's controller is alive, read-only from `/proc` (B2): only for a run that logged
+   * Whether the run's controller is alive, read-only from `/proc` (B2), or from `ps` on macOS: only for a run that logged
    * `Automatic checkpoint controller PID <n>`, whose `automatic-step` child runs on this host as this user
    * (automatic.py:1103, :1244). Never a signal: `process.kill(pid, 0)` would trust a PID that may have been reused.
    */
-  private async controllerState(directory: FileHandle, rawEvents: readonly RawEvent[]): Promise<RunActivity['controller']> {
+  private async controllerState(directory: FileHandle, opened: string, rawEvents: readonly RawEvent[]): Promise<RunActivity['controller']> {
     const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
     if (!logged) return null
-    const runDir = await realpathOrNull(at(directory))
-    return runDir === null ? 'unknown' : controllerLiveness(this.options.procRoot, Number(PID_ROW.exec(logged.message)![1]), logged.time, runDir)
+    const runDir = await directoryRealpath(directory, opened)
+    if (runDir === null) return 'unknown'
+    const pid = Number(PID_ROW.exec(logged.message)![1])
+    return process.platform === 'darwin' ? psControllerLiveness(this.options.ps, pid, logged.time, runDir) : controllerLiveness(this.options.procRoot, pid, logged.time, runDir)
   }
 
   /**
    * The run directory, `~`-relative (B3), for a project the registry lists under `viewer.expose_run_dir`; null for any other
    * project, a directory outside the home, and a path that would not paste unquoted as `RUN=<path>`.
    */
-  private async runDirectory(scope: Scope, directory: FileHandle): Promise<string | null> {
+  private async runDirectory(scope: Scope, directory: FileHandle, opened: string): Promise<string | null> {
     if (!this.config.viewer?.expose_run_dir.includes(scope.project.project_id)) return null
-    const [runDir, home] = await Promise.all([realpathOrNull(at(directory)), realpathOrNull(this.options.home)])
+    const [runDir, home] = await Promise.all([directoryRealpath(directory, opened), realpathOrNull(this.options.home)])
     if (runDir === null || home === null) return null
     const inside = relative(home, runDir)
     if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return null
@@ -1544,6 +1570,23 @@ async function realpathOrNull(path: string): Promise<string | null> {
   }
 }
 
+/**
+ * The real path of an open directory. Linux resolves the descriptor's procfs link. macOS cannot name a descriptor's
+ * path (its inode path does not resolve), so the path the directory was opened at is resolved instead and served only
+ * while it still is that directory: one renamed or replaced since reads as null, never as another directory.
+ */
+async function directoryRealpath(directory: FileHandle, opened: string): Promise<string | null> {
+  if (process.platform !== 'darwin') return realpathOrNull(at(directory))
+  const path = await realpathOrNull(opened)
+  if (path === null) return null
+  try {
+    const [pinned, current] = await Promise.all([directory.stat({ bigint: true }), fs.stat(path, { bigint: true })])
+    return pinned.dev === current.dev && pinned.ino === current.ino ? path : null
+  } catch {
+    return null
+  }
+}
+
 /** A `/proc` file's text (their sizes read as 0, so it is read to its end, bounded); null when it cannot be read. */
 async function readProcFile(path: string): Promise<string | null> {
   let handle: FileHandle
@@ -1600,6 +1643,58 @@ async function controllerLiveness(procRoot: string, pid: number, loggedAt: strin
   if (!targets.includes(runDir)) return 'not_running'
   const started = await processStart(procRoot, pid)
   if (started === null) return 'unknown'
+  return started <= Date.parse(loggedAt) + START_TOLERANCE_MS ? 'running' : 'unknown'
+}
+
+/**
+ * One process's `ps` row (start and command line); `gone` when ps exits 1 without output, as for no such process; null
+ * when ps fails. A UTF-8 character set prints a non-ASCII run directory as itself, where the C locale escapes it; the
+ * other categories stay C, so the start keeps the format PS_ROW reads.
+ */
+function psRow(ps: string, pid: number): Promise<string | 'gone' | null> {
+  return new Promise(resolve => {
+    execFile(ps, ['-ww', '-o', 'lstart=', '-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: PS_TIMEOUT_MS, maxBuffer: PROC_FILE_LIMIT, env: { LC_CTYPE: 'UTF-8', TZ: 'UTC', PATH: '/usr/bin:/bin' },
+    }, (error, stdout) => resolve(error === null ? stdout : error.code === 1 && stdout === '' ? 'gone' : null))
+  })
+}
+
+/**
+ * Every absolute path the words after an `automatic-step` word can spell: ps joins arguments with spaces and a path may
+ * hold some, so each run of words that starts with an absolute path is one. Null when there are more than a controller's
+ * command line holds.
+ */
+function stepTargets(words: readonly string[], step: number): string[] | null {
+  const targets = new Set<string>()
+  for (let start = step + 1; start < words.length; start += 1) {
+    if (!isAbsolute(words[start])) continue
+    for (let end = start + 1; end <= words.length; end += 1) {
+      targets.add(words.slice(start, end).join(' '))
+      if (targets.size > STEP_TARGET_LIMIT) return null
+    }
+  }
+  return [...targets]
+}
+
+/**
+ * `controllerLiveness` on macOS, which has no `/proc`: the same answers from one `ps` row of the process, read with a
+ * UTF-8 character set and UTC. Its start has whole seconds. ps prints what it cannot show as escapes, so a command line
+ * that names no run but holds one after `automatic-step` may still name this run: unknown, not not_running.
+ */
+async function psControllerLiveness(ps: string, pid: number, loggedAt: string, runDir: string): Promise<'running' | 'not_running' | 'unknown'> {
+  const row = await psRow(ps, pid)
+  if (row === 'gone') return 'not_running'
+  const match = row === null ? null : PS_ROW.exec(row.replace(/\n$/, ''))
+  if (!match) return 'unknown'
+  const [, month, day, hours, minutes, seconds, year, command] = match
+  const words = command.split(' ')
+  const step = words.indexOf('automatic-step')
+  if (step < 0) return 'not_running'
+  const targets = stepTargets(words, step)
+  if (targets === null) return 'unknown'
+  const resolved = await Promise.all(targets.map(realpathOrNull))
+  if (!resolved.includes(runDir)) return PS_ESCAPE.test(words.slice(step + 1).join(' ')) ? 'unknown' : 'not_running'
+  const started = Date.UTC(Number(year), MONTHS.indexOf(month), Number(day), Number(hours), Number(minutes), Number(seconds))
   return started <= Date.parse(loggedAt) + START_TOLERANCE_MS ? 'running' : 'unknown'
 }
 

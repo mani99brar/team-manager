@@ -4,13 +4,22 @@ import itertools
 import json
 import os
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
+from . import processes
 from .interactive import InteractiveSessions, attach_panels, require_shell
 from .sessions import read_json, save_json
+
+
+def is_zombie(pid: int) -> bool:
+    """Whether `pid` has exited and is not collected yet: its state in /proc on Linux, from ps on macOS."""
+    if sys.platform == "darwin":
+        return processes.state(pid) == "Z"
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
 
 
 class InteractiveTests(unittest.TestCase):
@@ -225,6 +234,29 @@ class InteractiveTests(unittest.TestCase):
                 self.sessions.locate("ui", [row])
         with self.assertRaisesRegex(RuntimeError, "Ambiguous"):
             self.sessions.locate("ui", [self.row(), self.row()])
+
+    def test_a_run_named_in_another_letter_case_binds_the_row_claude_gives_in_the_stored_one(self):
+        from .test_sessions import case_insensitive, swapped
+        if sys.platform != "darwin" or not case_insensitive(self.root):
+            self.skipTest("a case-insensitive macOS volume")
+        from .sessions import plan_digest
+        save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row()["id"], "session_id": self.row()["sessionId"]})
+        # Claude's row gives its cwd as the volume stores it (getcwd); the run is named in another case.
+        sessions = InteractiveSessions(swapped(self.root, self.directory), executable="claude")
+        self.assertEqual(sessions.directory, self.directory)
+        self.assertEqual(sessions.locate("ui", [self.row()])["sessionId"], self.row()["sessionId"])
+        self.assertEqual(sessions.locate("ui", [self.row(cwd=str(swapped(self.root, Path(self.row()["cwd"]))))])["sessionId"], self.row()["sessionId"])
+        with self.assertRaisesRegex(RuntimeError, "worktree mismatch"):
+            sessions.locate("ui", [self.row(cwd=str(self.directory / "worktree-adapter"))])
+
+    def test_elsewhere_a_row_cwd_in_another_letter_case_is_another_directory(self):
+        from .sessions import plan_digest
+        from .test_sessions import swapped
+        save_json(self.directory / "ui.interactive.json", {"plan_digest": plan_digest(self.plan), "background_id": self.row()["id"], "session_id": self.row()["sessionId"]})
+        with patch.object(sys, "platform", "linux"):
+            self.assertEqual(self.sessions.locate("ui", [self.row()])["sessionId"], self.row()["sessionId"])
+            with self.assertRaisesRegex(RuntimeError, "worktree mismatch"):
+                self.sessions.locate("ui", [self.row(cwd=str(swapped(self.root, Path(self.row()["cwd"]))))])
 
     def test_occupied_pane_is_never_sent_a_command(self):
         with patch("workflow.interactive.herdr", return_value={"result": {"process_info": {"shell_pid": 1, "foreground_processes": [{"pid": 2}]}}}):
@@ -720,7 +752,7 @@ class AttachOneTests(unittest.TestCase):
                 native.wait()
             else:
                 for _ in range(500):  # Uncollected: it still answers kill(pid, 0) until its parent reaps it.
-                    if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    if is_zombie(native.pid):
                         break
                     time.sleep(0.01)
             return self.exited(code)
@@ -836,7 +868,7 @@ class AttachOneTests(unittest.TestCase):
                 def ended(*args, **kwargs):
                     native.kill()  # Left uncollected, as a zombie, until its parent reaps it: it still answers kill(pid, 0).
                     for _ in range(500):
-                        if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                        if is_zombie(native.pid):
                             break
                         time.sleep(0.01)
                     return self.exited(code)
@@ -1032,7 +1064,7 @@ class UpdateGapTests(unittest.TestCase):
         self.addCleanup(native.wait)
         native.kill()
         for _ in range(500):
-            if Path(f"/proc/{native.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+            if is_zombie(native.pid):
                 break
             time.sleep(0.01)
         return native
@@ -1097,6 +1129,25 @@ class UpdateGapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "No live native PID") as raised:
             gaps.row("ui", [self.row(pid=None)])
         self.assertIs(type(raised.exception), RuntimeError)
+
+
+class ProcessAliveTests(unittest.TestCase):
+    def test_on_macos_ps_tells_a_zombie_and_kill_s_answer_stands_when_ps_gives_none(self):
+        from .interactive import process_alive
+        from .test_processes import need_ctypes, on_platform, ps_stat
+        need_ctypes()  # Before the subtests, which would each take on_platform's skip as their own.
+        pid = os.getpid()  # kill(pid, 0) answers for it.
+        for answer, alive in (("Ss  \n", True), ("R+  \n", True), ("Z   \n", False), (None, True)):
+            with self.subTest(answer=answer), on_platform("darwin", ps_stat(pid, answer)) as tools:
+                self.assertIs(process_alive(pid), alive)
+            self.assertEqual(len(tools.calls), 1)
+        # No PID, or one kill(pid, 0) refuses, never reaches ps; Linux reads /proc and never asks ps.
+        with on_platform("darwin", ps_stat(pid, "S   \n")) as tools, patch("workflow.interactive.os.kill", side_effect=ProcessLookupError):
+            self.assertEqual((process_alive(pid), process_alive(None), process_alive(0)), (False, False, False))
+        self.assertEqual(tools.calls, [])
+        with on_platform("linux", ps_stat(pid, "Z   \n")) as tools:
+            self.assertTrue(process_alive(pid))
+        self.assertEqual(tools.calls, [])
 
 
 if __name__ == "__main__":

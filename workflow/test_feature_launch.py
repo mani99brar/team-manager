@@ -30,7 +30,7 @@ class FeatureLaunchTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.repo = fixture_target(self.root)
         # A live launch registers the run: never in the operator's real registry.
         environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "projects.json"), "HOME": str(self.root / "home")})
@@ -134,7 +134,7 @@ class FeatureLaunchTests(unittest.TestCase):
 
     def test_export_is_stable_until_state_changes(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             plan = {"run_id": "demo", "base_commit": "a" * 40, "created_at": "2026-01-01T00:00:00Z"}
             save_json(root / "plan.json", plan)
             runtime = SimpleNamespace(directory=root, plan=plan)

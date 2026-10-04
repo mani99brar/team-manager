@@ -14,12 +14,14 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import processes
 from .worktrees import git_worktree
 
 TERMINAL = {"succeeded", "failed", "blocked"}
@@ -154,6 +156,35 @@ def run_lock(directory: Path, lock_name: str = "controller.lock"):
 
 def git(repo: Path, *arguments: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *arguments], text=True).strip()
+
+
+MAXPATHLEN = 1024  # F_GETPATH's buffer on macOS.
+
+
+def real_path(path) -> Path:
+    """`Path(path).resolve()`, on macOS in the spelling the volume stores.
+
+    A macOS volume is usually case- and normalization-insensitive: it finds a path typed in another letter case or Unicode
+    form, and resolve() keeps that spelling, while getcwd(), Claude's session rows and the server's realpath give the
+    stored one. A run named in two spellings would then not match its own worktrees, refs or registry entry. F_GETPATH
+    names the deepest existing ancestor as stored (opened for its path only: O_EVTONLY, and O_NONBLOCK so that a FIFO
+    does not wait for a writer); the rest, which does not exist yet, is kept as typed. Any error keeps the resolved path.
+    """
+    path = Path(path).resolve()
+    if sys.platform != "darwin":
+        return path
+    existing = path
+    while not os.path.exists(existing) and existing != existing.parent:
+        existing = existing.parent
+    try:
+        descriptor = os.open(existing, os.O_RDONLY | os.O_EVTONLY | os.O_NONBLOCK)
+        try:
+            stored = fcntl.fcntl(descriptor, fcntl.F_GETPATH, bytes(MAXPATHLEN))
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return path
+    return Path(os.fsdecode(stored.split(b"\0", 1)[0]), path.relative_to(existing))
 
 
 def prepare(directory: Path, repo: Path, base: str, tasks: dict[str, str], allow_edits: bool,
@@ -318,8 +349,12 @@ def stale_claude_processes(proc: Path = Path("/proc")) -> list[dict]:
     """Running Claude Code processes whose executable an update deleted: `{pid, cwd, command}` each, by pid.
 
     Such a long-lived session keeps seeing a newer version and reinstalls Claude Code, which makes `claude` briefly
-    missing for every other caller. Linux only: without /proc, or for an entry that cannot be read, nothing is reported.
+    missing for every other caller. Linux reads `proc`; macOS has no /proc, so there ps, lsof and libproc answer instead
+    (processes.stale_claude), unless a tree is given. Elsewhere, without /proc, or for an entry that cannot be read,
+    nothing is reported.
     """
+    if sys.platform == "darwin" and proc == Path("/proc"):
+        return processes.stale_claude()
     try:
         entries = [entry for entry in proc.iterdir() if entry.name.isdigit()]
     except OSError:
@@ -349,21 +384,37 @@ def stale_claude_warning(proc: Path = Path("/proc")) -> str:
                       *(f"  pid {item['pid']} in {item['cwd']}: {item['command']}" for item in stale)])
 
 
+def group_exited(process: subprocess.Popen) -> bool:
+    """Whether killpg's PermissionError means the group is done: macOS refuses (EPERM) a group in which no process can take a
+    signal because every one has exited and some are not collected yet, where Linux signals it. A leader that has exited
+    (collected here) then leaves nothing to stop; anything else is raised."""
+    return sys.platform == "darwin" and process.poll() is not None
+
+
 def terminate(process: subprocess.Popen) -> None:
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    except PermissionError:
+        if not group_exited(process):
+            raise
+        return
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except PermissionError:
+            if not group_exited(process):
+                raise
+            return
         process.wait()
 
 
 class ClaudeSessions:
     def __init__(self, directory: Path, executable: str = "claude", timeout: float = 1800):
-        self.directory = directory.resolve()
+        self.directory = real_path(directory)
         self.plan = read_json(self.directory / "plan.json")
         self.workers = plan_workers(self.plan)
         self.excluded = plan_excluded(self.plan)
@@ -371,7 +422,7 @@ class ClaudeSessions:
             raise RuntimeError("Run preparation is incomplete; inspect retained allocation state")
         for node in self.workers:
             info = self.plan["nodes"][node]
-            if Path(info["worktree"]).resolve() != self.directory / f"worktree-{node}" or info["observed_start_commit"] != self.plan["base_commit"]:
+            if real_path(info["worktree"]) != self.directory / f"worktree-{node}" or info["observed_start_commit"] != self.plan["base_commit"]:
                 raise RuntimeError("Invalid worktree identity/start revision in plan")
         self.executable = executable
         self.timeout = timeout

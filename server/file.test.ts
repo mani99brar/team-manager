@@ -12,6 +12,10 @@ import { defaultFixtureRoot, fixtureLocations } from './config.ts'
 const PI = 'pi-fixtures'
 const CLAUDE = 'claude-fixtures'
 const loc = (source: string) => (source === 'Pi' ? PI : CLAUDE)
+/** Where descriptor-relative paths start: procfs magic links on Linux, inode paths on macOS. */
+const DESCRIPTOR_PATHS = process.platform === 'darwin' ? '/.vol/' : '/proc/self/fd/'
+const PROCFS_ONLY = process.platform === 'darwin' && 'macOS has no procfs; the inode path tests are its counterpart'
+const MACOS_ONLY = process.platform !== 'darwin' && 'inode paths are the macOS mechanism'
 
 function sha256(bytes: Buffer | string): string {
   return createHash('sha256').update(bytes).digest('hex')
@@ -380,12 +384,29 @@ test('metadata EIO is a safe 500, not missing', async () => {
   }
 })
 
-test('secure reads fail closed at startup when procfs capability is unavailable', async () => {
+test('secure reads fail closed at startup when procfs capability is unavailable', { skip: PROCFS_ONLY }, async () => {
   mock.method(fs, 'statfs', async () => { throw Object.assign(new Error('no procfs'), { code: 'ENOENT' }) })
   syncBuiltinESMExports()
   const app = createApp(fixtureLocations(defaultFixtureRoot))
   try { await assert.rejects(async () => { await app.ready() }, /Linux.*procfs/) }
   finally { mock.restoreAll(); syncBuiltinESMExports(); await app.close() }
+})
+
+test('secure reads fail closed at startup when an inode path re-opens another directory', { skip: MACOS_ONLY }, async () => {
+  const open = fs.open
+  const handles: Awaited<ReturnType<typeof open>>[] = []
+  mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags: Parameters<typeof open>[1]) => {
+    // Opening succeeds, but at another directory than the one the inode path names.
+    const handle = await open(String(path).startsWith(DESCRIPTOR_PATHS) ? defaultFixtureRoot : path, flags)
+    handles.push(handle)
+    return handle
+  })
+  const app = createApp(fixtureLocations(defaultFixtureRoot))
+  try {
+    await assert.rejects(async () => { await app.ready() }, /Linux.*procfs.*macOS/)
+    assert.equal(handles.length, 2)
+    for (const handle of handles) assert.equal(handle.fd, -1)
+  } finally { mock.restoreAll(); await app.close() }
 })
 
 test('hash and content use exactly one descriptor read, including non-round-trippable bytes', async () => {
@@ -466,10 +487,11 @@ for (const code of ['ENOENT', 'EIO', 'EACCES']) {
 
 test('unsupported platform and non-procfs mounts fail closed', async () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!
-  for (const unsupported of ['platform', 'filesystem']) {
+  // A mount is a procfs question; macOS fails closed on its inode paths instead (above).
+  for (const unsupported of process.platform === 'darwin' ? ['platform'] : ['platform', 'filesystem']) {
     const app = createApp(fixtureLocations(defaultFixtureRoot))
     try {
-      if (unsupported === 'platform') Object.defineProperty(process, 'platform', { value: 'darwin' })
+      if (unsupported === 'platform') Object.defineProperty(process, 'platform', { value: 'freebsd' })
       else mock.method(fs, 'statfs', async () => ({ type: 0 }))
       await assert.rejects(async () => { await app.ready() }, /Linux.*procfs/)
     } finally {
@@ -485,7 +507,7 @@ test('unavailable descriptor access fails startup and closes every handle it ope
   const open = fs.open
   const handles: Awaited<ReturnType<typeof open>>[] = []
   mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags: Parameters<typeof open>[1]) => {
-    if (String(path).startsWith('/proc/self/fd/')) throw Object.assign(new Error('unavailable descriptor access'), { code: 'EACCES' })
+    if (String(path).startsWith(DESCRIPTOR_PATHS)) throw Object.assign(new Error('unavailable descriptor access'), { code: 'EACCES' })
     const handle = await open(path, flags)
     handles.push(handle)
     return handle

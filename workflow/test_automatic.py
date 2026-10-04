@@ -25,7 +25,7 @@ class CompletionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS),
                      "nodes": {node: {"session_id": node + "-token"} for node in ("ui", "adapter")}}
         sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": "idle"})
@@ -255,7 +255,7 @@ class SupervisorTimelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         save_json(self.root / "plan.json", {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS)})
         poll = patch("workflow.automatic.TIMELINE_POLL_SECONDS", 0.01)
         poll.start()
@@ -378,7 +378,7 @@ class ReviewCompletionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.bundle = {"run_id": "test", "candidate_commit": "c" * 40, "snapshots": {"ui": {"session_id": "ui-session"}, "adapter": {"session_id": "adapter-session"}}}
         self.digest = "b" * 64
         plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS)}
@@ -868,7 +868,7 @@ class PrintReviewerLaunchTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.cwd = self.root / "review-worktree"
         self.cwd.mkdir()
         for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["commit", "-q", "--allow-empty", "-m", "Candidate"]):

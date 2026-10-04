@@ -1,19 +1,25 @@
+import contextlib
+import errno
 import os
+import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from .herdr import herdr
-from .sessions import ClaudeSessions, TransientInfraError, prepare, read_json, run_lock, save_json
+from .sessions import ClaudeSessions, TransientInfraError, prepare, read_json, real_path, run_lock, save_json, terminate
 
 
 class SessionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
@@ -263,12 +269,120 @@ class ClaudeLaunchTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 2)
 
 
+def case_insensitive(directory: Path) -> bool:
+    """Whether the volume holding `directory` finds a name typed in another letter case (macOS's default APFS does)."""
+    probe = directory / "Case-Probe"
+    probe.mkdir()
+    try:
+        return (directory / "case-probe").exists()
+    finally:
+        probe.rmdir()
+
+
+def swapped(root: Path, path: Path) -> Path:
+    """`path` with every component below `root`, and `root`'s own name, typed in the other letter case."""
+    return Path(root.parent, root.name.swapcase(), *(part.swapcase() for part in path.relative_to(root).parts))
+
+
+class RealPathTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+
+    @unittest.skipUnless(sys.platform == "darwin", "the spelling a macOS volume stores")
+    def test_on_macos_the_stored_letter_case_and_unicode_form_of_the_deepest_existing_ancestor_and_the_rest_as_typed(self):
+        import unicodedata
+        if not case_insensitive(self.root):
+            self.skipTest("a case-sensitive volume")
+        stored = self.root / "Mixed Case" / "Sub"
+        stored.mkdir(parents=True)
+        self.assertEqual(real_path(str(swapped(self.root, stored))), stored)
+        self.assertEqual(real_path(swapped(self.root, stored) / "New" / "deeper.json"), stored / "New" / "deeper.json")
+        with contextlib.chdir(stored.parent):
+            self.assertEqual(real_path("sUB"), stored)
+        decomposed = self.root / unicodedata.normalize("NFD", "Café")
+        decomposed.mkdir()
+        self.assertEqual(real_path(self.root / unicodedata.normalize("NFC", "CAFÉ")), decomposed)
+        # A file, and a FIFO, which does not wait for a writer; inside a directory that can only be searched.
+        (stored / "Notes.md").write_text("")
+        os.mkfifo(stored / "Fifo")
+        stored.chmod(0o100)
+        self.addCleanup(stored.chmod, 0o700)
+        self.assertEqual([real_path(stored / name) for name in ("notes.MD", "FIFO")], [stored / "Notes.md", stored / "Fifo"])
+        # /var is a symlink to /private/var: resolved first, as before.
+        self.assertEqual(real_path("/var/folders"), Path("/private/var/folders"))
+        # Any error (here: no read permission, which the open needs) keeps the resolved path, as typed.
+        closed = self.root / "Closed"
+        closed.mkdir(0)
+        self.addCleanup(closed.chmod, 0o700)
+        self.assertEqual(str(real_path(self.root / "closed" / "Later")), str(self.root / "closed" / "Later"))
+
+    def test_elsewhere_it_is_exactly_path_resolve(self):
+        stored = self.root / "Mixed Case" / "Sub"
+        stored.mkdir(parents=True)
+        typed = swapped(self.root, stored)
+        with patch.object(sys, "platform", "linux"), patch("workflow.sessions.os.open") as opened, patch("workflow.sessions.fcntl.fcntl") as control:
+            for path in (typed, str(typed), typed / "New", "relative/Path", ""):
+                with self.subTest(path=path):
+                    self.assertEqual(str(real_path(path)), str(Path(path).resolve()))
+        opened.assert_not_called()
+        control.assert_not_called()
+
+
+def exited_group() -> subprocess.Popen:
+    """A process leading its own group that has exited and is not collected yet (macOS): the group holds only that zombie."""
+    from .processes import state
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    deadline = time.monotonic() + 30
+    while state(process.pid) != "Z":
+        assert time.monotonic() < deadline, "the process never exited"
+        time.sleep(0.01)
+    return process
+
+
+class TerminateTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "macOS refuses to signal a group of exited processes")
+    def test_on_macos_a_group_whose_processes_all_exited_is_done_although_killpg_is_refused(self):
+        process = exited_group()
+        self.addCleanup(process.wait)
+        with self.assertRaises(PermissionError):
+            os.killpg(process.pid, 0)  # What terminate meets.
+        terminate(process)
+        self.assertEqual(process.returncode, 0)  # Collected by terminate's check.
+        # A leader still running, refused: raised, from either signal.
+        running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(running.wait)
+        self.addCleanup(running.kill)
+        with patch("workflow.sessions.os.killpg", side_effect=PermissionError(errno.EPERM, "Operation not permitted")):
+            with self.assertRaises(PermissionError):
+                terminate(running)
+        with patch("workflow.sessions.os.killpg", side_effect=[None, PermissionError(errno.EPERM, "Operation not permitted")]), \
+                patch.object(running, "wait", side_effect=[subprocess.TimeoutExpired("sleep", 5), 0]):
+            with self.assertRaises(PermissionError):
+                terminate(running)
+
+    def test_elsewhere_a_refused_killpg_is_raised_and_a_group_that_is_gone_is_done(self):
+        process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        process.wait()
+        with patch.object(sys, "platform", "linux"):
+            for refused in ([PermissionError(errno.EPERM, "Operation not permitted")],
+                            [None, PermissionError(errno.EPERM, "Operation not permitted")]):
+                with self.subTest(refused=refused), patch("workflow.sessions.os.killpg", side_effect=refused), \
+                        patch.object(process, "wait", side_effect=[subprocess.TimeoutExpired("python", 5), 0]):
+                    with self.assertRaises(PermissionError):
+                        terminate(process)
+            with patch("workflow.sessions.os.killpg", side_effect=ProcessLookupError) as killpg:
+                terminate(process)
+            killpg.assert_called_once_with(process.pid, signal.SIGTERM)
+
+
 class StaleClaudeTests(unittest.TestCase):
     def test_processes_running_a_deleted_claude_executable_are_named_from_proc(self):
         from .sessions import stale_claude_processes, stale_claude_warning
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        proc = Path(temp.name)
+        proc = Path(temp.name).resolve()
 
         def process(pid, exe=None, cwd=None, cmdline=None):
             entry = proc / str(pid)
@@ -295,9 +409,91 @@ class StaleClaudeTests(unittest.TestCase):
         self.assertIn("keep reinstalling Claude Code", warning)
         self.assertIn("restart them before the run", warning)
         self.assertEqual(warning.splitlines()[1:], ["  pid 206 in /work/vea: claude --resume abc", "  pid 1107463 in /work/md-manager: claude"])
-        # No /proc (not Linux): nothing to report and nothing refused.
+        # No /proc (neither Linux nor macOS): nothing to report and nothing refused.
         self.assertEqual((stale_claude_processes(proc / "absent"), stale_claude_warning(proc / "absent")), ([], ""))
 
+    def test_on_macos_processes_running_a_deleted_claude_executable_are_named_from_ps_lsof_and_libproc(self):
+        from .sessions import stale_claude_processes, stale_claude_warning
+        from .test_processes import LSOF, lsof_cwd, lsof_txt, on_platform, ps_listing
+        # This user's processes; libproc's proc_pidpath fails with ENOENT once a running executable's file is deleted, and
+        # lsof still names the path it was run from.
+        listing = ps_listing(" 1107463 claude\n   12 /opt/homebrew/bin/python3.12 notes.py --mcp-config ~/.claude.json\n   13 claude\n   14 claude\n"
+                             "   15 claude --resume def\n   16 claude\n  206 rg --files /work/vea\n")
+        claude = "/Users/u/.local/share/claude/versions/2.1.281"
+        answers = {**listing, **lsof_cwd(1107463, "/work/md-manager"), **lsof_cwd(12, "/work/other"), **lsof_cwd(13, "/work/current"),
+                   **lsof_cwd(14, None), **lsof_cwd(15, "/work/ended"), **lsof_cwd(16, "/work/unnamed"), **lsof_cwd(206, "/work/vea"),
+                   **lsof_txt(1107463, "/Users/u/.local/share/Claude/versions/2.1.280"), **lsof_txt(12, "/opt/homebrew/Cellar/python@3.12/bin/python3.12"),
+                   **lsof_txt(14, claude), **lsof_txt(16, None), **lsof_txt(206, claude)}
+        paths = {1107463: errno.ENOENT,
+                 12: errno.ENOENT,                                          # Deleted, but not Claude Code: only its arguments mention claude.
+                 13: "/Users/u/.local/share/claude/versions/2.1.288",      # Claude Code, current binary.
+                 14: errno.ENOENT,                                          # Its cwd cannot be read.
+                 15: errno.ESRCH,                                           # Ended since the listing.
+                 16: errno.ENOENT,                                          # lsof names no executable for it.
+                 206: errno.ENOENT}                                         # Claude Code's binary, run as rg.
+        with on_platform("darwin", answers, paths) as tools:
+            self.assertEqual(stale_claude_processes(), [{"pid": 206, "cwd": "/work/vea", "command": "rg --files /work/vea"},
+                                                       {"pid": 1107463, "cwd": "/work/md-manager", "command": "claude"}])
+            # lsof is asked for the executable of a deleted one only.
+            self.assertEqual(sorted(int(command[3]) for command, _ in tools.calls if command[0] == LSOF and command[5] == "txt"), [12, 14, 16, 206, 1107463])
+            warning = stale_claude_warning()
+            # A tree given explicitly is still what is read (the Linux tests' fake /proc), and nothing asks ps.
+            calls = len(tools.calls)
+            self.assertEqual(stale_claude_processes(Path("/nonexistent/proc")), [])
+            self.assertEqual(len(tools.calls), calls)
+        self.assertTrue(warning.startswith("Warning: 2 running Claude Code process(es)"))
+        self.assertEqual(warning.splitlines()[1:], ["  pid 206 in /work/vea: rg --files /work/vea", "  pid 1107463 in /work/md-manager: claude"])
+        # ps or libproc unavailable: nothing to report and nothing refused.
+        with on_platform("darwin", {**answers, **ps_listing(None)}, paths):
+            self.assertEqual((stale_claude_processes(), stale_claude_warning()), ([], ""))
+        with on_platform("darwin", answers), patch("ctypes.CDLL", side_effect=OSError("image not found")):
+            self.assertEqual(stale_claude_processes(), [])
+        # Linux keeps reading /proc and never asks ps.
+        with on_platform("linux", answers, paths) as tools:
+            stale_claude_processes()
+        self.assertEqual(tools.calls, [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "real processes on macOS")
+    def test_on_macos_a_running_claude_binary_is_named_once_its_file_is_deleted_by_its_path_not_its_arguments(self):
+        from .processes import LIBPROC, PROC_PIDPATHINFO_MAXSIZE
+        from .sessions import stale_claude_processes
+        from .test_processes import ctypes, need_ctypes
+        need_ctypes()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name).resolve()
+        self.assertNotIn("claude", str(root).lower(), "the negative case needs a temporary directory whose path does not mention claude")
+        # The binary this interpreter runs (a framework build's python3 execs Python.app's), copied under a Claude Code version
+        # path and run as `rg` (as Claude Code runs its bundled ripgrep), and copied as a plain tool whose arguments mention
+        # claude: an update deletes a running version's file the same way.
+        path = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+        length = ctypes.CDLL(LIBPROC).proc_pidpath(os.getpid(), path, PROC_PIDPATHINFO_MAXSIZE)
+        claude, tool = root / "share/claude/versions/9.9.9", root / "bin/tool"
+        started = []
+        for executable, name, argument in ((claude, "rg", "--files"), (tool, "tool", "~/.claude/plugins/server.js")):
+            executable.parent.mkdir(parents=True)
+            shutil.copy(path.value[:length].decode(), executable)
+            # macOS may kill a process whose binary, new to it, is deleted within about a second of its first exec.
+            subprocess.run([str(executable), "-c", "pass"], check=True)
+            ready = root / f"{name}.ready"
+            code = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(60)"
+            process = subprocess.Popen([name, "-c", code, argument], executable=str(executable), cwd=root)
+            self.addCleanup(process.wait)
+            self.addCleanup(process.kill)
+            started.append((process, ready, f"{name} -c {code} {argument}"))
+        deadline = time.monotonic() + 30
+        for _, ready, _ in started:
+            while not ready.exists():
+                self.assertLess(time.monotonic(), deadline, "a copy never started")
+                time.sleep(0.02)
+        pids = [process.pid for process, _, _ in started]
+        self.assertFalse({item["pid"] for item in stale_claude_processes()} & set(pids))
+        claude.unlink()
+        tool.unlink()
+        stale = stale_claude_processes()
+        self.assertIn({"pid": pids[0], "cwd": str(root), "command": started[0][2]}, stale)
+        self.assertNotIn(pids[1], [item["pid"] for item in stale])
+        self.assertEqual([process.poll() for process, _, _ in started], [None, None])
 
 if __name__ == "__main__":
     unittest.main()

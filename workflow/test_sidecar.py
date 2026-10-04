@@ -6,6 +6,7 @@ Claude model calls.
 """
 import contextlib
 import copy
+import errno
 import fcntl
 import io
 import json
@@ -152,7 +153,7 @@ class SidecarRun(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()
         (self.repo / "ui.txt").write_text("before\n")
@@ -788,6 +789,7 @@ class Scheduling(SidecarRun):
         self.now = 1400.0  # Inside the pass timeout, and a lane completed: nothing starts while the pass runs.
         for _ in range(3):
             scheduler.tick([], {"ui": {}}, False)
+        self.wait_logged(1)  # A fresh executable's first exec can take longer than the 0.2s below (about 0.3s on macOS).
         time.sleep(0.2)
         self.assertEqual(len(self.job_calls()), 1)
         release.write_text("")
@@ -1080,7 +1082,7 @@ class SidecarGraph(unittest.TestCase):
     def build(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()
         (self.repo / "ui.txt").write_text("before")
@@ -1351,6 +1353,41 @@ class ExportsAndPrompt(SidecarRun):
         without = worker_prompt(self.directory, plan, "ui")
         self.assertNotIn("Review sidecar", without)
         self.assertEqual(with_sidecar.replace(SIDECAR_NOTE, ""), without)
+
+
+class JobLookupOnMacos(unittest.TestCase):
+    """process_gone and job_running (recover, kill_orphan, sidecar-pass) where macOS has no /proc: kill(pid, 0), then ps."""
+
+    def test_the_pass_s_own_job_is_found_through_ps_and_a_job_ps_cannot_confirm_is_not_running(self):
+        from .test_processes import on_platform, ps_command, ps_stat
+        session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        pid = os.getpid()  # kill(pid, 0) answers for it; what ps says about it is injected.
+        job = ps_command(pid, f"/Users/u/.local/bin/claude --print --session-id {session} --tools Read,Glob,Grep\n")
+        with on_platform("darwin", {**ps_stat(pid, "S   \n"), **job}):
+            self.assertFalse(sidecar.process_gone(pid))
+            self.assertEqual((sidecar.job_running(pid, session), sidecar.job_running(pid, "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff")), (True, False))
+        with on_platform("darwin", {**ps_stat(pid, "Z   \n"), **job}):
+            self.assertEqual((sidecar.process_gone(pid), sidecar.job_running(pid, session)), (True, False))
+        with on_platform("darwin", {**ps_stat(pid, "S   \n"), **ps_command(pid, None)}):
+            self.assertEqual((sidecar.process_gone(pid), sidecar.job_running(pid, session)), (False, False))
+        # No such process: gone, and ps is never asked. Linux reads /proc and never asks ps.
+        with on_platform("darwin", {**ps_stat(pid, "S   \n"), **job}) as tools, patch("workflow.processes.os.kill", side_effect=ProcessLookupError):
+            self.assertEqual((sidecar.process_gone(pid), sidecar.job_running(pid, session)), (True, False))
+        self.assertEqual(tools.calls, [])
+        with on_platform("linux", {**ps_stat(pid, "Z   \n"), **job}) as tools:
+            self.assertFalse(sidecar.job_running(pid, session))
+        self.assertEqual(tools.calls, [])
+
+    def test_a_refused_group_kill_is_a_job_gone_on_macos_and_raised_elsewhere(self):
+        """macOS refuses (EPERM) to signal a group whose processes have all exited while one is not collected yet."""
+        refused = PermissionError(errno.EPERM, "Operation not permitted")
+        with patch("workflow.sidecar.job_running", return_value=True), patch("workflow.sidecar.os.getpgid", side_effect=lambda pid: pid), \
+                patch("workflow.sidecar.os.killpg", side_effect=refused) as killpg:
+            with patch.object(sys, "platform", "darwin"):
+                self.assertTrue(sidecar.kill_orphan(4242, "session"))
+            killpg.assert_called_once_with(4242, signal.SIGTERM)
+            with patch.object(sys, "platform", "linux"), self.assertRaises(PermissionError):
+                sidecar.kill_orphan(4242, "session")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ Features at `feature.json` 2.2.0 and 2.3.0 (what `init` writes) run with enforce
 ## Commands
 
 ```bash
-PY="$HOME/dev/md-manager/.venv/bin/python"   # run from md-manager's checkout, or anywhere with PYTHONPATH pointing at it
+PY="$HOME/dev/md-manager/.venv/bin/python"   # the checkout's .venv/bin/python, wherever the checkout lives; run from it, or anywhere with PYTHONPATH pointing at it
 ```
 
 | Command | What it does |
@@ -68,7 +68,7 @@ The interview ships with the tool as a Claude Code skill in `workflow/skills/wor
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s "$HOME/dev/md-manager/workflow/skills/workflow-grill" ~/.claude/skills/workflow-grill
+ln -s "$HOME/dev/md-manager/workflow/skills/workflow-grill" ~/.claude/skills/workflow-grill   # your checkout's path
 ```
 
 Then, in Claude Code inside the target repository: `/workflow-grill <feature>`. It reads the PRD and the lane tasks, asks at most five questions one at a time (each with a recommended default and its consequence), resolves or defers anything still open after the fifth, and writes `features/<feature>/decisions.md`. It never writes code.
@@ -91,10 +91,10 @@ An optional independent senior-engineering reviewer beside the workers during th
 
 ## Setup
 
-From md-manager's root (Python 3.12 recommended):
+From md-manager's root (Python 3.12 recommended), on Linux or macOS (tested environments in [RUNBOOK.md](RUNBOOK.md#install-and-validate-without-launching-workers)):
 
 ```bash
-python3 -m venv .venv
+python3 -m venv .venv                    # macOS: python3.12 -m venv .venv (Homebrew's python@3.12; python3 may be another version)
 .venv/bin/pip install -r workflow/requirements.lock
 npm ci
 npx --no-install playwright install chromium
@@ -102,7 +102,7 @@ npx --no-install playwright install chromium
 npm run test:contracts
 ```
 
-The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair; `testdata/` holds copies of finished features' files the tests read.
+The tests use fake workers and reviewers with real Git worktrees, checks, checkpoints and headless Chromium; they make no Claude model calls. `test_portable.py` covers the portable-workflow scenarios, `test_guardrails.py` the guardrail scenarios (with a fake challenge job and a fake Herdr), `test_sidecar.py` the review sidecar scenarios (a scripted fake print job, a fake Herdr, real lane worktrees), `test_browser_rules.py` `check-report` and the browser scenario rules, `test_repair.py` lane repair, `test_processes.py` the macOS process queries (faked on any platform; the real ones only on macOS); `testdata/` holds copies of finished features' files the tests read.
 
 ## Files
 
@@ -111,6 +111,7 @@ The tests use fake workers and reviewers with real Git worktrees, checks, checkp
 - `guardrails.py`: outcome briefs, decisions pinning, the design challenge and `resume`, worker questions, the persisted deadline pause and `answer`. `skills/workflow-grill/`: the interview skill.
 - `scaffold.py`: `init`. `registry.py`: the Projects registry entry and its atomic merge.
 - `sessions.py`: run preparation (one worktree per selected lane), lane id rules, receipts, locking, and the `claude` process helpers (`run_claude`, `popen_claude`: the auto-updater off, an update in progress waited out; `background_settings`: the same setting as `--settings` for `claude --bg` sessions) with the stale-process warning.
+- `processes.py`: what macOS answers through `ps`, `lsof` and libproc where Linux reads `/proc/<pid>` (state, command line, working directory, a deleted executable); only the macOS branches call it.
 - `interactive.py`: native `claude --bg` launches, Herdr panes (one per lane, reviewers to their right), reconciliation, `attach-one`. `herdr.py`: the Herdr CLI helper.
 - `pipeline.py`: the supervised graph over the plan's lanes, freeze/ownership, verification, candidate, review, approval, integration and the CLI.
 - `repair.py`: `repair`, lane repair after freeze: `repairs.json`, the deterministic snapshot commits, the attempt floors, the checkpoint fork at the freeze boundary and `--workspace`.

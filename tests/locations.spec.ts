@@ -84,7 +84,7 @@ test('package and plugin files show a persistent installed-file notice; personal
   await editButton(page).click()
   await expect(page.getByTestId('installed-notice')).toBeVisible()
   await editor(page).click()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ControlOrMeta+End')
   await page.keyboard.type('edited')
   await page.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page.getByTestId('save-status')).toHaveText('Saved')
@@ -268,7 +268,7 @@ test('Refresh updates the listing without touching an open draft, and the docume
   await expect(page.getByRole('tabpanel')).toContainText('draft base')
   await editButton(page).click()
   await editor(page).click()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ControlOrMeta+End')
   await page.keyboard.type(' plus unsaved')
   await expect(page.getByTestId('save-status')).toHaveText('Unsaved')
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals
 from .pipeline import parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
-from .sessions import read_json, validate_node_id, validate_reviewer_id
+from .sessions import read_json, real_path, validate_node_id, validate_reviewer_id
 from . import sidecar
 from .verification import validate_schema
 
@@ -33,7 +33,7 @@ LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is 
 
 def git_root(path: Path) -> Path | None:
     """The working tree containing `path` (a `.git` directory, or the `.git` file of a linked worktree), or None."""
-    path = path.resolve()
+    path = real_path(path)
     for candidate in (path, *path.parents):
         if (candidate / ".git").exists():
             return candidate
@@ -52,7 +52,7 @@ def resolve_target(repo: Path | None, cwd: Path, tool: Path = TOOL) -> Path:
     root = git_root(cwd)
     if root is not None and (root / "features").is_dir():
         return root
-    return tool.resolve()
+    return real_path(tool)
 
 
 def feature_names(target: Path) -> list[str]:
@@ -73,7 +73,7 @@ def feature_folder(target: Path, feature: str) -> Path:
 def default_run_root(target: Path, feature: str, tool: Path = TOOL, home: Path | None = None) -> Path:
     """md-manager keeps `~/.local/state/md-manager-workflows/<feature>`; other targets `~/.local/state/agent-workflows/<repo>/<feature>`."""
     home = home or Path.home()
-    if target.resolve() == tool.resolve():
+    if real_path(target) == real_path(tool):
         return home / ".local/state/md-manager-workflows" / feature
     return home / ".local/state/agent-workflows" / repo_name(target) / feature
 
@@ -145,6 +145,11 @@ def feature_file(folder: Path, name: str) -> Path:
     path = (folder / name).resolve(strict=True)
     if not path.is_relative_to(folder.resolve()):
         raise ValueError("Feature file escapes feature directory")
+    if sys.platform == "darwin":
+        # macOS also finds the file under a name in another letter case or Unicode form, which Linux refuses as missing.
+        stored = real_path(path).relative_to(real_path(folder))
+        if stored != path.relative_to(folder.resolve()):
+            raise ValueError(f"Feature file {name} is missing: the file in {folder} is named {stored}, in another letter case or Unicode form")
     return path
 
 
@@ -277,7 +282,7 @@ def main(argv=None):
         repo = resolve_target(args.repo, Path.cwd())
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)
-        run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
+        run, commands, notes = launch_commands(repo, args.feature, run_id, real_path(run_root), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
@@ -288,7 +293,7 @@ def main(argv=None):
         declared = [worker["node_id"] for worker in manifest["workers"]]
         challenge = is_guarded(manifest) and manifest.get("challenge", True) is True
         review_sidecar = sidecar.declared(manifest)
-        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge, sidecar=review_sidecar is not None)
+        entry = registry_entry(repo, args.feature, real_path(run_root), declared, challenge=challenge, sidecar=review_sidecar is not None)
         # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
         migration = migration_note(manifest)
         if args.dry_run:

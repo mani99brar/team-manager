@@ -16,7 +16,7 @@ class VerificationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.policy = json.loads((CONTRACTS / "verification.example.json").read_text())
         self.expected = {"run_id": "test-run", "node_id": "ui", "attempt": 1,
                          "base_commit": "a" * 40, "output_commit": "b" * 40,

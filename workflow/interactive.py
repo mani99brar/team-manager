@@ -17,10 +17,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import processes
 from .guardrails import decisions_block
 from .herdr import herdr
-from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
-                       review_nodes, run_claude, save_json, worker_effort)
+from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, real_path,
+                       review_node, review_nodes, run_claude, save_json, worker_effort)
 
 REVIEW = "review"
 
@@ -108,7 +109,8 @@ class InteractiveSessions(ClaudeSessions):
         if len(matches) != 1:
             raise RuntimeError("Ambiguous Claude session identity")
         row = matches[0]
-        if row.get("kind") != "background" or Path(row.get("cwd", "")).resolve() != self.node_worktree(node).resolve() or row.get("name") != self.launch_name(node):
+        # Both as the volume spells them (real_path): Claude gives its cwd's stored letter case, in Unicode NFC.
+        if row.get("kind") != "background" or real_path(row.get("cwd", "")) != real_path(self.node_worktree(node)) or row.get("name") != self.launch_name(node):
             raise RuntimeError("Claude session identity/worktree mismatch")
         if receipt.get("background_id") and row.get("sessionId") != receipt.get("session_id"):
             raise RuntimeError("Native Claude UUID changed; refusing attachment")
@@ -432,7 +434,8 @@ def process_alive(pid) -> bool:
     """A PID from the session's own verified row; no PID (nothing attached yet) is never alive.
 
     kill(pid, 0) also answers for a process that has exited but is not collected yet (a zombie,
-    for as long as its parent or, for an adopted session, init has not reaped it).
+    for as long as its parent or, for an adopted session, init has not reaped it). Linux reads
+    its state from /proc, macOS from ps.
     """
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -440,6 +443,8 @@ def process_alive(pid) -> bool:
         os.kill(pid, 0)
     except OSError:
         return False
+    if sys.platform == "darwin":
+        return processes.state(pid) != "Z"  # No answer from ps: kill(pid, 0) is all there is.
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     except (OSError, IndexError):
@@ -656,7 +661,7 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--node", help="attach-one: a worker lane of the run, or a reviewer node (review, or review-<id>)")
     args = parser.parse_args()
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     # Every `claude` this process starts (the listing, `claude attach`) inherits the auto-updater off.
     os.environ.update(claude_env())
     try:

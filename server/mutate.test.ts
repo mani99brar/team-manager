@@ -1,7 +1,7 @@
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import fs, { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import fs, { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createApp } from './app.ts'
@@ -417,12 +417,17 @@ test('missing targets and symlinks anywhere in source or destination paths are r
 test('a case-only rename succeeds when the filesystem reports the destination absent and is refused when it reports an entry', async () => {
   await withTempRoot(async root => {
     await writeFile(join(root, 'pi', 'Notes.md'), 'notes')
+    // A case-insensitive fixture filesystem (macOS) reports the file itself at the new spelling.
+    const caseInsensitive = await lstat(join(root, 'pi', 'NOTES.md')).then(() => true, () => false)
+    const name = caseInsensitive ? 'Notes.md' : 'notes.md'
     const app = createApp(fixtureLocations(root))
     try {
-      // This runner's fixture filesystem is case-sensitive: the probe finds nothing and the rename proceeds.
+      // On a case-sensitive fixture filesystem the probe finds nothing and the rename proceeds; on a case-insensitive one
+      // it finds the file, and the rename is refused like any other collision.
       const renamed = await mutate(app, { op: 'rename', source: 'Pi', locationId: PI, path: 'Notes.md', destinationPath: 'notes.md' })
-      assert.equal(renamed.statusCode, 200, renamed.body)
-      assert.deepEqual(await tree(join(root, 'pi')), ['notes.md'])
+      assert.equal(renamed.statusCode, caseInsensitive ? 409 : 200, renamed.body)
+      if (caseInsensitive) assert.equal(renamed.json().code, 'DESTINATION_EXISTS')
+      assert.deepEqual(await tree(join(root, 'pi')), [name])
       assert.equal(await readFile(join(root, 'pi', 'notes.md'), 'utf8'), 'notes')
 
       // Simulate a case-insensitive volume: the probe reports an entry at the destination spelling.
@@ -436,7 +441,7 @@ test('a case-only rename succeeds when the filesystem reports the destination ab
       assert.equal(refused.statusCode, 409, refused.body)
       assert.equal(refused.json().code, 'DESTINATION_EXISTS')
       mock.restoreAll()
-      assert.deepEqual(await tree(join(root, 'pi')), ['notes.md'])
+      assert.deepEqual(await tree(join(root, 'pi')), [name])
       assert.equal(await readFile(join(root, 'pi', 'notes.md'), 'utf8'), 'notes')
     } finally { mock.restoreAll(); await app.close() }
   })
@@ -659,3 +664,100 @@ for (const op of ['create-file', 'copy'] as const) {
     })
   }
 }
+
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS link() follows a symlink given as its source; Linux link() does not'
+
+/**
+ * Swaps the name a mutation is about to link for a symlink to a canary outside every location, right before each link():
+ * the window between the server's checks and link() that an attacker with write access to the folder could race.
+ */
+async function withSwappedLinks(root: string, swapped: () => Promise<string[]>, run: (app: App, canary: string) => Promise<void>) {
+  const canary = join(root, 'outside', 'canary.md')
+  await mkdir(join(root, 'outside'))
+  await writeFile(canary, 'outside secret')
+  const app = createApp(fixtureLocations(root))
+  const link = fs.link
+  try {
+    mock.method(fs, 'link', async (from: Parameters<typeof link>[0], to: Parameters<typeof link>[1]) => {
+      for (const path of await swapped()) {
+        await symlink(canary, `${path}.swap`)
+        await rename(`${path}.swap`, path)
+      }
+      return link(from, to)
+    })
+    await run(app, canary)
+    mock.restoreAll()
+    // Nothing outside the locations was linked in, and nothing inside them serves it.
+    assert.equal((await stat(canary)).nlink, 1)
+    for (const [source, locationId] of [['Pi', PI], ['Claude', CLAUDE]] as const) {
+      for (const path of await tree(join(root, source === 'Pi' ? 'pi' : 'claude'))) {
+        if (!path.endsWith('.md')) continue
+        const read = await app.inject(`/api/file?source=${source}&locationId=${locationId}&path=${encodeURIComponent(path)}`)
+        assert.ok(read.statusCode !== 200 || !read.json().content.includes('outside secret'), `${source}:${path}`)
+      }
+    }
+  } finally { mock.restoreAll(); await app.close() }
+}
+
+const stagingNames = (directory: string) => async () =>
+  (await readdir(directory)).filter(name => name.startsWith('.md-manager-')).map(name => join(directory, name))
+
+for (const op of ['rename', 'move'] as const) {
+  test(`on macOS ${op} refuses a source swapped for a symlink to an outside file before link(), linking nothing in`, { skip: MACOS_ONLY }, async () => {
+    await withTempRoot(async root => {
+      await mkdir(join(root, 'pi', 'sub'))
+      await writeFile(join(root, 'pi', 'src.md'), 'mine')
+      const destinationPath = op === 'rename' ? 'dst.md' : 'sub/dst.md'
+      await withSwappedLinks(root, async () => [join(root, 'pi', 'src.md')], async (app, canary) => {
+        const response = await mutate(app, { op, source: 'Pi', locationId: PI, path: 'src.md', destinationPath })
+        assert.equal(response.statusCode, 404, response.body)
+        assert.equal(response.json().code, 'NOT_FOUND')
+        await assert.rejects(lstat(join(root, 'pi', ...destinationPath.split('/'))), { code: 'ENOENT' })
+        // The swapped-in symlink is left where the attacker put it: the server neither followed nor removed it.
+        assert.equal(await fs.readlink(join(root, 'pi', 'src.md')), canary)
+      })
+    })
+  })
+}
+
+for (const op of ['create-file', 'copy'] as const) {
+  test(`on macOS ${op} never links an outside file when the staging name is swapped for a symlink before link()`, { skip: MACOS_ONLY }, async () => {
+    await withTempRoot(async root => {
+      await writeFile(join(root, 'pi', 'source.md'), 'mine')
+      await withSwappedLinks(root, stagingNames(join(root, 'claude')), async app => {
+        const response = await mutate(app, op === 'copy'
+          ? { op, source: 'Pi', locationId: PI, path: 'source.md', destinationSource: 'Claude', destinationLocationId: CLAUDE, destinationPath: 'new.md' }
+          : { op, source: 'Claude', locationId: CLAUDE, path: 'new.md', content: 'mine' })
+        // The staged file lost its only name to the swap, so its inode path reaches nothing: refused, never the canary.
+        assert.equal(response.statusCode, 404, response.body)
+        assert.equal(response.json().code, 'NOT_FOUND')
+        // Cleanup removes the staging name, now the attacker's symlink; nothing is published.
+        assert.deepEqual(await tree(join(root, 'claude')), [])
+      })
+    })
+  })
+}
+
+test('on macOS rename, move, create-file and copy link the pinned file itself when nothing races them', { skip: MACOS_ONLY }, async () => {
+  await withTempRoot(async root => {
+    await mkdir(join(root, 'pi', 'sub'))
+    await writeFile(join(root, 'pi', 'a.md'), 'alpha', { mode: 0o640 })
+    const { ino } = await stat(join(root, 'pi', 'a.md'))
+    const app = createApp(fixtureLocations(root))
+    try {
+      assert.equal((await mutate(app, { op: 'rename', source: 'Pi', locationId: PI, path: 'a.md', destinationPath: 'b.md' })).statusCode, 200)
+      assert.equal((await mutate(app, { op: 'move', source: 'Pi', locationId: PI, path: 'b.md', destinationPath: 'sub/c.md' })).statusCode, 200)
+      const moved = await stat(join(root, 'pi', 'sub', 'c.md'))
+      assert.equal(moved.ino, ino)
+      assert.equal(moved.nlink, 1)
+      assert.equal((await mutate(app, { op: 'create-file', source: 'Claude', locationId: CLAUDE, path: 'new.md', content: 'fresh' })).statusCode, 201)
+      assert.equal((await mutate(app, { op: 'copy', source: 'Pi', locationId: PI, path: 'sub/c.md', destinationSource: 'Claude', destinationLocationId: CLAUDE, destinationPath: 'c.md' })).statusCode, 201)
+      assert.deepEqual(await tree(join(root, 'pi')), ['sub/', 'sub/c.md'])
+      assert.deepEqual(await tree(join(root, 'claude')), ['c.md', 'new.md'])
+      assert.equal(await readFile(join(root, 'claude', 'new.md'), 'utf8'), 'fresh')
+      assert.equal(await readFile(join(root, 'claude', 'c.md'), 'utf8'), 'alpha')
+      assert.equal((await stat(join(root, 'claude', 'c.md'))).mode & 0o777, 0o640)
+      assert.equal((await stat(join(root, 'claude', 'new.md'))).nlink, 1)
+    } finally { await app.close() }
+  })
+})

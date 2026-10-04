@@ -111,7 +111,7 @@ test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects op
     await expect(page.getByTestId('document-view').getByRole('heading', { level: 2 })).toContainText('projects-nav-')
     await page.getByRole('button', { name: 'Edit', exact: true }).click()
     await page.locator('.cm-content').click()
-    await page.keyboard.press('Control+End')
+    await page.keyboard.press('ControlOrMeta+End')
     await page.keyboard.type('draft')
     await rootsNav(page).getByRole('link', { name: 'Projects' }).click()
     const dialog = page.getByRole('dialog')

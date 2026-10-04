@@ -32,6 +32,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -40,8 +41,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from . import processes
 from .guardrails import epoch, input_shown, iso, pane_attachment, went_on, waiting_question
-from .sessions import plan_workers, popen_claude, read_json, save_json, terminate
+from .sessions import plan_workers, popen_claude, read_json, real_path, save_json, terminate
 from .verification import CONTRACTS, validate_schema
 
 SIDECAR = "sidecar"
@@ -851,6 +853,8 @@ class Pass:
 # ---- Restart, freeze and the stopped run ---------------------------------------------------------------------------
 
 def process_gone(pid: int) -> bool:
+    if sys.platform == "darwin":
+        return processes.gone(pid)  # No /proc: kill(pid, 0) and ps.
     try:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
     except (OSError, IndexError):
@@ -861,6 +865,9 @@ def job_running(pid, session_id) -> bool:
     """A live process with that pid whose command line holds the pass's session id: the pass's own job, not a reused pid."""
     if type(pid) is not int or pid <= 0 or not isinstance(session_id, str) or not session_id or process_gone(pid):
         return False
+    if sys.platform == "darwin":
+        command = processes.command_line(pid)
+        return command is not None and session_id in command
     try:
         command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
     except OSError:
@@ -879,6 +886,11 @@ def kill_orphan(pid, session_id) -> bool:
             else:
                 os.kill(pid, sig)
         except ProcessLookupError:
+            return True
+        except PermissionError:
+            # macOS refuses a group whose processes have all exited while some are not collected yet (sessions.group_exited).
+            if sys.platform != "darwin":
+                raise
             return True
         for _ in range(50):
             if process_gone(pid):
@@ -1135,7 +1147,7 @@ def pass_main(argv=None):
     parser.add_argument("directory", type=Path)
     parser.add_argument("--final", action="store_true", help="The final pass: fills the ledger's handoff; run it before freeze")
     args = parser.parse_args(argv)
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     try:
         plan = read_json(directory / "plan.json")
         if not has_sidecar(plan):

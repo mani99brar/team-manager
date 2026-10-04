@@ -82,7 +82,7 @@ class ExportSectionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def test_review_section_derives_transport_time_and_diff_from_files(self):
         directory = legacy_run(self.root)
@@ -198,7 +198,7 @@ class ServedCompletionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.directory = legacy_run(Path(self.temp.name))
+        self.directory = legacy_run(Path(self.temp.name).resolve())
         self.plan, self.policy = read_json(self.directory / "plan.json"), read_json(self.directory / "policy.json")
         self.token = self.plan["nodes"]["ui"]["session_id"]
 
@@ -255,7 +255,7 @@ class ReviewerExportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def test_two_reviewer_record_exports_one_entry_per_reviewer_with_its_findings_and_times(self):
         directory = legacy_run(self.root)
@@ -308,7 +308,7 @@ class ExportRunTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def test_legacy_run_directory_re_exports_to_current_version_and_stays_stable(self):
         directory = legacy_run(self.root)

@@ -25,7 +25,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .checks import now
 from .pipeline import Pipeline, build_pipeline, commit_env, digest_file, graph_config, report
-from .sessions import git, read_json, run_lock, save_json
+from .sessions import git, read_json, real_path, run_lock, save_json
 from .verification import owns, safe_path
 from .worktrees import git_worktree
 
@@ -568,7 +568,7 @@ def repair_main(argv=None):
     parser.add_argument("--workspace", action="store_true", help="Create a detached worktree at the right base, with a brief, to commit the fix in")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print what --commit would do; write nothing")
     args = parser.parse_args(argv)
-    directory = args.directory.resolve()
+    directory = real_path(args.directory)
     try:
         if bool(args.commit) == args.workspace:
             raise ValueError("Give exactly one of --commit <sha> (apply a fix) and --workspace (make a worktree to commit one in)")

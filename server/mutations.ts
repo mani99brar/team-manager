@@ -142,8 +142,16 @@ async function publishFile(parent: FileHandle, name: string, bytes: Buffer, mode
   try {
     if (mode !== undefined) await file.chmod(mode)
     await file.writeFile(bytes)
-    await file.close()
-    await fs.link(temporary, at(parent, name)).catch(conflictFromErrno)
+    if (process.platform === 'darwin') {
+      // macOS link() follows a symlink given as its source, and the staging name can be swapped for one: link the
+      // staged inode by its inode path while its handle is open, so that inode cannot be reused and is never a symlink.
+      const staged = await file.stat({ bigint: true })
+      await fs.link(`/.vol/${staged.dev}/${staged.ino}`, at(parent, name)).catch(conflictFromErrno)
+      await file.close()
+    } else {
+      await file.close()
+      await fs.link(temporary, at(parent, name)).catch(conflictFromErrno)
+    }
   } finally {
     await file.close().catch(() => undefined)
     // Publication commits at link(): cleanup must neither turn success into failure nor
@@ -186,7 +194,7 @@ async function relocate(root: FileHandle, from: string[], to: string[]): Promise
   if (to.length > from.length && sameComponents(from, to.slice(0, from.length))) {
     throw new PathError(400, 'A folder cannot be moved into itself.')
   }
-  await withParentDirectory(root, from, async (sourceParent, sourceName) => {
+  await withParentDirectory(root, from, async (sourceParent, sourceName, track) => {
     const kind = await existingTarget(sourceParent, sourceName)
     const destinationName = to[to.length - 1]
     if (kind === 'file' && !isMarkdownName(destinationName)) throw new PathError(400, 'The file name must end in .md.')
@@ -195,8 +203,23 @@ async function relocate(root: FileHandle, from: string[], to: string[]): Promise
     const run = async (destinationParent: FileHandle) => {
       await assertAbsent(destinationParent, destinationName)
       if (kind === 'file') {
+        let pinned: { dev: bigint; ino: bigint } | null = null
+        if (process.platform === 'darwin') {
+          // macOS link() follows a symlink given as its source, which can be swapped in after the probe: pin the regular
+          // file no-follow and hold it open for the step (its inode cannot be reused), then require the link to be it.
+          const source = await openRegularFile(sourceParent, sourceName)
+          track(source)
+          pinned = await source.stat({ bigint: true })
+        }
         // link() refuses an existing destination atomically; the old name is removed only once the new one exists.
         await fs.link(at(sourceParent, sourceName), at(destinationParent, destinationName)).catch(conflictFromErrno)
+        if (pinned) {
+          const linked = await fs.lstat(at(destinationParent, destinationName), { bigint: true })
+          if (!linked.isFile() || linked.dev !== pinned.dev || linked.ino !== pinned.ino) {
+            await fs.unlink(at(destinationParent, destinationName)).catch(() => undefined)
+            throw new PathError(404, NOT_FOUND)
+          }
+        }
         try {
           await fs.unlink(at(sourceParent, sourceName))
         } catch (error) {

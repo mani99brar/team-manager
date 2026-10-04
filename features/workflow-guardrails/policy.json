@@ -31,7 +31,7 @@
           "id": "workflow-unit",
           "kind": "unit",
           "argv": [
-            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "python",
             "-m",
             "workflow.run_tests"
           ],

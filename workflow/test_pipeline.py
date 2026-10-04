@@ -160,7 +160,7 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()
         (self.repo / "contracts/workflow").mkdir(parents=True)
@@ -770,7 +770,7 @@ class AdvanceTests(unittest.TestCase):
             seen.append((dict(state.values), tuple(state.next)))
             if len(seen) == 2:
                 raise OSError("disk full")
-        with tempfile.TemporaryDirectory() as root, SqliteSaver.from_conn_string(str(Path(root) / "graph.sqlite")) as saver:
+        with tempfile.TemporaryDirectory() as root, SqliteSaver.from_conn_string(str(Path(root).resolve() / "graph.sqlite")) as saver:
             graph = builder.compile(checkpointer=saver)
             config = {"configurable": {"thread_id": "run"}}
             with patch.object(pipeline, "report", exported), patch("sys.stderr") as stderr:

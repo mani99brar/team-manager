@@ -56,7 +56,7 @@ class RepairFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo"
         (self.repo / "tests").mkdir(parents=True)
         (self.repo / "docs").mkdir()
@@ -902,7 +902,7 @@ class IdenticalFailureGuard(unittest.TestCase):
     def test_identical_failure_guard_compares_only_the_same_revision(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = Path(temp.name).resolve()
         attempts = {"candidate:ui": 3}
         bumped = []
         runtime = type("Runtime", (), {})()
@@ -930,7 +930,7 @@ class AttemptBudget(unittest.TestCase):
     def test_attempt_budget_is_per_revision(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        root = Path(temp.name)
+        root = Path(temp.name).resolve()
         runtime = Pipeline.__new__(Pipeline)
         runtime.directory, runtime.policy, runtime.workers = root, {"max_verification_attempts": 3}, ["ui"]
         save_json(root / "repairs.json", {"version": "1.0.0", "repairs": [{"n": 1, "status": "applied", "lanes": {}, "attempt_floors": {"candidate:ui": 3}},

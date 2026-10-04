@@ -40,7 +40,7 @@ async function openForEditing(page: Page, url: string) {
 /** Places the caret at the end of the document and types. */
 async function typeAtEnd(page: Page, text: string) {
   await editor(page).click()
-  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ControlOrMeta+End')
   await page.keyboard.type(text)
 }
 
@@ -302,7 +302,7 @@ test('unchanged CRLF, BOM and no-final-newline files round-trip byte for byte; e
     await page.keyboard.press('Backspace')
     await expect(saveStatus(page)).toHaveText('Saved')
     await editor(page).click()
-    await page.keyboard.press('Control+Home')
+    await page.keyboard.press('ControlOrMeta+Home')
     await page.keyboard.type('!')
     await page.keyboard.press('Backspace')
     await expect(saveStatus(page)).toHaveText('Saved')
@@ -311,7 +311,7 @@ test('unchanged CRLF, BOM and no-final-newline files round-trip byte for byte; e
     await saveButton(page).click()
     await expect(saveStatus(page)).toHaveText('Saved')
     await editor(page).click()
-    await page.keyboard.press('Control+End')
+    await page.keyboard.press('ControlOrMeta+End')
     await page.keyboard.press('Backspace')
     await expect(saveStatus(page)).toHaveText('Unsaved')
     await saveButton(page).click()

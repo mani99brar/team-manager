@@ -14,17 +14,21 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from .launch import BUILTIN_BRIEFS, TOOL, feature_names, launch_commands, main as launch_main, resolve_target
+from .guardrails import check_run_worktrees, run_worktrees
+from .launch import BUILTIN_BRIEFS, TOOL, default_run_root, feature_file, feature_names, launch_commands, main as launch_main, resolve_target
 from .pipeline import ExportRuntime, export_run
-from .registry import merge_registry, register, registry_entry
+from .registry import merge_registry, overlaps, register, registry_entry
 from .scaffold import init
-from .sessions import read_json, save_json
+from .sessions import read_json, real_path, save_json
 from .test_export import legacy_run
 from .test_lanes import LANES, LaneRun
+from .test_sessions import case_insensitive, swapped
 from .verification import CONTRACTS
 
 PY = sys.executable
@@ -75,7 +79,7 @@ class Isolated(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.home = self.root / "home"
         self.registry = self.root / "config" / "projects.json"
         environment = patch.dict(os.environ, {"HOME": str(self.home), "MD_MANAGER_PROJECTS_CONFIG": str(self.registry)})
@@ -210,6 +214,124 @@ class NoTargetSchema(LaneRun):
         for node in LANES:
             self.assertEqual(read_json(run / f"verification/worker/{node}/1/packet.json")["gate"]["status"], "passed")
         self.assertFalse((self.repo / "contracts").exists())
+
+
+def on_case_insensitive_macos(test: unittest.TestCase, root: Path) -> None:
+    if sys.platform != "darwin" or not case_insensitive(root):
+        test.skipTest("a case-insensitive macOS volume")
+
+
+class CaseVariantLaunch(Isolated):
+    """A path typed in another letter case than the volume stores (macOS finds it): the launch, its registry entry and the
+    feature's files use the stored spelling, as getcwd, Claude and the server's realpath give it."""
+
+    def test_on_macos_the_repository_and_run_root_take_the_stored_spelling(self):
+        on_case_insensitive_macos(self, self.root)
+        target = make_target(self.root)
+        runs = self.root / "Runs"
+        runs.mkdir()
+        printed = self.dry_run("skeleton", "--repo", str(swapped(self.root, target)), "--run-root", str(swapped(self.root, runs)), "--no-herdr")
+        self.assertEqual((printed["repository"], printed["run_directory"]), (str(target), str(runs / "skeleton-001")))
+        self.assertEqual(printed["registry"]["entry"], registry_entry(target, "skeleton", runs, ["app"]))
+        # The default run root is keyed by the stored repository name, and md-manager typed in another case is md-manager.
+        printed = self.dry_run("skeleton", "--repo", str(swapped(self.root, target / "features")), "--no-herdr")
+        self.assertEqual(printed["run_directory"], str(self.home / ".local/state/agent-workflows/project-B/skeleton/skeleton-001"))
+        self.assertEqual(default_run_root(Path(str(TOOL).swapcase()), "skeleton", home=self.home), self.home / ".local/state/md-manager-workflows/skeleton")
+        # A second spelling of a registered runs root overlaps it, as the server's realpath sees it.
+        register(self.registry, registry_entry(target, "skeleton", runs, ["app"]))
+        text, note = merge_registry(self.registry.read_text(), registry_entry(target, "other", swapped(self.root, runs) / "nested", ["app"]))
+        self.assertIsNone(text)
+        self.assertIn("overlaps", note)
+        self.assertTrue(overlaps(str(runs), str(swapped(self.root, runs))))
+
+    def test_on_macos_a_feature_file_named_in_another_letter_case_is_refused_as_on_linux(self):
+        on_case_insensitive_macos(self, self.root)
+        target = make_target(self.root)
+        folder = target / "features" / "skeleton"
+        manifest = read_json(folder / "feature.json")
+        manifest["workers"][0]["task"] = "App-Task.md"
+        save_json(folder / "feature.json", manifest)
+        commit_all(target)
+        errors = self.refused("skeleton", "--repo", str(target), "--no-herdr", "--dry-run")
+        self.assertIn(f"Feature file App-Task.md is missing: the file in {folder} is named app-task.md", errors)
+        # The stored name is accepted however the feature directory is typed.
+        self.assertEqual(feature_file(swapped(self.root, folder), "app-task.md"), swapped(self.root, folder) / "app-task.md")
+
+    def test_on_macos_a_registry_naming_the_repository_in_another_spelling_is_the_same_project(self):
+        on_case_insensitive_macos(self, self.root)
+        target = make_target(self.root)
+        runs = self.root / "Runs"
+        runs.mkdir()
+        register(self.registry, registry_entry(target, "skeleton", runs, ["app"]))
+        # Edited by hand to name the repository in another spelling of the same directory.
+        edited = self.registry.read_text().replace(str(target), str(swapped(self.root, target)))
+        text, note = merge_registry(edited, registry_entry(target, "other", self.root / "Other", ["app"]))
+        self.assertIsNotNone(text, note)
+        with patch.object(sys, "platform", "linux"):  # Elsewhere the spelling given is compared, as before.
+            text, note = merge_registry(edited, registry_entry(target, "other", self.root / "Other", ["app"]))
+        self.assertIsNone(text)
+        self.assertIn("already names the repository", note)
+
+    def test_elsewhere_paths_keep_the_spelling_given_and_resolve_as_before(self):
+        target = make_target(self.root)
+        runs = self.root / "Runs"
+        runs.mkdir()
+        with patch.object(sys, "platform", "linux"), patch("workflow.registry.os.path.realpath", wraps=os.path.realpath) as realpath, \
+                patch("workflow.sessions.os.open") as opened:
+            self.assertFalse(overlaps(str(runs), str(runs.parent / "runs")))
+            self.assertEqual(realpath.call_count, 2)
+            self.assertEqual(str(default_run_root(Path(str(target).swapcase()), "skeleton", home=self.home)),
+                             str(self.home / ".local/state/agent-workflows/PROJECT-b/skeleton"))
+            if case_insensitive(self.root):  # Linux would not find these; this volume does, and the spelling given is kept.
+                self.assertEqual(str(resolve_target(swapped(self.root, target), self.root)), str(swapped(self.root, target)))
+                self.assertEqual(str(feature_file(target / "features/skeleton", "APP-TASK.md")), str(target / "features/skeleton/APP-TASK.md"))
+        opened.assert_not_called()
+
+
+class CaseVariantRun(LaneRun):
+    def test_on_macos_a_run_prepared_and_named_in_other_letter_cases_is_one_run(self):
+        on_case_insensitive_macos(self, self.root)
+        self.feature_dir()
+        run, commands, _ = launch_commands(self.repo, "lanes", "lanes-001", self.run_root, herdr=False)
+        self.run_root.mkdir()
+        def typed(path: str) -> str:
+            """In the other case: the path, or for the run directory (not created yet) its parent."""
+            return str(swapped(self.root, Path(path)) if Path(path).exists() else Path(typed(str(Path(path).parent)), Path(path).name))
+
+        # Every path prepare is given (run, --repo, --policy, --task), typed in the other case.
+        prepare = [typed(item) if item.startswith(str(self.root)) else item for item in commands[2]]
+        prepare = [f"{item.split('=', 1)[0]}={typed(item.split('=', 1)[1])}" if "=" + str(self.root) in item else item for item in prepare]
+        self.assertFalse(any(str(self.root) in item for item in prepare))
+        result = subprocess.run(prepare, cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = read_json(run / "plan.json")
+        self.assertEqual((plan["repository"], {info["worktree"] for info in plan["nodes"].values()}),
+                         (str(self.repo), {str(run / f"worktree-{node}") for node in LANES}))
+        # Later commands find it however it is named.
+        for typed in (run, swapped(self.root, run)):
+            for action in ("status", "export"):
+                with self.subTest(run=typed, action=action):
+                    result = subprocess.run([PY, "-m", "workflow", action, str(typed)], cwd=TOOL, capture_output=True, text=True, timeout=120)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_on_macos_a_run_below_a_directory_stored_decomposed_finds_its_worktrees(self):
+        """Git lists worktrees in composed Unicode (core.precomposeunicode); this volume stores the directory decomposed."""
+        on_case_insensitive_macos(self, self.root)
+        (self.root / unicodedata.normalize("NFD", "Café")).mkdir()
+        composed = self.root / unicodedata.normalize("NFC", "Café")
+        if str(real_path(composed)) == str(composed):
+            self.skipTest("a volume that finds a name typed in another Unicode form")
+        (composed / "runs").mkdir()
+        self.feature_dir()
+        run, commands, _ = launch_commands(self.repo, "lanes", "lanes-001", composed / "runs", herdr=False)
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        directory = real_path(run)
+        self.assertNotEqual(str(directory), str(run))  # Pinned decomposed, as stored.
+        plan = read_json(directory / "plan.json")
+        self.assertEqual({real_path(path) for path in run_worktrees(self.repo, directory)}, {directory / f"worktree-{node}" for node in LANES})
+        heads = check_run_worktrees(SimpleNamespace(directory=directory, plan=plan), {plan["base_commit"]})
+        self.assertEqual(set(heads.values()), {plan["base_commit"]})
 
 
 class PreflightClaudeFlags(Isolated):
@@ -474,7 +596,7 @@ class Trimmed(unittest.TestCase):
             self.assertIn("invalid choice", errors.getvalue())
         # A run recorded before this slice still exports.
         with tempfile.TemporaryDirectory() as root:
-            directory = legacy_run(Path(root))
+            directory = legacy_run(Path(root).resolve())
             exported = export_run(ExportRuntime(directory))
             self.assertEqual((exported["run_id"], exported["review"]["verdict"]), ("legacy-001", "approved"))
 
@@ -579,7 +701,7 @@ class PortablePrompts(unittest.TestCase):
         from types import SimpleNamespace
         from .automatic import BUILTIN_REVIEW_BRIEF, REVIEW_COMPLETION_SCHEMA, completion_prompt, completion_protocol_prompt, review_prompt
         with tempfile.TemporaryDirectory() as temp:
-            directory = Path(temp) / "run"
+            directory = Path(temp).resolve() / "run"
             plan = {"run_id": "run-1", "workers": ["app"], "nodes": {"app": {"session_id": "token"}}}
             runtime = SimpleNamespace(directory=directory, plan=plan, workers=["app"])
             protocol = completion_protocol_prompt(runtime, "token", "d" * 64, "c" * 40)

@@ -366,7 +366,8 @@ class ChallengeJobFails(FailingChallenge):
 
 class ChallengeJobStops(FailingChallenge):
     def test_a_challenge_job_that_times_out_cannot_start_or_changes_its_worktree_is_never_a_pass(self):
-        with patch("workflow.guardrails.challenge_timeout", return_value=1):
+        # On macOS long enough for the job to log its launch first: a fresh executable's first exec alone takes about 0.3s there.
+        with patch("workflow.guardrails.challenge_timeout", return_value=5 if sys.platform == "darwin" else 1):
             self.fails("timeout-001", "timeout", "Design challenge attempt 1 deadline exhausted; no worker was launched")
         executable, self.executable = self.executable, self.root / "missing-claude"
         self.fails("missing-cli-001", "pass", f"No such file or directory: '{self.executable}'", jobs=[])
@@ -1038,7 +1039,7 @@ class CompletionEvidence(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.plan = {"run_id": "run", "completion_version": "1.1.0", "nodes": {"ui": {"session_id": "ui-token"}}}
         self.runtime = SimpleNamespace(directory=self.root, plan=self.plan)
 
@@ -1093,7 +1094,7 @@ class WorkerQuestion(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.plan = {"run_id": "run", "source_branch": "feature/test", "automatic": dict(DEFAULTS), "completion_version": "1.1.0",
                      "workers": ["ui", "adapter"], "nodes": {lane: {"session_id": f"{lane}-token"} for lane in ("ui", "adapter")}}
         save_json(self.root / "plan.json", self.plan)
@@ -1532,7 +1533,7 @@ class AnswerDelivery(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         save_json(self.root / "plan.json", {"run_id": "run", "workers": ["ui", "adapter"], "nodes": {"ui": {}, "adapter": {}}})
         for lane in ("ui", "adapter"):
             save_json(self.root / f"{lane}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00", "background_id": f"bg-{lane}"})
@@ -1756,7 +1757,7 @@ class ExportSeam(unittest.TestCase):
     def test_export_seam_1_6_0_carries_decisions_challenge_evidence_and_questions_and_older_runs_export_nulls(self):
         """Scenario export-seam (the Python half; contracts/projects/contract.test.ts and server/projects.test.ts serve it)."""
         with tempfile.TemporaryDirectory() as root:
-            directory = legacy_run(Path(root))
+            directory = legacy_run(Path(root).resolve())
             before = export_run(ExportRuntime(directory))
             self.assertEqual(before["version"], EXPORT_VERSION)
             self.assertEqual(EXPORT_VERSION, "1.6.0")

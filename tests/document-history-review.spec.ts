@@ -73,7 +73,13 @@ test('historical outline origin restores its own scroll, focus and expansion aft
   await outline.getByRole('button', { name: 'Expand subagents', exact: true }).click()
   const file = outline.locator(`[data-node-id="Claude/${CLAUDE}/workflow.md"] .outline-name`)
   await file.focus()
-  await outline.evaluate(element => { element.scrollTop = element.scrollHeight })
+  // A scroll event is dispatched on the next frame: wait for it, so the outline has recorded its position before Enter unmounts it.
+  await outline.evaluate(element => new Promise<void>(resolve => {
+    const before = element.scrollTop
+    element.addEventListener('scroll', () => resolve(), { once: true })
+    element.scrollTop = element.scrollHeight
+    if (element.scrollTop === before) resolve()
+  }))
   const scroll = await outline.evaluate(element => element.scrollTop)
   expect(scroll).toBeGreaterThan(0)
   await file.press('Enter')

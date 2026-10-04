@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import fs, { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { mock, test } from 'node:test'
 import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
@@ -53,6 +56,9 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 
 const sha256 = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
 const json = (value: unknown) => JSON.stringify(value, null, 2)
+/** macOS has no procfs: it reads controller liveness from `ps` and reaches open directories by inode path. */
+const PROCFS_ONLY = process.platform === 'darwin' && 'macOS has no procfs; it reads liveness from ps (the macOS tests below)'
+const MACOS_ONLY = process.platform !== 'darwin' && 'macOS behaviour'
 
 type RawEvent = { sequence: number; time: string; node: string; status: string; message: string }
 type Registration = { phase: 'worker' | 'candidate'; node_id: string; attempt: number; path: string; sha256: string }
@@ -945,6 +951,25 @@ test('unavailable or symlinked run roots are 503; oversized exports are refused 
       }
     }, [{ id: 'alpha', workflows: [{ id: 'main' }, { id: 'big' }, { id: 'locked' }] }], { runStore: { exportByteLimit: 2048 } })
   } finally { await rm(outside, { recursive: true, force: true }) }
+})
+
+test('a socket where a run file belongs reads as absent, like a missing file, never as a failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-'))
+  const server = createServer()
+  try {
+    // Socket paths are short (104 bytes on macOS), so this run sits right below the temporary root.
+    const runsRoot = join(root, 'r')
+    await mkdir(runsRoot)
+    const dir = await writeRun(runsRoot, { runId: 's', next: ['launch_ui', 'launch_adapter'], events: launchEvents, eventsFile: false })
+    await new Promise<void>((resolve, reject) => server.once('error', reject).listen(join(dir, 'events.jsonl'), resolve))
+    const config = await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main', runsRoot }] }])), 'test registry')
+    const store = new RunStore(config)
+    // The export's own copy of the events stands in, as it does for a log that is not there.
+    assert.deepEqual((await store.loadRun(store.scope('alpha', 'main'), 's')).events.map(event => event.sequence), [1, 2, 3, 4])
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -2136,7 +2161,7 @@ async function fakeProc(root: string, name: string, child?: { pid: number; argv:
   return proc
 }
 
-test('[B2] controller liveness: this run\'s automatic-step, started by its PID row, is running; a gone or reused PID is not; anything unclear is unknown', async () => {
+test('[B2] controller liveness: this run\'s automatic-step, started by its PID row, is running; a gone or reused PID is not; anything unclear is unknown', { skip: PROCFS_ONLY }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-proc-'))
   try {
     const runsRoot = join(root, 'runs', 'alpha', 'main')
@@ -2185,6 +2210,120 @@ test('[B2] controller liveness: this run\'s automatic-step, started by its PID r
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
+/** `ps -o lstart=` with C-format times in UTC: `Www Mmm dd hh:mm:ss yyyy`, the day padded with a space. */
+function lstart(at: string): string {
+  const [weekday, day, month, year, time] = new Date(at).toUTCString().split(' ')
+  return `${weekday.slice(0, 3)} ${month} ${day.replace(/^0/, ' ')} ${time} ${year}`
+}
+
+/**
+ * A fake macOS `ps` for one PID: it answers exactly the liveness check's invocation (a UTF-8 character set and no other
+ * locale, UTC) with `row`, padded after the start time as ps pads it, and exits with `code` (ps exits 1 without output for
+ * no such process); anything else exits 64. A Buffer row is written as its raw bytes.
+ */
+async function fakePs(root: string, name: string, pid: number, row: { argv: string[]; startedAt: string } | string | Buffer | null, code = row === null ? 1 : 0): Promise<string> {
+  const path = join(root, name)
+  const text = row === null ? '' : typeof row === 'string' || Buffer.isBuffer(row) ? row : `${lstart(row.startedAt)}    ${row.argv.join(' ')}`
+  await writeFile(`${path}.row`, text.length === 0 ? '' : Buffer.concat([Buffer.from(text), Buffer.from('\n')]))
+  await writeFile(path, [
+    '#!/bin/sh',
+    `[ "$*" = "-ww -o lstart= -o command= -p ${pid}" ] && [ "$LC_CTYPE" = UTF-8 ] && [ -z "\${LC_ALL+x}\${LANG+x}\${LC_TIME+x}" ] && [ "$TZ" = UTC ] || exit 64`,
+    `/bin/cat '${path}.row'`,
+    `exit ${code}`,
+  ].join('\n'), { mode: 0o755 })
+  return path
+}
+
+test('[B2] controller liveness on macOS reads one ps row: this run\'s automatic-step started by its PID row is running; a gone or reused PID is not; anything unclear is unknown', { skip: MACOS_ONLY }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-ps-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    // ps joins the arguments with spaces, so a run directory whose path holds spaces is found among the split points.
+    const spacedRoot = join(root, 'runs with  spaces', 'alpha')
+    // ps prints a non-ASCII run directory as itself in a UTF-8 character set.
+    const accentedRoot = join(root, 'runs café', 'alpha')
+    await mkdir(runsRoot, { recursive: true })
+    await mkdir(spacedRoot, { recursive: true })
+    await mkdir(accentedRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }, { id: 'spaced', runsRoot: spacedRoot }, { id: 'accented', runsRoot: accentedRoot }] }])), 'test registry')
+    const pid = 4242
+    const pidRow = (sequence: number, controller = pid): RawEvent => ({ sequence, time: T1, node: 'controller', status: 'running', message: `Automatic checkpoint controller PID ${controller}` })
+    const inputs = inputsSection({}, { ui: liveWorker, adapter: liveWorker })
+    const liveDir = await writeRun(runsRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(5)], inputs })
+    const otherDir = await writeRun(runsRoot, { ...waitingRun, runId: 'other', events: [...launchEvents, pidRow(5, 4343)], inputs })
+    const spacedDir = await writeRun(spacedRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(5)], inputs })
+    const accentedDir = await writeRun(accentedRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(5)], inputs })
+    const step = (dir: string) => ['/Users/you/dev/md-manager/.venv/bin/python', '-m', 'workflow', 'automatic-step', dir, '--live']
+    const started = (at: string, dir = liveDir) => ({ argv: step(dir), startedAt: at })
+    const cases: [string, string, string][] = [
+      ['running', 'main', await fakePs(root, 'ps-running', pid, started('2026-03-01T10:04:30Z'))],
+      // The start has whole seconds: one that reads a second after the row is still the process that logged it.
+      ['running', 'main', await fakePs(root, 'ps-tolerance', pid, started('2026-03-01T10:05:01Z'))],
+      ['running', 'spaced', await fakePs(root, 'ps-spaced', pid, started('2026-03-01T10:04:30Z', spacedDir))],
+      ['running', 'accented', await fakePs(root, 'ps-accented', pid, started('2026-03-01T10:04:30Z', accentedDir))],
+      ['not_running', 'main', await fakePs(root, 'ps-gone', pid, null)],
+      ['not_running', 'main', await fakePs(root, 'ps-reused', pid, { argv: ['/usr/bin/vim', 'notes.md'], startedAt: '2026-03-01T10:30:00Z' })],
+      ['not_running', 'main', await fakePs(root, 'ps-other-run', pid, started('2026-03-01T10:04:00Z', otherDir))],
+      // Only the exact spacing of the arguments names the directory.
+      ['not_running', 'spaced', await fakePs(root, 'ps-respaced', pid, started('2026-03-01T10:04:30Z', join(root, 'runs with spaces', 'alpha', 'live')))],
+      ['unknown', 'main', await fakePs(root, 'ps-later', pid, started('2026-03-01T10:05:02Z'))],
+      // ps shows a byte it cannot print as an escape (é as `M-CM-)`), so the path it shows may still be this run's directory.
+      ['unknown', 'main', await fakePs(root, 'ps-escaped', pid, started('2026-03-01T10:04:30Z', `${root}/runs/M-CM-)/main/live`))],
+      // A byte that is not UTF-8 is printed raw and decodes to U+FFFD, so that path too may be this run's directory.
+      ['unknown', 'main', await fakePs(root, 'ps-invalid-byte', pid, Buffer.concat([Buffer.from(`${lstart('2026-03-01T10:04:30Z')}    ${step('').slice(0, -2).join(' ')} ${root}/runs/`), Buffer.from([0xff]), Buffer.from('/main/live --live')]))],
+      ['unknown', 'main', await fakePs(root, 'ps-many-paths', pid, started('2026-03-01T10:04:30Z', Array.from({ length: 12 }, (_, index) => `/p${index}`).join(' ')))],
+      ['unknown', 'main', await fakePs(root, 'ps-failing', pid, null, 2)],
+      ['unknown', 'main', await fakePs(root, 'ps-garbled', pid, `yesterday ${step(liveDir).join(' ')}`)],
+      ['unknown', 'main', join(root, 'no-such-ps')],
+    ]
+    for (const [expected, workflow, ps] of cases) {
+      const store = new RunStore(config, { ps })
+      const scope = store.scope('alpha', workflow)
+      assert.equal(activityOf((await store.loadRun(scope, 'live')).detail, ps).controller, expected, ps)
+      assert.equal((await store.listRuns(scope)).find(summary => summary.run_id === 'live')!.activity?.controller, expected, `${ps} (list)`)
+    }
+    // A different PID is asked about, so this fake answers nothing that reads as running.
+    const store = new RunStore(config, { ps: await fakePs(root, 'ps-pid', 4343, started('2026-03-01T10:04:30Z')) })
+    assert.equal((await store.loadRun(store.scope('alpha', 'main'), 'live')).detail.summary.activity!.controller, 'unknown')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[B2] on macOS the real ps: this run\'s live automatic-step is running, under a non-ASCII path too; this test\'s own PID and an exited one are not', { skip: MACOS_ONLY }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-ps-'))
+  let child: ChildProcess | undefined
+  let accented: ChildProcess | undefined
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    const accentedRoot = join(root, 'runs café', 'alpha')
+    await mkdir(runsRoot, { recursive: true })
+    await mkdir(accentedRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }, { id: 'accented', runsRoot: accentedRoot }] }])), 'test registry')
+    const inputs = inputsSection({}, { ui: liveWorker, adapter: liveWorker })
+    // A stand-in controller: a sleeping child whose command line names the run directory after automatic-step, as automatic.py's does.
+    child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', 'automatic-step', join(runsRoot, 'live'), '--live'], { stdio: 'ignore' })
+    accented = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', 'automatic-step', join(accentedRoot, 'live'), '--live'], { stdio: 'ignore' })
+    await Promise.all([once(child, 'spawn'), once(accented, 'spawn')])
+    // Each row is logged after the process it names started.
+    const pidRow = (controller: number): RawEvent => ({ sequence: 5, time: new Date().toISOString(), node: 'controller', status: 'running', message: `Automatic checkpoint controller PID ${controller}` })
+    await writeRun(runsRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(child.pid!)], inputs })
+    await writeRun(runsRoot, { ...waitingRun, runId: 'reused', events: [...launchEvents, pidRow(process.pid)], inputs })
+    await writeRun(accentedRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow(accented.pid!)], inputs })
+    const store = new RunStore(config)
+    const scope = store.scope('alpha', 'main')
+    const controller = async (runId: string) => (await store.loadRun(scope, runId)).detail.summary.activity!.controller
+    assert.equal(await controller('live'), 'running')
+    assert.equal(await controller('reused'), 'not_running')
+    assert.equal((await store.loadRun(store.scope('alpha', 'accented'), 'live')).detail.summary.activity!.controller, 'running')
+    child.kill()
+    await once(child, 'exit')
+    assert.equal(await controller('live'), 'not_running')
+  } finally {
+    child?.kill()
+    accented?.kill()
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('[B2] every browser fixture run serves a 1.5.0 summary whose activity names what it waits on', async () => {
   const at = (value: string | null | undefined) => value ? value.replace(/^2026-03-01T(\d\d:\d\d):00Z$/, '$1') : '-'
   const seen: Record<string, SeededActivity> = {}
@@ -2225,6 +2364,64 @@ test('[B3] run_dir is served with ~ only for projects listed in viewer.expose_ru
     // Outside $HOME (the temporary roots) nothing is served, listed or not.
     if (!root.startsWith(`${homedir()}/`)) assert.equal(await runDir({}, 'alpha'), null)
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[B3] on macOS run_dir names the directory that was read, or nothing once another one has replaced it at its path', { skip: MACOS_ONLY }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-rundir-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    await mkdir(runsRoot, { recursive: true })
+    const opened = await writeRun(runsRoot, { runId: 'r1', next: ['launch_ui', 'launch_adapter'] })
+    const config = await parseProjectsConfig(JSON.stringify({ ...registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }]), viewer: { expose_run_dir: ['alpha'] } }), 'viewer registry')
+    const store = new RunStore(config, { home: root })
+    const scope = store.scope('alpha', 'main')
+    assert.equal((await store.loadRun(scope, 'r1')).detail.run_dir, '~/runs/alpha/main/r1')
+    // The directory being read is moved aside and another one takes its path before the run directory is named.
+    const realpath = fs.realpath
+    mock.method(fs, 'realpath', async (path: Parameters<typeof realpath>[0], options?: Parameters<typeof realpath>[1]) => {
+      if (path === opened) {
+        mock.restoreAll()
+        await rename(opened, `${opened}-moved`)
+        await mkdir(opened)
+      }
+      return realpath(path, options as never)
+    })
+    try {
+      const run = await store.loadRun(scope, 'r1')
+      assert.equal(run.detail.summary.run_id, 'r1', 'the pinned directory was read')
+      assert.equal(run.detail.run_dir, null)
+    } finally { mock.restoreAll() }
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('on macOS a run root whose volume has no working inode paths is a 503 and nothing below it is opened', { skip: MACOS_ONLY }, async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const configured = runsRoot('alpha', 'main')
+    await writeRun(configured, { runId: 'r1', next: ['launch_ui', 'launch_adapter'] })
+    const { dev, ino } = await stat(configured, { bigint: true })
+    const inodePath = `/.vol/${dev}/${ino}`
+    const statOriginal = fs.stat
+    const open = fs.open
+    const opened: string[] = []
+    mock.method(fs, 'stat', async (path: Parameters<typeof statOriginal>[0], options?: Parameters<typeof statOriginal>[1]) => {
+      if (String(path) === inodePath) throw Object.assign(new Error('Operation not supported'), { code: 'ENOTSUP' })
+      return statOriginal(path, options as never)
+    })
+    mock.method(fs, 'open', async (path: Parameters<typeof open>[0], flags?: Parameters<typeof open>[1], mode?: Parameters<typeof open>[2]) => {
+      opened.push(String(path))
+      return open(path, flags, mode)
+    })
+    try {
+      for (const path of [url('alpha', 'main'), url('alpha', 'main', 'r1'), url('alpha', 'main', 'r1', '/events')]) {
+        const response = await get(app, path)
+        assertError(response, 503, 'RUNS_ROOT_UNAVAILABLE', root)
+        assert.match((response.json() as { error: { message: string } }).error.message, /inode/)
+      }
+      assert.ok(opened.includes(configured))
+      assert.ok(!opened.some(path => path.startsWith(`${configured}/`) || path.startsWith(`${inodePath}/`)), opened.join('\n'))
+    } finally { mock.restoreAll() }
+    assert.equal((await get(app, url('alpha', 'main', 'r1'))).status, 200)
+  })
 })
 
 test('[B3] the registry accepts a top-level viewer key and keeps it across reloads; unknown keys are still refused', async () => {

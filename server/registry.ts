@@ -1,7 +1,8 @@
 import fs, { type FileHandle } from 'node:fs/promises'
 import { constants } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { orderLocations, type Category, type LocationConfig, type Source } from './config.ts'
-import { DIRECTORY_FLAGS, EXCLUDED_DIRECTORY, MutationQueue, PathError, RequestError, at, isMarkdownName, isSource } from './files.ts'
+import { DIRECTORY_FLAGS, MutationQueue, PathError, RequestError, at, inodePathReaches, isExcludedDirectory, isMarkdownName, isSource } from './files.ts'
 
 /**
  * The set of configured filesystem locations and the only way to reach one of their roots.
@@ -14,7 +15,11 @@ import { DIRECTORY_FLAGS, EXCLUDED_DIRECTORY, MutationQueue, PathError, RequestE
  * is a directory. No handle outlives the operation that opened it, so there is nothing to leak on shutdown.
  */
 export const CAPABILITY_ERROR = 'Secure file reads require Linux with mounted procfs at /proc/self/fd.'
+/** The darwin probe's refusal, which names both platforms the server supports. */
+export const MAC_CAPABILITY_ERROR = 'Secure file reads require Linux with mounted procfs at /proc/self/fd, or macOS with inode paths at /.vol.'
 const PROC_SUPER_MAGIC = 0x9fa0
+/** macOS inode paths are per volume: a root on a volume without them is unavailable rather than read by pathname. */
+const NO_INODE_PATHS = 'The configured folder is on a volume that cannot be opened by inode, which secure access on macOS requires.'
 
 export type EntryKind = 'directory' | 'file'
 export type Entry = { source: Source; locationId: string; path: string; kind: EntryKind }
@@ -58,8 +63,12 @@ export async function unavailableReason(path: string, error: unknown): Promise<s
   }
 }
 
-/** No pathname fallback: Node lacks openat, so descriptor-relative traversal requires Linux procfs. */
+/**
+ * No pathname fallback: Node lacks openat, so descriptor-relative traversal requires Linux procfs or macOS inode
+ * paths (see files.ts `at`). Every other platform is refused.
+ */
 async function probeCapability(): Promise<void> {
+  if (process.platform === 'darwin') return probeInodePaths()
   if (process.platform !== 'linux' || !constants.O_NOFOLLOW || !constants.O_DIRECTORY) throw new Error(CAPABILITY_ERROR)
   try {
     const stats = await fs.statfs('/proc/self/fd')
@@ -74,6 +83,27 @@ async function probeCapability(): Promise<void> {
     throw new Error(CAPABILITY_ERROR, { cause })
   } finally {
     await handle.close()
+  }
+}
+
+/**
+ * macOS: prove that an open directory re-opens through its inode path as that same directory before any root is
+ * touched. The temporary directory is always there; each root's own volume is checked again when it is opened.
+ */
+async function probeInodePaths(): Promise<void> {
+  if (!constants.O_NOFOLLOW || !constants.O_DIRECTORY) throw new Error(MAC_CAPABILITY_ERROR)
+  const handles: FileHandle[] = []
+  try {
+    const directory = await fs.open(tmpdir(), constants.O_RDONLY | constants.O_DIRECTORY)
+    handles.push(directory)
+    const probe = await fs.open(at(directory), constants.O_RDONLY | constants.O_DIRECTORY)
+    handles.push(probe)
+    // Equal inode paths are an equal device and inode: the re-open reached the pinned directory itself.
+    if (at(probe) !== at(directory)) throw new Error('The inode path reached another directory.')
+  } catch (cause) {
+    throw new Error(MAC_CAPABILITY_ERROR, { cause })
+  } finally {
+    await Promise.all(handles.map(handle => handle.close()))
   }
 }
 
@@ -94,7 +124,7 @@ async function walk(directory: FileHandle, location: LocationConfig, prefix: str
     if (dirent.isSymbolicLink()) continue
     const path = prefix ? `${prefix}/${dirent.name}` : dirent.name
     if (dirent.isDirectory()) {
-      if (dirent.name === EXCLUDED_DIRECTORY) continue
+      if (isExcludedDirectory(dirent.name)) continue
       let child: FileHandle
       try {
         child = await fs.open(at(directory, dirent.name), DIRECTORY_FLAGS)
@@ -178,6 +208,9 @@ export class LocationRegistry {
       throw error
     }
     try {
+      if (process.platform === 'darwin' && !(await inodePathReaches(root))) {
+        throw new LocationUnavailableError(`${NO_INODE_PATHS} Refresh the listing to see which locations are available.`)
+      }
       return await operation(root)
     } finally {
       await root.close()

@@ -14,10 +14,12 @@ import fcntl
 import json
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 
 from .export_state import definition
+from .sessions import real_path
 
 REGISTRY_ENV = "MD_MANAGER_PROJECTS_CONFIG"
 REGISTRY_VERSION = 1
@@ -142,8 +144,15 @@ def has_sidecar_node(workflow: dict) -> bool:
 
 
 def overlaps(left: str, right: str) -> bool:
-    """Containment after resolving symlinks where the paths exist, as the server's `assertCanonicalRoots` does."""
-    left, right = os.path.realpath(left), os.path.realpath(right)
+    """Containment after resolving symlinks where the paths exist, as the server's `assertCanonicalRoots` does.
+
+    On macOS its realpath also gives the letter case and Unicode form the volume stores, so two spellings of one root
+    overlap there (real_path).
+    """
+    if sys.platform == "darwin":
+        left, right = str(real_path(left)), str(real_path(right))
+    else:
+        left, right = os.path.realpath(left), os.path.realpath(right)
     return left == right or left.startswith(right.rstrip(os.sep) + os.sep) or right.startswith(left.rstrip(os.sep) + os.sep)
 
 
@@ -178,7 +187,11 @@ def merge_registry(text: str | None, entry: dict) -> tuple[str | None, str]:
     for (start, end), project in zip(projects, document["projects"]):
         if not isinstance(project, dict) or project.get("project_id") != entry["project_id"]:
             continue
-        if os.path.normpath(str(project.get("repository"))) != os.path.normpath(entry["repository"]):
+        stored = str(project.get("repository"))
+        # macOS finds a repository named in another letter case or Unicode form: compare the spellings its volume stores.
+        same = (real_path(stored) == real_path(entry["repository"]) if sys.platform == "darwin"
+                else os.path.normpath(stored) == os.path.normpath(entry["repository"]))
+        if not same:
             return None, (f"Registry not changed: project {entry['project_id']} already names the repository "
                           f"{project.get('repository')}, not {entry['repository']}")
         fields, _ = object_members(text, start)

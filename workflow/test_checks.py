@@ -1,9 +1,13 @@
 """Worker-phase file capture (PRD_VIEWER_CLARITY 4.1): real Git snapshots, real verification worktrees and checks."""
+import errno
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +27,7 @@ class FileCaptureTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.repo = self.root / "repo"
         (self.repo / "tests").mkdir(parents=True)
         (self.repo / "docs").mkdir()
@@ -201,6 +205,53 @@ class VitestCountsTests(unittest.TestCase):
         self.assertIsNone(text_test_counts("      Tests  70 passed | 1 exploded (71)\n"))
         self.assertIsNone(text_test_counts(" Test Files  1 failed (1)\n"))
         self.assertIsNone(text_test_counts("      Tests  3 passed (3)\n# tests 4\n# pass 3\n"))
+
+
+# A check that leaves its group holding only an exited, uncollected process: it forks a child, which forks a grandchild that
+# exits at once and then leaves the group itself, never collecting the grandchild; the check prints that child's pid and exits.
+LEAVES_A_ZOMBIE = """
+import os, sys, time
+if os.fork() == 0:
+    if os.fork() == 0:
+        os._exit(0)
+    os.setpgid(0, 0)
+    print(os.getpid(), flush=True)
+    time.sleep(60)
+    os._exit(0)
+time.sleep(0.5)
+"""
+
+
+class ExecuteTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.log = self.root / "check.log"
+
+    def keeper(self) -> int:
+        """The child that left the check's group, killed at cleanup (its grandchild is then collected by init)."""
+        deadline = time.monotonic() + 30
+        while not self.log.read_text().strip():
+            self.assertLess(time.monotonic(), deadline, "the check never printed")
+            time.sleep(0.01)
+        pid = int(self.log.read_text().split()[0])
+        self.addCleanup(os.kill, pid, signal.SIGKILL)
+        return pid
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS refuses to signal a group of exited processes")
+    def test_on_macos_a_check_whose_group_holds_only_an_uncollected_process_keeps_its_result(self):
+        code, _, _ = checks.execute([sys.executable, "-c", LEAVES_A_ZOMBIE], self.root, self.log, 30, dict(os.environ))
+        self.keeper()
+        self.assertEqual(code, 0)
+
+    def test_elsewhere_a_refused_group_kill_is_raised(self):
+        with patch.object(sys, "platform", "linux"), \
+                patch("workflow.checks.terminate"), patch("workflow.checks.os.killpg", side_effect=PermissionError(errno.EPERM, "Operation not permitted")):
+            with self.assertRaises(PermissionError):
+                checks.execute([sys.executable, "-c", "pass"], self.root, self.log, 30, dict(os.environ))
+        with patch("workflow.checks.terminate"), patch("workflow.checks.os.killpg", side_effect=ProcessLookupError):
+            self.assertEqual(checks.execute([sys.executable, "-c", "raise SystemExit(3)"], self.root, self.log, 30, dict(os.environ))[0], 3)
 
 
 if __name__ == "__main__":

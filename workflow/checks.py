@@ -45,6 +45,10 @@ def execute(argv: list[str], cwd: Path, log: Path, timeout: int, env: dict) -> t
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                # macOS refuses a group whose processes have all exited while some are not collected yet (sessions.group_exited).
+                if sys.platform != "darwin":
+                    raise
             output.flush()
             os.fsync(output.fileno())
     return code, started, now()
@@ -313,7 +317,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
         path = directory / name.lower()
         path.mkdir()
         env[name] = str(path)
-    # Unix domain sockets (tsx IPC, Chromium) are limited to ~107 bytes of path, so the
+    # Unix domain sockets (tsx IPC, Chromium) are limited to ~107 bytes of path (103 on macOS), so the
     # lane's TMPDIR cannot live under the run directory. It is private to this lane,
     # holds no evidence, and is removed once the checks finish.
     tmpdir = lane_tmpdir()
@@ -343,7 +347,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     return packet
 
 
-SOCKET_PATH_LIMIT = 107  # sun_path on Linux, excluding the terminating NUL.
+SOCKET_PATH_LIMIT = 103 if sys.platform == "darwin" else 107  # sun_path (104 bytes on macOS, 108 on Linux), excluding the terminating NUL.
 SOCKET_NAME_ALLOWANCE = len("/tsx-4294967295/4294967295.pipe")
 
 
