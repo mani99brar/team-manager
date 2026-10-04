@@ -9,6 +9,7 @@ selected lane around the fixed tail. Excluded lanes keep their owned paths off-l
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import html
 import json
@@ -259,15 +260,23 @@ def passed_message(packet: dict, retried: int | None = None) -> str:
 
 
 def append_event(directory: Path, node: str, status: str, message: str) -> None:
-    """One events.jsonl line, numbered after the last one: Pipeline.event, and the commands that need no Pipeline (`answer`, `note`)."""
+    """One events.jsonl line, numbered after the last one: Pipeline.event, and the commands that need no Pipeline (`answer`, `note`).
+
+    `answer` and `note` append from their own processes beside a running controller, so events.lock is held from the read
+    of the last sequence to the append: two lines never share a sequence, which the viewer refuses (readEvents)."""
     path = directory / "events.jsonl"
-    prior = path.read_text().splitlines() if path.exists() else []
-    sequence = json.loads(prior[-1])["sequence"] + 1 if prior else 1
-    record = {"sequence": sequence, "time": now(), "node": node, "status": status, "message": message}
-    with path.open("a") as handle:
-        handle.write(json.dumps(record) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    with (directory / "events.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            prior = path.read_text().splitlines() if path.exists() else []
+            sequence = json.loads(prior[-1])["sequence"] + 1 if prior else 1
+            record = {"sequence": sequence, "time": now(), "node": node, "status": status, "message": message}
+            with path.open("a") as handle:
+                handle.write(json.dumps(record) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def action_event(event, actor: str, action: str, detail: str = "") -> None:

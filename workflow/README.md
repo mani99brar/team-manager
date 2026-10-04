@@ -47,7 +47,7 @@ The target is `--repo`, else the current directory when it is a Git repository w
 
    ```bash
    $PY -m workflow launch my-feature --repo ~/dev/project-B --dry-run
-   $PY -m workflow launch my-feature --repo ~/dev/project-B --live --automatic --reviewer-transport print
+   $PY -m workflow launch my-feature --repo ~/dev/project-B --live --automatic --reviewer-transport print --by operator
    ```
 
    A 2.2.0 launch runs the design challenge before any worker; when it pauses, the launch exits 0 and prints the concerns and the `resume` commands. Otherwise an automatic launch keeps printing the run's timeline in that pane, one line per event (UTC time, node, status, message); a resumed `automatic --live` starts with the last five events. Runs are stored under `~/.local/state/agent-workflows/<repo-name>/<feature>/<run-id>` (`--run-root` overrides; storage must be outside the target). md-manager keeps `~/.local/state/md-manager-workflows/<feature>`.

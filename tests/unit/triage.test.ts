@@ -607,6 +607,11 @@ describe('deriveNow', () => {
     assert.deepEqual(commands(now), ['"$PY" -m workflow.interactive attach-one "$RUN" --node game'])
     const later = deriveNow(synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, pane, [960, 'launch_game', 'running', 'Awaiting explicit completion signal; idle is not acceptance']] }))
     assert.equal(later.situation, 'running', 'a later event for the node clears it')
+    // pipeline.py/notes.py send_note: a note's outcome row on the lane says nothing about the pane's state.
+    for (const outcome of ['undeliverable, not typed (lane_blocked)', 'typed into its pane']) {
+      const noted = deriveNow(synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, pane, [930, 'launch_game', 'running', `Note N-1 from the maintainer to worker game: ${outcome}`]] }))
+      assert.equal(noted.situation, 'pane_attention', `a note row (${outcome}) does not clear the pane`)
+    }
     const reviewer = deriveNow(synthetic({
       status: 'running', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'running' },
       events: [[0, 'review', 'running', 'Launching the native reviewer session general'], [60, 'review', 'running', 'Reviewer general needs attention in its pane (native state blocked); waiting until the deadline']],
@@ -1067,6 +1072,14 @@ describe('deriveAttention', () => {
     assert.deepEqual([...all.nodes].map(([node, attention]) => [node, attention.kind]), [['launch_controller', 'pane'], ['launch_ui', 'question'], ['approval', 'approval']])
     assert.equal(deriveAttention(lanes([pane], { approval: true })).top?.kind, 'pane')
     assert.equal(deriveAttention(lanes([], { approval: true })).top?.kind, 'approval')
+  })
+
+  it('keeps a pane on a lane named controller past the controller\'s own action rows and a note', () => {
+    for (const message of ['Automatic by the maintainer: the supervisor continues the run', 'Start by the operator (via a Claude Code session)', 'Note N-2 from the operator to worker controller: undeliverable, not typed (lane_blocked)']) {
+      const kept = deriveAttention(lanes([pane, [50, 'launch_controller', 'running', message]]))
+      assert.equal(kept.top?.kind, 'pane', message)
+      assert.equal(kept.top?.node_id, 'launch_controller', message)
+    }
   })
 
   it('clears a pane once any later event names that node', () => {

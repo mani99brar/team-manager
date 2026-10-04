@@ -452,6 +452,9 @@ class DeclaredReviewers(LaneRun):
         result = self.cli("approve", str(self.directory), "--bundle-sha256", digest)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), read_json(self.directory / "run-state.json")["values"]["integrated_commit"])
+        rows = [event["message"] for event in map(json.loads, (self.directory / "events.jsonl").read_text().splitlines()) if event["node"] == "controller"]
+        self.assertEqual(len(rows), 1, rows)  # C17: the approval names its actor.
+        self.assertRegex(rows[0], rf"^Approve by the operator( \(via a Claude Code session\))?: the fast-forward of bundle {digest[:12]}$")
         exported = read_json(self.directory / "run-state.json")
         self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["verdict"]) for entry in exported["review"]["reviewers"]],
                          [("general", "manual", "approved"), ("coverage", "manual", "approved")])

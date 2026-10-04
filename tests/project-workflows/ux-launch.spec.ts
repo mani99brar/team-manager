@@ -142,8 +142,8 @@ test(`[scenario:launch-question-first] While a question waits, the Questions sec
   await expect(page.getByTestId('worker-questions-waiting')).toBeVisible()
   await expect(questions).toContainText(LAUNCH_QUESTIONS[1].question)
   await expect(questions.getByTestId('now-command')).toHaveText([
-    '"$PY" -m workflow answer "$RUN" ui "<your answer>"',
-    '"$PY" -m workflow answer "$RUN" ui "<your answer>" --no-herdr',
+    '"$PY" -m workflow answer "$RUN" ui "<your answer>" --by operator',
+    '"$PY" -m workflow answer "$RUN" ui "<your answer>" --by operator --no-herdr',
   ])
   await expect(questions).toContainText('Outside Herdr the first form records the answer')
   await expect(questions).toContainText('RUNBOOK “Worker questions”')

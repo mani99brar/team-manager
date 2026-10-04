@@ -280,8 +280,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
     try:
-        # A launch is the operator's decision; a dry run decides nothing, and without --by prints the operator's commands.
-        by = (args.by or "operator") if args.dry_run else require_actor(args, "launch")
+        # A launch is the operator's decision; a dry run decides nothing, and without --by prints the operator's commands. With
+        # --by maintainer it is refused too: it would print commands for a launch the maintainer may not run.
+        by = "operator" if args.dry_run and args.by is None else require_actor(args, "launch")
         repo = resolve_target(args.repo, Path.cwd())
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)

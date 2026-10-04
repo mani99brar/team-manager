@@ -49,7 +49,7 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   await expect(banner).toContainText('coverage blocked the candidate: 1 open P1')
   await expect(commands(page)).toHaveText([
     '"$PY" -m workflow init <fixes-feature> --repo <target repo>',
-    '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic',
+    '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator',
   ])
   await expect(banner.getByTestId('now-step')).toHaveCount(3)
   await expect(banner.getByTestId('now-step').nth(1)).toContainText('Fill in the TODOs')
@@ -73,8 +73,8 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   banner = await openRun(page, uxRunUrl(RUN_IDENTICAL), 'blocked_identical')
   await expect(banner).toContainText('Blocked at Verify combined candidate · lane ui failed identically on attempts 1 and 2')
   await expect(banner).toContainText('project-workflows-browser')
-  await expect(commands(page).first()).toHaveText('"$PY" -m workflow repair "$RUN" ui --workspace')
-  await expect(commands(page).last()).toHaveText('"$PY" -m workflow automatic "$RUN" --live')
+  await expect(commands(page).first()).toHaveText('"$PY" -m workflow repair "$RUN" ui --workspace --by operator')
+  await expect(commands(page).last()).toHaveText('"$PY" -m workflow automatic "$RUN" --live --by operator')
   await expect(commands(page)).toHaveCount(4)
   await expect(banner).not.toContainText('Interrupted')
   await expect(banner).not.toContainText('Claude Code')
@@ -84,21 +84,21 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   banner = await openRun(page, uxRunUrl(RUN_DEADLINE), 'blocked_before_freeze')
   await expect(banner).toContainText('Blocked before freeze at Freeze worker handoffs')
   await expect(banner).toContainText(DEADLINE_MESSAGE)
-  await expect(commands(page)).toHaveText(['"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic'])
+  await expect(commands(page)).toHaveText(['"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic --by operator'])
 
   // Interrupted, recorded on the review node itself with no controller row: a paused run, never called failed.
   banner = await openRun(page, uxRunUrl(RUN_REVIEW_INTERRUPTED), 'interrupted')
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'paused')
   await expect(banner).toContainText('Interrupted at Independent review')
   await expect(banner).not.toContainText('Failed')
-  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live'])
+  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live --by operator'])
 
   // Interrupted during the freeze by an outage: the same command, once Claude Code works again.
   banner = await openRun(page, uxRunUrl(RUN_FREEZE_INTERRUPTED), 'interrupted')
   await expect(banner).toContainText('Interrupted at Freeze worker handoffs')
   await expect(banner).toContainText('the freeze was stopping the workers')
   await expect(banner).toContainText('Once `claude --version` works')
-  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live'])
+  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live --by operator'])
 
   // Interrupted: the supervisor itself stopped while the workers ran.
   banner = await openRun(page, uxRunUrl(RUN_CONTROLLER_INTERRUPTED), 'interrupted')
@@ -110,7 +110,7 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   banner = await openRun(page, uxRunUrl(RUN_REPAIRED), 'interrupted')
   await expect(banner).toContainText('Repair 1 applied; the run continues when you resume it')
   await expect(banner).not.toContainText('Failed')
-  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live'])
+  await expect(commands(page)).toHaveText(['"$PY" -m workflow automatic "$RUN" --live --by operator'])
 
   // Succeeded: nothing to type.
   banner = await openRun(page, runUrl(RUN_SUCCEEDED), 'succeeded')
@@ -122,14 +122,14 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   banner = await openRun(page, uxRunUrl(RUN_AWAITING_APPROVAL), 'awaiting_approval')
   await expect(banner).toContainText('Awaiting your approval')
   expect(APPROVAL_BUNDLE).not.toBe(BUNDLE_SHA256)
-  await expect(commands(page)).toHaveText([`"$PY" -m workflow approve "$RUN" --bundle-sha256 ${APPROVAL_BUNDLE}`])
+  await expect(commands(page)).toHaveText([`"$PY" -m workflow approve "$RUN" --bundle-sha256 ${APPROVAL_BUNDLE} --by operator`])
 
   // A question waits: both answer forms, naming the lane.
   banner = await openRun(page, guardedRunUrl(RUN_GUARDED_ASKING), 'question')
   await expect(banner).toContainText('Waiting on you: adapter asked question 2 of 3')
   await expect(commands(page)).toHaveText([
-    '"$PY" -m workflow answer "$RUN" adapter "<your answer>"',
-    '"$PY" -m workflow answer "$RUN" adapter "<your answer>" --no-herdr',
+    '"$PY" -m workflow answer "$RUN" adapter "<your answer>" --by operator',
+    '"$PY" -m workflow answer "$RUN" adapter "<your answer>" --by operator --no-herdr',
   ])
   await expectNoExecutionControls(page)
 })
@@ -349,7 +349,7 @@ test(`[scenario:narrow-run] At 390×844 the run page fits the width, starts with
 test(`[scenario:question-attention] A waiting question or a pane that needs attention is marked on the banner, the graph, the Steps, the step strip and the tab title (${phase})`, async ({ page }, testInfo) => {
   const cases = [
     // A question: both answer forms, naming the lane.
-    { url: guardedRunUrl(RUN_GUARDED_ASKING), situation: 'question', kind: 'question', node: 'launch_adapter', command: [/^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>"$/, /^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>" --no-herdr$/] },
+    { url: guardedRunUrl(RUN_GUARDED_ASKING), situation: 'question', kind: 'question', node: 'launch_adapter', command: [/^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>" --by operator$/, /^"\$PY" -m workflow answer "\$RUN" adapter "<your answer>" --by operator --no-herdr$/] },
     { url: uxRunUrl(RUN_PANE), situation: 'pane_attention', kind: 'pane', node: 'launch_ui', command: [/^"\$PY" -m workflow\.interactive attach-one "\$RUN" --node ui$/] },
   ]
   for (const { url, situation, kind, node, command } of cases) {

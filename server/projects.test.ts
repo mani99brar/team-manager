@@ -2017,6 +2017,25 @@ test('[B1] on a lane named controller, a Controller blocked row belongs to the r
   })
 })
 
+test('[B1] on a lane named controller, a gate action\'s actor row (C17) belongs to the run, never touching the lane', async () => {
+  // pipeline.py action_event: `<Action> by the operator|maintainer…` as a `controller` `running` row.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Start by the operator (via a Claude Code session)' },
+      { sequence: 2, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 4, time: T1, node: 'controller', status: 'interactive', message: 'Worker controller needs attention in its pane (native state blocked); waiting until its deadline' },
+      { sequence: 5, time: T2, node: 'controller', status: 'running', message: 'Automatic by the maintainer: the supervisor continues the run' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id]), [[1, null], [2, 'launch_controller'], [3, 'launch_ui'], [4, 'launch_controller'], [5, null]])
+  })
+})
+
 test('[B1] candidate events name the lane whose combined check they report', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'combined', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets })

@@ -266,7 +266,9 @@ const CONTROLLER_BLOCKED = /^Controller blocked: /
 const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
 const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW]
+/** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
+const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/
@@ -577,7 +579,7 @@ function computeTimeline(run: RunData): Timeline {
     const started = worker.launch.native_started_at ?? worker.launch.launch_requested_at
     const span = newSpan(worker.launch_node_id, worker.node_id, 1, { at: started, source: 'receipt', note: worker.launch.native_started_at ? 'launch receipt' : 'launch requested (receipt)' })
     span.status = status
-    const latest = rows.filter(row => row.node === worker.launch_node_id && !row.marker).at(-1)
+    const latest = rows.filter(row => row.node === worker.launch_node_id && !row.marker && !NOTE_ROW.test(row.event.message)).at(-1)
     span.outcome = latest?.text ?? ''
     if (worker.stop?.confirmed_at) close(span, status, { at: worker.stop.confirmed_at, source: 'receipt', note: 'stop receipt' }, 'worked · stopped cleanly')
     spans.push(span)
@@ -906,7 +908,7 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
   const found: Pane[] = []
   for (const node of run.detail.definition.nodes) {
     if (!node.node_id.startsWith('launch_') && node.node_id !== 'review') continue
-    const latest = rows.filter(row => row.node === node.node_id && row.marker === null).at(-1)
+    const latest = rows.filter(row => row.node === node.node_id && row.marker === null && !NOTE_ROW.test(row.event.message)).at(-1)
     const match = latest ? PANE.exec(latest.event.message) : null
     if (!latest || !match) continue
     const reviewer = PANE_REVIEWER.exec(latest.event.message)?.[1]

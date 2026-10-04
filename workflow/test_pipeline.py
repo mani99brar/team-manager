@@ -17,6 +17,7 @@ from unittest.mock import patch
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from .actor import OPERATOR_ONLY
 from .automatic import automatic_settings
 from .checks import execute, now
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
@@ -1329,8 +1330,27 @@ class AdvanceTests(unittest.TestCase):
         self.assertIn("disk full", "".join(str(call) for call in stderr.write.call_args_list))
 
 
-if __name__ == "__main__":
-    unittest.main()
+def append_many(directory: str, node: str, count: int) -> None:
+    from .pipeline import append_event
+    for index in range(count):
+        append_event(Path(directory), node, "running", f"{node} row {index}")
+
+
+class EventLogTests(unittest.TestCase):
+    def test_processes_appending_at_once_number_their_events_strictly_increasing(self):
+        """`answer` and `note` append beside a running automatic controller, each from its own process: the events lock
+        keeps one sequence per line, which the viewer's reader requires (server/projects.ts readEvents)."""
+        import multiprocessing
+        context = multiprocessing.get_context("fork")
+        with tempfile.TemporaryDirectory() as temp:
+            writers = [context.Process(target=append_many, args=(temp, f"lane{index}", 40)) for index in range(4)]
+            for writer in writers:
+                writer.start()
+            for writer in writers:
+                writer.join(60)
+                self.assertEqual(writer.exitcode, 0)
+            events = [json.loads(line) for line in (Path(temp) / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["sequence"] for event in events], list(range(1, 161)))
 
 
 class ActorTests(unittest.TestCase):
@@ -1368,7 +1388,8 @@ class ActorTests(unittest.TestCase):
                 with self.subTest(action=action):
                     code, output = self.run_main(main, argv)
                     self.assertNotEqual(code, 0)
-                    self.assertIn("requires --by operator|maintainer", output)
+                    # An operator decision names only the operator: --by maintainer would be refused next.
+                    self.assertIn(f"{action} requires --by operator: " if action in OPERATOR_ONLY else f"{action} requires --by operator|maintainer", output)
                     self.assertNotIn("No such file", output)
 
     def test_the_maintainer_is_refused_the_operators_decisions_before_it_reads_the_run(self):
@@ -1390,3 +1411,7 @@ class ActorTests(unittest.TestCase):
             self.assertEqual(require_actor(SimpleNamespace(by="operator"), "approve"), "operator")
         with patch.dict(os.environ, {"CLAUDECODE": ""}):
             self.assertEqual(actor_text("maintainer"), "the maintainer")
+
+
+if __name__ == "__main__":
+    unittest.main()

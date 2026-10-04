@@ -31,6 +31,8 @@ def add_actor_argument(parser) -> None:
 def require_actor(args, action: str) -> str:
     """The actor `args.by` names for `action`; ValueError when it is missing, or when the maintainer asks for an operator decision."""
     actor = getattr(args, "by", None)
+    if actor not in ACTORS and action in OPERATOR_ONLY:
+        raise ValueError(f"{action} requires --by operator: it is the operator's decision, so --by maintainer is refused")
     if actor not in ACTORS:
         raise ValueError(f"{action} requires --by operator|maintainer: the operator, or the maintainer (a Claude session acting for "
                          "the operator)")

@@ -505,11 +505,14 @@ class ChallengeHeartbeat(FailingChallenge):
         self.assertEqual((read_json(directory / "challenge.running.json")["attempt"], (directory / "challenge.json").exists()), (1, False))
         self.assertEqual([event[1:] for event in self.events(directory) if event[0] == "challenge"][-1], ("blocked", "KeyboardInterrupt"))
         self.assertFalse(any(directory.glob("*.interactive.json")))
-        # The command it names runs the challenge as attempt 2, then launches the workers.
+        # The command it names runs the challenge as attempt 2, then launches the workers. No record yet, so the maintainer may
+        # run it too (C17): finishing the operator's interrupted first attempt decides nothing new.
         self.mode.write_text("pass")
-        output, code = self.cli(resume_main, [str(directory)])
+        with patch.dict(os.environ, {"CLAUDECODE": ""}):
+            output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 2))
+        self.assertIn(("controller", "running", "Resume by the maintainer: rerunning the design challenge as attempt 2"), self.events(directory))
 
     def test_ctrl_c_during_a_launchs_challenge_names_resume_not_the_supervisor(self):
         runs = []
@@ -1080,6 +1083,10 @@ class ChallengeRevision(GuardedFeature):
         self.assertNotIn("the adapter lane owns backend.py", plan["nodes"]["ui"]["task"])
         self.assertEqual({git(path, "rev-parse", "HEAD") for path in self.run_worktrees(directory)}, {revision})
         self.assert_unfinished(directory)
+        # Only the intent says a rerun was under way (the plan still pins what attempt 1 read): the maintainer may finish it (C17).
+        record = read_json(directory / "challenge.json")
+        self.assertEqual((record["status"], guardrails.stale_pins(directory, plan, record), (directory / "challenge-revision.json").exists()), ("paused", [], True))
+        guardrails.refuse_maintainer(directory, plan, record, "maintainer")
         # Interrupted after the re-pin saved plan.json: base, start commits and task moved in one write; only the intent is left.
         def repin_then_interrupt(*args):
             repin(*args)
@@ -1200,7 +1207,8 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 1, output)
         self.assertIn("Design challenge attempt 1 read other feature files than the plan now pins (tasks)", output)
         self.challenge_says([concern("P2", "Minor")])
-        output, code = self.cli(resume_main, [str(directory)])
+        # The re-pinned files are the operator's rerun, interrupted (stale_pins): the maintainer may finish it (C17).
+        output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
         self.assertEqual((code, read_json(directory / "challenge.json")["attempt"]), (0, 2), output)
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
         # Attempt 1 read the task before the edit: the rerun names it, though nothing was left to commit this time.
@@ -1275,6 +1283,34 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual([event for event in self.events(directory) if event[0] == "controller"][-1],
                          ("controller", "running", "Resume by the maintainer: design challenge attempt 1 accepted; launching the workers"))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+
+
+class ActorRows(GuardedFeature):
+    """C17: the gate actions that change the run write `<Action> by the operator|maintainer[ (via a Claude Code session)]`."""
+
+    def events(self, directory: Path) -> list:
+        return [(event["node"], event["status"], event["message"]) for event in map(json.loads, (directory / "events.jsonl").read_text().splitlines())]
+
+    def test_start_and_a_maintainers_reconcile_name_their_actor(self):
+        directory = self.prepare("actor-rows-001")
+
+        def ui_fails(sessions, node):
+            receipt = FakeSessions.run(sessions, node)  # The receipt is written: the session exists, its step failed.
+            if node == "ui":
+                raise RuntimeError("Launch attach failed")
+            return receipt
+
+        with patch.dict(os.environ, {"CLAUDECODE": ""}), patch.object(RecordingSessions, "run", autospec=True, side_effect=ui_fails):
+            output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertNotEqual(code, 0, output)
+        self.assertEqual(self.events(directory)[0], ("controller", "running", "Start by the operator"))
+        # Reconcile is mechanical recovery: the maintainer may run it, and it rebinds the failed lane's session.
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            output, code = self.cli(pipeline.main, ["reconcile", str(directory), "--by", "maintainer"])
+        self.assertEqual(code, 0, output)
+        events = self.events(directory)
+        row = events.index(("controller", "running", "Reconcile by the maintainer (via a Claude Code session): ui"))
+        self.assertIn(("ui", "interactive", "Awaiting explicit completion signal; idle is not acceptance"), events[row:])
 
 
 class OverrideFromAnotherController(GuardedFeature):

@@ -62,12 +62,16 @@ class FeatureLaunchTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-root", root])
         self.assertEqual([command[-2:] for command in calls if command[3:4] in (["start"], ["automatic"])], [["--by", "operator"]] * 2)
-        for argv, refusal in (([], "launch requires --by operator|maintainer"), (["--by", "maintainer"], "launch is the operator's decision")):
-            with self.subTest(argv=argv), patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
+        # The missing --by names only the actor a launch takes; a dry run prints no commands the maintainer would be refused.
+        for argv, refusal in (([], "launch requires --by operator: "), (["--by", "maintainer"], "launch is the operator's decision"),
+                              (["--dry-run", "--by", "maintainer"], "launch is the operator's decision")):
+            with self.subTest(argv=argv), patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors, \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
                 with self.assertRaises(SystemExit):
-                    main(["project-workflows", "--repo", str(self.repo), "--live", *argv])
+                    main(["project-workflows", "--repo", str(self.repo), *([] if "--dry-run" in argv else ["--live"]), *argv])
             command.assert_not_called()
             self.assertIn(refusal, errors.getvalue())
+            self.assertNotIn("--by maintainer", printed.getvalue())
 
     def test_automatic_plan_keeps_launches_in_graph_and_adds_supervision(self):
         _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
