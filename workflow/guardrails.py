@@ -443,7 +443,8 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
         paused = f"Design challenge attempt {attempt} paused the run before any worker launch: {len(blocking)} P0/P1 concern(s)"
         runtime.event(CHALLENGE, "paused", paused)
         from .attention import attention
-        attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD, then run: {resume_command(directory, herdr)}; "
+        attention(directory, "challenge_paused", f"{paused}. Edit the task files, decisions.md or the PRD {edited_in(plan)}, then run: "
+                                                 f"{resume_command(directory, herdr)}; "
                                                  f"or accept it: {resume_command(directory, herdr, accept=True)}", node=CHALLENGE)
     else:
         runtime.event(CHALLENGE, "succeeded", f"Design challenge attempt {attempt} passed ({len(output['concerns'])} P2 concern(s)); launching workers")
@@ -499,6 +500,10 @@ def finished_note(source: Path, branch: str, checkout: Path | None = None) -> st
     where = f"git -C {checkout} " if checkout else "git "
     return (f"Merge the run branch from your checkout without switching it: {where}merge --ff-only {branch}. Once the run is "
             f"finished, remove its source checkout: {where}worktree remove {source}")
+
+
+# Set by launch on the `automatic` it runs: launch prints finished_note itself, in its `git -C <your checkout>` form.
+LAUNCH_NOTE_ENV = "WORKFLOW_LAUNCH_PRINTS_FINISH_NOTE"
 
 
 def run_finished_note(directory: Path, plan: dict) -> str | None:

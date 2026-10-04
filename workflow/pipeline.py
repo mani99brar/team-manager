@@ -995,7 +995,7 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
     or `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies. The run does
     not record whether its `start` was given --herdr, so the commands come with the hint to add it.
     """
-    from .guardrails import HERDR_HINT, REVISION_INTENT, load_challenge, resume_command, stale_pins, unused_edits
+    from .guardrails import HERDR_HINT, REVISION_INTENT, edited_in, load_challenge, resume_command, stale_pins, unused_edits
     record = load_challenge(directory)
     running = directory / "challenge.running.json"
     started = read_json(running).get("attempt", 0) if running.exists() else 0
@@ -1018,7 +1018,7 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
         return (f"design challenge attempt {record['attempt']} paused the run, and feature files changed since it read them: "
                 f"{resume_command(directory)} commits them and reruns the design challenge ({HERDR_HINT}); --accept-challenge is "
                 "refused until the changes are reverted")
-    return (f"design challenge attempt {record['attempt']} paused the run: edit the task files, decisions.md or the PRD, then "
+    return (f"design challenge attempt {record['attempt']} paused the run: edit the task files, decisions.md or the PRD {edited_in(plan)}, then "
             f"{resume_command(directory)}, or accept it with {resume_command(directory, accept=True)} ({HERDR_HINT})")
 
 
@@ -1033,7 +1033,10 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
     values, tasks = exported.get("values") or {}, exported.get("tasks") or []
     gates = {item.get("kind"): item for task in tasks for item in task.get("interrupts") or [] if isinstance(item, dict)}
     if values.get("integrated_commit") and not exported.get("next"):
-        return f"none: {branch} was fast-forwarded to {values['integrated_commit']}; nothing was pushed{untouched_main(plan.get('repository'), branch)}"
+        from .guardrails import run_finished_note
+        note = run_finished_note(directory, plan)
+        return (f"none: {branch} was fast-forwarded to {values['integrated_commit']}; nothing was pushed{untouched_main(plan.get('repository'), branch)}"
+                + (f". {note}" if note else ""))
     if not values:
         waiting = challenge_step(directory, plan)
         if waiting:
@@ -1262,9 +1265,9 @@ def main():
                 warning = stale_claude_warning()
                 parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
-            from .guardrails import run_finished_note
+            from .guardrails import LAUNCH_NOTE_ENV, run_finished_note
             note = run_finished_note(directory, read_json(directory / "plan.json"))
-            if note:
+            if note and os.environ.get(LAUNCH_NOTE_ENV) != "1":
                 print(note)
             return
         if args.action == "export":
@@ -1424,6 +1427,11 @@ def main():
                     advance(runtime, graph, value, config)
                 finally:
                     print(f"Report: {report(runtime, graph.get_state(config))}")
+                if args.action == "approve" and graph.get_state(config).values.get("integrated_commit"):
+                    from .guardrails import run_finished_note
+                    note = run_finished_note(directory, runtime.plan)
+                    if note:
+                        print(note)
                 if args.action == "start" and args.herdr:
                     print(json.dumps(attach_panels(runtime.sessions), indent=2))
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

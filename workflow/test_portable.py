@@ -88,13 +88,13 @@ class Isolated(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def dry_run(self, *argv: str) -> dict:
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output:
             launch_main([*argv, "--dry-run"])
         command.assert_not_called()
         return json.loads(output.getvalue())
 
     def refused(self, *argv: str) -> str:
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
                 launch_main(list(argv))
         command.assert_not_called()
@@ -104,7 +104,7 @@ class Isolated(unittest.TestCase):
     def live(self, *argv: str) -> list:
         """A live launch with every command intercepted; returns (command, cwd) pairs in order."""
         calls = []
-        with patch("workflow.launch.subprocess.run", side_effect=lambda command, cwd, check: calls.append((command, cwd))), \
+        with patch("workflow.launch.run_command", side_effect=lambda command, cwd, check, **_: calls.append((command, cwd))), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             launch_main([*argv, "--live"])
         return calls
@@ -434,6 +434,7 @@ class InitScaffold(Isolated):
         save_json(folder / "policy.json", policy)
         (folder / "main-task.md").write_text("## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n")
         (folder / "README.md").write_text("# skeleton\n\nThe first feature.\n")
+        commit_all(target, "Skeleton")  # The run's worktree holds only committed feature files.
         printed = self.dry_run("skeleton", "--repo", str(target))
         self.assertEqual((printed["workers"], printed["reviewers"]), (["main"], ["general", "coverage"]))
 

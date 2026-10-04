@@ -7,6 +7,7 @@ directory under `<target>/features/` that holds a `feature.json`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -14,13 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, finished_note, is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout
+from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, finished_note, is_guarded, migration_note, prd_path, refusals, resume_command,
+                         source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
 from .verification import validate_schema
-from .worktrees import controller_git_config
+from .worktrees import common_dir, controller_git_config, worktree_lock
 
 # The repository this tool lives in: the fallback target, and the working directory of every
 # `python -m workflow` command a launch runs (it locates the tool, not the target).
@@ -55,6 +57,41 @@ def resolve_target(repo: Path | None, cwd: Path, tool: Path = TOOL) -> Path:
     if root is not None and (root / "features").is_dir():
         return root
     return tool.resolve()
+
+
+def run_of_source(target: Path) -> Path | None:
+    """The run whose own source checkout `target` is (`<id>.source` beside a run `<id>` whose plan.json names it), or None.
+
+    A launch typed inside one would take that worktree for its target: a project named after it, branched from the run's branch.
+    """
+    if not target.name.endswith(".source"):
+        return None
+    run = target.parent / target.name.removesuffix(".source")
+    try:
+        plan = read_json(run / "plan.json")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(plan, dict) or not isinstance(plan.get("repository"), str):
+        return None
+    return run if Path(plan["repository"]).resolve() == target.resolve() else None
+
+
+def untracked(repo: Path, paths: list[Path]) -> list[str]:
+    """The files among `paths` that HEAD does not hold, repository-relative and in order.
+
+    `git worktree add` checks out HEAD, so an ignored or excluded feature file, which preflight's clean check never sees,
+    would be missing from the run's worktree.
+    """
+    names = list(dict.fromkeys(path.relative_to(repo).as_posix() for path in paths))
+    listed = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD", "--", *names],
+                            capture_output=True, text=True, check=True).stdout
+    held = set(listed.split("\0"))
+    return [name for name in names if name not in held]
+
+
+def run_command(command: list[str], cwd: Path, check: bool = True, **options) -> subprocess.CompletedProcess:
+    """Runs one of the commands launch_commands plans. Tests replace this, so launch's own Git reads stay real."""
+    return subprocess.run(command, cwd=cwd, check=check, **options)
 
 
 def feature_names(target: Path) -> list[str]:
@@ -220,6 +257,20 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         """A feature file at its path in the run's worktree: the same committed file, which preflight's clean check covers."""
         return source / path.relative_to(repo)
 
+    rerooted = [policy_path, *tasks.values()]
+    rerooted += [path for reviewer_id, path in reviewers.items()
+                 if not next(item["prompt"] for item in manifest["reviewers"] if item["reviewer_id"] == reviewer_id).startswith(BUILTIN_PREFIX)]
+    if is_guarded(manifest):
+        rerooted.append(folder / DECISIONS)
+        if "prd" in manifest:
+            rerooted.append(prd_path(repo, manifest["prd"]))
+        if review_sidecar and not review_sidecar["prompt"].startswith(BUILTIN_PREFIX):
+            rerooted.append(sidecar_brief)
+    missing = untracked(repo, rerooted)
+    if missing:
+        raise ValueError("\n  ".join(f"{name} is not committed at HEAD: an ignored or excluded file never reaches the run's worktree. "
+                                     "Commit it (git add -f for an ignored file), then launch again" for name in missing))
+
     base = [sys.executable, "-m", "workflow"]
     preflight = [*base, "preflight", str(run), "--repo", str(repo), "--policy", str(policy_path)]
     start = [*base, "start", str(run), "--live", "--repo", str(source)]
@@ -295,6 +346,9 @@ def main(argv=None):
     run_id = args.run_id or f"{args.feature}-001"
     try:
         repo = resolve_target(args.repo, Path.cwd())
+        owner = run_of_source(repo)
+        if owner is not None:
+            raise ValueError(f"{repo} is the source checkout of the run {owner}; launch from your own checkout: {common_dir(repo).parent}")
         feature_folder(repo, args.feature)  # An unknown name is refused with the features found, before anything else.
         run_root = args.run_root or default_run_root(repo, args.feature)
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
@@ -328,9 +382,15 @@ def main(argv=None):
         if run.exists():
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
         source = source_checkout(run)
+        branch = commands[1][commands[1].index("-b") + 1]
         if source.exists() or source.is_symlink():
+            # The run directory does not exist, so no prepare ran: a branch of the run's name is a failed launch's leftover.
+            leftover = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                                      capture_output=True).returncode == 0
             raise ValueError(f"Source checkout already exists: {source}. A run's worktree is never reused; remove it "
-                             f"(git -C {repo} worktree remove {source}) or launch with another --run-id.")
+                             f"(git -C {repo} worktree remove {source})"
+                             + (f" and its branch, which no run used (git -C {repo} branch -D {branch})," if leftover else "")
+                             + " or launch with another --run-id.")
         # A malformed registry blocks the launch here, before any Git action; it is never rewritten.
         merge_registry(read_registry(registry), entry)
         for note in notes + ([migration] if migration else []):
@@ -338,13 +398,16 @@ def main(argv=None):
         # How the run ends, from the automatic settings prepare pins as plan.automatic (validated by launch_commands).
         from .automatic import automatic_settings
         settings = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport) if args.automatic else None
-        branch = commands[1][commands[1].index("-b") + 1]
         print(f"Run {run}: {finish_policy(settings, branch)}.", flush=True)
         print(f"Source checkout: {source}, the run's own worktree on {branch}; your checkout {repo} stays on its branch. "
               "Feature files edited during a design challenge pause are edited there.", flush=True)
         try:
             for index, command in enumerate(commands):
-                subprocess.run(command, cwd=command_cwd(command, repo), check=True)
+                # `git worktree add` takes the worktree lock, as every add under workflow/ does (worktrees.py): another run
+                # from this checkout may be adding its own. `automatic` leaves the finished note to launch's -C form below.
+                options = {"env": {**os.environ, LAUNCH_NOTE_ENV: "1"}} if command[3:4] == ["automatic"] else {}
+                with worktree_lock(repo) if command[0] == "git" else contextlib.nullcontext():
+                    run_command(command, cwd=command_cwd(command, repo), check=True, **options)
                 if index == 2:
                     # The run directory exists now: make the run visible in the Projects viewer.
                     try:

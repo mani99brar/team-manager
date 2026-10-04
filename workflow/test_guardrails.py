@@ -240,7 +240,7 @@ class BriefHeadings(GuardedFeature):
         manifest = {key: value for key, value in self.manifest.items() if key != "prd"}
         save_json(self.folder / "feature.json", {**manifest, "version": "2.1.0"})
         commit_all(self.repo)
-        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             from .launch import main as launch_main
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
@@ -530,7 +530,7 @@ class ChallengeHeartbeat(FailingChallenge):
                 raise KeyboardInterrupt
 
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
+        with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
                 launch_main([FEATURE, "--repo", str(self.repo), "--live", "--automatic", "--run-root", str(self.runs)])
@@ -548,7 +548,7 @@ class ChallengeAttention(GuardedFeature):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 0, output)
         text = (f"Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s). Edit the task files, decisions.md "
-                f"or the PRD, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
+                f"or the PRD in the source checkout {self.repo}, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
                 '--accept-challenge "<reason>"')
         [line] = lines()
         self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
@@ -831,11 +831,12 @@ class ChallengePauses(GuardedFeature):
                 save_json(directory / "challenge.json", {"status": "paused"})
 
         from .launch import main as launch_main
-        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
+        with patch("workflow.launch.run_command", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
             launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--run-root", str(self.runs)])
         self.assertEqual([command[3] if command[0] != "git" else "git" for command in calls], ["preflight", "git", "prepare", "start"])
-        self.assertIn("Launch paused at the design challenge; no worker was launched", output.getvalue())
+        run = (self.runs / f"{FEATURE}-001").resolve()
+        self.assertIn(f"Launch paused at the design challenge; no worker was launched. Run: {run}\nSource checkout: {run}.source\n", output.getvalue())
 
 
 class ChallengeResumeSupervises(GuardedFeature):

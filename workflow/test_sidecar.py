@@ -278,9 +278,16 @@ class Declare(GuardedFeature):
         (self.folder / "sidecar-brief.md").write_text("Look at the adapter first.\n")
         self.with_sidecar({"prompt": "sidecar-brief.md", "cadence_seconds": 120, "max_messages_per_lane": 0})
         commit_all(self.repo, "File brief")
+        _, commands, _ = launch_commands(self.repo, FEATURE, "file-001", self.runs, herdr=False)
+        # A feature file brief is read from the run's own worktree, not from your checkout.
+        self.assertEqual(commands[2][commands[2].index("--sidecar-brief") + 1],
+                         str(self.runs.resolve() / "file-001.source" / "features" / FEATURE / "sidecar-brief.md"))
         plan = read_json(self.prepare("file-001") / "plan.json")
         self.assertEqual(plan["sidecar"], {"prompt": "Look at the adapter first.\n", **SETTINGS, "cadence_seconds": 120, "max_messages_per_lane": 0})
-        # Refusals name feature.json and the key, before any Git action (refused() asserts no command ran).
+        # Refusals name feature.json and the key, before any Git action (refused() asserts no command ran). Launches go from
+        # your checkout: launch refuses a run's source checkout as its target.
+        self.repo = self.root / "target"
+        self.folder = self.repo / "features" / FEATURE
         (self.folder / "empty.md").write_text("  \n")
         commit_all(self.repo, "Empty brief")
         branches = git(self.repo, "branch", "--list")
@@ -337,7 +344,7 @@ class Graph(GuardedFeature):
         handoff = next(node for node in nodes if node["node_id"] == "handoff")
         self.assertEqual(handoff["depends_on"], ["launch_ui", "launch_adapter", "sidecar"])
         self.assertEqual(read_json(directory / "run-state.json")["sidecar"], sidecar.initial_ledger(plan))
-        entry = self.dry_run(FEATURE, "--repo", str(self.repo), "--no-herdr")["registry"]["entry"]
+        entry = self.dry_run(FEATURE, "--repo", str(self.root / "target"), "--no-herdr")["registry"]["entry"]  # Your checkout, not the run's.
         self.assertEqual(entry["workflows"][0]["definition"]["nodes"], nodes)
         # Without the challenge the sidecar is first and depends on nothing.
         without = graph_nodes(LANES, challenge=False, sidecar=True)
