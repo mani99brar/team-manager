@@ -1321,6 +1321,11 @@ class RecordTests(unittest.TestCase):
                                         "moved during the run"))
         note_controller_drift(f.runtime, "c" * 40)
         self.assertEqual(len(events()), 2)
+        # A malformed line in the log (the tolerant reader, as the shared .git check uses) never stops the step.
+        path = f.directory / "events.jsonl"
+        path.write_text("{not json\n" + path.read_text())
+        note_controller_drift(f.runtime, "c" * 40)
+        self.assertEqual(len([line for line in path.read_text().splitlines() if '"warning"' in line]), 2)
 
     def test_a_changed_shared_git_is_a_warning_at_freeze_review_and_integrate_never_a_refusal(self):
         # C25: prepare recorded a digest of what in the shared .git can make a Git command run something. Freeze (after the

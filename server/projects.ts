@@ -415,6 +415,8 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
  */
 const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
   /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/, /^Controller blocked: /,
+  // automatic.py note_controller_drift: the step runs another controller commit than prepare pinned (a `warning`, served status-less).
+  /^Controller commit [0-9a-f]+ runs this step\b/,
   // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them.
   /^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion file for /]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])

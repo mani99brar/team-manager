@@ -2819,6 +2819,21 @@ class ControllerStopTests(GraphFixture):
     def said(self, status="blocked") -> list:
         return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", status)]
 
+    def test_a_step_on_another_controller_commit_writes_one_drift_warning_before_its_pid_row(self):
+        # C52: drive compares the controller checkout it runs from (the real HEAD of this package's checkout, read through
+        # controller_commit's default path) with plan.controller.commit. One warning, before the PID row, however many steps run it.
+        f = self.fixture
+        current = git(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
+        f.runtime.plan["controller"] = {"commit": "0" * 40, "dirty": False, "claude_version": None}
+        drift = f"Controller commit {current[:12]} runs this step, not {'0' * 12} pinned at prepare: the controller checkout moved during the run"
+        for _ in range(2):
+            with patch("workflow.automatic.BLOCKED_RUNS", set()), patch("workflow.automatic.wait_handoffs", side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime)
+        rows = [(event["status"], re.sub(r"PID \d+$", "PID n", event["message"])) for event in self.events()
+                if event["node"] == "controller" and event["status"] != "interrupted"]  # Not the Ctrl-C rows.
+        self.assertEqual(rows, [("warning", drift), ("running", "Automatic checkpoint controller PID n"), ("running", "Automatic checkpoint controller PID n")])
+
     def test_a_changed_source_branch_is_an_interruption_that_names_the_switch_back_and_the_resume(self):
         import shlex
         f = self.fixture

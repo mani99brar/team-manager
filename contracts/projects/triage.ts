@@ -265,10 +265,15 @@ const CONTROLLER_BLOCKED = /^Controller blocked: /
  * failed are said bare, without CONTROLLER_BLOCKED's prefix, as advance_or_block and the failed wait say them.
  */
 const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion file for /]
+/**
+ * automatic.py note_controller_drift: a `controller` `warning` row before the PID row when a step runs another controller commit
+ * than prepare pinned. `warning` is no event status, so it is served without one: a note, never a block.
+ */
+const CONTROLLER_DRIFT = /^Controller commit [0-9a-f]+ runs this step\b/
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, CONTROLLER_DRIFT]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, CONTROLLER_DRIFT, ...BARE_STOPS]
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/

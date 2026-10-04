@@ -2019,6 +2019,30 @@ test('[B1] on a lane named controller, a Controller blocked row belongs to the r
   })
 })
 
+test('[C52] the controller drift warning is a node-less log row, on a lane named controller too, never failing or moving the lane', async () => {
+  // automatic.py note_controller_drift writes a `controller` `warning` row before the step's PID row. `warning` is no event status,
+  // so it is served without one; on a lane named `controller` it would otherwise land on that lane's launch node.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const drift = `Controller commit ${'b'.repeat(12)} runs this step, not ${'a'.repeat(12)} pinned at prepare: the controller checkout moved during the run`
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T1, node: 'controller', status: 'warning', message: drift },
+      { sequence: 4, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 2088885' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [
+      [1, 'launch_controller', 'running', 'status_changed'], [2, 'launch_ui', 'running', 'status_changed'],
+      [3, null, null, 'log'], [4, null, 'running', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running')
+  })
+})
+
 test('[B1] on a lane named controller, the stops said bare off the source branch belong to the run, never failing the lane', async () => {
   // automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
   // failed are said as drive says them, without `Controller blocked: `. On a lane named `controller` each row would otherwise land on

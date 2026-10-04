@@ -2032,9 +2032,9 @@ def note_controller_drift(runtime, current: str | None = None) -> None:
         return
     message = (f"Controller commit {current[:12]} runs this step, not {pinned['commit'][:12]} pinned at prepare: the controller checkout "
                "moved during the run")
-    path = runtime.directory / "events.jsonl"
-    if path.exists() and any(json.loads(line).get("message") == message for line in path.read_text().splitlines() if line.strip()):
-        return
+    from .pipeline import complete_events
+    if any(event.get("message") == message for event in complete_events(runtime.directory)):
+        return  # The tolerant reader, as the shared .git check uses: a torn line never stops the step.
     runtime.event("controller", "warning", message)
 
 
