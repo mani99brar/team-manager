@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule, restore_step
+from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule, released_drops, restore_step
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, plan_digest, read_json,
                        review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
@@ -326,7 +326,7 @@ def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | Non
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
               "Completion of a turn is not workflow approval." + setup_note(directory) + restore_step(plan, node) + "\n\n" + plan["nodes"][node]["task"]
-              + conventions_block(plan) + decisions_block(plan) + challenge_block(directory, plan))
+              + conventions_block(plan) + decisions_block(plan) + challenge_block(directory, plan, released_drops(directory)))
     reading = "" if plan.get("automatic") else reading_rule(plan)  # An automatic run's completion protocol carries its own.
     if reading:
         prompt += f"\n\n{reading}\n"

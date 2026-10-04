@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .actor import BY_OPERATOR, add_actor_argument, require_actor
 from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, check_restore, conventions_summary, finished_note,
-                         has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
+                         has_operator_decisions, is_guarded, is_held, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
@@ -206,7 +206,7 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
-                    roles: dict | None = None, restore_from: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
@@ -219,6 +219,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     `restore_from` (C12) is resolved to its commit here, in the target (the run's worktree shares its objects and refs),
     before any Git action, and prepare gets that commit.
+
+    `hold_challenge` (C8) holds the run after a passing design challenge until `resume --launch`; prepare pins it as
+    plan.holds. It is refused for a feature without the challenge (before 2.2.0, or challenge: false).
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -312,6 +315,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
     for key, value in roles.items():
         prepare.extend([f"--{key.replace('_', '-')}", value])
+    if hold_challenge:
+        if not is_guarded(manifest) or manifest.get("challenge") is False:
+            raise ValueError("--hold-challenge needs the design challenge, which this feature does not run (feature.json before 2.2.0, "
+                             "or challenge: false)")
+        prepare.append("--hold-challenge")
     if restore_from is not None:
         check_restore(automatic, selected)
         prepare.extend(["--restore-from", resolve_commit(repo, restore_from)])
@@ -333,9 +341,17 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     return run, commands, notes
 
 
-def challenge_paused(run: Path) -> bool:
+def challenge_paused(run: Path) -> str | None:
+    """Why `start` launched no worker at the design challenge: "paused" (a P0/P1), "held" (a passing attempt the plan holds,
+    not released yet), or None."""
     path = run / "challenge.json"
-    return path.is_file() and read_json(path).get("status") == "paused"
+    if not path.is_file():
+        return None
+    record = read_json(path)
+    if record.get("status") == "paused":
+        return "paused"
+    plan = run / "plan.json"
+    return "held" if plan.is_file() and is_held(run, read_json(plan), record) else None
 
 
 def command_cwd(command: list[str], target: Path, tool: Path = TOOL) -> Path:
@@ -367,6 +383,8 @@ def main(argv=None):
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
     parser.add_argument("--restore-from", metavar="COMMIT", help="A follow-up run: each lane starts by restoring its owned paths from this commit "
                                                               "(pinned in the plan; the design challenge reads a read-only copy)")
+    parser.add_argument("--hold-challenge", action="store_true", help="Stop after a passing design challenge and print every concern; "
+                                                                      "`resume --launch` launches the workers (pinned at prepare)")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
@@ -384,7 +402,7 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles, args.restore_from)
+                                               by, args.profile, roles, args.restore_from, args.hold_challenge)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
@@ -464,9 +482,10 @@ def main(argv=None):
                         print(f"Projects registry {registry}: {register(registry, entry)}", flush=True)
                     except (ValueError, OSError) as error:
                         print(f"Projects registry {registry} not updated: {error}", file=sys.stderr, flush=True)
-                if index == 3 and challenge_paused(run):
+                stopped = challenge_paused(run) if index == 3 else None
+                if stopped:
                     # `start` printed the concerns and the resume commands; nothing else runs until the operator decides.
-                    print(f"\nLaunch paused at the design challenge; no worker was launched. Run: {run}\nSource checkout: {source}")
+                    print(f"\nLaunch {stopped} at the design challenge; no worker was launched. Run: {run}\nSource checkout: {source}")
                     return
         except KeyboardInterrupt:
             if (run / "challenge.running.json").is_file() and not any(run.glob("*.interactive.json")):

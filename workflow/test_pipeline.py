@@ -1563,7 +1563,8 @@ class ActorTests(unittest.TestCase):
         return [("start", pipeline.main, ["start", run, "--live"]), ("automatic", pipeline.main, ["automatic", run, "--live"]),
                 ("retry", pipeline.main, ["retry", run]), ("reconcile", pipeline.main, ["reconcile", run]),
                 ("approve", pipeline.main, ["approve", run, "--bundle-sha256", "0" * 64]), ("resume", resume_main, [run]),
-                ("accept-challenge", resume_main, [run, "--accept-challenge", "fine"]), ("answer", answer_main, [run, "ui", "A"]),
+                ("accept-challenge", resume_main, [run, "--accept-challenge", "fine"]), ("resume --launch", resume_main, [run, "--launch"]),
+                ("answer", answer_main, [run, "ui", "A"]),
                 ("repair", repair_main, [run, "ui", "--commit", "HEAD", "--reason", "fix"]),
                 ("launch", launch_main, ["demo", "--repo", run, "--live"]), ("note", note_main, [run, "ui", "Hold the tests."])]
 
@@ -1578,7 +1579,7 @@ class ActorTests(unittest.TestCase):
                     self.assertNotIn("No such file", output)
 
     def test_the_maintainer_is_refused_the_operators_decisions_before_it_reads_the_run(self):
-        refused = {"approve", "accept-challenge", "answer", "repair", "launch"}
+        refused = {"approve", "accept-challenge", "resume --launch", "answer", "repair", "launch"}
         with tempfile.TemporaryDirectory() as temp:
             for action, main, argv in self.gates(Path(temp) / "missing"):
                 code, output = self.run_main(main, [*argv, "--by", "maintainer"])
