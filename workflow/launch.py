@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 from .actor import BY_OPERATOR, add_actor_argument, require_actor
-from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, finished_note,
-                         has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout)
+from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, check_restore, conventions_summary, finished_note,
+                         has_operator_decisions, is_guarded, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
@@ -206,7 +206,7 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
-                    roles: dict | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    roles: dict | None = None, restore_from: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
@@ -216,6 +216,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     `roles` holds the role pins given as flags (worker_model, worker_effort, judge_model, judge_effort; C52): only those
     reach prepare, which reads WORKFLOW_WORKER_EFFORT once for an omitted worker effort and pins the judges at high.
+
+    `restore_from` (C12) is resolved to its commit here, in the target (the run's worktree shares its objects and refs),
+    before any Git action, and prepare gets that commit.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
@@ -309,6 +312,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
     for key, value in roles.items():
         prepare.extend([f"--{key.replace('_', '-')}", value])
+    if restore_from is not None:
+        check_restore(automatic, selected)
+        prepare.extend(["--restore-from", resolve_commit(repo, restore_from)])
     commands = [preflight, ["git", "worktree", "add", "-b", branch, str(source), "HEAD"], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -359,6 +365,8 @@ def main(argv=None):
                                               "(default: Claude Code's default)")
     parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="Their effort, pinned at prepare (default high)")
     parser.add_argument("--no-herdr", action="store_true", help="Explicitly omit terminal attachments")
+    parser.add_argument("--restore-from", metavar="COMMIT", help="A follow-up run: each lane starts by restoring its owned paths from this commit "
+                                                              "(pinned in the plan; the design challenge reads a read-only copy)")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
@@ -376,7 +384,7 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles)
+                                               by, args.profile, roles, args.restore_from)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
@@ -403,6 +411,8 @@ def main(argv=None):
                        "reviewers": reviewers, "commands": commands, "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
                        "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
                                       "migration_note": migration, "conventions": conventions}}
+            if args.restore_from is not None:
+                printed["restore_from"] = {"name": args.restore_from, "commit": prepare[prepare.index("--restore-from") + 1]}
             if review_sidecar:
                 # What prepare pins as plan.sidecar (the brief's text in place of its path); a feature without one prints no key.
                 printed["sidecar"] = {**review_sidecar, "brief": str(sidecar.brief_path(feature_folder(repo, args.feature), review_sidecar["prompt"]))}
@@ -475,6 +485,8 @@ def main(argv=None):
                             f"resume with:  {sys.executable} -m workflow automatic {run} --live {BY_OPERATOR}\n")
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
+            from .pipeline import outcome_lines
+            print(outcome_lines(run), end="")
             print(finished_note(source, branch, repo))
             return
         print(f"\nRun: {run}\nWorkers ({', '.join(selected)}) are in their dedicated Herdr tab (unless --no-herdr).")

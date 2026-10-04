@@ -10,6 +10,8 @@ import io
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -170,13 +172,13 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
     def challenge_calls(self) -> list:
         return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
 
-    def prepare(self, run_id: str, automatic: bool = False) -> Path:
+    def prepare(self, run_id: str, automatic: bool = False, restore_from: str | None = None) -> Path:
         """The exact worktree and prepare commands a launch runs, executed against the target.
 
         The run's own worktree is its source checkout from then on: self.repo and self.folder follow it, as the operator
         edits a paused run's feature files where the paused message says. A later prepare launches from there.
         """
-        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic)
+        run, commands, _ = launch_commands(self.repo, FEATURE, run_id, self.runs, herdr=False, automatic=automatic, restore_from=restore_from)
         subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1842,6 +1844,155 @@ class PerRunCheckout(GuardedFeature):
         # Merged from the target without switching it, as the finished message says.
         git(target, "merge", "-q", "--ff-only", f"feature/{FEATURE}/first-001")
         self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD")), (mine[0], git(first_source, "rev-parse", "HEAD")))
+
+
+class RestoreFrom(GuardedFeature):
+    """C12: `--restore-from <commit>` pins a candidate a follow-up run restores; the challenge reads a read-only copy of the
+    lanes' owned paths at it, and each worker's prompt starts with its own restore command. Automatic runs only: a manual
+    worker has no shell to run that command."""
+
+    def setUp(self):
+        super().setUp()
+        # ui also owns ui-assets, which the candidate lacks: its restore command leaves it out.
+        policy = two_lane_policy()
+        policy["workers"][0]["owned_paths"] = ["ui.txt", "ui-assets"]
+        save_json(self.folder / "policy.json", policy)
+        self.manifest.pop("prd")  # The challenge reads the copy through --add-dir even without a PRD.
+        save_json(self.folder / "feature.json", self.manifest)
+        commit_all(self.repo, "No PRD; ui owns its assets")
+        git(self.repo, "checkout", "-q", "-b", "candidate")
+        (self.repo / "ui.txt").write_text("candidate")
+        (self.repo / "backend.py").write_text("VALUE = 3\n")
+        (self.repo / "unowned.txt").write_text("nobody owns this")
+        commit_all(self.repo, "Candidate of an earlier run")
+        self.candidate = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-")
+
+    def restore_ref(self, run: Path) -> str:
+        return f"refs/workflow/{hashlib.sha256(str(run.resolve()).encode()).hexdigest()[:16]}/restore-from"
+
+    def prepare_here(self, commands: list, *flags: str) -> subprocess.CompletedProcess:
+        """Launch's prepare command run against this checkout in place of the run's own worktree (C56a), which no test of a
+        refusal adds: the refusal comes before any Git action, so the worktree add would be the only one."""
+        source = commands[1][-2]
+        prepare = [item.replace(source, str(self.repo)) for item in commands[2]]
+        return subprocess.run([*prepare, *flags], cwd=TOOL, capture_output=True, text=True, timeout=120)
+
+    def test_prepare_pins_the_commit_and_each_lanes_present_paths_and_writes_a_read_only_copy(self):
+        run = self.prepare("restore-001", automatic=True, restore_from="candidate")
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["restore_from"], {"commit": self.candidate, "paths": {"ui": ["ui.txt"], "adapter": ["backend.py"]}})
+        copy = run / "challenge-inputs" / "restore"
+        self.assertEqual(sorted(path.name for path in copy.iterdir()), ["backend.py", "ui.txt"])
+        self.assertEqual(((copy / "ui.txt").read_text(), (copy / "backend.py").read_text()), ("candidate", "VALUE = 3\n"))
+        self.assertFalse(os.access(copy / "ui.txt", os.W_OK))
+        # Files read-only, directories 0755: a plain `rm -rf` (shutil.rmtree) of an old run still works.
+        self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o755)
+        # A plain directory, not a worktree: resume's checks see only the lanes' worktrees (the challenge's comes at start).
+        self.assertEqual(guardrails.run_worktrees(self.repo, run), [run / "worktree-adapter", run / "worktree-ui"])
+        # The commit stays reachable under the run's own ref, wherever the candidate branch goes.
+        git(self.repo, "branch", "-q", "-D", "candidate")
+        self.assertEqual(git(self.repo, "rev-parse", self.restore_ref(run)), self.candidate)
+        shutil.rmtree(run / "challenge-inputs")
+
+    def test_the_copy_streams_nested_directories_and_leaves_symlinks_out(self):
+        git(self.repo, "checkout", "-q", "candidate")
+        (self.repo / "ui-assets" / "icons").mkdir(parents=True)
+        (self.repo / "ui-assets" / "icons" / "a.svg").write_text("<svg/>")
+        (self.repo / "ui-assets" / "link.svg").symlink_to("icons/a.svg")
+        commit_all(self.repo, "Candidate with assets")
+        candidate = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-")
+        run = self.prepare("restore-004", automatic=True, restore_from=candidate)
+        copy = run / "challenge-inputs" / "restore"
+        self.assertEqual((copy / "ui-assets" / "icons" / "a.svg").read_text(), "<svg/>")
+        self.assertFalse((copy / "ui-assets" / "link.svg").exists() or (copy / "ui-assets" / "link.svg").is_symlink())
+        self.assertEqual(stat.S_IMODE((copy / "ui-assets" / "icons").stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((copy / "ui-assets" / "icons" / "a.svg").stat().st_mode), 0o444)
+        shutil.rmtree(run / "challenge-inputs")
+
+    def test_the_challenge_reads_the_copy_and_each_worker_prompt_starts_with_its_restore_command(self):
+        run = self.prepare("restore-002", automatic=True, restore_from=self.candidate[:12])
+        output, code = self.cli(pipeline.main, ["start", str(run), "--live"])
+        self.assertEqual(code, 0, output)
+        call, = self.challenge_calls()
+        self.assertEqual(call["add_dirs"], [str(run / "challenge-inputs")])
+        self.assertIn(f"{run / 'challenge-inputs' / 'restore'}", call["prompt"])
+        self.assertIn(self.candidate, call["prompt"])
+        self.assertIn("Each lane sees only its own restored paths, not the other lanes': ui: ui.txt; adapter: backend.py.", call["prompt"])
+        commands = {"ui": f"git restore --source={self.candidate} --staged --worktree -- ui.txt",
+                    "adapter": f"git restore --source={self.candidate} --staged --worktree -- backend.py"}
+        for lane, command in commands.items():
+            prompt = self.given[lane]["prompt"]
+            self.assertIn(command + "\n", prompt)  # The whole command line: ui's absent ui-assets is left out.
+            self.assertLess(prompt.index(command), prompt.index("## Goal"))  # Its first step, before the task.
+        self.assertNotIn("ui-assets", self.given["ui"]["prompt"].split("## Goal")[0])
+        # The printed command restores the candidate in the lane's worktree.
+        subprocess.run(commands["ui"], shell=True, cwd=run / "worktree-ui", check=True)
+        self.assertEqual((run / "worktree-ui" / "ui.txt").read_text(), "candidate")
+
+    def test_a_paused_run_with_the_flag_is_edited_and_resumed(self):
+        run = self.prepare("restore-003", automatic=True, restore_from="candidate")
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(run), "--live"])
+        self.assertEqual((code, read_json(run / "challenge.json")["status"]), (0, "paused"), output)
+        task = self.folder / "ui-task.md"
+        task.write_text(task.read_text() + "\nOnly ui.txt.\n")
+        self.challenge_says([concern("P2", "Minor")])
+        with patch("workflow.automatic.supervise"):
+            output, code = self.cli(resume_main, [str(run)])
+        self.assertEqual(code, 0, output)
+        plan = read_json(run / "plan.json")
+        revision = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(plan["base_commit"], revision)  # Committed and moved: the copy is no worktree to move.
+        self.assertEqual(plan["restore_from"]["commit"], self.candidate)
+        self.assertEqual([call["add_dirs"] for call in self.challenge_calls()], [[str(run / "challenge-inputs")]] * 2)
+        self.assertEqual((run / "challenge-inputs" / "restore" / "ui.txt").read_text(), "candidate")
+        self.assertIn(f"git restore --source={self.candidate} --staged --worktree -- ui.txt", self.given["ui"]["prompt"])
+
+    def test_a_lane_named_restore_from_is_refused_before_any_git_action(self):
+        policy = read_json(self.folder / "policy.json")
+        policy["workers"][1]["node_id"] = "restore-from"
+        save_json(self.folder / "policy.json", policy)
+        self.manifest["workers"][1]["node_id"] = "restore-from"
+        save_json(self.folder / "feature.json", self.manifest)
+        commit_all(self.repo, "A lane named restore-from")
+        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/restore-lane")
+        with self.assertRaisesRegex(ValueError, "--restore-from needs the ref name restore-from"):
+            launch_commands(self.repo, FEATURE, "restore-lane", self.runs, herdr=False, automatic=True, restore_from="candidate")
+        run, commands, _ = launch_commands(self.repo, FEATURE, "restore-lane", self.runs, herdr=False, automatic=True)
+        result = self.prepare_here(commands, "--restore-from", self.candidate)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("--restore-from needs the ref name restore-from", result.stderr)
+        self.assertFalse(run.exists())
+        self.assertEqual(git(self.repo, "worktree", "list", "--porcelain").count("worktree "), 1)
+
+    def test_prepare_refuses_a_name_that_is_not_a_commit_and_runs_without_the_flag_behave_as_before(self):
+        with self.assertRaisesRegex(ValueError, "--restore-from --all is not a commit"):
+            guardrails.resolve_commit(self.repo, "--all")  # An option is no name; on the command line argparse refuses it first.
+        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/restore-bad")
+        for name in ("no-such-ref", git(self.repo, "rev-parse", "HEAD^{tree}")):
+            run, commands, _ = launch_commands(self.repo, FEATURE, "restore-bad", self.runs, herdr=False, automatic=True)
+            result = self.prepare_here(commands, "--restore-from", name)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(f"--restore-from {name} is not a commit", result.stderr)
+            self.assertFalse(run.exists())
+        # A manual worker has no shell to run its restore command: launch and prepare refuse the flag without --automatic.
+        with self.assertRaisesRegex(ValueError, "--restore-from needs --automatic"):
+            launch_commands(self.repo, FEATURE, "restore-manual", self.runs, herdr=False, restore_from="candidate")
+        run, commands, _ = launch_commands(self.repo, FEATURE, "restore-manual", self.runs, herdr=False)
+        result = self.prepare_here(commands, "--restore-from", self.candidate)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("--restore-from needs --automatic", result.stderr)
+        self.assertFalse(run.exists())
+        run = self.prepare("restore-none")
+        self.assertNotIn("restore_from", read_json(run / "plan.json"))
+        self.assertFalse((run / "challenge-inputs").exists())
+        output, code = self.cli(pipeline.main, ["start", str(run), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.challenge_calls()[0]["add_dirs"], [])
+        self.assertNotIn("git restore", self.given["ui"]["prompt"])
+        self.assertNotIn("restore", self.challenge_calls()[0]["prompt"].lower().replace("restore-none", ""))
 
 
 class OverrideFromAnotherController(GuardedFeature):

@@ -328,6 +328,19 @@ class FeatureLaunchTests(unittest.TestCase):
                 if returncode == 75:
                     self.assertIn(f"-m workflow automatic {self.root / 'runs' / 'auto-75'} --live", errors.getvalue())
 
+    def test_an_automatic_launch_prints_the_outcome_block_once_after_its_finished_line(self):
+        # C43: launch's own copy, after `automatic` printed its own above (it shares the terminal); then the source checkout's
+        # finished note (C56a), which `automatic` leaves to launch.
+        with patch("workflow.launch.run_command"), patch("workflow.pipeline.outcome_block", return_value="Outcome: blocked\nReviewers:"), \
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr",
+                  "--run-id", "outcome-001", "--run-root", str(self.root / "runs")])
+        lines = output.getvalue().splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("Automatic run finished. Evidence: "))
+        self.assertEqual(lines[index + 1:index + 3], ["Outcome: blocked", "Reviewers:"])
+        self.assertEqual(len(lines), index + 4)  # The finished note, last.
+        self.assertEqual(output.getvalue().count("Outcome:"), 1)
+
     def test_a_live_launch_first_says_how_the_run_finishes(self):
         # From the automatic settings prepare pins (plan.automatic), not from plan.mode, which is "interactive" for every run.
         finishes = {True: "automatic, finish verified-feature-branch: once every reviewer approves, the controller fast-forwards {branch} "
@@ -390,6 +403,25 @@ class FeatureLaunchTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", "noted", "--run-root", str(self.root / "runs")])
         self.assertNotIn("ANTHROPIC_MODEL", errors.getvalue())
+
+    def test_restore_from_is_resolved_and_passed_to_prepare_and_the_dry_run_shows_it(self):
+        # C12: launch resolves --restore-from in the target before any Git action and hands prepare the commit.
+        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), automatic=True, restore_from="HEAD")
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--restore-from") + 1], head)
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"))
+        self.assertNotIn("--restore-from", commands[2])
+        with self.assertRaisesRegex(ValueError, "--restore-from no-such-commit is not a commit"):
+            launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), automatic=True, restore_from="no-such-commit")
+        with self.assertRaisesRegex(ValueError, "--restore-from needs --automatic"):  # A manual worker has no shell.
+            launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), restore_from="HEAD")
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--automatic", "--restore-from", "HEAD"])
+        command.assert_not_called()
+        printed = json.loads(output.getvalue())
+        self.assertEqual(printed["restore_from"], {"name": "HEAD", "commit": head})
+        self.assertIn(head, printed["commands"][2])
 
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()):

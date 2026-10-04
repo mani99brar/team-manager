@@ -22,6 +22,11 @@
   shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
   delivers it, typing the text at most once (after a Herdr timeout on the text the operator looks at the pane first).
 
+- Restore from a candidate (C12): `--restore-from <commit>` on launch and prepare pins `plan.restore_from` (the commit
+  and each lane's owned paths present at it), keeps the commit under the run's `refs/workflow/<hash>/restore-from` and
+  writes a read-only copy of those paths at it into `challenge-inputs/restore/`, a plain directory, never a worktree.
+  Automatic runs only: a manual worker has no shell to run its restore command. The challenge reads it through --add-dir, and each worker's prompt starts with its own `git restore` command.
+
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
 """
@@ -38,6 +43,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -49,7 +55,7 @@ from .actor import BY_OPERATOR, actor_record, actor_text, add_actor_argument, re
 from .checks import now
 from .sessions import (TransientInfraError, git, job_env, plan_workers, note_role, popen_claude, read_json, record_role, role_flags, run_lock, save_json,
                        stale_claude_warning, terminate)
-from .verification import CONTRACTS, validate_schema
+from .verification import CONTRACTS, safe_path, validate_schema
 from .worktrees import git_worktree
 
 GUARDED_VERSION = "2.2.0"
@@ -230,6 +236,123 @@ def pin_prd(directory: Path, source: Path) -> dict:
     os.chmod(temporary, 0o600)
     os.replace(temporary, copy_path)
     return {"path": str(source.resolve()), "copy": str(copy_path.relative_to(directory)), "sha256": digest_bytes(copy_path.read_bytes())}
+
+
+# ---- Restore from a candidate (C12) ----------------------------------------------------------------------------
+
+RESTORE = "restore"  # The read-only copy's directory under challenge-inputs/.
+RESTORE_REF = "restore-from"  # Beside the lanes' snapshot refs under refs/workflow/<run hash>/; prepare refuses a lane of that name.
+
+
+def resolve_commit(repo: Path, name: str) -> str:
+    """The commit `--restore-from <name>` names in `repo`, by `git rev-parse --verify <name>^{commit}`; ValueError for
+    anything else (an unknown name, a tree or blob, an option)."""
+    refused = ValueError(f"--restore-from {name} is not a commit in {repo}")
+    if not name or name.startswith("-"):
+        raise refused
+    try:  # git_read: launch's dry run resolves it too, under the tests' patched subprocess.run.
+        commit = git_read(repo, "rev-parse", "--verify", "-q", f"{name}^{{commit}}").decode().strip()
+    except (OSError, subprocess.CalledProcessError):
+        raise refused from None
+    if not commit:
+        raise refused
+    return commit
+
+
+def check_restore(automatic: bool, lanes: list[str]) -> None:
+    """launch and prepare refuse `--restore-from` here, before any Git or filesystem action: in a manual run (its workers
+    get no shell to run their restore command), and in a run with a lane named after the restore ref."""
+    if not automatic:
+        raise ValueError("--restore-from needs --automatic: a manual worker has no shell to run its git restore command")
+    if RESTORE_REF in lanes:
+        raise ValueError(f"--restore-from needs the ref name {RESTORE_REF}, which a lane of this run takes; rename the lane")
+
+
+def restore_ref(directory: Path) -> str:
+    """The run's own ref that keeps the pinned commit reachable, beside its lane snapshot refs (Pipeline.freeze)."""
+    return f"refs/workflow/{hashlib.sha256(str(directory).encode()).hexdigest()[:16]}/{RESTORE_REF}"
+
+
+def present_paths(repo: Path, commit: str, prefixes: list[str]) -> list[str]:
+    """The owned paths (files or directories) that exist at `commit`, in policy order."""
+    present = []
+    for prefix in prefixes:
+        path = safe_path(prefix)
+        listed = subprocess.check_output(["git", "-C", str(repo), "--literal-pathspecs", "ls-tree", "-z", "--name-only", commit, "--", path])
+        if listed:
+            present.append(path)
+    return present
+
+
+def restore_member(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
+    """The copy holds regular files and directories only: a link is left out, never followed out of the copy."""
+    if member.issym() or member.islnk():
+        return None
+    return tarfile.data_filter(member, path)
+
+
+def write_restore_copy(directory: Path, repo: Path, commit: str, paths: list[str]) -> Path:
+    """`challenge-inputs/restore/`: `paths` as `commit` holds them, streamed from `git archive` (so the target's export-ignore
+    and export-subst attributes apply, and links are left out). Files 0444; directories 0755, so a plain `rm -rf` of the run
+    still works (the challenge has no write tool)."""
+    inputs = directory / "challenge-inputs"
+    inputs.mkdir(mode=0o700, exist_ok=True)
+    target = inputs / RESTORE
+    target.mkdir(mode=0o700)
+    if paths:
+        with subprocess.Popen(["git", "-C", str(repo), "--literal-pathspecs", "archive", "--format=tar", commit, "--", *paths],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as archive:
+            with tarfile.open(fileobj=archive.stdout, mode="r|") as tar:
+                tar.extractall(target, filter=restore_member)
+            errors = archive.stderr.read()
+        if archive.returncode != 0:
+            raise subprocess.CalledProcessError(archive.returncode, archive.args, stderr=errors)
+    for root, folders, files in os.walk(target, topdown=False):
+        for name in files:
+            os.chmod(Path(root) / name, 0o444)
+        for name in folders:
+            os.chmod(Path(root) / name, 0o755)
+    os.chmod(target, 0o755)
+    return target
+
+
+def pin_restore(plan: dict, directory: Path, policy: dict, commit: str) -> None:
+    """`prepare --restore-from`: plan.restore_from = {commit, paths: {lane: its owned paths present at the commit}}, the copy of
+    their union, and the ref that keeps the commit. `commit` is resolve_commit's."""
+    repo = Path(plan["repository"])
+    owned = {worker["node_id"]: worker["owned_paths"] for worker in policy["workers"]}
+    paths = {node: present_paths(repo, commit, owned[node]) for node in plan_workers(plan)}
+    write_restore_copy(directory, repo, commit, sorted({path for items in paths.values() for path in items}))
+    subprocess.run(["git", "-C", str(repo), "update-ref", restore_ref(directory), commit], check=True, capture_output=True)
+    plan["restore_from"] = {"commit": commit, "paths": paths}
+
+
+def restore_step(plan: dict, node: str) -> str:
+    """The worker prompt's first step in a run with `restore_from`: the lane's own `git restore` (no overlay, so the files
+    the commit lacks under those paths are removed). Owned paths absent at the commit are left out. Nothing for other runs."""
+    restore = plan.get("restore_from")
+    if not isinstance(restore, dict):
+        return ""
+    commit, paths = restore["commit"], restore["paths"].get(node) or []
+    if not paths:
+        return (f"\n\nThis run continues from commit {commit}, but none of your owned paths exist at it: there is nothing to "
+                "restore, and you start from the base.")
+    command = shlex.join(["git", "restore", f"--source={commit}", "--staged", "--worktree", "--", *paths])
+    return (f"\n\nFirst step, before anything else: this run continues from commit {commit}. Restore your owned paths from it in "
+            f"your worktree:\n{command}\nIt replaces those paths with their contents at that commit and removes the files the commit "
+            "lacks under them. You get only your own restored paths, not the other lanes'; the task below starts from there.")
+
+
+def restore_block(directory: Path, plan: dict) -> str:
+    """The challenge prompt's note on `restore_from`: the commit, the read-only copy, and each lane's restored paths."""
+    restore = plan.get("restore_from")
+    if not isinstance(restore, dict):
+        return ""
+    lanes = "; ".join(f"{node}: {', '.join(restore['paths'].get(node) or []) or 'none of its owned paths exist at it'}" for node in plan_workers(plan))
+    return (f"\n\nThis run continues from commit {restore['commit']}: the lanes start from the base with their owned paths replaced "
+            f"by their contents at that commit (files the commit lacks under them are removed). A read-only copy of those paths at "
+            f"that commit is in {directory / 'challenge-inputs' / RESTORE} (read it). Each lane sees only its own restored paths, "
+            f"not the other lanes': {lanes}.")
 
 
 def completion_version(plan: dict) -> str:
@@ -472,6 +595,7 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
         parts.append(f"\n\nThe PRD this feature implements: {directory / prd['copy']} (read it).")
     else:
         parts.append("\n\nThe feature names no PRD; challenge the tasks and decisions below.")
+    parts.append(restore_block(directory, plan))
     for node in plan_workers(plan):
         parts.append(task_block(plan, node))
     conventions = conventions_block(plan)
@@ -567,7 +691,7 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
     prompt_path = directory / f"challenge-{attempt}.prompt.txt"
     prompt_path.write_text(challenge_prompt(directory, plan))
     os.chmod(prompt_path, 0o600)
-    add_dirs = [str(directory / "challenge-inputs")] if plan.get("prd") else []
+    add_dirs = [str(directory / "challenge-inputs")] if plan.get("prd") or plan.get("restore_from") else []
     runtime.event(CHALLENGE, "running", f"Design challenge attempt {attempt}: one print job, session {session_id}")
     stdout = directory / f"challenge-{attempt}.stdout.json"
     try:
@@ -1417,7 +1541,7 @@ def resume_main(argv=None):
     except ValueError as error:
         parser.exit(1, f"Blocked: {error}\nNothing was changed.\n")
     from langgraph.checkpoint.sqlite import SqliteSaver
-    from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
+    from .pipeline import Pipeline, build_pipeline, graph_config, outcome_lines, report, start_workers
     warning = stale_claude_warning()
     if warning:
         print(warning, file=sys.stderr)
@@ -1456,11 +1580,12 @@ def resume_main(argv=None):
             except TransientInfraError as error:
                 parser.exit(75, f"Interrupted: {error}\n")  # Resumable, like `automatic --live`.
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
+            print(outcome_lines(directory), end="")
             note = run_finished_note(directory, runtime.plan)
             if note:
                 print(note)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
+        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n{outcome_lines(directory)}")
 
 
 def answer_command(directory: Path, node: str, text: str, herdr: bool = True) -> str:
