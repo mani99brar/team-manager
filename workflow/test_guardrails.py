@@ -3437,7 +3437,13 @@ class GrillSkill(unittest.TestCase):
                       "cite the file that records them)", read)
         self.assertIn("A limit on what the feature delivers (only, never, except, excluded, deferred), one that excludes data or behaviour, "
                       "never counts as settled by the documents, even when it quotes the operator's own words. Ownership lines are not limits.", read)
-        self.assertIn('Question 1 plays them all back in one question: "You wrote X; the drafts read it as Y, so Z is excluded. Correct?"', read)
+        # One first question (decision 9): the critical-paths question outranks the limits' read-back, which comes right after it.
+        self.assertIn("If there are any limits, the first question after the critical-paths question (§2), or Question 1 when there is none, "
+                      'plays them all back in one question: "You wrote X; the drafts read it as Y, so Z is excluded. Correct?"', read)
+        readme = " ".join((TOOL / "workflow/README.md").read_text().split())
+        self.assertIn("Every limit on what the feature delivers (only, never, except, excluded, deferred) is played back to you in the first "
+                      "question after the critical-paths question, or the first question when there is none,", readme)
+        self.assertNotIn("is played back to you as the first question", readme)
         # §2: no riders (C2), the repository's own mechanism and run limits (C3), restated answers, scoped delegations, open questions (C5).
         self.assertIn("Options differ only on the dimension the question asks.", ask)
         self.assertIn("The `decisions.md` bullet an answer writes commits to nothing its option did not state (the plain-text line, or an "
