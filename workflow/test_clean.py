@@ -110,6 +110,94 @@ class CleanTests(unittest.TestCase):
         self.assertNotIn("will remove", out)
         self.untouched()
 
+    def test_an_unbound_receipt_is_matched_by_its_launch_log(self):
+        # `claude --bg` started the session, then the listing failed: the receipt has no ID, the launch log has it.
+        save_json(self.run / "ui.interactive.json", {"node_id": "ui", "session_id": None, "status": "needs_reconciliation"})
+        (self.run / "ui.launch.log").write_text("Started in the background.\nclaude attach 33333333-3333-4333-8333-333333333333 \n")
+        self.rows = [{"id": "33333333-3333-4333-8333-333333333333", "sessionId": "44444444-4444-4444-8444-444444444444", "state": "working",
+                      "pid": 4242, "name": "workflow-elsewhere-ui"}]
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 1)
+        self.assertIn("Blocked: claude agents still lists ui (33333333-3333-4333-8333-333333333333) from this run's receipts", err)
+        self.assertNotIn("will remove", out)
+        self.untouched()
+
+    def test_a_session_with_one_of_the_runs_launch_names_is_refused(self):
+        for name in ("workflow-feature-001-ui", "workflow-feature-001-reviewer", "workflow-feature-001-reviewer-security"):
+            with self.subTest(name=name):
+                self.rows = [{"id": "bg-new", "sessionId": "55555555-5555-4555-8555-555555555555", "state": "idle", "pid": 4242, "name": name},
+                             {"id": "bg-near", "state": "idle", "pid": 4243, "name": "workflow-feature-0012-ui"}]
+                code, _, err = self.clean("--by", "operator")
+                self.assertEqual(code, 1)
+                self.assertIn("(bg-new) from this run's receipts", err)
+                self.untouched()
+
+    def test_an_unreadable_receipt_is_refused(self):
+        (self.run / "review.interactive.json").write_text("{not json")
+        code, _, err = self.clean("--by", "operator")
+        self.assertEqual(code, 1)
+        self.assertIn("Blocked: receipt review.interactive.json cannot be read", err)
+        self.untouched()
+
+    def test_a_stopped_session_does_not_hold_the_run(self):
+        bound = {"id": "bg-ui", "sessionId": "11111111-1111-4111-8111-111111111111"}
+        for row in ({**bound, "state": "stopped", "pid": None}, {**bound, "state": "failed", "pid": 4242}):
+            with self.subTest(row=row):
+                self.rows = [row]
+                code, out, err = self.clean("--by", "operator", "--dry-run")
+                self.assertEqual(code, 0, err)
+                self.assertIn("will remove", out)
+        # A row without a PID still holds the run, unless the controller confirmed its stop.
+        self.rows = [{**bound, "state": "idle", "pid": None}]
+        code, _, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 1)
+        self.assertIn("ui (bg-ui)", err)
+        save_json(self.run / "ui.stop.json", {"background_id": "bg-ui", "stopped": True})
+        code, _, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+
+    def test_a_lane_with_uncommitted_changes_is_marked_in_the_list(self):
+        (self.run / "worktree-ui" / "README.md").write_text("# Edited\n")
+        (self.run / "worktree-ui" / "new.txt").write_text("new\n")
+        code, out, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"  lane worktree {self.run / 'worktree-ui'} (2 uncommitted changes: the lane's only copy of them)", out)
+        self.assertIn(f"  candidate worktree {self.run / 'candidate'}\n", out)
+
+    def test_a_leftover_git_no_longer_lists_is_removed(self):
+        review = self.run / "review-worktree"
+        (review / ".git").unlink()
+        git(self.repo, "worktree", "prune")
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(review.exists())
+
+    def test_a_failure_of_one_removal_does_not_stop_the_rest(self):
+        with patch.object(clean, "prune_attempt", side_effect=TypeError("unexpected")):
+            code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 1)
+        self.assertIn("some removals failed, the rest are done", err)
+        self.assertIn("unexpected", err)
+        self.assertFalse((self.run / "review-worktree").exists())
+
+    def test_a_repository_with_a_separate_git_dir(self):
+        store, checkout = self.root / "store" / "repo.git", self.root / "separate"
+        store.parent.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", "--separate-git-dir", str(store), str(checkout)], check=True)
+        (checkout / "README.md").write_text("# Repo\n")
+        for args in (["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["add", "."], ["commit", "-qm", "Base"]):
+            subprocess.run(["git", "-C", str(checkout), *args], check=True)
+        run = self.root / "runs" / "other-001"
+        run.mkdir()
+        lane = run / "worktree-ui"
+        git_worktree(checkout, "add", "--detach", str(lane), "HEAD")
+        save_json(run / "plan.json", {"run_id": run.name, "repository": str(checkout), "nodes": {"ui": {"worktree": str(lane)}}})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            clean.clean_main([str(run), "--by", "operator"])
+        self.assertFalse(lane.exists())
+        self.assertNotIn(str(lane), git(checkout, "worktree", "list", "--porcelain"))
+
     def test_an_unknown_session_listing_is_refused(self):
         with patch.object(clean, "inventory", side_effect=RuntimeError("`claude agents --json` exited 1")):
             code, _, err = self.clean("--by", "operator")

@@ -3,11 +3,14 @@
 It prunes every passed check attempt of the run (checks.prune_attempt, which verify_revision has applied to each new one
 since C47), then removes the lane, candidate, review and challenge worktrees and, once the run is finished, its source
 checkout `<runs root>/<run id>.source`; then `git worktree prune`. Every removal goes through git_worktree, under the
-repository's worktree lock, since running runs add worktrees to the same .git. Failed attempts are kept whole, and so are
-repair workspaces (an operator's fix may sit uncommitted in one), packets, logs, artifacts and every run file.
+repository's worktree lock, since running runs add worktrees to the same .git (a leftover Git no longer lists is deleted:
+checks.remove_worktree). Failed attempts are kept whole, and so are repair workspaces (an operator's fix may sit
+uncommitted in one), packets, logs, artifacts and every run file.
 
-It refuses while the run's controller or supervisor lock is held, or while `claude agents` lists a session from one of the
-run's receipts, and it lists what it will remove before it removes anything. Only the operator runs it: cleaning a blocked
+It refuses while the run's controller or supervisor lock is held, while a receipt cannot be read, or while `claude agents`
+lists a live session of the run: by a receipt's IDs, by the ID a never-bound receipt's launch log printed, or by one of
+the run's launch names. It lists what it will remove before it removes anything, marking a lane worktree with uncommitted
+changes (before freeze, the worker's only copy of its edits). Only the operator runs it: cleaning a blocked
 run removes the lane worktrees a repair would use, so it is not mechanical recovery (decision 2a), and `--by maintainer`
 is refused.
 """
@@ -15,13 +18,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-from .checks import PRUNED_CACHES, RAW_BROWSER_OUTPUT, prune_attempt
+from .checks import prunable, prune_attempt, remove_worktree
+from .interactive import REVIEW, TERMINAL_STATES, launch_name, recorded_stop
 from .sessions import read_json, run_lock
-from .worktrees import WorktreeError, common_dir, git_worktree
+from .worktrees import common_dir, git_worktree
 
 RUN_WORKTREES = (("review worktree", "review-worktree"), ("challenge worktree", "challenge-worktree"))
 
@@ -42,18 +47,69 @@ def inventory() -> list[dict]:
     return rows
 
 
-def listed_sessions(directory: Path, rows: list[dict]) -> list[str]:
-    """`<node> (<background id>)` for each receipt (`<node>.interactive.json`) whose session the listing still shows."""
-    found = []
+# A receipt's launch log names the ID `claude --bg` printed (InteractiveSessions.locate binds it the same way).
+LAUNCHED_ID = re.compile(r"claude attach ([a-f0-9-]{8,36})\s")
+
+
+def run_nodes(directory: Path, plan: dict) -> set[str]:
+    """Every node of the run that may have had a session: the plan's lanes, the reviewers, and each node with a receipt or a
+    launch log."""
+    nodes = {REVIEW, *(plan.get("nodes") or {}), *(plan.get("workers") or [])}
+    nodes |= {path.name.removesuffix(".interactive.json") for path in directory.glob("*.interactive.json")}
+    nodes |= {path.name.removesuffix(".launch.log") for path in directory.glob("*.launch.log")}
+    return {node for node in nodes if isinstance(node, str)}
+
+
+def live(directory: Path, node: str, row: dict) -> bool:
+    """A listed row counts unless it is in a terminal state, or has no PID and the controller confirmed its stop (as
+    stop_session and verified_row judge it)."""
+    if row.get("state") in TERMINAL_STATES:
+        return False
+    if row.get("pid") is None:
+        stop = recorded_stop(directory, node)
+        return not (stop and stop["confirmed"])
+    return True
+
+
+def listed_sessions(directory: Path, plan: dict, rows: list[dict]) -> list[str]:
+    """`<node> (<id>)` for each live session the listing shows of this run: by a receipt's background or session ID, by the
+    ID its launch log printed when the receipt was never bound, or by one of the run's launch names (launch refuses on
+    that name too). ValueError when a receipt cannot be read, since clean cannot then tell."""
+    rows = [row for row in rows if isinstance(row, dict)]
+    found = {}
     for path in sorted(directory.glob("*.interactive.json")):
+        node = path.name.removesuffix(".interactive.json")
         try:
             receipt = read_json(path)
-        except ValueError:
-            continue
-        background, session = receipt.get("background_id"), receipt.get("session_id")
-        if any((background and row.get("id") == background) or (session and row.get("sessionId") == session) for row in rows if isinstance(row, dict)):
-            found.append(f"{path.name.removesuffix('.interactive.json')} ({background or session})")
-    return found
+            if not isinstance(receipt, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as error:
+            raise ValueError(f"receipt {path.name} cannot be read ({error}); clean cannot tell whether its session is live") from None
+        ids = {receipt["background_id"]} if receipt.get("background_id") else set()
+        log = directory / f"{node}.launch.log"
+        if not ids and log.is_file():
+            ids = set(LAUNCHED_ID.findall(log.read_text(errors="replace")))
+        session = receipt.get("session_id")
+        for row in rows:
+            if (row.get("id") in ids or (session and row.get("sessionId") == session)) and live(directory, node, row):
+                found.setdefault(row.get("id") or row.get("sessionId"), node)
+    run_id = plan.get("run_id") or directory.name
+    names = {launch_name(run_id, node): node for node in run_nodes(directory, plan)}
+    reviewer = launch_name(run_id, "review-")  # Any declared reviewer's name, whether or not it left a receipt.
+    for row in rows:
+        name = row.get("name")
+        node = names.get(name) or (f"review-{name[len(reviewer):]}" if isinstance(name, str) and name.startswith(reviewer) else None)
+        if node and live(directory, node, row):
+            found.setdefault(row.get("id") or row.get("sessionId"), node)
+    return [f"{node} ({identity})" for identity, node in sorted(found.items(), key=lambda item: (item[1], str(item[0])))]
+
+
+def uncommitted(path: Path) -> int | None:
+    """How many changes `git status` shows in a lane worktree; None when Git cannot tell."""
+    try:
+        return len(subprocess.run(["git", "-C", str(path), "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.splitlines())
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def finished(directory: Path) -> bool:
@@ -79,8 +135,7 @@ def passed_attempts(directory: Path) -> tuple[list[tuple[Path, list[str]]], list
         if status != "passed":
             kept.append(folder)
             continue
-        names = [name for name in ("worktree", *PRUNED_CACHES) if (folder / name).exists() or (folder / name).is_symlink()]
-        names += sorted(path.name for path in folder.iterdir() if RAW_BROWSER_OUTPUT.fullmatch(path.name))
+        names = [path.name for path in prunable(folder)]
         if names:
             prune.append((folder, names))
     return prune, kept
@@ -130,12 +185,13 @@ def clean_main(argv=None):
                              "what a repair uses")
         with run_lock(directory, "automatic-supervisor.lock"), run_lock(directory):
             plan = read_json(directory / "plan.json")
-            listed = listed_sessions(directory, inventory())
+            listed = listed_sessions(directory, plan, inventory())
             if listed:
                 raise ValueError(f"claude agents still lists {', '.join(listed)} from this run's receipts; stop it first "
                                  "(RUNBOOK: Stopping an unfinished run)")
-            # The main worktree's checkout, which outlives every worktree removed here (a source checkout may be the plan's repository).
-            repository = common_dir(plan["repository"]).parent
+            # Git's common directory itself, which outlives every worktree removed here (a source checkout may be the plan's
+            # repository) and is the repository whatever its layout (--separate-git-dir, a bare repository's worktrees).
+            repository = common_dir(plan["repository"])
             attempts, kept_attempts = passed_attempts(directory)
             worktrees, kept = run_worktrees(directory, plan)
             if not attempts and not worktrees:
@@ -145,7 +201,10 @@ def clean_main(argv=None):
                 for folder, names in attempts:
                     print(f"  passed attempt {folder.relative_to(directory)}: {', '.join(names)}")
                 for label, path in worktrees:
-                    print(f"  {label} {path}")
+                    changes = uncommitted(path) if label == "lane worktree" else 0
+                    note = (" (Git cannot tell whether it holds uncommitted changes)" if changes is None else
+                            f" ({changes} uncommitted change{'s' if changes != 1 else ''}: the lane's only copy of them)" if changes else "")
+                    print(f"  {label} {path}{note}")
             for folder in kept_attempts:
                 print(f"Kept: {folder.relative_to(directory)}: an attempt that did not pass, kept whole")
             for line in kept:
@@ -160,13 +219,13 @@ def clean_main(argv=None):
                 try:
                     prune_attempt(repository, folder)
                     print(f"Removed: passed attempt {folder.relative_to(directory)} pruned")
-                except (WorktreeError, OSError) as error:
+                except Exception as error:  # Whatever one removal raises, the others still run.
                     errors.append(f"{folder}: {error}")
             for label, path in worktrees:
                 try:
-                    git_worktree(repository, "remove", "--force", str(path))
+                    remove_worktree(repository, path)
                     print(f"Removed: {label} {path}")
-                except (WorktreeError, OSError) as error:
+                except Exception as error:
                     errors.append(f"{path}: {error}")
             if attempts or worktrees:
                 git_worktree(repository, "prune")

@@ -107,6 +107,27 @@ class LedgerTests(unittest.TestCase):
         self.assertIn(f"  {self.hand[:12]} code outside any run: Take the tone from run x (src/tone.ts)", out)
         self.assertIn(f"  {self.config[:12]} config outside any run: Notes (docs/NOTES.md, features/fix/task.md)", out)
 
+    def test_a_registry_of_the_wrong_shape_only_costs_the_record(self):
+        policy, task = self.root / "policy.json", self.root / "task.md"
+        save_json(policy, POLICY)
+        task.write_text("Fix the tone.\n")
+        for number, document in enumerate(({"version": 1, "projects": None}, {"version": 1, "projects": [{"project_id": "repo", "workflows": None}]},
+                                           {"version": 1, "projects": [{"project_id": "repo", "workflows": [{"runs_root": str(self.runs)}, "x"]}, 3]})):
+            with self.subTest(document=document):
+                save_json(self.registry, document)
+                if number < 2:
+                    with self.assertRaisesRegex(ValueError, "is not a list"):
+                        ledger.runs_roots()
+                else:
+                    self.assertEqual(ledger.runs_roots(), [self.runs])
+                run = self.root / "fix-runs" / f"run-{number}"
+                with patch.object(ledger, "known_runs", side_effect=TypeError("unexpected")) if number == 2 else contextlib.nullcontext():
+                    code, out, err = pipeline_cli("prepare", str(run), "--repo", str(self.repo), "--policy", str(policy), "--task", f"main={task}")
+                self.assertEqual(code, 0, err)
+                self.assertIn("Warning: base_unreviewed not pinned:", err)
+                self.assertNotIn("base_unreviewed", read_json(run / "plan.json"))
+                self.assertTrue((run / "policy.json").is_file())
+
     def test_the_list_is_capped_and_says_how_many_more(self):
         with patch.object(ledger, "LIST_LIMIT", 1):
             pinned = ledger.base_unreviewed(self.repo, self.merge, ledger.runs_roots())

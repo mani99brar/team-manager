@@ -1,5 +1,7 @@
 """Worker-phase file capture (PRD_VIEWER_CLARITY 4.1): real Git snapshots, real verification worktrees and checks."""
+import contextlib
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -13,8 +15,9 @@ from jsonschema.exceptions import ValidationError
 
 from . import checks
 from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, text_test_counts, verify_revision
-from .sessions import git
+from .sessions import git, save_json
 from .verification import validate_schema
+from .worktrees import git_worktree
 
 UNIT = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
@@ -280,6 +283,61 @@ class PruneTests(unittest.TestCase):
         packet, _, folder = self.attempt(0)
         self.assertEqual(checks.prune_attempt(self.repo, folder), [])
         self.assertTrue((folder / "packet.json").is_file())
+
+    def test_an_unreadable_cache_directory_is_removed_too(self):
+        # A check may leave a directory its owner cannot list (mode 0o000) or only enter (0o300); rmtree cannot open either.
+        self.LEAVE = (self.LEAVE + "for name, mode in (('closed', 0o000), ('blind', 0o300)):\n"
+                      "    path = pathlib.Path(os.environ['npm_config_cache'], name, 'inner')\n"
+                      "    path.mkdir(parents=True); (path / 'entry').write_text('x'); path.parent.chmod(mode)\n")
+        packet, _, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        self.assertFalse((folder / "npm_config_cache").exists())
+
+    def test_a_removal_that_fails_is_only_a_warning(self):
+        with patch.object(checks, "prune_attempt", side_effect=TypeError("boom")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                packet, _, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed")
+        self.assertIn(f"Warning: passed attempt {folder} was not pruned (boom)", err.getvalue())
+
+    def test_a_worktree_git_no_longer_lists_is_deleted(self):
+        # `git worktree remove --force` that fails partway still unregisters the worktree; a leftover is deleted and pruned.
+        for breaking in ("read-only", "unregistered"):
+            with self.subTest(breaking=breaking):
+                folder = self.run_dir / breaking
+                worktree = folder / "worktree"
+                git_worktree(self.repo, "add", "--detach", str(worktree), self.base)
+                if breaking == "read-only":
+                    (worktree / "locked").mkdir()
+                    (worktree / "locked/entry").write_text("x")
+                    (worktree / "locked").chmod(0o500)
+                else:
+                    (worktree / ".git").unlink()
+                    git_worktree(self.repo, "prune")
+                self.assertEqual(checks.prune_attempt(self.repo, folder), [worktree])
+                self.assertFalse(worktree.exists())
+                self.assertNotIn(str(worktree), self.worktrees())
+
+    def test_an_independent_repository_is_never_deleted_as_a_leftover(self):
+        folder = self.run_dir / "clone"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(folder / "worktree")], check=True)
+        with self.assertRaises(checks.WorktreeError):
+            checks.prune_attempt(self.repo, folder)
+        self.assertTrue((folder / "worktree/.git").is_dir())
+
+    def test_a_failed_deferred_browser_check_keeps_its_raw_output(self):
+        # Browser checks are deferred in the worker phase: a passed attempt may hold one that failed, whose raw output is
+        # the only copy of its failure screenshots and traces.
+        folder = self.run_dir / "verification/worker/adapter/1"
+        for index in (0, 1, 2):
+            (folder / f"browser-{index}/trace").mkdir(parents=True)
+        save_json(folder / "packet.json", {"gate": {"status": "passed"}, "capture_errors": ["e2e: exit 1"], "scenario_errors": ["smoke/home: no screenshot"],
+                                           "evidence": {"checks": [{"id": "e2e", "worker_check_index": 0}, {"id": "smoke", "worker_check_index": 1},
+                                                                   {"id": "fine", "worker_check_index": 2}]}})
+        self.assertEqual(checks.prunable(folder), [folder / "browser-2"])
+        checks.prune_attempt(self.repo, folder)
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["browser-0", "browser-1", "packet.json"])
 
 
 class VitestCountsTests(unittest.TestCase):

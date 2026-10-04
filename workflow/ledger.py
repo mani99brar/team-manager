@@ -53,8 +53,14 @@ def runs_roots(env: dict | None = None, extra=()) -> list[Path]:
             document = json.loads(path.read_text())
         except ValueError as error:
             raise ValueError(f"Registry {path} is not valid JSON: {error}") from None
-        for project in document.get("projects", []) if isinstance(document, dict) else []:
-            for workflow in project.get("workflows", []) if isinstance(project, dict) else []:
+        projects = document.get("projects", []) if isinstance(document, dict) else []
+        if not isinstance(projects, list):
+            raise ValueError(f"Registry {path}: projects is not a list")
+        for project in projects:
+            workflows = project.get("workflows", []) if isinstance(project, dict) else []
+            if not isinstance(workflows, list):
+                raise ValueError(f"Registry {path}: the workflows of {project.get('project_id')} is not a list")
+            for workflow in workflows:
                 if isinstance(workflow, dict) and isinstance(workflow.get("runs_root"), str):
                     roots.append(Path(workflow["runs_root"]).expanduser())
     roots.extend(Path(root) for root in extra)

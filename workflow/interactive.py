@@ -32,6 +32,15 @@ def is_review_node(node: str) -> bool:
     return node == REVIEW or node.startswith("review-")
 
 
+def launch_name(run_id: str, node: str) -> str:
+    """`workflow-<run>-<lane>`, `workflow-<run>-reviewer` for the default reviewer, `workflow-<run>-reviewer-<id>` otherwise."""
+    if node == REVIEW:
+        return f"workflow-{run_id}-reviewer"
+    if node.startswith("review-"):
+        return f"workflow-{run_id}-reviewer-{node[len('review-'):]}"
+    return f"workflow-{run_id}-{node}"
+
+
 def refuse_long_prompt(node: str, prompt: str) -> None:
     """Refuse a prompt over PROMPT_ARGV_LIMIT bytes; the launch calls it before it writes the receipt. The remedy names what
     fills that role's prompt. A reviewer's refusal still leaves its review needing reconciliation (automatic._review_native
@@ -91,12 +100,7 @@ class InteractiveSessions(ClaudeSessions):
         return rows
 
     def launch_name(self, node: str) -> str:
-        """`workflow-<run>-<lane>`, `workflow-<run>-reviewer` for the default reviewer, `workflow-<run>-reviewer-<id>` otherwise."""
-        if node == REVIEW:
-            return f"workflow-{self.plan['run_id']}-reviewer"
-        if node.startswith("review-"):
-            return f"workflow-{self.plan['run_id']}-reviewer-{node[len('review-'):]}"
-        return f"workflow-{self.plan['run_id']}-{node}"
+        return launch_name(self.plan["run_id"], node)
 
     def node_worktree(self, node: str) -> Path:
         """Workers live in the plan's worktrees; every reviewer in the run's shared candidate checkout."""
