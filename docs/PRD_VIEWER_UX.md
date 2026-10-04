@@ -515,7 +515,7 @@ Hiding single-value columns is decided over the whole review, not per group, and
 Design challenge                                         [✓ Succeeded] · one print job
 Passed on attempt 3 · 8 P2 notes · decided 08:50:49 · 11m07s over 3 attempts
 Attempts  [#1 ? 08:39 · ended without a record]  [#2 ✗ 08:45 · 46s · interrupted]  [#3 ✓ 08:48 · 2m29s]
-[Concerns 8] [Alternative & experiment] [History 7]
+[Concerns 8] [Alternative & experiment] [Earlier attempts 2] [History 7]
 ── Concerns: P0/P1 open by default; P2 one line each, expandable to message and consequence
 ```
 

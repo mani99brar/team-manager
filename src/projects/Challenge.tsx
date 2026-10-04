@@ -74,7 +74,9 @@ export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
           <dt>Attempts</dt>
           <dd data-testid="challenge-attempts">
             {challenge.attempts} {challenge.attempts === 1 ? 'attempt' : 'attempts'}; this is attempt {challenge.attempt}
-            {challenge.attempts > 1 && <span className="projects-muted"> (earlier attempts' P0/P1 are listed below; their full records stay in the run directory)</span>}
+            {challenge.attempts > 1 && <span className="projects-muted">{(challenge.history ?? []).length > 0
+              ? " (earlier attempts' P0/P1 are listed below; their full records stay in the run directory)"
+              : ' (earlier attempts are kept in the run directory)'}</span>}
           </dd>
         </div>
         <div><dt>Session</dt><dd>{challenge.session_id ? <code>{challenge.session_id}</code> : 'No session recorded'}</dd></div>

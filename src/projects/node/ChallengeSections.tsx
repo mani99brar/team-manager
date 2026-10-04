@@ -28,7 +28,7 @@ export function ChallengeSections({ inputs, onRetryInputs }: { inputs: Resource<
         <ChallengeAlternative challenge={challenge} />
       </NodeSection>
       {(challenge.history ?? []).length > 0 && (
-        <NodeSection sectionKey="history" title="Earlier attempts" testId="challenge-history-section">
+        <NodeSection sectionKey="challenge-history" title="Earlier attempts" testId="challenge-history-section">
           <ChallengeHistory challenge={challenge} />
         </NodeSection>
       )}

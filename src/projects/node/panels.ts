@@ -107,14 +107,15 @@ export function challengeHeadline(challenge: Challenge, spans: readonly Span[]):
   return { lead, notes: p2 > 0 ? `${p2} P2 ${p2 === 1 ? 'note' : 'notes'}` : null, decidedAt: challenge.decided_at, totalMs, attempts: challenge.attempts }
 }
 
-/** A challenge's index entries: its concerns when it raised any, the alternative and the experiment, then the earlier attempts (C49) when there are any. */
+/** A challenge's index entries: its concerns when it raised any, the alternative and the experiment, then the earlier attempts (C49) when there are any,
+ * keyed apart from the node's own event History ('history'), which ends every node's index. */
 export function challengeSectionEntries(challenge: Challenge | null): SectionEntry[] {
   if (challenge === null) return []
   const history = challenge.history ?? []
   return [
     ...(challenge.concerns.length > 0 ? [{ key: 'concerns', label: 'Concerns', count: challenge.concerns.length }] : []),
     { key: 'alternative', label: 'Alternative & experiment' },
-    ...(history.length > 0 ? [{ key: 'history', label: 'Earlier attempts', count: history.length }] : []),
+    ...(history.length > 0 ? [{ key: 'challenge-history', label: 'Earlier attempts', count: history.length }] : []),
   ]
 }
 

@@ -9,13 +9,13 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { RunInputs } from '../../src/projects/api.ts'
 import { challengeSectionEntries } from '../../src/projects/node/panels.ts'
 
-type ChallengeModule = { ChallengeHistory: (props: { challenge: Challenge }) => React.ReactNode }
+type ChallengeModule = { ChallengeHistory: (props: { challenge: Challenge }) => React.ReactNode; ChallengeFacts: (props: { challenge: Challenge }) => React.ReactNode }
 
 // tsx compiles the component's JSX for the classic runtime here (the app's tsconfig is not the root one): give it React. The
 // path is a variable so that tsconfig.node.json, which has no `jsx`, never type-checks the component; tsconfig.app.json does.
 Object.assign(globalThis, { React })
 const component = '../../src/projects/Challenge.tsx'
-const { ChallengeHistory } = await import(component) as ChallengeModule
+const { ChallengeFacts, ChallengeHistory } = await import(component) as ChallengeModule
 const { createElement } = React
 
 type Challenge = NonNullable<RunInputs['challenge']>
@@ -44,7 +44,22 @@ test('the challenge page lists each earlier attempt with its P0/P1 concerns', ()
 })
 
 test('the section index points at the earlier attempts when there are any', () => {
-  assert.deepEqual(challengeSectionEntries(challenge({ history })).map(entry => entry.key), ['alternative', 'history'])
-  assert.deepEqual(challengeSectionEntries(challenge({ history })).at(-1), { key: 'history', label: 'Earlier attempts', count: 2 })
+  assert.deepEqual(challengeSectionEntries(challenge({ history })).map(entry => entry.key), ['alternative', 'challenge-history'])
+  assert.deepEqual(challengeSectionEntries(challenge({ history })).at(-1), { key: 'challenge-history', label: 'Earlier attempts', count: 2 })
   assert.deepEqual(challengeSectionEntries(challenge({})).map(entry => entry.key), ['alternative'])
+  // NodeDetail ends every index with the node's own event History ('history'): the keys stay distinct, so each chip finds its section.
+  const keys = [...challengeSectionEntries(challenge({ history, concerns: [history[0].concerns[0]] })), { key: 'history' }].map(entry => entry.key)
+  assert.equal(new Set(keys).size, keys.length)
+})
+
+test('the attempts fact points below only when an earlier attempt is listed there', () => {
+  const facts = (fields: Partial<Challenge>) => renderToStaticMarkup(createElement(ChallengeFacts, { challenge: challenge(fields) }))
+  assert.match(facts({ history }), /P0\/P1 are listed below/)
+  // An earlier attempt that wrote no record (a deadline), or an export before C49: nothing is listed below, so the fact says where they are.
+  for (const empty of [[], undefined]) {
+    const markup = facts({ history: empty })
+    assert.doesNotMatch(markup, /listed below/)
+    assert.match(markup, /3 attempts; this is attempt 3/)
+    assert.match(markup, /earlier attempts are kept in the run directory/)
+  }
 })
