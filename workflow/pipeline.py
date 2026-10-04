@@ -685,7 +685,9 @@ class Pipeline:
             reused = self.reusable_packet(node, attempt, candidate["commit"], state, repaired=bool(repairs))
             if reused:
                 packet = reuse_packet(self.directory, self.plan, self.policy, node, candidate["commit"], reused, attempt=attempt)
-                note = f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
+                # A regular candidate packet already cached at this attempt (an earlier controller ran the checks) comes back as it is.
+                note = (f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
+                        if "reused_from" in packet else self.slow_note(node, packet))
             else:
                 packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
                                          changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),

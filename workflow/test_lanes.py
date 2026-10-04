@@ -248,6 +248,59 @@ class ThreeLaneRun(LaneRun):
         self.assertEqual((positions["launch_adapter"], positions["handoff"], positions["integrate"], height), ((90, 70), (280, 70), (1230, 70), 140))
         self.assertEqual(len(edges), 6)
 
+    def candidate_step(self, before):
+        """Through freeze to the review, calling `before(runtime, state)` as the candidate step begins."""
+        from .pipeline import Pipeline
+        original = Pipeline.candidate
+
+        def candidate(runtime, state):
+            before(runtime, state)
+            return original(runtime, state)
+        with patch.object(Pipeline, "candidate", autospec=True, side_effect=candidate), \
+                SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            verified = graph.invoke(Command(resume={"freeze": True}), self.config)
+        self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+        return [json.loads(line)["message"] for line in (self.directory / "events.jsonl").read_text().splitlines()
+                if json.loads(line)["node"] == "candidate_adapter"]
+
+    def test_a_regular_candidate_packet_already_cached_at_attempt_1_is_reported_as_it_is(self):
+        # A controller from before C28 ran this lane's candidate checks (a plain cherry-pick gave the same commit here, since
+        # the lane changed only its own paths) and wrote a regular packet; the upgraded controller re-enters the step.
+        from .checks import verify_revision
+        from .pipeline import changed_files
+        self.prepare(["adapter"])
+
+        def seed(runtime, state):
+            snapshot = state["snapshots"]["adapter"]["commit"]
+            verify_revision(runtime.directory, runtime.plan, runtime.policy, "adapter", snapshot, state["snapshots"]["adapter"]["changed_files"],
+                            state["snapshots"]["adapter"]["session_id"], phase="candidate", attempt=1)
+        messages = self.candidate_step(seed)
+        snapshot = read_json(self.directory / "snapshots.json")["adapter"]["commit"]
+        self.assertEqual(messages, [f"Combined revision {snapshot}"])
+        packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertNotIn("reused_from", packet)
+        self.assertEqual(packet["gate"]["status"], "passed")
+
+    def test_a_candidate_written_before_ff_runs_the_checks_in_their_own_worktree(self):
+        # candidate.json from a controller before C28: a plain cherry-pick made a new commit, not the snapshot itself.
+        self.prepare(["adapter"])
+        made = {}
+
+        def seed(runtime, state):
+            snapshot = state["snapshots"]["adapter"]["commit"]
+            commit = git(self.repo, "commit-tree", f"{snapshot}^{{tree}}", "-p", self.plan["base_commit"], "-m", "adapter (cherry-picked)")
+            git(self.repo, "worktree", "add", "-q", "--detach", str(self.directory / "candidate"), commit)
+            save_json(self.directory / "candidate.json", {"commit": commit, "worktree": str(self.directory / "candidate")})
+            made["commit"] = commit
+        messages = self.candidate_step(seed)
+        self.assertEqual(messages, [f"Combined revision {made['commit']}"])
+        packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertNotIn("reused_from", packet)
+        self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", made["commit"]))
+        self.assertTrue((self.directory / "verification/candidate/adapter/1/check-0.log").is_file())  # The checks ran.
+
     def test_a_one_lane_browser_check_reruns_at_the_candidate(self):
         self.prepare(["ui"])
         # The ui lane gains a browser check; its worker gate records it for the candidate gate, which runs it again.
