@@ -230,6 +230,35 @@ class OutcomeBlock(OutcomeRun):
         self.assertIn("  The ui lane still reads the old key.", lines)
 
 
+    def test_the_approval_stop_lists_the_open_ledger_findings_when_no_final_pass_wrote_the_handoff(self):
+        # C51 lists "open sidecar-ledger findings": only a final pass writes handoff.unresolved, so a run whose final pass timed out
+        # or was rejected falls back to the ledger's findings still open, acknowledged or fix_reported.
+        from .test_sidecar import appendix_b
+        self.plan["sidecar"] = {"prompt": "Watch the lanes.", "cadence_seconds": 600, "pass_timeout_seconds": 600, "max_passes": 6, "max_messages_per_lane": 3}
+        save_json(self.directory / "plan.json", self.plan)
+        ledger = appendix_b()
+        self.assertIsNone(ledger["handoff"])
+        ledger["findings"].append({**ledger["findings"][1], "id": "S-3", "disposition": "withdrawn", "problem": "Gone. It was a misreading."})
+        save_json(self.directory / "sidecar.ledger.json", ledger)
+        self.review("approved", [("general", "approved"), ("coverage", "approved")])
+        items = outcome_block(self.directory, open_items_only=True).splitlines()
+        start = items.index("Sidecar findings still open (no final pass wrote its unresolved list):")
+        self.assertEqual(items[start + 1:start + 3],
+                         ["  [S-1 P1 engine, fix_reported] A rejected output still appends the pass to the ledger before validation, so a "
+                          "malformed output leaves a half-written pass.",
+                          "  [S-2 P2 viewer, open] The seeded ledger's timestamps are written by hand and drift from the events the same "
+                          "fixture seeds."])
+        self.assertNotIn("Gone.", "\n".join(items))
+        # The outcome block keeps its own reading: the unresolved list only.
+        self.assertNotIn("Sidecar findings still open", outcome_block(self.directory))
+        # A final pass's list wins: the fallback is for a ledger without one.
+        ledger["handoff"] = {"unresolved": ["S-1 still validates late."], "structural": [], "verified_resolved": [], "withdrawn": [], "gaps": []}
+        save_json(self.directory / "sidecar.ledger.json", ledger)
+        items = outcome_block(self.directory, open_items_only=True).splitlines()
+        self.assertIn("  S-1 still validates late.", items)
+        self.assertNotIn("Sidecar findings still open (no final pass wrote its unresolved list):", items)
+
+
 class OutcomePrinted(OutcomeRun):
     def blocked_run(self) -> None:
         self.review("blocked", [("general", None), ("coverage", "approved")])

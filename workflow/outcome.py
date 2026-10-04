@@ -125,7 +125,8 @@ def reviews(directory: Path, plan: dict) -> tuple[str | None, list[str], dict, l
 
 def open_items(directory: Path, plan: dict, findings: list, open_p2: bool = False) -> tuple[list[str], bool]:
     """The sections that need the operator: open P0/P1, with `open_p2` the open P2s (below the block threshold: the approval
-    stop lists them, C51), known limits, each lane's evidence, the sidecar's unresolved list; and whether any of them is more
+    stop lists them, C51), known limits, each lane's evidence, the sidecar's unresolved list (with `open_p2`, the ledger's open
+    findings when no final pass wrote that list); and whether any of them is more
     than a lane's verify_yourself line (which every completed 1.1.0 lane carries). The open P2s never make it more."""
     from .automatic import first_sentence
     from .pipeline import blocking_findings
@@ -156,6 +157,14 @@ def open_items(directory: Path, plan: dict, findings: list, open_p2: bool = Fals
     unresolved = ((ledger or {}).get("handoff") or {}).get("unresolved") or []
     if unresolved:
         lines += ["Sidecar unresolved:", *(f"  {item}" for item in unresolved)]
+    elif open_p2 and ledger and ledger.get("handoff") is None:
+        # Only the final pass writes handoff.unresolved; when none did (it timed out, or its output was rejected), the approval stop
+        # lists the ledger's findings still open instead (C51: "open sidecar-ledger findings").
+        from .sidecar import OPEN
+        still = [item for item in ledger.get("findings") or [] if item.get("disposition") in OPEN]
+        if still:
+            lines.append("Sidecar findings still open (no final pass wrote its unresolved list):")
+            lines += [f"  [{item['id']} {item['severity']} {item['lane']}, {item['disposition']}] {first_sentence(item['problem'])}" for item in still]
     return lines, open_ or bool(blocking or limits or unresolved)
 
 
