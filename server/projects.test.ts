@@ -1082,6 +1082,26 @@ test('the same artifact ID registered twice is served only when both registratio
   })
 })
 
+test('a reused candidate packet serves its worker packet\'s artifacts and names that packet\'s worktree', async () => {
+  // workflow/checks.py reuse_packet (C28): one lane without a browser check; the candidate packet names the worker packet it
+  // reused, copies its result and holds no artifact of its own.
+  await harness(async ({ app, runsRoot }) => {
+    const reused_from = { path: 'verification/worker/ui/1/packet.json', sha256: 'a'.repeat(64) }
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'reused', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['review'], events: launchEvents,
+      packets: [
+        { node: 'ui', phase: 'candidate', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n', skipWrite: true }],
+          mutate: packet => { packet.reused_from = reused_from } },
+        { node: 'ui', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n' }] },
+      ] })
+    const log = await get(app, url('alpha', 'main', 'reused', '/artifacts/log-0-444444444444'))
+    assert.equal(log.status, 200)
+    assert.equal(log.body, 'checked once\n')
+    const result = await get(app, url('alpha', 'main', 'reused', '/results/candidate_ui/1'))
+    assert.equal(result.status, 200)
+    assert.deepEqual(JSON.parse(result.body).checks.map((check: { cwd: string }) => check.cwd), ['verification/worker/ui/1/worktree'])
+  })
+})
+
 // ---------------------------------------------------------------------------------------------------------------
 // Review results and run inputs (export sections 1.1.0 / 1.2.0)
 
@@ -2057,6 +2077,22 @@ test('[C52] the controller drift warning is a node-less log row, on a lane named
       [3, null, null, 'log'], [4, null, 'running', 'log']])
     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
     assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running')
+  })
+})
+
+test('[B1] on a lane named controller, prepare\'s launch notes belong to the run, never starting the lane', async () => {
+  // pipeline.py prepare records the launch's notes (C23, C27) as one `controller` row, before any lane launches.
+  const notes = 'Launch notes: Lane controller requires fewer checks than the policy of lane-000: required kind contract removed.'
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [{ sequence: 1, time: T0, node: 'controller', status: 'running', message: notes }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [[1, null, 'running', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'pending', 'the launch notes never start the lane')
   })
 })
 

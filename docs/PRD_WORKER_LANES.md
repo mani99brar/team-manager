@@ -17,7 +17,7 @@ Success: `launch <feature> --workers ui,docs --live --automatic` on a feature th
 - `launch --workers a,b` selects a subset; the selection is pinned in `plan.json`. Omitted means every declared lane.
 - Excluded lanes' owned paths stay off-limits. Ownership is checked against the full declared policy; the candidate cherry-picks selected lanes only, in declared order.
 - `role` is a free label. Each lane declares `required_check_kinds`; the frontend/backend rule in `verification.py` is removed.
-- One lane is a valid run. The candidate is then that lane's snapshot, still verified in the combined phase.
+- One lane is a valid run. The candidate is then that lane's snapshot itself. Its first candidate attempt reuses the worker packet when the lane has no browser check; a browser lane, a retry and a repaired candidate are verified again in the combined phase.
 - The finding vocabulary changes with the lanes: `worker` is a lane id, `multiple` or `none`. `both` is not written any more, but is accepted from old exports.
 
 ## 3. Configuration
@@ -110,7 +110,7 @@ Offline unless marked live.
 | Scenario id | Asserts |
 | --- | --- |
 | three-lane-run | a `FakeSessions` automatic run with lanes `ui`, `adapter`, `docs` reaches a verified branch whose commits are the three lane snapshots in declared order; every per-lane file exists under its lane id |
-| one-lane-run | a run selecting one lane verifies it in both phases and integrates it |
+| one-lane-run | a run selecting one lane verifies it and integrates it; without a browser check its candidate reuses the worker packet (C28) |
 | subset-pinned | `launch --workers ui,docs` pins `workers` and `excluded_workers`; `prepare` creates two worktrees; `status` and the export list two lanes |
 | excluded-ownership | a selected lane whose snapshot touches a path owned by an excluded lane blocks at freeze with an ownership violation naming both lanes |
 | unknown-worker | `--workers ui,nope` and `--workers ui,ui` are refused before any Git action |

@@ -12,7 +12,7 @@ from unittest.mock import patch
 from jsonschema.exceptions import ValidationError
 
 from . import checks
-from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, text_test_counts, verify_revision
+from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, reuse_packet, text_test_counts, verify_revision
 from .sessions import git
 from .verification import validate_schema
 
@@ -241,6 +241,82 @@ class FileCaptureTests(unittest.TestCase):
         validate_schema("verificationEvidence", packet["evidence"])
         validate_schema("workerResult", packet["result"])
         self.assertEqual(recheck_packet(json.loads(saved), policy, self.run_dir)["gate"]["status"], "passed")
+
+
+class ReusedPacketTests(unittest.TestCase):
+    """C28: a single lane without a browser check reuses its worker packet at the candidate gate, by reference."""
+
+    def setUp(self):
+        self.fixture = FileCaptureTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        self.commit, self.changed = f.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        self.worker = f.verify(self.commit, self.changed)
+        self.worker_path = f.run_dir / "verification/worker/adapter/1/packet.json"
+
+    def reuse(self, policy=None, attempt=1, worker_path=None, commit=None):
+        f = self.fixture
+        return reuse_packet(f.run_dir, f.plan, policy or f.policy(), "adapter", commit or self.commit, worker_path or self.worker_path, attempt=attempt)
+
+    def test_the_candidate_packet_names_the_worker_packet_and_runs_nothing(self):
+        f = self.fixture
+        packet = self.reuse()
+        path = f.run_dir / "verification/candidate/adapter/1/packet.json"
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["phase"], "candidate")
+        self.assertEqual({key: saved["expected"][key] for key in ("run_id", "node_id", "attempt", "output_commit")},
+                         {"run_id": "run", "node_id": "adapter", "attempt": 1, "output_commit": self.commit})
+        self.assertEqual(saved["reused_from"], {"path": "verification/worker/adapter/1/packet.json",
+                                                "sha256": hashlib.sha256(self.worker_path.read_bytes()).hexdigest()})
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), ["packet.json"])  # No worktree, no check ran.
+        self.assertEqual((saved["gate"]["status"], saved["result"]["attempt"], saved["result"]["node_id"]), ("passed", 1, "adapter"))
+        self.assertEqual(saved["artifact_paths"], self.worker["artifact_paths"])  # The links resolve to the worker's artifacts.
+        self.assertEqual((packet["phase"], packet["gate"]["status"], packet["reused_from"]), ("candidate", "passed", saved["reused_from"]))
+        # The cache answers the same call with the same packet; recheck_packet re-gates the referenced worker packet.
+        self.assertEqual(recheck_packet(json.loads(path.read_text()), f.policy(), f.run_dir)["gate"]["status"], "passed")
+        self.assertEqual(self.reuse()["gate"]["status"], "passed")
+        self.assertEqual(f.verify(self.commit, self.changed, phase="candidate")["gate"]["status"], "passed")
+
+    def test_the_worker_packet_is_regated_in_the_candidate_phase(self):
+        f = self.fixture
+        policy = f.policy()
+        policy["workers"][0]["checks"].append({"id": "build", "kind": "build", "argv": [sys.executable, "-c", "raise SystemExit(1)"],
+                                               "timeout_seconds": 60, "scenarios": []})
+        commit, changed = f.snapshot({"docs/OTHER.md": b"# Other\n"})
+        worker = verify_revision(f.run_dir, f.plan, policy, "adapter", commit, changed, "session", attempt=2)
+        self.assertEqual((worker["gate"]["status"], worker["gate"]["deferred_checks"]), ("passed", ["build"]))
+        packet = self.reuse(policy=policy, commit=commit, worker_path=f.run_dir / "verification/worker/adapter/2/packet.json")
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        self.assertIn("build: exit 1", packet["gate"]["reasons"])
+        self.assertEqual(json.loads((f.run_dir / "verification/candidate/adapter/1/packet.json").read_text())["gate"]["status"], "blocked")
+
+    def test_a_changed_or_foreign_worker_packet_is_refused(self):
+        f = self.fixture
+        with self.assertRaisesRegex(ValueError, "is not the worker packet of adapter at"):
+            self.reuse(commit=self.fixture.base)  # Another revision than the one the worker packet verified.
+        self.assertFalse((f.run_dir / "verification/candidate").exists())
+        self.reuse()
+        path = f.run_dir / "verification/candidate/adapter/1/packet.json"
+        saved = json.loads(path.read_text())
+        # C24 still holds: the reused packet at another attempt's path is not that attempt's packet, and runs nothing.
+        other = f.run_dir / "verification/candidate/adapter/2/packet.json"
+        other.parent.mkdir(parents=True)
+        other.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, re.escape(f"Existing verification at {other} is the candidate packet of adapter attempt 1, "
+                                                          "not the candidate packet of adapter attempt 2")):
+            f.verify(self.commit, self.changed, phase="candidate", attempt=2)
+        # A reference to another file, or a worker packet changed after the reuse, is refused when rechecked.
+        for reference, message in (({**saved["reused_from"], "sha256": "0" * 64}, "Reused worker packet .* changed"),
+                                   ({**saved["reused_from"], "path": "../outside/packet.json"}, "Reused worker packet .* outside the run"),
+                                   ({**saved["reused_from"], "path": "verification/candidate/adapter/1/packet.json",
+                                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}, "is not the worker packet of adapter")):
+            with self.subTest(reference=reference["path"]), self.assertRaisesRegex(ValueError, message):
+                recheck_packet({**saved, "reused_from": reference}, f.policy(), f.run_dir)
+        self.worker_path.chmod(0o600)
+        self.worker_path.write_text(self.worker_path.read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "Reused worker packet .* changed"):
+            recheck_packet(json.loads(path.read_text()), f.policy(), f.run_dir)
 
 
 class VitestCountsTests(unittest.TestCase):

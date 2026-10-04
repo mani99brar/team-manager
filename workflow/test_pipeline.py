@@ -1014,6 +1014,18 @@ class RecordTests(unittest.TestCase):
                                                                 ("passed", "Candidate gate passed on attempt 2 after attempt 1 failed")])
         self.assertEqual(self.events("candidate_ui"), [("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step; not a retry.
 
+    def test_a_check_over_sixty_percent_of_its_timeout_is_named_in_its_verify_and_candidate_events(self):
+        f = self.fixture
+        # About 70% of a 4 s timeout; ui's quick build is not named.
+        f.policy["workers"][1]["checks"][0].update(timeout_seconds=4, argv=["python", "-c", "import time; time.sleep(2.8); print('Ran 1 test in 2.8s\\n\\nOK')"])
+        self.pin()
+        with self.graph() as graph:
+            self.review_gate(graph)
+        slow = r"; slow: unit took \d s of its 4 s timeout \((6[1-9]|[7-9]\d)%\)$"
+        self.assertRegex(self.events("verify_adapter")[-1][1], r"^Required tests and artifacts passed" + slow)
+        self.assertRegex(self.events("candidate_adapter")[-1][1], r"^Combined revision [0-9a-f]{40}" + slow)
+        self.assertEqual(self.events("verify_ui")[-1], ("passed", "Required tests and artifacts passed; recorded for the candidate gate: build (exit 0)"))
+
     def test_the_verify_message_keeps_the_viewers_prefix_and_puts_the_retry_last(self):
         from .pipeline import passed_message
         packet = {"gate": {"deferred_checks": ["build", "browser", "lint"]},
@@ -1557,7 +1569,8 @@ class CandidateRefTests(unittest.TestCase):
             save_json(packets[lane], {"gate": {"status": "passed"}, "expected": {"output_commit": sha}})
 
         def verified(directory, plan, policy, node, commit_, changed, session, phase="worker", attempt=1):
-            packet = {"gate": {"status": "passed", "reasons": []}, "expected": {"output_commit": commit_}}
+            # A packet with no checks: the candidate step reads its result and evidence for C27's slow note.
+            packet = {"gate": {"status": "passed", "reasons": []}, "expected": {"output_commit": commit_}, "result": {"checks": []}, "evidence": {"checks": []}}
             path = directory / "verification" / phase / node / str(attempt) / "packet.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             save_json(path, packet)

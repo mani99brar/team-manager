@@ -281,10 +281,12 @@ const CONTROLLER_DRIFT = /^Controller commit [0-9a-f]+ runs this step\b/
 const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
 /** abandon.py (C30): the `cancelled` row of a run the operator abandoned. */
 const ABANDONED_ROW = /^Abandoned by the (?:operator|maintainer)\b/
+/** pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches. */
+const LAUNCH_NOTES = /^Launch notes: /
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT]
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT, LAUNCH_NOTES]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS, LAUNCH_NOTES]
 /** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
 const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */
@@ -361,9 +363,10 @@ const PHRASES: Phrase[] = [
   [/^Launching or reconciling the exact native session$/, () => 'launching the native session'],
   [PID_ROW, pid => `controller started (PID ${pid})`],
   [/^Attempt (\d+); revision (\S+)$/, (k, revision) => `attempt ${k} started · revision ${revision}`],
-  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+?)(?:; (passed on attempt \d+ after attempt \d+ failed))?$/,
-    (checks, retry) => `passed · ${checks} gated at the candidate${retry ? ` · ${retry}` : ''}`],
-  [/^Combined revision (\S+)$/, revision => `combined revision ${revision}`],
+  // The retry, then C27's slow note, follow the checks; C28's reuse note or the slow note follow a combined revision.
+  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+?)(?:; (passed on attempt \d+ after attempt \d+ failed))?(?:; (slow: .+))?$/,
+    (checks, retry, slow) => `passed · ${checks} gated at the candidate${retry ? ` · ${retry}` : ''}${slow ? ` · ${slow}` : ''}`],
+  [/^Combined revision (\S+)(?:; (.+))?$/, (revision, note) => `combined revision ${revision}${note ? ` · ${note}` : ''}`],
   [/^Candidate gate blocked on attempt (\d+): (.+)$/, (k, reasons) => `gate blocked on attempt ${k}: ${reasons}`],
   [/^Candidate gate passed on attempt (\d+) after attempt (\d+) failed$/, (k, before) => `gate passed on attempt ${k} after attempt ${before} failed`],
   [/^Fast-forwarded to (\S+); no push performed$/, commit => `fast-forwarded to ${commit} · no push performed`],

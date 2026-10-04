@@ -93,6 +93,57 @@ def validate_policy(policy: dict) -> dict:
     return policy
 
 
+TEST_KINDS = ("unit", "integration", "contract", "browser")
+
+
+def policy_lint(policy: dict, previous: dict | None, since: str | None = None) -> list[str]:
+    """Launch notes on a valid policy, never a refusal (C27): (a) each lane that requires no test kind, which is allowed
+    (the operator may decline tests); (c) each lane's required kinds and check ids that `previous`, the pinned policy of
+    the feature's previous run (`since` names it), had and this one removed. Added checks and owned paths are no note."""
+    notes = []
+    before = {}
+    if previous is not None:
+        for worker in previous.get("workers", []):
+            try:
+                before[worker["node_id"]] = (set(required_kinds(previous, worker)), {check["id"] for check in worker["checks"]})
+            except (KeyError, TypeError, ValueError):
+                continue  # A previous policy this controller cannot read lists nothing removed.
+    for worker in policy["workers"]:
+        node, kinds = worker["node_id"], required_kinds(policy, worker)
+        if not set(kinds) & set(TEST_KINDS):
+            notes.append(f"Lane {node} requires no test kind ({', '.join(TEST_KINDS[:-1])} or {TEST_KINDS[-1]}), only {', '.join(kinds) or 'none'}. "
+                         "That is allowed when tests were declined; for information only.")
+        if node in before:
+            old_kinds, old_checks = before[node]
+            removed = [f"required kind {kind} removed" for kind in sorted(old_kinds - set(kinds))]
+            removed += [f"check {check} removed" for check in sorted(old_checks - {check["id"] for check in worker["checks"]})]
+            if removed:
+                notes.append(f"Lane {node} requires fewer checks than the policy of {since or 'the previous run'}: {'; '.join(removed)}.")
+    return notes
+
+
+SLOW_SHARE = 0.6  # A check over this share of its timeout is named in its verify and candidate events (C27 rule e).
+
+
+def slow_checks(worker: dict, result: dict, evidence: dict) -> list[str]:
+    """Each of the lane's checks whose execution took more than SLOW_SHARE of its timeout: `unit took 210 s of its 300 s timeout (70%)`."""
+    named = []
+    executions = result.get("checks", [])
+    timeouts = {check["id"]: check["timeout_seconds"] for check in worker["checks"]}
+    for receipt in evidence.get("checks", []):
+        index, timeout = receipt.get("worker_check_index"), timeouts.get(receipt.get("id"))
+        if timeout is None or not isinstance(index, int) or not 0 <= index < len(executions):
+            continue
+        try:
+            execution = executions[index]
+            seconds = (datetime.fromisoformat(execution["finished_at"]) - datetime.fromisoformat(execution["started_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if seconds > SLOW_SHARE * timeout:
+            named.append(f"{receipt['id']} took {seconds:.0f} s of its {timeout} s timeout ({round(100 * seconds / timeout)}%)")
+    return named
+
+
 def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dict,
                     artifact_root: Path, artifact_paths: dict[str, Path], enforce_ownership: bool = True,
                     phase: str = "candidate") -> dict:

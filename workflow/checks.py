@@ -289,7 +289,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
         if found != (phase, node, attempt):
             raise ValueError(f"Existing verification at {packet_path} is the {found[0]} packet of {found[1]} attempt {found[2]}, "
                              f"not the {phase} packet of {node} attempt {attempt}; it is never reused")
-        if packet["expected"]["output_commit"] != commit or packet["evidence"]["policy_sha256"] != policy_digest(policy):
+        # A reused candidate packet has no evidence of its own: recheck_packet gates its worker packet's against the policy.
+        if packet["expected"]["output_commit"] != commit or ("evidence" in packet and packet["evidence"]["policy_sha256"] != policy_digest(policy)):
             raise ValueError("Existing verification belongs to a different revision/policy")
         return recheck_packet(packet, policy, run)
     if directory.exists():
@@ -434,7 +435,64 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": scenarios})
 
 
+def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, worker_path: Path, attempt: int = 1) -> dict:
+    """The candidate packet of a lane whose candidate is its own snapshot: the worker packet at `worker_path`, re-gated in the
+    candidate phase, instead of a second verification worktree (C28). Nothing runs.
+
+    The saved packet carries the call's own phase, lane and attempt and `reused_from`: the worker packet's run-relative path
+    and sha256. recheck_packet loads that packet again, checks its digest and gates it as a candidate packet, so the cache
+    rule of verify_revision (a packet of another phase, lane or attempt is never reused) still holds. Its `result` and
+    `artifact_paths` are copies for readers of the file (the viewer, report.html); no gate trusts them.
+    """
+    directory = run / "verification" / "candidate" / node / str(attempt)
+    packet_path = directory / "packet.json"
+    if packet_path.exists():
+        return verify_revision(run, plan, policy, node, commit, [], "", phase="candidate", attempt=attempt)
+    if directory.exists():
+        raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
+    worker_path = Path(worker_path).resolve()
+    if not worker_path.is_relative_to(run.resolve()):
+        raise ValueError(f"Reused worker packet {worker_path} is outside the run")
+    with worker_path.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    worker = json.loads(worker_path.read_text())
+    expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
+                "output_commit": commit, "verification_cwd": worker["expected"]["verification_cwd"]}
+    packet = {"phase": "candidate", "expected": expected,
+              "reused_from": {"path": str(worker_path.relative_to(run.resolve())), "sha256": digest}}
+    gated = recheck_packet(packet, policy, run)
+    reused = packet["reused_from"]["path"]
+    directory.mkdir(parents=True, mode=0o700)
+    result = {**gated["result"], "attempt": attempt, "summary": f"Worker check capture {reused} reused for the candidate gate; not integration approval"}
+    save_json(packet_path, {**packet, "result": result, "artifact_root": gated["artifact_root"], "artifact_paths": gated["artifact_paths"],
+                            "gate": gated["gate"]})
+    return gated
+
+
+def recheck_reused(packet: dict, policy: dict, run: Path) -> dict:
+    """A reused candidate packet (reuse_packet): its worker packet, unchanged since, of this lane and revision, gated as a
+    candidate packet, under the candidate packet's own phase, expectation and reference."""
+    reference = packet["reused_from"]
+    path = (run / reference["path"]).resolve()
+    if not path.is_relative_to(run.resolve()):
+        raise ValueError(f"Reused worker packet {reference['path']} is outside the run")
+    if not path.is_file():
+        raise ValueError(f"Reused worker packet {reference['path']} is missing")
+    with path.open("rb") as handle:
+        if hashlib.file_digest(handle, "sha256").hexdigest() != reference["sha256"]:
+            raise ValueError(f"Reused worker packet {reference['path']} changed after its reuse")
+    worker = json.loads(path.read_text())
+    expected = packet["expected"]
+    if (worker.get("phase"), "reused_from" in worker) != ("worker", False) or any(
+            worker["expected"][key] != expected[key] for key in ("run_id", "node_id", "base_commit", "output_commit")):
+        raise ValueError(f"{reference['path']} is not the worker packet of {expected['node_id']} at {expected['output_commit']}")
+    gated = recheck_packet({**worker, "phase": "candidate"}, policy, run)
+    return {**gated, "phase": "candidate", "expected": expected, "reused_from": reference}
+
+
 def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
+    if "reused_from" in packet:
+        return recheck_reused(packet, policy, run)
     root = Path(packet["artifact_root"]).resolve()
     if not root.is_relative_to(run.resolve()):
         raise ValueError("Artifact root outside run")
