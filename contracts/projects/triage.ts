@@ -1061,7 +1061,12 @@ export function deriveNow(run: NowInput): Now {
     run, timeline, rows, focus, scope: scopeStart(run.detail, rows, focus), status: run.detail.snapshot.status, results: run.results ?? new Map(), missing: new Set(),
     automatic: automaticRun(run, rows),
   }
-  const rules = [questionNow, paneNow, approvalNow, challengeNow, interruptedNow, blockedBeforeFreezeNow, identicalNow, checkFailedNow, reviewBlockedNow, runningNow, succeededNow, inactiveNow, unmatchedNow]
+  // An abandoned run (C30) reads cancelled at run level while its nodes keep their statuses: the rules that assume a live
+  // run (a gate to decide, a challenge to resume, a lane to repair or retry, steps still running) no longer apply, since
+  // abandon refuses every command they name. A review-blocked run keeps its brief and follow-up launch.
+  const live = context.status !== 'cancelled'
+  const rules = [questionNow, paneNow, ...live ? [approvalNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
+    ...live ? [identicalNow, checkFailedNow] : [], reviewBlockedNow, ...live ? [runningNow] : [], succeededNow, inactiveNow, unmatchedNow]
   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
   return { interruption: null, lane: null, reason: null, reasonSource: null, since: focus?.since ?? null, ...now, focus, missing: [...context.missing] }
 }
@@ -1541,8 +1546,10 @@ function succeededNow(context: Context): Draft | null {
 
 function inactiveNow(context: Context): Draft | null {
   if (context.status !== 'cancelled' && context.status !== 'pending') return null
+  // abandon.py's row says who abandoned the run and why.
+  const abandoned = context.rows.filter(row => row.status === 'cancelled' && ABANDONED_ROW.test(row.event.message)).at(-1) ?? null
   return {
-    situation: 'inactive', tone: 'inactive', glyph: '○',
+    situation: 'inactive', tone: 'inactive', glyph: '○', ...abandoned ? { since: abandoned.event.occurred_at, reason: [abandoned.event.message], reasonSource: 0 as const } : {},
     headline: [context.status === 'cancelled' ? '○ Cancelled before completion' : '○ Not started: nothing has run yet'],
     next: { action: 'none', label: 'Nothing to do.', runbook: [], steps: [], caveat: null },
   }

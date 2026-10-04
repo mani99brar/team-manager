@@ -977,6 +977,41 @@ describe('deriveNow', () => {
     assert.equal(checked(synthetic({ status: 'pending', nodes: {}, events: [] })).situation, 'inactive')
   })
 
+  // C30: the server reads an abandoned run cancelled at run level, but its nodes keep their statuses. Nothing that
+  // assumes a live run applies: abandon refuses resume, retry, repair, freeze and approve.
+  const ABANDONED: EventSpec = [10800, null, 'cancelled', 'Abandoned by the operator: usage limit hit; followed up by run-002. Stopped: game']
+
+  it('inactive: a run abandoned while its worker ran reads cancelled, not running', () => {
+    const now = checked(synthetic({ status: 'cancelled', nodes: WORKING, events: [...LAUNCHED, ABANDONED] }))
+    assert.equal(now.situation, 'inactive')
+    assert.match(textToString(now.headline, T0), /^○ Cancelled before completion/)
+    assert.match(textToString(now.reason, T0), /Abandoned by the operator: usage limit hit; followed up by run-002/)
+    assert.doesNotMatch(prose(now), /Running|supervising|deadline/)
+    assert.deepEqual(commands(now), [])
+  })
+
+  it('inactive: a run abandoned while paused at the design challenge offers no resume', () => {
+    const now = checked(synthetic({
+      status: 'cancelled', nodes: { challenge: 'paused' },
+      events: [[0, 'challenge', 'running', 'Design challenge attempt 1: one print job, session 81e2b324-da2f-47a3-9d66-e9f8ad35e964'],
+        [150, 'challenge', 'paused', 'Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s)'], ABANDONED],
+      inputs: inputs => {
+        const challenge = inputs.challenge!
+        inputs.challenge = { ...challenge, status: 'paused', attempt: 1, attempts: 1, concerns: [{ ...challenge.concerns[0], severity: 'P1', message: 'Seats can be squatted.' }, ...challenge.concerns.slice(1)] }
+      },
+    }))
+    assert.equal(now.situation, 'inactive')
+    assert.match(textToString(now.headline, T0), /^○ Cancelled before completion/)
+    assert.ok(!commands(now).some(command => /resume|accept-challenge/.test(command)))
+  })
+
+  it('review_blocked: an abandoned blocked run keeps the brief and the follow-up launch', () => {
+    const blocked = runData(skeleton)
+    const now = checked({ ...blocked, detail: { ...blocked.detail, snapshot: { ...blocked.detail.snapshot, status: 'cancelled' } } })
+    assert.equal(now.situation, 'review_blocked')
+    assert.equal(commands(now)[0], '"$PY" -m workflow brief "$RUN"')
+  })
+
   it('no_rule_matched: a failed run', () => {
     const now = checked(synthetic({
       status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'succeeded', approval: 'succeeded', integrate: 'failed' },
