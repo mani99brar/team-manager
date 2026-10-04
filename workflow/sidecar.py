@@ -685,7 +685,17 @@ def typed_text(message: dict) -> str:
 
 def deliver_one(runtime, message: dict, herdr: Herdr) -> tuple[str, str | None]:
     """(status, reason) of one pending message; typed only after a fresh gate (PRD 4.5). Exceptions are the caller's."""
-    directory, plan, lane = runtime.directory, runtime.plan, message["lane"]
+    return deliver_text(runtime, message["lane"], typed_text(message), herdr)
+
+
+def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None) -> tuple[str, str | None]:
+    """(status, reason) of typing `text` into `lane`'s pane, then Enter, behind the sidecar's gate: `refused` for a run
+    after freeze, a lane not launched, a lane that went on and a lane waiting on a question; `undeliverable` without
+    Herdr, without a pane, while the lane's row is not `working` or `idle`, while the pane is not attached to the lane's
+    session, and while its input line is not empty. A sidecar message (deliver_one) and an operator's note
+    (`workflow note`) both pass it. `text` is typed as given. Exceptions are the caller's."""
+    directory, plan = runtime.directory, runtime.plan
+    herdr = herdr or Herdr(directory)
     reason = refusal(directory, plan, lane)
     if reason:
         return "refused", reason
@@ -706,7 +716,7 @@ def deliver_one(runtime, message: dict, herdr: Herdr) -> tuple[str, str | None]:
         return "undeliverable", "pane_not_attached"
     if input_shown(herdr.call("pane", "read", pane, "--source", "visible", text=True), ""):
         return "undeliverable", "pane_busy"  # A dialog replaced the input line, or the operator has a draft typed.
-    herdr.call("pane", "send-text", pane, typed_text(message))
+    herdr.call("pane", "send-text", pane, text)
     herdr.call("pane", "send-keys", pane, "Enter")
     return "delivered", None
 

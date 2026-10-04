@@ -8,7 +8,7 @@ The LangGraph workflow in `workflow/` can drive any git repository, not only md-
 
 Success:
 
-- From md-manager's checkout, `.venv/bin/python -m workflow launch <feature> --repo ~/dev/project-B --live --automatic` runs a feature defined in `~/dev/project-B/features/<feature>/`, stores the run under `~/.local/state/agent-workflows/project-B/<feature>/`, and the run appears in the Projects viewer without editing the registry by hand.
+- From md-manager's checkout, `.venv/bin/python -m workflow launch <feature> --repo ~/dev/project-B --live --automatic --by operator` runs a feature defined in `~/dev/project-B/features/<feature>/`, stores the run under `~/.local/state/agent-workflows/project-B/<feature>/`, and the run appears in the Projects viewer without editing the registry by hand.
 - `workflow init <feature> --repo X` writes a feature directory that fails validation until its placeholders are filled in, and passes once they are.
 - A lane task missing `## Goal`, `## Acceptance` or `## Stop` is refused at launch.
 - A design challenge with a P0 or P1 pauses the run before any worker is launched.

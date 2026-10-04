@@ -96,7 +96,7 @@ class Isolated(unittest.TestCase):
     def refused(self, *argv: str) -> str:
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
-                launch_main(list(argv))
+                launch_main(list(argv) if "--by" in argv or "--dry-run" in argv else [*argv, "--by", "operator"])
         command.assert_not_called()
         self.assertEqual(exit_.exception.code, 1)
         return errors.getvalue()
@@ -106,7 +106,7 @@ class Isolated(unittest.TestCase):
         calls = []
         with patch("workflow.launch.subprocess.run", side_effect=lambda command, cwd, check: calls.append((command, cwd))), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            launch_main([*argv, "--live"])
+            launch_main([*argv, "--live", "--by", "operator"])
         return calls
 
 
@@ -258,8 +258,8 @@ class MdManagerDefaults(Isolated):
              "--task", f"ui={folder / 'ui-task.md'}", "--task", f"adapter={folder / 'adapter-task.md'}",
              "--reviewer", f"general={folder / 'reviewers/general.md'}", "--reviewer", f"coverage={folder / 'reviewers/coverage.md'}",
              "--automatic", "--worker-timeout-seconds", "14400", "--review-timeout-seconds", "1800", "--reviewer-transport", "print"],
-            [*base, "start", str(run), "--live", "--herdr"],
-            [*base, "automatic", str(run), "--live"],
+            [*base, "start", str(run), "--live", "--by", "operator", "--herdr"],
+            [*base, "automatic", str(run), "--live", "--by", "operator"],
         ]
         with contextlib.chdir(TOOL):
             printed = self.dry_run("viewer-clarity", "--automatic", "--reviewer-transport", "print")

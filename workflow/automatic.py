@@ -491,7 +491,7 @@ def check_finding_lanes(runtime, findings: list) -> None:
 
 REVIEW_COMPLETION_LIMIT = 262144
 REVIEW_RESUME_NOTE = ("Controller interrupted while waiting for the reviewers. The native reviewer sessions were NOT stopped "
-                      "and keep running; resume with: python -m workflow automatic {directory} --live")
+                      "and keep running; resume with: python -m workflow automatic {directory} --live --by operator")
 BUILTIN_REVIEW_BRIEF = Path(__file__).resolve().parent / "prompts" / "review.md"
 # The tool's own copy: the target repository needs no contracts/ directory.
 REVIEW_COMPLETION_SCHEMA = CONTRACTS / "reviewCompletion.schema.json"
@@ -574,6 +574,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
     """The brief, then the rubric and the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the
     lane repairs, a 1.1.0 run's inputs and worker claims. Both transports build on it (print_review_prompt; the native
     completion protocol), so a replay can too."""
+    from .notes import notes_note
     from .repair import repair_note
     return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
@@ -583,7 +584,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
-            + repair_note(runtime.directory) + worker_claims(runtime) + decisions_block(runtime.plan))
+            + repair_note(runtime.directory) + notes_note(runtime.directory, lanes(runtime)) + worker_claims(runtime) + decisions_block(runtime.plan))
 
 
 def print_review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
@@ -1699,10 +1700,14 @@ class Timeline:
         self.poll()
 
 
-def supervise(directory: Path) -> None:
-    """Each recovery uses a new controller process, not just an in-memory replay."""
+def supervise(directory: Path, actor: str | None = None) -> None:
+    """Each recovery uses a new controller process, not just an in-memory replay. `automatic --live` passes its --by
+    (`actor`), recorded once the supervisor lock is held; `resume` already recorded its own."""
     validate_automatic(read_json(directory / "plan.json"))
     with run_lock(directory, "automatic-supervisor.lock"), Timeline(directory):
+        if actor:
+            from .pipeline import action_event, append_event
+            action_event(lambda *row: append_event(directory, *row), actor, "automatic", "the supervisor continues the run")
         (directory / REVIEW_RESTART).unlink(missing_ok=True)  # Each `automatic --live` may re-enter a review that launched nothing once.
         for _ in range(45):
             try:
@@ -1720,15 +1725,15 @@ def supervise(directory: Path) -> None:
 
 
 RESUME_NOTE = ("Supervisor interrupted. Native workers were NOT stopped and keep running; "
-               "resume with: python -m workflow automatic {directory} --live")
+               "resume with: python -m workflow automatic {directory} --live --by operator")
 # automatic-step exits 75 when a checkpoint persisted (the supervisor continues in a new process) and 69
 # (EX_UNAVAILABLE) when Claude Code itself was unavailable; then the supervisor, `automatic`, exits 75 itself.
 UNAVAILABLE_EXIT = 69
 UNAVAILABLE_NOTE = ("Claude Code was unavailable (an update replacing it, or its background service restarting). Nothing was "
                     "stopped: the native sessions keep running. Once `claude` works, resume with: "
-                    "python -m workflow automatic {directory} --live")
+                    "python -m workflow automatic {directory} --live --by operator")
 REVIEW_STOP_NOTE = ("Reviewer stop not confirmed after acceptance: {error}. The verdict is kept; inspect the reviewer "
-                    "session, then resume retries the stop with: python -m workflow automatic {directory} --live")
+                    "session, then resume retries the stop with: python -m workflow automatic {directory} --live --by operator")
 
 
 def reviewer_stop_pending(runtime, state) -> bool:
@@ -1775,7 +1780,7 @@ REVIEW_RESTART = "review-restart.json"
 def partial_review_stop(runtime, worktree: Path) -> str:
     """The stop for a review worktree a failed review left behind, with the commands that remove it and continue the run."""
     return (f"Partial review worktree {worktree} left by the failed review; remove it with git worktree remove --force {worktree}, "
-            f"then rerun: python -m workflow automatic {runtime.directory} --live")
+            f"then rerun: python -m workflow automatic {runtime.directory} --live --by operator")
 
 
 def restart_review(runtime, state) -> bool:
@@ -1803,7 +1808,7 @@ def restart_review(runtime, state) -> bool:
 
 FREEZE_INTERRUPTED = "freeze-interrupted.json"
 FREEZE_RESUME_NOTE = ("The freeze was stopping the workers: resume completes the stops it recorded (<lane>.stop.json) and relaunches "
-                      "nothing. Once `claude` works, resume with: python -m workflow automatic {directory} --live")
+                      "nothing. Once `claude` works, resume with: python -m workflow automatic {directory} --live --by operator")
 
 
 def freeze_failure(state) -> str | None:
@@ -1913,7 +1918,7 @@ def resumable_stop(runtime, message: str) -> RuntimeError:
 
 def resume_note(runtime) -> str:
     """How a resumable stop's message ends: the resume, once the step it names first is done."""
-    return f"then resume with: python -m workflow automatic {runtime.directory} --live"
+    return f"then resume with: python -m workflow automatic {runtime.directory} --live --by operator"
 
 
 def source_branch_note(runtime, branch: str) -> str:
@@ -1929,11 +1934,11 @@ def start_note(runtime, state) -> str:
     receipts name and launches nothing), or a run whose graph never started is started."""
     if not state.values:
         return (f"Automatic supervision requires a completed start: the run was never started, so no worker was launched. Start it "
-                f"with: python -m workflow start {runtime.directory} --live, {resume_note(runtime)}")
+                f"with: python -m workflow start {runtime.directory} --live --by operator, {resume_note(runtime)}")
     steps = [name for name in state.next if name.startswith("launch_")]
     return (f"Automatic supervision requires a completed start: {listing(steps)} did not complete. Nothing was stopped or relaunched: "
             f"inspect {'its receipt' if len(steps) == 1 else 'their receipts'} and `claude agents --json`, reconcile with: "
-            f"python -m workflow reconcile {runtime.directory}, {resume_note(runtime)}")
+            f"python -m workflow reconcile {runtime.directory} --by operator, {resume_note(runtime)}")
 
 
 def graph_state(runtime):

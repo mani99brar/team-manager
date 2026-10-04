@@ -51,6 +51,24 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertIn("--live", commands[3])
         self.assertIn("--herdr", commands[3])
 
+    def test_launch_passes_its_by_to_start_and_automatic_and_refuses_the_maintainer(self):
+        """C17: the steps a launch runs carry its --by; a launch is the operator's decision."""
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "by-test", Path("/tmp/workflow-launch-tests"), automatic=True, by="operator")
+        self.assertEqual([command[3:] for command in commands if command[3:4] in (["start"], ["automatic"])],
+                         [["start", "/tmp/workflow-launch-tests/by-test", "--live", "--by", "operator", "--herdr"],
+                          ["automatic", "/tmp/workflow-launch-tests/by-test", "--live", "--by", "operator"]])
+        calls = []
+        with tempfile.TemporaryDirectory() as root, patch("workflow.launch.subprocess.run", side_effect=lambda command, cwd, check: calls.append(command)), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-root", root])
+        self.assertEqual([command[-2:] for command in calls if command[3:4] in (["start"], ["automatic"])], [["--by", "operator"]] * 2)
+        for argv, refusal in (([], "launch requires --by operator|maintainer"), (["--by", "maintainer"], "launch is the operator's decision")):
+            with self.subTest(argv=argv), patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(SystemExit):
+                    main(["project-workflows", "--repo", str(self.repo), "--live", *argv])
+            command.assert_not_called()
+            self.assertIn(refusal, errors.getvalue())
+
     def test_automatic_plan_keeps_launches_in_graph_and_adds_supervision(self):
         _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
         self.assertIn("--automatic", commands[2])
@@ -101,7 +119,7 @@ class FeatureLaunchTests(unittest.TestCase):
             with self.subTest(returncode=returncode), patch("workflow.launch.subprocess.run", side_effect=run), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit) as exited:
-                    main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr",
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr",
                           "--run-id", f"auto-{returncode}", "--run-root", str(self.root / "runs")])
                 self.assertEqual(exited.exception.code, expected_code)
                 self.assertIn(expected, errors.getvalue())
@@ -117,7 +135,7 @@ class FeatureLaunchTests(unittest.TestCase):
             run_id = "finish-automatic" if automatic else "finish-manual"
             with self.subTest(automatic=automatic), patch("workflow.launch.subprocess.run"), contextlib.redirect_stdout(io.StringIO()) as output, \
                     contextlib.redirect_stderr(io.StringIO()):
-                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
                       *(["--automatic"] if automatic else [])])
                 run = (self.root / "runs" / run_id).resolve()
                 self.assertEqual(output.getvalue().splitlines()[0],
@@ -139,7 +157,7 @@ class FeatureLaunchTests(unittest.TestCase):
             (Path(root) / "project-workflows-001").mkdir()
             with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    main(["project-workflows", "--repo", str(self.repo), "--live", "--run-root", root])
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--run-root", root])
             command.assert_not_called()
 
     def test_run_id_cannot_escape_storage(self):

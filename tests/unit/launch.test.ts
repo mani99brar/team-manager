@@ -124,7 +124,7 @@ describe('the Questions section', () => {
   test('both answer forms name the lane; --no-herdr is the second', () => {
     const next = answerNext('duel')
     const commands = next.steps.flatMap(step => (step.kind === 'command' ? [step.text] : []))
-    assert.deepEqual(commands, ['"$PY" -m workflow answer "$RUN" duel "<your answer>"', '"$PY" -m workflow answer "$RUN" duel "<your answer>" --no-herdr'])
+    assert.deepEqual(commands, ['"$PY" -m workflow answer "$RUN" duel "<your answer>" --by operator', '"$PY" -m workflow answer "$RUN" duel "<your answer>" --by operator --no-herdr'])
     assert.match(next.caveat ?? '', /exits 1/)
   })
 })

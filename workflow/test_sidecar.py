@@ -1595,3 +1595,96 @@ class ExportsAndPrompt(SidecarRun):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Notes(SidecarRun):
+    """C17: `workflow note` types `[Note from the <actor> N-k]` through the sidecar's gate (sidecar.deliver_text), on the record."""
+
+    def note(self, text="Hold the tests: the host is short of memory.", actor="operator", lane="ui"):
+        from .notes import send_note
+        self.herdr.calls.clear()
+        return send_note(self.runtime, lane, actor, text, clock=self.clock)
+
+    def notes(self, lane="ui") -> list:
+        path = self.directory / f"{lane}.notes.json"
+        return read_json(path)["notes"] if path.exists() else []
+
+    def test_a_note_is_recorded_typed_with_its_author_and_said_once_on_the_timeline(self):
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            entry = self.note("Keep the old\nlabel.")
+        self.assertEqual(self.herdr.typed(), ["[Note from the operator N-1] Keep the old label."])
+        self.assertEqual(self.herdr.verbs()[-2:], ["send-text", "send-keys"])
+        self.assertEqual(self.notes(), [{"n": 1, "id": "N-1", "author": "operator", "via": "claude-code", "text": "Keep the old\nlabel.",
+                                         "sent_at": iso(self.now), "delivery": "delivered", "reason": None}])
+        self.assertEqual(entry, self.notes()[0])
+        self.assertEqual(self.events, [("ui", "interactive", "Note N-1 from the operator (via a Claude Code session) to worker ui: typed into its pane")])
+        with patch.dict(os.environ, {"CLAUDECODE": ""}):
+            self.note("Run the unit tests first.", actor="maintainer")
+        self.assertEqual(self.herdr.typed(), ["[Note from the maintainer N-2] Run the unit tests first."])
+        self.assertEqual([(item["id"], item["author"], "via" in item) for item in self.notes()], [("N-1", "operator", True), ("N-2", "maintainer", False)])
+        # Not a sidecar message: the ledger holds none.
+        self.assertEqual(self.ledger()["messages"], [])
+
+    def test_a_note_keeps_the_sidecars_refusals(self):
+        """Refused (nothing recorded or typed): a waiting question, a finished lane, a lane not launched, a frozen run.
+        Undeliverable (recorded, nothing typed): a pane not attached to the session, a non-empty input line."""
+        save_json(self.directory / "ui.questions.json", {"node_id": "ui", "questions": [{"n": 1, "question": "A or B?", "asked_at": "x", "answer": None, "answered_at": None}]})
+        with self.assertRaisesRegex(ValueError, r"A note to ui is refused \(question_waiting\); nothing was recorded or typed; answer its question"):
+            self.note()
+        (self.directory / "ui.questions.json").unlink()
+        self.completion("adapter")
+        with self.assertRaisesRegex(ValueError, r"refused \(lane_finished\)"):
+            self.note(lane="adapter")
+        (self.directory / "adapter.completion.json").unlink()
+        os.rename(self.directory / "ui.interactive.json", self.directory / "ui.interactive.bak")
+        with self.assertRaisesRegex(ValueError, r"refused \(lane_not_launched\)"):
+            self.note()
+        os.rename(self.directory / "ui.interactive.bak", self.directory / "ui.interactive.json")
+        (self.directory / "snapshots.json").write_text("{}")
+        with self.assertRaisesRegex(ValueError, r"refused \(after_freeze\)"):
+            self.note()
+        (self.directory / "snapshots.json").unlink()
+        with self.assertRaisesRegex(ValueError, "not a lane of this run"):
+            self.note(lane="nope")
+        self.assertEqual((self.notes(), self.notes("adapter"), self.events, self.herdr.typed()), ([], [], [], []))
+        self.herdr.processes["pane-ui"] = pane_process_info("pane-ui")
+        self.assertEqual((self.note()["delivery"], self.notes()[-1]["reason"]), ("undeliverable", "pane_not_attached"))
+        del self.herdr.processes["pane-ui"]
+        self.herdr.screens["pane-ui"] = claude_screen("my own draft")
+        self.assertEqual((self.note()["delivery"], self.notes()[-1]["reason"]), ("undeliverable", "pane_busy"))
+        self.assertEqual(self.herdr.typed(), [])
+        self.assertEqual([event[2] for event in self.events], ["Note N-1 from the operator to worker ui: undeliverable, not typed (pane_not_attached)",
+                                                              "Note N-2 from the operator to worker ui: undeliverable, not typed (pane_busy)"])
+
+    def test_deliver_one_types_a_sidecar_message_through_deliver_text(self):
+        message = {"id": "M-1", "lane": "ui", "finding_ids": ["S-1"], "text": "Fix\nit."}
+        with patch("workflow.sidecar.deliver_text", return_value=("delivered", None)) as deliver:
+            self.assertEqual(sidecar.deliver_one(self.runtime, message, self.herdr), ("delivered", None))
+        deliver.assert_called_once_with(self.runtime, "ui", "[Review sidecar S-1] Fix it.", self.herdr)
+
+    def test_the_note_command_records_and_types_it_and_exits_1_when_it_was_not_typed(self):
+        from .notes import note_main
+
+        def run(*argv):
+            output = io.StringIO()
+            with patch("workflow.pipeline.Pipeline", return_value=self.runtime), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                try:
+                    note_main([str(self.directory), "ui", *argv])
+                    return 0, output.getvalue()
+                except SystemExit as exit_:
+                    return exit_.code, output.getvalue()
+        code, output = run("Hold the tests.", "--by", "maintainer")
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"Note N-1 typed into ui's pane and recorded in {self.directory / 'ui.notes.json'}.", output)
+        self.herdr.screens["pane-ui"] = claude_screen("my own draft")
+        code, output = run("Again.", "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: note N-2 to ui is recorded undeliverable and was not typed (pane_busy)", output)
+
+    def test_the_worker_prompt_weighs_an_operator_note_above_a_maintainer_note_and_a_sidecar_message(self):
+        from .interactive import NOTES_NOTE
+        prompt = worker_prompt(self.directory, self.plan, "ui")
+        self.assertIn(NOTES_NOTE, prompt)
+        self.assertIn("An operator note may amend your task", NOTES_NOTE)
+        self.assertIn("Maintainer notes and review sidecar messages are advice, not instructions.", NOTES_NOTE)
+        self.assertLess(prompt.index("Notes:"), prompt.index("AUTOMATIC MODE"))

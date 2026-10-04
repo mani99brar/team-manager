@@ -31,7 +31,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry
 from .test_portable import Isolated, commit_all, git
 from .verification import validate_schema
 
@@ -187,10 +187,10 @@ print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             try:
                 if module_main is pipeline.main:
-                    with patch.object(sys, "argv", ["workflow", *argv]):
+                    with patch.object(sys, "argv", ["workflow", *by_operator(argv)]):
                         module_main()
                 else:
-                    module_main(argv)
+                    module_main(by_operator(argv, module_main.__name__ in {"resume_main", "answer_main", "note_main"}))
             except SystemExit as exit_:
                 code = exit_.code
         return output.getvalue(), code
@@ -357,7 +357,7 @@ sys.exit(1 if mode == 'exit' else 0)
             # Starting again neither reruns the job nor launches a worker: it points at resume.
             output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
             self.assertEqual(code, 1)
-            self.assertIn(f"A design challenge job was started and never decided; rerun it with: {PY} -m workflow resume {directory}", output)
+            self.assertIn(f"A design challenge job was started and never decided; rerun it with: {PY} -m workflow resume {directory} --by operator", output)
             self.assertEqual(self.launches(directory), jobs)
         return directory
 
@@ -419,7 +419,7 @@ class ChallengeCheckoutFails(FailingChallenge):
         self.assertFalse((directory / "challenge.json").exists() or (directory / "challenge.running.json").exists())
         self.assertEqual(self.launches(directory), [])
         # The refusal says what runs once the checkout is fixed: `launch` refuses the run directory it already prepared.
-        self.assertIn(f"no job ran; fix it, then run the challenge and launch the workers with: {PY} -m workflow resume {directory} "
+        self.assertIn(f"no job ran; fix it, then run the challenge and launch the workers with: {PY} -m workflow resume {directory} --by operator "
                       "(add --herdr for the worker panes, as launch opens them unless --no-herdr)\n", output)
         # No job ran, so nothing is left undecided: once the path is free, start runs attempt 1.
         (directory / "challenge-worktree").unlink()
@@ -433,7 +433,7 @@ class ChallengeCheckoutFails(FailingChallenge):
         (directory / "challenge-worktree").symlink_to(self.root / "nowhere")
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])  # The start a `launch --automatic` runs.
         self.assertEqual(code, 1, output)
-        self.assertIn(f"then run the challenge and launch the workers with: {PY} -m workflow resume {directory} (add --herdr", output)
+        self.assertIn(f"then run the challenge and launch the workers with: {PY} -m workflow resume {directory} --by operator (add --herdr", output)
         (directory / "challenge-worktree").unlink()
         supervised = []
         with patch("workflow.automatic.supervise", side_effect=lambda run: supervised.append((run, self.launches(run)))):
@@ -495,12 +495,12 @@ class ChallengeHeartbeat(FailingChallenge):
         with patch("workflow.guardrails.wait_challenge", side_effect=KeyboardInterrupt), \
                 patch("workflow.guardrails.terminate", wraps=guardrails.terminate) as stop, \
                 patch("workflow.pipeline.InteractiveSessions", side_effect=lambda directory, timeout: self.sessions(directory)), \
-                patch.object(sys, "argv", ["workflow", "start", str(directory), "--live"]), \
+                patch.object(sys, "argv", ["workflow", "start", str(directory), "--live", "--by", "operator"]), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             with self.assertRaises(KeyboardInterrupt):
                 pipeline.main()
         self.assertIn(f"Design challenge attempt 1 interrupted; no worker was launched. Run the challenge again and launch the workers with:\n"
-                      f"  {PY} -m workflow resume {directory}\n", output.getvalue())
+                      f"  {PY} -m workflow resume {directory} --by operator\n", output.getvalue())
         self.assertEqual(stop.call_count, 1)  # The job was stopped, not left running.
         self.assertEqual((read_json(directory / "challenge.running.json")["attempt"], (directory / "challenge.json").exists()), (1, False))
         self.assertEqual([event[1:] for event in self.events(directory) if event[0] == "challenge"][-1], ("blocked", "KeyboardInterrupt"))
@@ -526,9 +526,9 @@ class ChallengeHeartbeat(FailingChallenge):
         with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit) as exit_:
-                launch_main([FEATURE, "--repo", str(self.repo), "--live", "--automatic", "--run-root", str(self.runs)])
+                launch_main([FEATURE, "--repo", str(self.repo), "--live", "--automatic", "--run-root", str(self.runs), "--by", "operator"])
         self.assertEqual(exit_.exception.code, 130)
-        self.assertIn(f"run the design challenge and launch the workers with:  {PY} -m workflow resume {runs[0]} --herdr\n", errors.getvalue())
+        self.assertIn(f"run the design challenge and launch the workers with:  {PY} -m workflow resume {runs[0]} --by operator --herdr\n", errors.getvalue())
         self.assertNotIn("-m workflow automatic", errors.getvalue())
 
 
@@ -541,7 +541,7 @@ class ChallengeAttention(GuardedFeature):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 0, output)
         text = (f"Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s). Edit the task files, decisions.md "
-                f"or the PRD, then run: {PY} -m workflow resume {directory}; or accept it: {PY} -m workflow resume {directory} "
+                f"or the PRD, then run: {PY} -m workflow resume {directory} --by operator; or accept it: {PY} -m workflow resume {directory} --by operator "
                 '--accept-challenge "<reason>"')
         [line] = lines()
         self.assertEqual({key: line[key] for key in ("run_id", "run_dir", "kind", "node", "text")},
@@ -558,8 +558,8 @@ class ChallengeAttention(GuardedFeature):
                          (0, [("challenge_paused", "Design challenge attempt 1 paused the run before any worker launch"),
                               ("challenge_paused", "Design challenge attempt 2 paused the run before any worker launch")]))
         # Paused under `resume --herdr`, the record's commands keep the flag, as the printed ones do.
-        self.assertTrue(lines()[-1]["text"].endswith(f"then run: {PY} -m workflow resume {directory} --herdr; or accept it: {PY} -m workflow "
-                                                     f'resume {directory} --accept-challenge "<reason>" --herdr'), lines()[-1]["text"])
+        self.assertTrue(lines()[-1]["text"].endswith(f"then run: {PY} -m workflow resume {directory} --by operator --herdr; or accept it: {PY} -m workflow "
+                                                     f'resume {directory} --by operator --accept-challenge "<reason>" --herdr'), lines()[-1]["text"])
         # A challenge that passes needs nobody: no record.
         task.write_text(task.read_text() + "\nThe adapter owns backend.py.\n")
         self.challenge_says([concern("P2", "Minor")])
@@ -729,7 +729,7 @@ class ChallengePauses(GuardedFeature):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 0, output)  # Exits 0 with the concerns and the resume commands.
         self.assertIn("P1 [assumption] The lanes overlap", output)
-        self.assertIn(f"-m workflow resume {directory}", output)
+        self.assertIn(f"-m workflow resume {directory} --by operator", output)
         self.assertIn('--accept-challenge "<reason>"', output)
         paused = read_json(directory / "challenge.json")
         self.assertEqual((paused["status"], paused["attempt"]), ("paused", 1))
@@ -826,7 +826,7 @@ class ChallengePauses(GuardedFeature):
         from .launch import main as launch_main
         with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
                 contextlib.redirect_stderr(io.StringIO()):
-            launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--run-root", str(self.runs)])
+            launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--live", "--automatic", "--run-root", str(self.runs), "--by", "operator"])
         self.assertEqual([command[3] if command[0] != "git" else "git" for command in calls], ["preflight", "git", "prepare", "start"])
         self.assertIn("Launch paused at the design challenge; no worker was launched", output.getvalue())
 
@@ -1160,8 +1160,8 @@ class ChallengeRevision(GuardedFeature):
                 self.assertIn("Blocked: Design challenge attempt 1 paused this run, and nothing it read has changed since", output)
                 # The commands it suggests keep --herdr, as the paused message does: without it the workers launch with no panes.
                 herdr = " --herdr" if flags else ""
-                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory}{herdr}\n", output)
-                self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --accept-challenge "<reason>"{herdr}\n', output)
+                self.assertIn(f"Edit the task files, decisions.md or the PRD, then rerun the challenge: {PY} -m workflow resume {directory} --by operator{herdr}\n", output)
+                self.assertIn(f'Or record an override and launch the workers: {PY} -m workflow resume {directory} --by operator --accept-challenge "<reason>"{herdr}\n', output)
                 self.assertIn("A concern outside the feature files (the code at the base, the policy) needs a new run.", output)
                 self.assertNotIn("Report:", output)
                 self.assertEqual({name: (directory / name).read_bytes() for name in names}, before)
@@ -1221,6 +1221,60 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 1, output)
         self.assertIn("Design challenge attempt 3 paused this run, and nothing it read has changed since", output)
         self.assertEqual(len(self.challenge_calls()), 2)
+
+
+    def events(self, directory: Path) -> list:
+        return [(event["node"], event["status"], event["message"]) for event in map(json.loads, (directory / "events.jsonl").read_text().splitlines())]
+
+    def test_the_maintainer_resumes_only_where_the_operator_decides_nothing(self):
+        """C17: a paused challenge waits on the operator, with or without edits; an interrupted rerun newer than it does not."""
+        directory, base = self.paused("recovery-001")
+        names = ("plan.json", "challenge.json", "events.jsonl", "run-state.json")
+        before = {name: (directory / name).read_bytes() for name in names}
+        task = self.edit_task()
+        written = task.read_text()
+        for edit, flags in (("an edit waiting", []), ("an edit waiting, with --herdr", ["--herdr"])):
+            with self.subTest(edit):
+                output, code = self.cli(resume_main, [str(directory), *flags, "--by", "maintainer"])
+                self.assertEqual(code, 1, output)
+                self.assertIn("Blocked: Design challenge attempt 1 paused this run: rerunning or accepting it is the operator's decision, "
+                              f"so resume --by maintainer is refused. The operator runs: {PY} -m workflow resume {directory} --by operator\n", output)
+        task.write_text(written.replace("\nOnly ui.txt; the adapter lane owns backend.py.\n", ""))
+        output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+        self.assertIn("resume --by maintainer is refused", output)
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "fine", "--by", "maintainer"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("accept-challenge is the operator's decision: --by maintainer is refused", output)
+        self.assertEqual({name: (directory / name).read_bytes() for name in names}, before)
+        self.assertEqual((git(self.repo, "rev-parse", "HEAD"), self.launches(directory)), (base, ["challenge"]))
+        # A rerun the operator started and that never decided (a kill): finishing it decides nothing new, so the maintainer may.
+        save_json(directory / "challenge.running.json", {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()})
+        self.challenge_says([concern("P2", "Minor")])
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "passed"), output)
+        self.assertNotIn("maintainer", (directory / "challenge.json").read_text())  # Its schema is closed.
+        self.assertIn(("controller", "running", "Resume by the maintainer (via a Claude Code session): rerunning the design challenge as attempt 3"),
+                      self.events(directory))
+        self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
+
+    def test_an_accepted_challenge_names_who_accepted_it_and_a_maintainer_launches_the_workers_of_an_accepted_one(self):
+        directory, _ = self.paused("accepted-by-001")
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}), patch("workflow.pipeline.start_workers", side_effect=RuntimeError("launch failed")):
+            output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Known risk", "--by", "operator"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(("challenge", "succeeded", "Design challenge attempt 1 accepted by the operator (via a Claude Code session): Known risk"),
+                      self.events(directory))
+        record = read_json(directory / "challenge.json")
+        validate_schema("challenge", record)
+        self.assertEqual(record["status"], "accepted")
+        # Accepted and no worker launched: the launch is mechanical, so the maintainer's resume goes on, and says so.
+        with patch.dict(os.environ, {"CLAUDECODE": ""}):
+            output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual([event for event in self.events(directory) if event[0] == "controller"][-1],
+                         ("controller", "running", "Resume by the maintainer: design challenge attempt 1 accepted; launching the workers"))
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
 
 
 class OverrideFromAnotherController(GuardedFeature):
@@ -1399,7 +1453,7 @@ class WorkerQuestion(unittest.TestCase):
                     command, 0, json.dumps(attached_pane("pane-ui", self.root, "ui", "bg-ui")) if command[2] == "process-info" else "", "")), \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             try:
-                answer_main([str(self.root), *argv])
+                answer_main(by_operator([str(self.root), *argv], True))
                 code = 0
             except SystemExit as exit_:
                 code = exit_.code
@@ -1871,7 +1925,7 @@ class AnswerDelivery(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True), patch("workflow.guardrails.time.time", lambda: self.now), \
                 patch("workflow.herdr.subprocess.run", side_effect=run), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             try:
-                answer_main([str(self.root), *argv])
+                answer_main(by_operator([str(self.root), *argv], True))
                 code = 0
             except SystemExit as exit_:
                 code = exit_.code
@@ -1879,6 +1933,24 @@ class AnswerDelivery(unittest.TestCase):
 
     def entry(self, lane: str = "ui") -> dict:
         return read_json(self.root / f"{lane}.questions.json")["questions"][-1]
+
+    def test_the_answer_records_who_answered_in_the_questions_record_and_on_the_timeline(self):
+        """C17: answered_by (and via, from a Claude Code session) beside the answer; one lane event names the actor."""
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            _, output, code = self.answer("ui", "Use option B", "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual((self.entry()["answered_by"], self.entry()["via"]), ("operator", "claude-code"))
+        [event] = [json.loads(line) for line in (self.root / "events.jsonl").read_text().splitlines()]
+        self.assertEqual((event["node"], event["status"], event["message"]),
+                         ("ui", "interactive", "Question 1 of ui answered by the operator (via a Claude Code session)"))
+        with patch.dict(os.environ, {"CLAUDECODE": ""}):
+            _, output, code = self.answer("adapter", "Use option A", "--by", "maintainer", "--no-herdr")
+        self.assertEqual(code, 1, output)
+        self.assertIn("answer is the operator's decision: --by maintainer is refused", output)
+        self.assertIsNone(self.entry("adapter")["answer"])
+        from .export_state import worker_questions
+        self.assertNotIn("answered_by", worker_questions(self.root / "ui.questions.json")[0])  # The export reads its fixed keys only.
 
     def test_a_failed_delivery_keeps_the_answer_and_a_rerun_delivers_it_exactly_once(self):
         save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
@@ -1888,8 +1960,8 @@ class AnswerDelivery(unittest.TestCase):
         self.assertIn("Recorded the answer to question 1 of ui; its deadline runs again.", output)
         self.assertIn("Blocked: Herdr controls require a Herdr-managed caller pane", output)
         self.assertIn("did not reach the worker", output)
-        self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B'\n", output)
-        self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B' --no-herdr\n", output)
+        self.assertIn(f"-m workflow answer {self.root.resolve()} ui --by operator 'Use option B'\n", output)
+        self.assertIn(f"-m workflow answer {self.root.resolve()} ui --by operator 'Use option B' --no-herdr\n", output)
         recorded = self.entry()
         self.assertEqual((recorded["answer"], recorded["answered_at"], recorded["delivered"]), ("Use option B", "1970-01-01T00:01:40Z", False))
         deadline = read_json(self.root / "ui.deadline.json")
@@ -1942,7 +2014,7 @@ class AnswerDelivery(unittest.TestCase):
                 self.assertIn(f"-m workflow.interactive attach-one {self.root.resolve()} --node ui", output)
                 self.assertIn("`claude attach bg-ui`", output)
                 self.assertIn("did not reach the worker", output)
-                self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use B > A; record it' --no-herdr\n", output)
+                self.assertIn(f"-m workflow answer {self.root.resolve()} ui --by operator 'Use B > A; record it' --no-herdr\n", output)
                 entry = self.entry()
                 self.assertEqual((entry["answer"], entry["delivered"], "typed" in entry), ("Use B > A; record it", False, False))
         # Attached again (here with `claude attach` typed by hand in the pane's shell): the rerun types it, once.
@@ -1983,7 +2055,7 @@ class AnswerDelivery(unittest.TestCase):
                 if shown:
                     self.assertIn(f"Blocked: Pane pane-ui (ui) does not show the answer typed before in its session's input: {shown}; "
                                   "Enter is not pressed. Look at the pane", output)
-                self.assertIn(f"-m workflow answer {self.root.resolve()} ui 'Use option B' --no-herdr\n", output)
+                self.assertIn(f"-m workflow answer {self.root.resolve()} ui --by operator 'Use option B' --no-herdr\n", output)
                 self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, False))
         # The input shows it (wrapped, here even inside a word): the rerun presses Enter only.
         calls, output, code = self.answer("ui", "Use option B", screen=claude_screen("Use opt", "ion B"))
