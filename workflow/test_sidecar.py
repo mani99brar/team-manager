@@ -1613,7 +1613,7 @@ class Notes(SidecarRun):
         self.assertEqual(self.notes(), [{"n": 1, "id": "N-1", "author": "operator", "via": "claude-code", "text": "Keep the old\nlabel.",
                                          "sent_at": iso(self.now), "delivery": "delivered", "reason": None}])
         self.assertEqual(entry, self.notes()[0])
-        self.assertEqual(self.events, [("ui", "interactive", "Note N-1 from the operator (via a Claude Code session) to worker ui: typed into its pane")])
+        self.assertEqual(self.events, [("ui", "note", "Note N-1 from the operator (via a Claude Code session) to worker ui: typed into its pane")])
         with patch.dict(os.environ, {"CLAUDECODE": ""}):
             self.note("Run the unit tests first.", actor="maintainer")
         self.assertEqual(self.herdr.typed(), ["[Note from the maintainer N-2] Run the unit tests first."])

@@ -85,7 +85,9 @@ def send_note(runtime, lane: str, actor: str, text: str, clock=None) -> dict:
     with notes_lock(directory):
         save_note(directory, lane, entry)
     outcome = "typed into its pane" if status == "delivered" else f"{status}, not typed ({reason})"
-    runtime.event(lane, "interactive", f"Note {entry['id']} from {actor_text(actor)} to worker {lane}: {outcome}")
+    # A plain record (status `note`, served as a log line): never a lane status, so it cannot end an interruption's scope
+    # or read as the lane running while no controller does.
+    runtime.event(lane, "note", f"Note {entry['id']} from {actor_text(actor)} to worker {lane}: {outcome}")
     return entry
 
 

@@ -741,9 +741,19 @@ def interrupted_rerun(directory: Path, plan: dict, record: dict) -> bool:
 def refuse_maintainer(directory: Path, plan: dict, current: dict | None, actor: str) -> None:
     """`resume --by maintainer` only where it decides nothing (C17, decision 2a): no record yet, a challenge passed or accepted
     (the workers' launch), or an interrupted rerun newer than the paused record. A paused challenge itself, with or without
-    edits, waits on the operator: a rerun of edits is theirs to commit, a bare rerun re-rolls their challenge."""
-    if actor != "maintainer" or current is None or current["status"] != "paused" or interrupted_rerun(directory, plan, current):
+    edits, waits on the operator: a rerun of edits is theirs to commit, a bare rerun re-rolls their challenge. So does a
+    pinned file edited after the interrupted rerun: that rerun committed its own edits before its re-pin and its job (an
+    interrupted commit lists them in REVISION_INTENT), so any other is a later edit, perhaps half-written."""
+    if actor != "maintainer" or current is None or current["status"] != "paused":
         return
+    if interrupted_rerun(directory, plan, current):
+        intent = directory / REVISION_INTENT
+        committing = set(read_json(intent)["paths"]) if intent.exists() else set()
+        later = [path for path in dirty_paths(Path(plan["repository"])) if path in pinned_paths(plan) and path not in committing]
+        if not later:
+            return
+        raise ValueError(f"Feature files were edited after the interrupted rerun ({', '.join(later)}): committing them is the operator's "
+                         f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
     raise ValueError(f"Design challenge attempt {current['attempt']} paused this run: rerunning or accepting it is the operator's "
                      f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
 
@@ -1194,7 +1204,8 @@ def answer_main(argv=None):
         if entry is None:
             entry = record_answer(directory, args.node, args.text, delivered=False, actor=actor)
             from .pipeline import append_event
-            append_event(directory, args.node, "interactive", f"Question {entry['n']} of {args.node} answered by {actor_text(actor)}")
+            # A plain record, like a note's: no lane status, so an interrupted controller stays visible.
+            append_event(directory, args.node, "note", f"Question {entry['n']} of {args.node} answered by {actor_text(actor)}")
             print(f"Recorded the answer to question {entry['n']} of {args.node}; its deadline runs again.")
         else:
             typed = " (typed into its pane, not submitted)" if entry.get("typed") else ""

@@ -677,6 +677,24 @@ describe('deriveNow', () => {
     assert.doesNotMatch(prose(now), /new run|Blocked/)
   })
 
+  it('interrupted (a): a note or an answer sent while no controller runs keeps the interruption', () => {
+    // notes.py send_note and guardrails.py answer_main need no controller. They write plain records (raw status `note`),
+    // which the server serves on the lane with no status, as log lines: they neither end the scope nor read as running.
+    const RESUME_NOTE = 'Supervisor interrupted. Native workers were NOT stopped and keep running; resume with: python -m workflow automatic <path> --live'
+    const stops: EventSpec[] = [[1800, null, null, RESUME_NOTE], [1800, null, 'paused', BRANCH_STOP]]
+    const records = ['Note N-1 from the operator to worker game: undeliverable, not typed (lane_blocked)', 'Note N-1 from the maintainer to worker game: typed into its pane',
+      'Question 1 of game answered by the operator', 'Question 1 of game answered by the maintainer (via a Claude Code session)']
+    for (const stop of stops) {
+      for (const record of records) {
+        const now = checked(synthetic({ status: 'paused', nodes: { ...WORKING, handoff: 'paused' }, events: [...LAUNCHED, stop, [1900, 'launch_game', null, record]] }))
+        assert.equal(now.situation, 'interrupted', `${stop[3].slice(0, 20)} then ${record}`)
+        assert.equal(now.interruption, 'a', record)
+        assert.ok(commands(now).includes('"$PY" -m workflow automatic "$RUN" --live --by operator'), record)
+        assert.doesNotMatch(prose(now), /No action needed/, record)
+      }
+    }
+  })
+
   it('interrupted (a): a start that did not complete is reconciled, or started when the run never was, then resumed', () => {
     const reconcile = checked(synthetic({
       status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'failed' },

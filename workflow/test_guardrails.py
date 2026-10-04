@@ -1266,6 +1266,23 @@ class ChallengeRevision(GuardedFeature):
                       self.events(directory))
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
 
+    def test_the_maintainer_never_commits_an_edit_made_after_an_interrupted_rerun(self):
+        """C17: an interrupted rerun committed its own edits before its job; a pinned file dirty now is a later operator edit."""
+        directory, base = self.paused("later-edit-001")
+        save_json(directory / "challenge.running.json", {"attempt": 2, "session_id": "00000000-0000-4000-8000-000000000002", "started_at": now()})
+        edited = self.edit_task().relative_to(self.repo).as_posix()
+        before = {name: (directory / name).read_bytes() for name in ("plan.json", "challenge.json", "events.jsonl")}
+        output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Blocked: Feature files were edited after the interrupted rerun ({edited}): committing them is the operator's decision, "
+                      f"so resume --by maintainer is refused. The operator runs: {PY} -m workflow resume {directory} --by operator\n", output)
+        self.assertEqual((git(self.repo, "rev-parse", "HEAD"), self.launches(directory)), (base, ["challenge"]))
+        self.assertEqual({name: (directory / name).read_bytes() for name in before}, before)
+        self.assertFalse((directory / "challenge-revision.json").exists())
+        # The edits an interrupted resume was committing (its intent lists them) are the operator's rerun: the maintainer may finish it.
+        save_json(directory / "challenge-revision.json", {"base_commit": base, "paths": [edited]})
+        guardrails.refuse_maintainer(directory, read_json(directory / "plan.json"), read_json(directory / "challenge.json"), "maintainer")
+
     def test_an_accepted_challenge_names_who_accepted_it_and_a_maintainer_launches_the_workers_of_an_accepted_one(self):
         directory, _ = self.paused("accepted-by-001")
         with patch.dict(os.environ, {"CLAUDECODE": "1"}), patch("workflow.pipeline.start_workers", side_effect=RuntimeError("launch failed")):
@@ -1979,7 +1996,7 @@ class AnswerDelivery(unittest.TestCase):
         self.assertEqual((self.entry()["answered_by"], self.entry()["via"]), ("operator", "claude-code"))
         [event] = [json.loads(line) for line in (self.root / "events.jsonl").read_text().splitlines()]
         self.assertEqual((event["node"], event["status"], event["message"]),
-                         ("ui", "interactive", "Question 1 of ui answered by the operator (via a Claude Code session)"))
+                         ("ui", "note", "Question 1 of ui answered by the operator (via a Claude Code session)"))
         with patch.dict(os.environ, {"CLAUDECODE": ""}):
             _, output, code = self.answer("adapter", "Use option A", "--by", "maintainer", "--no-herdr")
         self.assertEqual(code, 1, output)
