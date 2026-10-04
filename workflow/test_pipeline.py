@@ -386,6 +386,9 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             exported = read_json(self.directory / "run-state.json")
             self.assertTrue(any(task["error"] for task in exported["tasks"]))
             self.assertTrue(exported["verification_packets"])
+        # The drill fails an attempt whose checks passed: it is kept whole, as a failed attempt is (C47); ui's is pruned.
+        self.assertTrue((self.directory / "verification/worker/adapter/1/worktree").is_dir())
+        self.assertFalse((self.directory / "verification/worker/ui/1/worktree").exists())
         ui_path = self.directory / "verification/worker/ui/1/packet.json"
         original = digest_file(ui_path)
         self.assertEqual(self.runtime.retry_check("worker", "adapter"), 2)

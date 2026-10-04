@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .sessions import git, save_json, scrub_env, terminate
 from .verification import evaluate_worker, policy_digest
-from .worktrees import git_worktree, without_controller_git_config
+from .worktrees import WorktreeError, git_worktree, without_controller_git_config
 
 
 def now() -> str:
@@ -275,9 +275,106 @@ def browser_evidence(report_path: Path, output_root: Path, requirement: dict, ca
     return counts, [{"id": item["id"], "status": item["status"], "screenshot_artifact_id": item["screenshot"]} for item in found.values()]
 
 
+# What a passed attempt no longer needs (C47): the checkout and caches its checks ran in, and Playwright's raw output, whose
+# screenshots are already artifacts. The folder, packet.json, the logs, artifacts/ and browser-report-<n>.json stay, and so
+# does the raw output of a browser check that failed: deferred in the worker phase, it fails without failing the attempt,
+# and its failure screenshots and traces may be in that output only.
+PRUNED_CACHES = ("npm_config_cache", "xdg_cache_home")
+RAW_BROWSER_OUTPUT = re.compile(r"browser-(\d+)")
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes what a check left read-only (an npm cache entry, a Go module cache), or unreadable."""
+    def writable(function, name, _):
+        if function in (os.open, os.scandir, os.listdir):
+            # A directory rmtree cannot open or list: make it the owner's again and remove it whole. rmtree goes on.
+            os.chmod(name, 0o700)
+            remove_tree(Path(name))
+            return
+        if not os.path.lexists(name):
+            return  # Removed above, after a failed listing of it.
+        os.chmod(os.path.dirname(name), 0o700)
+        if os.path.isdir(name) and not os.path.islink(name):
+            os.chmod(name, 0o700)
+        function(name)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=lambda function, name, info: writable(function, name, info[1]))
+
+
+def registered_worktree(repository, path: Path) -> bool:
+    """Whether `git worktree list` still names this path."""
+    listed = git(repository, "worktree", "list", "--porcelain").splitlines()
+    return f"worktree {path.resolve()}" in listed or f"worktree {path}" in listed
+
+
+def remove_worktree(repository, path: Path) -> None:
+    """`git worktree remove --force`, under the repository's worktree lock. A removal that fails partway (read-only content)
+    still unregisters the worktree, and Git then refuses the leftover as "not a working tree" for good: once Git no longer
+    lists the path, the leftover is deleted and pruned. An independent repository (a `.git` directory) is never deleted."""
+    try:
+        git_worktree(repository, "remove", "--force", str(path))
+        return
+    except WorktreeError:
+        if not (path.exists() or path.is_symlink()) or registered_worktree(repository, path) or (path / ".git").is_dir():
+            raise
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        remove_tree(path)
+    git_worktree(repository, "prune")
+
+
+def failed_browser_output(directory: Path) -> set[str]:
+    """The `browser-<n>` folders of the attempt's checks that failed, by its packet; none when there is no packet to read."""
+    try:
+        packet = json.loads((directory / "packet.json").read_text())
+        receipts = packet["evidence"]["checks"]
+        errors = [str(error) for error in [*packet.get("capture_errors", []), *packet.get("scenario_errors", [])]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    failed = set()
+    for receipt in receipts if isinstance(receipts, list) else []:
+        if isinstance(receipt, dict) and any(error.startswith((f"{receipt.get('id')}:", f"{receipt.get('id')}/")) for error in errors):
+            failed.add(f"browser-{receipt.get('worker_check_index')}")
+    return failed
+
+
+def prunable(directory: Path) -> list[Path]:
+    """What prune_attempt removes from this attempt folder now, in order: the worktree, the caches, the raw browser output of
+    the checks that did not fail."""
+    if not directory.is_dir():
+        return []
+    keep = failed_browser_output(directory)
+    raw = sorted((path for path in directory.iterdir() if RAW_BROWSER_OUTPUT.fullmatch(path.name) and path.name not in keep),
+                 key=lambda path: int(path.name.removeprefix("browser-")))
+    return [path for path in [directory / "worktree", *(directory / name for name in PRUNED_CACHES), *raw]
+            if path.exists() or path.is_symlink()]
+
+
+def prune_attempt(repository, directory: Path) -> list[Path]:
+    """Remove a passed attempt's worktree (remove_worktree, under the repository's worktree lock), its caches and the raw
+    browser output of its checks that did not fail; returns what it removed, nothing when it was already pruned.
+    recheck_packet reads only the packet and artifacts/, so the attempt still rechecks and is still reused. Never called on
+    an attempt that failed."""
+    removed = []
+    for path in prunable(directory):
+        if path.name == "worktree":
+            remove_worktree(repository, path)
+        elif path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            remove_tree(path)
+        removed.append(path)
+    return removed
+
+
 def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
-                    session_id: str, phase: str = "worker", attempt: int = 1) -> dict:
-    """One fresh verification worktree per node/phase/attempt, artifacts retained."""
+                    session_id: str, phase: str = "worker", attempt: int = 1, prune: bool = True) -> dict:
+    """One fresh verification worktree per node/phase/attempt, artifacts retained. A passed attempt is pruned once its
+    packet is saved (prune_attempt); a failed one is kept whole, and so is one the caller may still fail (`prune=False`:
+    the failure drill's attempt)."""
     worker = next(worker for worker in policy["workers"] if worker["node_id"] == node)
     directory = run / "verification" / phase / node / str(attempt)
     packet_path = directory / "packet.json"
@@ -346,6 +443,12 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
               "dropped_env_names": dropped}
     packet = recheck_packet(packet, policy, run)
     save_json(packet_path, packet)
+    if prune and packet["gate"]["status"] == "passed":
+        try:
+            prune_attempt(plan["repository"], directory)
+        except Exception as error:  # Whatever the removal raises, the check passed.
+            # The evidence is saved and passed; what is left only takes disk. `workflow clean` prunes it later.
+            print(f"Warning: passed attempt {directory} was not pruned ({error}); `python -m workflow clean` prunes it", file=sys.stderr)
     return packet
 
 

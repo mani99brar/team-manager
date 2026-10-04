@@ -529,7 +529,7 @@ class OneLaneRepair(RepairFixture):
         [candidate] = [Path(item["path"]) for item in bundle["packets"] if Path(item["path"]).parts[-4] == "candidate"]
         packet = read_json(candidate)
         self.assertNotIn("reused_from", packet)
-        self.assertTrue((candidate.parent / "worktree").is_dir())
+        self.assertTrue((candidate.parent / "check-0.log").is_file())  # The checks ran there; the passed attempt's worktree is pruned (C47).
         self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", self.candidate_commit(1)))
         self.assertEqual(self.tree(self.candidate_commit(1)), self.tree(entry["lanes"]["ui"]["commit"]))
 
@@ -551,7 +551,7 @@ class OneLaneWorkerRepair(OneLaneRepair):
             self.assertEqual(graph.invoke(None, config)["__interrupt__"][0].value["kind"], "independent_review")
         packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
         self.assertNotIn("reused_from", packet)
-        self.assertTrue((self.directory / "verification/candidate/adapter/1/worktree").is_dir())
+        self.assertTrue((self.directory / "verification/candidate/adapter/1/check-0.log").is_file())  # Its worktree is pruned (C47).
         self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", self.candidate_commit(1)))
 
 

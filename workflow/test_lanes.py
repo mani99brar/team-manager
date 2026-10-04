@@ -187,7 +187,8 @@ class ThreeLaneRun(LaneRun):
                 self.assertTrue((self.directory / name).exists(), name)
         for node in LANES:  # Several lanes: every lane's checks run again on the combined revision, in their own worktree.
             self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
-            self.assertTrue((self.directory / f"verification/candidate/{node}/1/worktree").is_dir())
+            # The passed attempt's worktree is pruned (C47); its check log stays as the evidence the checks ran there.
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/check-0.log").is_file())
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
@@ -303,7 +304,7 @@ class ThreeLaneRun(LaneRun):
         self.assertEqual(read_json(self.directory / "candidate.json")["commit"], snapshots["ui"]["commit"])
         for node in ("ui", "docs"):
             self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
-            self.assertTrue((self.directory / f"verification/candidate/{node}/1/worktree").is_dir(), node)
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/check-0.log").is_file(), node)  # Its worktree is pruned (C47).
 
     def test_report_positions_follow_the_lane_count(self):
         positions, edges, width, height = lane_positions(LANES)

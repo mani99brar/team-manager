@@ -603,10 +603,13 @@ class Pipeline:
         snap = snapshots[node]
         attempt = self.attempt("worker", node)
         self.event(f"verify_{node}", "running", f"Attempt {attempt}; revision {snap['commit']}")
-        packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"], attempt=attempt)
-        path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
         drill = self.failure_drill()
-        if drill and drill["node_id"] == node and attempt == 1:
+        drilled = bool(drill) and drill["node_id"] == node and attempt == 1
+        # The drill fails this attempt whatever its checks say, so it is kept whole like any failed attempt (C47).
+        packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"],
+                                 attempt=attempt, prune=not drilled)
+        path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
+        if drilled:
             marker = "Intentional lab drill: verification branch failure, not a worker or test failure"
             if marker not in packet["capture_errors"]:
                 packet["capture_errors"].append(marker)
@@ -1213,8 +1216,8 @@ def main():
     controller_git_config(os.environ)  # As `python -m workflow` does, for `python -m workflow.pipeline`; added once only.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
-                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar), repair, note, brief and "
-             "abandon have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon --help")
+                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar), repair, note, brief, "
+             "abandon, clean and ledger have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon|clean|ledger --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -1381,6 +1384,13 @@ def main():
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile)
             elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
+            # C45: what the base holds that no approved run reviewed, pinned and printed. It changes nothing else, and a
+            # registry or run it cannot read only costs the record.
+            from .ledger import base_unreviewed, describe, runs_roots
+            try:
+                plan["base_unreviewed"] = base_unreviewed(Path(plan["repository"]), plan["base_commit"], runs_roots(extra=[directory.parent]))
+            except Exception as error:  # The run is already allocated: whatever the ledger raises, prepare finishes.
+                print(f"Warning: base_unreviewed not pinned: {error}", file=sys.stderr)
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             if args.sidecar_brief:
@@ -1396,6 +1406,8 @@ def main():
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}. Lanes: {', '.join(selected)}"
                   + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else "")
                   + f". Reviewers: {', '.join(reviewer_ids(plan))}")
+            if "base_unreviewed" in plan:
+                print(describe(plan["base_unreviewed"], plan["base_commit"]))
             return
         if args.action == "automatic":
             if not args.live:

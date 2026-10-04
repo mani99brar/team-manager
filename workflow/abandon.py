@@ -11,7 +11,8 @@ an unfinished stop intent by its ids or its process. A session that is gone is r
 
 Afterwards every command that would change the run refuses it (refuse_abandoned): automatic, automatic-step, start,
 attach, freeze, retry, reconcile, review, approve, resume, answer, note, repair and sidecar-pass. status, export and brief
-still read it.
+still read it; clean removes its worktrees and keeps its source checkout, which brief reads (clean.run_worktrees), and
+ledger reads it like any other run.
 """
 from __future__ import annotations
 
