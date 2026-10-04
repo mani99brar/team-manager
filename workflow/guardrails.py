@@ -977,14 +977,16 @@ def input_shown(screen: str, text: str) -> str | None:
     """None when the Claude Code input on the pane's screen (`herdr pane read`) holds `text`, else what the screen shows.
 
     The input is the last line starting with `❯` under a rule (a line of `─`, perhaps labelled), wrapped onto the lines
-    below it down to the closing rule; the transcript above it never counts. Whitespace is ignored: a wrap may split a word.
+    below it down to the closing rule, or to the end of the screen when no rule closes it: Herdr's capture can end at the
+    input (20 of the 25 sidecar `pane_busy` refusals on pine did, 17 of them on an empty input). The transcript above it never counts.
+    Whitespace is ignored: a wrap may split a word. Both the sidecar's gate and `answer`'s Enter-only rerun read it.
     """
     lines = screen.splitlines()
     start = next((index for index in range(len(lines) - 1, 0, -1)
                   if lines[index].lstrip().startswith("❯") and lines[index - 1].lstrip().startswith("─")), None)
-    end = None if start is None else next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("─")), None)
-    if end is None:
+    if start is None:
         return "Herdr shows no Claude Code input line in it"
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("─")), len(lines))
     held = " ".join(" ".join([lines[start].lstrip()[1:], *lines[start + 1:end]]).split())
     if held.replace(" ", "") == "".join(text.split()):
         return None

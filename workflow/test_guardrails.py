@@ -76,6 +76,14 @@ def claude_screen(*typed: str) -> str:
                       *(f"  {line}" for line in typed[1:]), rule, "  ⏵⏵ bypass permissions on (shift+tab to cycle)", ""])
 
 
+def input_at_bottom(*typed: str) -> str:
+    """A capture that ends at the Claude Code input, with no closing rule under it, as 20 of the 25 `pane_busy` refusals in
+    pine's sidecar ledgers read (sidecar-inputs/<n>/<lane>.pane.txt): the working line, the labelled rule, `❯` and the input's
+    lines, then nothing; `typed` are those lines."""
+    return "\n".join(["✽ Cogitating… (30m 35s · ↓ 65.0k tokens · thought for 1s)", "  ⎿ Tip: Use /clear to start fresh when switching topics", "",
+                      f"{'─' * 40} workflow-run-ui ─", "❯\xa0" + (typed[0] if typed else ""), *(f"  {line}" for line in typed[1:])]) + "\n"
+
+
 def concern(severity: str, message: str = "A concern") -> dict:
     return {"severity": severity, "kind": "assumption", "message": message, "consequence": f"{message} breaks the run"}
 
@@ -1976,6 +1984,25 @@ class AnswerDelivery(unittest.TestCase):
         self.assertEqual((calls, code), ([], 0), output)
         self.assertIn("The answer is typed in the worker's session but not submitted: claude attach bg-adapter, then press Enter", output)
         self.assertEqual((self.entry("adapter")["typed"], self.entry("adapter")["delivered"]), (True, True))
+
+    def test_a_capture_that_ends_at_the_input_line_still_shows_the_input(self):
+        # Herdr's capture can end at the `❯` line, with no closing rule under it (20 of the 25 sidecar `pane_busy` refusals on pine).
+        # The input then runs to the end of the screen: the answer typed before gets its Enter, and a draft there is refused.
+        save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})
+        calls, output, code = self.answer("ui", "Use option B", fail_at={"send-keys": subprocess.TimeoutExpired(["herdr"], 15)})
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "send-text", "send-keys"], 1), output)
+        for screen, shown in ((input_at_bottom("[Operator] The host is out of memory: hold the tests.", "Reply not needed."),
+                               "its input line shows '[Operator] The host is out of memory: hold the tests. Reply not needed.'"),
+                              (input_at_bottom(), "its input line is empty"),
+                              ("● Option A or B?\n❯ Use option B\n", "Herdr shows no Claude Code input line in it")):  # No rule above the `❯`.
+            with self.subTest(shown=shown):
+                calls, output, code = self.answer("ui", "Use option B", screen=screen)
+                self.assertEqual(([call[2] for call in calls], code), (["process-info", "read"], 1), output)
+                self.assertIn(f"does not show the answer typed before in its session's input: {shown}; Enter is not pressed", output)
+                self.assertEqual((self.entry()["typed"], self.entry()["delivered"]), (True, False))
+        calls, output, code = self.answer("ui", "Use option B", screen=input_at_bottom("Use opt", "ion B") + "\n\n")
+        self.assertEqual(([call[2] for call in calls], code), (["process-info", "read", "send-keys"], 0), output)
+        self.assertIs(self.entry()["delivered"], True)
 
     def test_a_rerun_after_a_failed_send_text_types_the_answer_and_a_timeout_says_to_look_first(self):
         save_json(self.root / "terminals.json", {"ui": {"pane_id": "pane-ui", "tab_id": "t", "mode": "attach_requested"}})

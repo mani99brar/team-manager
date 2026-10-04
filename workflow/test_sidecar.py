@@ -26,12 +26,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from . import sidecar
 from .automatic import DEFAULTS as AUTOMATIC, automatic_settings, drive, wait_handoffs
 from .export_state import graph_nodes
-from .guardrails import iso
+from .guardrails import input_shown, iso
 from .interactive import SIDECAR_NOTE, worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, export_run
 from .sessions import TransientInfraError, git, prepare, read_json, save_json
-from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, pane_process_info, two_lane_policy
+from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, input_at_bottom, pane_process_info, two_lane_policy
 from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
 from .test_portable import commit_all
 from .verification import policy_digest, validate_schema
@@ -584,6 +584,25 @@ class Messages(SidecarRun):
         self.assertEqual(self.herdr.typed(), [])
         validate_schema("sidecar", self.ledger())
         self.assert_node_statuses()
+
+    def test_the_gate_reads_an_input_line_at_the_bottom_of_the_capture(self):
+        # In 20 of the 25 `pane_busy` refusals in pine's sidecar ledgers Herdr's capture ended at the `❯` line with no closing rule
+        # under it, 17 of them on an empty input. The input then runs to the end of the screen, so an empty one there takes the message.
+        for screen in (input_at_bottom(), input_at_bottom() + "\n\n"):
+            with self.subTest(screen=screen):
+                self.herdr.screens["pane-ui"] = screen
+                self.assert_outcome("delivered", None, typed=True)
+        self.assertIsNone(input_shown(input_at_bottom(), ""))
+        # A draft there is still refused (6 of the 25 held a typed `[Operator] ...` draft), and so is a screen whose `❯` line is
+        # under no rule: a transcript line, or a dialog's option.
+        draft = input_at_bottom("[Operator] The host is out of memory: hold the tests.", "Reply not needed.")
+        for screen, shown in ((draft, "its input line shows '[Operator] The host is out of memory: hold the tests. Reply not needed.'"),
+                              ("● Done.\n❯ Use option B\n", "Herdr shows no Claude Code input line in it"),
+                              (DIALOG, "Herdr shows no Claude Code input line in it")):
+            with self.subTest(shown=shown):
+                self.assertEqual(input_shown(screen, ""), shown)
+                self.herdr.screens["pane-ui"] = screen
+                self.assert_outcome("undeliverable", "pane_busy")
 
     def test_a_message_citing_an_existing_finding_and_a_ref_is_typed_with_the_resolved_ids(self):
         self.deliver()
