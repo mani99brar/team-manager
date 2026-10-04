@@ -8,7 +8,8 @@ const version = z.literal('1.0.0')
  * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
- * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`.
+ * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, and the
+ * challenge's optional `hold` (C8).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -242,6 +243,17 @@ export const runChallengeSchema = z.strictObject({
   cheap_experiment: z.string().min(1).nullable(),
   accepted_reason: z.string().min(1).nullable(),
   decided_at: timestamp,
+  /**
+   * 1.7.0 (C8): a passed attempt the plan holds until `resume --launch` (`launch --hold-challenge`, or profile attended): when it
+   * was held and, once released, when, by whom and the note numbers left out of the workers' prompts. Null for every other
+   * challenge (or absent, from a server before it). The status stays `passed` while held; the challenge node is served paused.
+   */
+  hold: z.strictObject({
+    held_at: timestamp,
+    released_at: timestamp.nullable(),
+    released_by: z.enum(['operator', 'maintainer']).nullable(),
+    dropped: z.array(z.number().int().positive()),
+  }).nullable().optional(),
 })
 
 export const runInputWorkerSchema = z.strictObject({

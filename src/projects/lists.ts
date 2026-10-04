@@ -190,8 +190,8 @@ export function controllerSuffix(status: RunStatus, readings: readonly Controlle
 /** What the run page knows beyond its export: the served activity, the run directory and the controller readings. */
 export type ServedRun = { detail: RunDetail; activity: RunActivity | null; runDir: string | null; controller: readonly ControllerReading[] }
 
-/** Situations that come before rule 5 (c): a stopped controller never hides a question, a pane, an approval or a paused challenge. */
-const BEFORE_INTERRUPTED: readonly Situation[] = ['question', 'pane_attention', 'awaiting_approval', 'challenge_paused', 'interrupted']
+/** Situations that come before rule 5 (c): a stopped controller never hides a question, a pane, an approval or a held or paused challenge. */
+const BEFORE_INTERRUPTED: readonly Situation[] = ['question', 'pane_attention', 'awaiting_approval', 'challenge_held', 'challenge_paused', 'interrupted']
 
 /**
  * Why the export-derived Now disagrees with what the server reads live, or null when it does not:

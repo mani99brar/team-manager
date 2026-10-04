@@ -16,6 +16,16 @@ const STATUS_WORDING: Record<Challenge['status'], string> = {
   disabled: 'Disabled: the feature turned the challenge off, so nothing was challenged.',
 }
 
+/** The outcome in words; a passed attempt the plan holds (C8) launched nothing until `resume --launch` released it. */
+function statusWording(challenge: Challenge): string {
+  if (challenge.status === 'passed' && challenge.hold) {
+    return challenge.hold.released_at === null
+      ? 'Passed and held: no P0 or P1 concern, and the run holds for the operator to read every concern. No worker launches until the operator releases it through the workflow CLI (resume --launch).'
+      : 'Passed and held, then released by the operator, so the workers were launched.'
+  }
+  return STATUS_WORDING[challenge.status]
+}
+
 const KIND_WORDING: Record<Concern['kind'], string> = {
   assumption: 'fragile assumption',
   failure_mode: 'likely failure mode',
@@ -31,7 +41,7 @@ export function ChallengeHeadline({ challenge, spans }: { challenge: Challenge; 
   const { lead, notes, decidedAt, totalMs, attempts } = challengeHeadline(challenge, spans)
   return (
     <p className={`challenge-headline challenge-headline-${challenge.status}`} data-testid="challenge-headline" data-challenge-status={challenge.status}>
-      {challenge.status === 'paused' && <span aria-hidden="true">‖ </span>}
+      {(challenge.status === 'paused' || (challenge.status === 'passed' && challenge.hold && challenge.hold.released_at === null)) && <span aria-hidden="true">‖ </span>}
       {lead}
       {notes && <> · {notes}</>}
       {decidedAt && <> · decided <Time iso={decidedAt} seconds /></>}
@@ -49,7 +59,17 @@ export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
     <details className="challenge-facts">
       <summary>Outcome, attempts and session</summary>
       <dl className="projects-facts">
-        <div><dt>Outcome</dt><dd data-testid="challenge-status"><strong>{challenge.status}</strong> — {STATUS_WORDING[challenge.status]}</dd></div>
+        <div><dt>Outcome</dt><dd data-testid="challenge-status"><strong>{challenge.status}</strong> — {statusWording(challenge)}</dd></div>
+        {challenge.hold && (
+          <div>
+            <dt>Hold</dt>
+            <dd data-testid="challenge-hold">
+              Held <Time iso={challenge.hold.held_at} seconds />
+              {challenge.hold.released_at === null ? '; not released yet'
+                : <>; released <Time iso={challenge.hold.released_at} seconds /> by the {challenge.hold.released_by ?? 'operator'}{challenge.hold.dropped.length > 0 && `, notes ${challenge.hold.dropped.join(', ')} left out of the workers' prompts`}</>}
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Attempts</dt>
           <dd data-testid="challenge-attempts">

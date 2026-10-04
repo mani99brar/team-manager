@@ -15,6 +15,7 @@ import {
   CHALLENGE_P1_CONSEQUENCE,
   CHALLENGE_P2,
   CHALLENGE_P2_CONSEQUENCE,
+  CHALLENGE_DECIDED_AT,
   CHALLENGE_SESSION,
   CLARITY_WORKFLOW_ID,
   DEFAULT_REVIEWER_ID,
@@ -42,8 +43,11 @@ import {
   RUN_GUARDED_BLOCKED,
   RUN_SUCCEEDED,
   TWO_LANES,
+  event,
+  runDetails,
+  runInputs,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
 
 installHooks()
 
@@ -143,6 +147,57 @@ test(`[scenario:challenge-node-page] The graph starts with Design challenge; its
   await page.goto(clarityRunUrl(RUN_FILES))
   await expect(nodeListItem(page, 'challenge')).toHaveCount(0)
   await expect(page.locator('[data-testid="run-node-list"] [data-node-id]').first()).toHaveAttribute('data-node-id', 'launch_ui')
+})
+
+test(`[scenario:challenge-held] A run held after a passing design challenge shows the challenge paused with every concern, and resume --launch as its next step, never the accept command (${phase})`, async ({ page }, testInfo) => {
+  // C8: run-guarded-asking as it stood before its workers launched, had the plan held its challenge (launch --hold-challenge).
+  const runId = RUN_GUARDED_ASKING
+  const runPath = apiRun(runId, GUARDED_WORKFLOW_ID)
+  const detail = structuredClone(runDetails[runId])
+  detail.summary.status = 'paused'
+  detail.snapshot.status = 'paused'
+  detail.snapshot.last_sequence = 2
+  for (const node of detail.snapshot.nodes) {
+    Object.assign(node, node.node_id === 'challenge' ? { status: 'paused' } : { status: 'pending', attempt: 0, session_id: null, result_uri: null, lane_results: [] })
+  }
+  const inputs = structuredClone(runInputs[runId])
+  inputs.challenge = { ...inputs.challenge!, hold: { held_at: CHALLENGE_DECIDED_AT, released_at: null, released_by: null, dropped: [] } }
+  for (const worker of inputs.workers) Object.assign(worker, { launch: null, completion: null, handoff: null, stop: null, questions: [] })
+  const events = [
+    event(runId, 1, { type: 'status_changed', node_id: 'challenge', attempt: 1, status: 'succeeded', message: 'Design challenge attempt 1 passed (1 P2 concern(s)); held for the operator' }),
+    event(runId, 2, { type: 'status_changed', node_id: 'challenge', attempt: 1, status: 'paused', message: 'Design challenge attempt 1 passed (1 P2 concern(s)) and is held for the operator before any worker launch' }),
+  ]
+  const json = (body: unknown) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+  await page.route(url => url.pathname === runPath, route => route.fulfill(json(detail)))
+  await page.route(url => url.pathname === `${runPath}/inputs`, route => route.fulfill(json(inputs)))
+  await page.route(url => url.pathname === `${runPath}/events`, (route, request) => {
+    const after = Number(new URL(request.url()).searchParams.get('after') ?? '0')
+    return route.fulfill(json({ events: events.filter(item => item.sequence > after) }))
+  })
+  await page.goto(guardedRunUrl(undefined, runId))
+
+  // The Now banner: held, with resume --launch first and the plain resume second; nothing to accept.
+  const banner = page.getByTestId('run-now')
+  await expect(banner).toHaveAttribute('data-situation', 'challenge_held')
+  await expect(banner.getByTestId('now-headline')).toContainText('Held: the design challenge passed with 1 P2 concern; no worker launched until you release it')
+  const steps = banner.getByTestId('now-step')
+  await expect(steps).toHaveCount(2)
+  await expect(steps.nth(0)).toContainText('"$PY" -m workflow resume "$RUN" --launch --by operator')
+  await expect(steps.nth(1)).toContainText('"$PY" -m workflow resume "$RUN" --by operator')
+  await expect(banner).not.toContainText('--accept-challenge')
+
+  // The challenge node is paused while its record stays passed, and its page shows the hold and every concern.
+  await graphNode(page, 'challenge').click()
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'challenge')
+  await expect(page.getByTestId('challenge-headline')).toContainText('Held after passing on attempt 1: no worker launches until the operator releases it')
+  await expect(page.getByTestId('challenge')).toHaveAttribute('data-challenge-status', 'passed')
+  await expect(page.getByTestId('challenge-concern')).toHaveCount(1)
+  await expect(page.getByTestId('challenge-concern')).toContainText(CHALLENGE_P2)
+  await expect(page.getByTestId('challenge-alternative')).toContainText(CHALLENGE_ALTERNATIVE)
+  await expect(page.getByTestId('challenge-experiment')).toContainText(CHALLENGE_EXPERIMENT)
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'challenge-held')
 })
 
 test(`[scenario:completion-evidence-shown] The launch node shows untested, the falsifying check linked to the verify node's check, and verify-yourself; a legacy run says evidence was not recorded (${phase})`, async ({ page }, testInfo) => {

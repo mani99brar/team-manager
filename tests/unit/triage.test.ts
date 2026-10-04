@@ -914,6 +914,41 @@ describe('deriveNow', () => {
       "After editing the tasks, decisions.md or the PRD in the run's source checkout (the paused message and status name it):")
   })
 
+  it('challenge_held', () => {
+    // C8: a passing attempt the plan holds. The node is served paused while the record stays passed; nothing is accepted.
+    const now = checked(synthetic({
+      status: 'paused', nodes: { challenge: 'paused' },
+      events: [[0, 'challenge', 'running', 'Design challenge attempt 1: one print job, session 81e2b324-da2f-47a3-9d66-e9f8ad35e964'],
+        [140, 'challenge', 'succeeded', 'Design challenge attempt 1 passed (2 P2 concern(s)); held for the operator'],
+        [150, 'challenge', 'paused', 'Design challenge attempt 1 passed (2 P2 concern(s)) and is held for the operator before any worker launch']],
+      inputs: inputs => {
+        const challenge = inputs.challenge!
+        inputs.challenge = { ...challenge, status: 'passed', accepted_reason: null, attempt: 1, attempts: 1,
+          concerns: [{ ...challenge.concerns[0], severity: 'P2', message: 'Naming is loose.' }, { ...challenge.concerns[0], severity: 'P2', message: 'One test is slow.' }],
+          hold: { held_at: '2026-09-24T08:40:00Z', released_at: null, released_by: null, dropped: [] } }
+      },
+    }))
+    assert.equal(now.situation, 'challenge_held')
+    assert.match(textToString(now.headline, T0), /^‖ Held: the design challenge passed with 2 P2 concerns; no worker launched/)
+    assert.match(textToString(now.reason, T0), /Naming is loose\./)
+    assert.deepEqual(commands(now), ['"$PY" -m workflow resume "$RUN" --launch --by operator', '"$PY" -m workflow resume "$RUN" --by operator'])
+    assert.ok(commands(now).every(command => !command.includes('--accept-challenge')), 'never the accept command')
+    // The held rows read as people words.
+    assert.equal(humanizeEvent({ message: 'Design challenge attempt 1 passed (2 P2 concern(s)); held for the operator' }), 'attempt 1 passed · 2 P2 concerns · held for you')
+    assert.equal(humanizeEvent({ message: 'Design challenge attempt 1 passed (2 P2 concern(s)) and is held for the operator before any worker launch' }),
+      'attempt 1 held for you: 2 P2 concerns; no worker launched')
+    // Released (resume --launch): no longer held, and a paused record is the ordinary pause.
+    const released = checked(synthetic({
+      status: 'running', nodes: { challenge: 'succeeded', launch_game: 'running' },
+      events: [[0, 'challenge', 'succeeded', 'Design challenge attempt 1 passed (2 P2 concern(s)); held for the operator'], [10, 'launch_game', 'running', 'Launching or reconciling the exact native session']],
+      inputs: inputs => {
+        inputs.challenge = { ...inputs.challenge!, status: 'passed', accepted_reason: null, attempt: 1, attempts: 1, concerns: [],
+          hold: { held_at: '2026-09-24T08:40:00Z', released_at: '2026-09-24T08:45:00Z', released_by: 'operator', dropped: [] } }
+      },
+    }))
+    assert.notEqual(released.situation, 'challenge_held')
+  })
+
   it('awaiting_approval', () => {
     const done = { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'succeeded' } as const
     const now = checked(synthetic({

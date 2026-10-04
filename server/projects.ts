@@ -32,7 +32,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * per worker, and a `challenge` graph node before the launches; older exports serve them as null and `[]`, and their
  * completions as 1.0.0) and 1.6.0 (the review sidecar: a top-level `sidecar` section holding its ledger, or null, and a
  * `sidecar` graph node after the challenge) and 1.7.0 (C52: `inputs.roles`, `inputs.controller` and `inputs.automatic.profile`,
- * each absent for a run prepared before it and served as null). A section is served only when the
+ * each absent for a run prepared before it and served as null; C8: `inputs.challenge.hold`, absent without a hold and served as
+ * null, and a challenge node served paused while its hold waits for `resume --launch`). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -221,6 +222,13 @@ const challengeSectionSchema = z.strictObject({
   cheap_experiment: z.string().min(1).nullable(),
   accepted_reason: z.string().min(1).nullable(),
   decided_at: zonedTimestamp,
+  /** Export 1.7.0 (C8): the hold of this attempt (challenge-hold.json); absent for every challenge without one. */
+  hold: z.strictObject({
+    held_at: zonedTimestamp,
+    released_at: zonedTimestamp.nullable(),
+    released_by: z.enum(['operator', 'maintainer']).nullable(),
+    dropped: z.array(z.number().int().positive()),
+  }).optional(),
 })
 
 /** The export's `inputs` section: what the run was asked to do, pinned from `plan.json`, `policy.json` and receipts. */
@@ -721,6 +729,12 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
       cheap_experiment: challenge.cheap_experiment === null ? null : redactPaths(challenge.cheap_experiment),
       accepted_reason: challenge.accepted_reason === null ? null : redactPaths(challenge.accepted_reason),
       decided_at: utcTimestamp(challenge.decided_at),
+      hold: challenge.hold === undefined ? null : {
+        ...challenge.hold,
+        held_at: utcTimestamp(challenge.hold.held_at),
+        released_at: challenge.hold.released_at === null ? null : utcTimestamp(challenge.hold.released_at),
+        dropped: [...challenge.hold.dropped],
+      },
     },
     // Export 1.7.0; runs prepared before the pins, and older exports, serve null.
     roles: section.roles == null ? null : { worker: { ...section.roles.worker }, judges: { ...section.roles.judges } },
@@ -1391,7 +1405,8 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     // The design challenge node is decided by the export's challenge record when there is one, never by `values`.
     const challenge = node.node_id === CHALLENGE_NODE ? state.inputs?.challenge ?? null : null
     if (challenge) { attempt = challenge.attempts; session_id = challenge.session_id }
-    if (challenge?.status === 'paused') status = 'paused'
+    // A passed attempt the plan holds (C8) is paused until `resume --launch` records its release; challenge.json stays passed.
+    if (challenge?.status === 'paused' || (challenge?.status === 'passed' && challenge.hold && challenge.hold.released_at === null)) status = 'paused'
     else if (challenge) status = 'succeeded'
     else if (task?.error) status = 'failed'
     else if (frozen && node.node_id === 'handoff') status = 'succeeded'

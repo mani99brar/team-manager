@@ -113,7 +113,7 @@ export type Timeline = {
 // ---- Now types (6.1, 6.2) -----------------------------------------------------------------------------------------
 
 /** The `run-now[data-situation]` ids, in the order `deriveNow` checks them (6.2). */
-export type Situation = 'question' | 'pane_attention' | 'awaiting_approval' | 'challenge_paused' | 'interrupted' | 'blocked_before_freeze'
+export type Situation = 'question' | 'pane_attention' | 'awaiting_approval' | 'challenge_held' | 'challenge_paused' | 'interrupted' | 'blocked_before_freeze'
   | 'blocked_identical' | 'check_failed' | 'review_blocked' | 'running' | 'succeeded' | 'inactive' | 'no_rule_matched'
 
 /**
@@ -370,6 +370,9 @@ const PHRASES: Phrase[] = [
   [/^Design challenge attempt (\d+): one print job, session (\S+)$/, (k, session) => `attempt ${k} started (print job, session ${session})`],
   [/^Feature files re-pinned for design challenge attempt (\d+) on base (\S+)$/, (k, base) => `attempt ${k} started after re-pinning the feature files (base ${base})`],
   [/^Design challenge attempt (\d+) passed \((\d+) (P\d) concern\(s\)\); launching workers$/, (k, n, severity) => `attempt ${k} passed · ${n} ${severity} ${Number(n) === 1 ? 'concern' : 'concerns'}`],
+  [/^Design challenge attempt (\d+) passed \((\d+) (P\d) concern\(s\)\); held for the operator$/, (k, n, severity) => `attempt ${k} passed · ${n} ${severity} ${Number(n) === 1 ? 'concern' : 'concerns'} · held for you`],
+  [/^Design challenge attempt (\d+) passed \((\d+) (P\d) concern\(s\)\) and is held for the operator before any worker launch$/,
+    (k, n, severity) => `attempt ${k} held for you: ${n} ${severity} ${Number(n) === 1 ? 'concern' : 'concerns'}; no worker launched`],
   [/^Design challenge attempt (\d+) paused the run before any worker launch: (\d+) P0\/P1 concern\(s\)$/,
     (k, n) => `attempt ${k} paused the run: ${n} P0/P1 ${Number(n) === 1 ? 'concern' : 'concerns'}; no worker launched`],
   [/^KeyboardInterrupt$/, () => 'interrupted (KeyboardInterrupt)'],
@@ -1064,7 +1067,7 @@ export function deriveNow(run: NowInput): Now {
     run, timeline, rows, focus, scope: scopeStart(run.detail, rows, focus), status: run.detail.snapshot.status, results: run.results ?? new Map(), missing: new Set(),
     automatic: automaticRun(run, rows),
   }
-  const rules = [questionNow, paneNow, approvalNow, challengeNow, interruptedNow, blockedBeforeFreezeNow, identicalNow, checkFailedNow, reviewBlockedNow, runningNow, succeededNow, inactiveNow, unmatchedNow]
+  const rules = [questionNow, paneNow, approvalNow, challengeHeldNow, challengeNow, interruptedNow, blockedBeforeFreezeNow, identicalNow, checkFailedNow, reviewBlockedNow, runningNow, succeededNow, inactiveNow, unmatchedNow]
   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
   return { interruption: null, lane: null, reason: null, reasonSource: null, since: focus?.since ?? null, ...now, focus, missing: [...context.missing] }
 }
@@ -1150,6 +1153,28 @@ function approvalNow(context: Context): Draft | null {
     ...base, headline: ['? Awaiting your approval', ...when, '. Not complete until you approve it in the CLI; viewing approves nothing.'],
     next: { action: 'required', label: 'Approve the reviewed bundle: a local fast-forward of the source branch, nothing is pushed', runbook: [RUNBOOK.approve], caveat: null,
       steps: [command(workflow('approve', '--bundle-sha256', hash))] },
+  }
+}
+
+/**
+ * A passed design challenge the plan holds (C8, `launch --hold-challenge` or profile attended) and nothing released: the operator
+ * reads every concern, then `resume --launch` launches the workers. Nothing blocks, so the accept command is never offered.
+ */
+function challengeHeldNow(context: Context): Draft | null {
+  const challenge = context.run.inputs?.challenge ?? null
+  const hold = challenge?.hold ?? null
+  if (challenge?.status !== 'passed' || hold === null || hold.released_at !== null) return null
+  const [first] = challenge.concerns
+  return {
+    situation: 'challenge_held', tone: 'paused', glyph: '‖', since: lastMessage(context, 'challenge')?.event.occurred_at ?? hold.held_at,
+    headline: [`‖ Held: the design challenge passed with ${plural(challenge.concerns.length, 'P2 concern')}; no worker launched until you release it`],
+    reason: first ? [`${first.severity}: ${first.message}${challenge.concerns.length > 1 ? ` (+${challenge.concerns.length - 1} more)` : ''}`] : null,
+    next: {
+      action: 'required', label: 'Read every concern, then launch the workers, or revise the feature files and rerun the challenge', runbook: [RUNBOOK.challenge],
+      caveat: 'Add --drop <n>,<m> to leave numbered notes out of the workers\' prompts.',
+      steps: [command(workflow('resume', '--launch'), 'Launch the workers with the challenge notes:'),
+        command(workflow('resume'), "Or edit the tasks, decisions.md or the PRD in the run's source checkout, then rerun the challenge; it holds again when it passes:")],
+    },
   }
 }
 

@@ -94,7 +94,9 @@ function severityWords(concerns: Challenge['concerns'], severities: readonly Cha
 export function challengeHeadline(challenge: Challenge, spans: readonly Span[]): ChallengeHeadline {
   const blocking = severityWords(challenge.concerns, ['P0', 'P1'])
   const p2 = challenge.concerns.filter(concern => concern.severity === 'P2').length
-  const lead = challenge.status === 'passed' ? `Passed on attempt ${challenge.attempt}`
+  const held = challenge.status === 'passed' && challenge.hold != null && challenge.hold.released_at === null
+  const lead = held ? `Held after passing on attempt ${challenge.attempt}: no worker launches until the operator releases it`
+    : challenge.status === 'passed' ? `Passed on attempt ${challenge.attempt}`
     : challenge.status === 'paused' ? `Paused: the design challenge found ${blocking || 'a blocking concern'}; no worker was launched.`
       : challenge.status === 'accepted' ? `Accepted by the operator on attempt ${challenge.attempt}${blocking ? ` over ${blocking}` : ''}`
         : 'Disabled: nothing was challenged'
