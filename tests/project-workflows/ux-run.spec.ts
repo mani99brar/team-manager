@@ -42,17 +42,17 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   await page.setViewportSize({ width: 1440, height: 900 })
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
 
-  // Blocked by review: the three-step new-run template, with placeholders, never a concrete feature name.
+  // Blocked by review: the brief, then a follow-up run of the same feature (C30), with placeholders, never a concrete feature name.
   let banner = await openRun(page, reviewersRunUrl(RUN_REVIEWER_BLOCKED), 'review_blocked')
   await expect(banner).toContainText('Blocked by review at Independent review')
   await expect(banner).toContainText('The workflow did not complete.')
   await expect(banner).toContainText('coverage blocked the candidate: 1 open P1')
   await expect(commands(page)).toHaveText([
-    '"$PY" -m workflow init <fixes-feature> --repo <target repo>',
-    '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator',
+    '"$PY" -m workflow brief "$RUN"',
+    '"$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic --by operator',
   ])
   await expect(banner.getByTestId('now-step')).toHaveCount(3)
-  await expect(banner.getByTestId('now-step').nth(1)).toContainText('Fill in the TODOs')
+  await expect(banner.getByTestId('now-step').nth(1)).toContainText('Paste what each lane needs from the brief')
   const copy = banner.getByTestId('copy-command')
   await expect(copy).toHaveText(['Copy', 'Copy'], { useInnerText: true })
   for (const button of await copy.all()) await expect(button).toHaveAttribute('aria-label', 'Copy command')
@@ -65,7 +65,7 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   expect(await bottomOf(banner)).toBeLessThanOrEqual(900)
   // Copy puts exactly the command on the clipboard; the viewer runs nothing.
   await copy.first().click()
-  await expect.poll(() => page.evaluate('navigator.clipboard.readText()')).toBe('"$PY" -m workflow init <fixes-feature> --repo <target repo>')
+  await expect.poll(() => page.evaluate('navigator.clipboard.readText()')).toBe('"$PY" -m workflow brief "$RUN"')
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'run-now-banner')
 

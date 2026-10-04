@@ -203,13 +203,15 @@ function body(source: string, header: string): string {
   return source.slice(start, end < 0 ? undefined : end)
 }
 const PIPELINE = body(PYTHON('pipeline.py'), 'def main(')
-/** Where each verb's argparse lives (workflow/__main__.py dispatches launch, init, resume, answer and repair). */
+/** Where each verb's argparse lives (workflow/__main__.py dispatches launch, init, resume, answer, repair, brief and abandon). */
 const CLI: Record<string, string> = {
   launch: body(PYTHON('launch.py'), 'def main('),
   init: body(PYTHON('scaffold.py'), 'def main('),
   resume: body(PYTHON('guardrails.py'), 'def resume_main('),
   answer: body(PYTHON('guardrails.py'), 'def answer_main('),
   repair: body(PYTHON('repair.py'), 'def repair_main('),
+  brief: body(PYTHON('brief.py'), 'def brief_main('),
+  abandon: body(PYTHON('abandon.py'), 'def abandon_main('),
   'attach-one': body(PYTHON('interactive.py'), 'def main('),
 }
 
@@ -227,10 +229,12 @@ function assertRealCli(now: Now) {
     for (const flag of tokens.filter(token => token.startsWith('--'))) {
       assert.ok(parser.includes(flag === '--by' ? 'add_actor_argument(parser)' : `add_argument("${flag}"`), `${verb} takes ${flag} (${command})`)
     }
-    if (['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'launch'].includes(verb)) {
+    if (['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'launch', 'abandon'].includes(verb)) {
       assert.ok(command.endsWith(' --by operator') || command.includes(' --by operator '), `a gate command names the operator (${command})`)
     }
-    if (tokens.includes('"$RUN"')) assert.equal(tokens[4], '"$RUN"', `the run directory follows the verb (${command})`)
+    // launch's positional is the feature; there "$RUN" is the run it follows (--follows, C30).
+    if (tokens.includes('"$RUN"') && verb !== 'launch') assert.equal(tokens[4], '"$RUN"', `the run directory follows the verb (${command})`)
+    if (verb === 'launch' && tokens.includes('"$RUN"')) assert.equal(tokens[tokens.indexOf('"$RUN"') - 1], '--follows', command)
   }
 }
 
@@ -479,12 +483,14 @@ describe('deriveNow', () => {
     const reason = textToString(now.reason, T0)
     assert.match(reason, /general blocked the candidate: 1 open P1 — Private matches can be joined without their code\./)
     assert.match(reason, /coverage was superseded \(no verdict\)/)
+    // C30: a follow-up run of the same feature, fed by the blocked run's brief, never a separate fixes feature.
     assert.deepEqual(now.next.steps.map(step => step.kind), ['command', 'text', 'command'])
     assert.deepEqual(commands(now), [
-      '"$PY" -m workflow init <fixes-feature> --repo <target repo>',
-      '"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator',
+      '"$PY" -m workflow brief "$RUN"',
+      '"$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic --by operator',
     ])
-    assert.match((now.next.steps[1] as { text: string }).text, /\/workflow-grill <fixes-feature>.*decisions\.md.*commit/)
+    assert.match((now.next.steps[1] as { text: string }).text, /restore.*findings.*task.*commit/)
+    assert.ok(!JSON.stringify(now.next).includes('init <fixes-feature>'))
     const everything = JSON.stringify(now.next)
     for (const invented of ['skeleton', 'Pirate', 'skeleton-001', '<run id>']) assert.ok(!everything.includes(invented), `no concrete ${invented}`)
   })

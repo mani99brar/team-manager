@@ -200,10 +200,10 @@ y152 ┌ NOW (run-now data-situation="review_blocked") ────────�
      │ ✗ Blocked by review at Independent review · 09:32 (2 h ago). The workflow did not complete.             │
      │   general blocked the candidate: 1 open P1 — Private matches can be joined without their code          │
      │   (apps/server/src/MatchRoom.ts:44-50). coverage was superseded (no verdict).        [Open finding ›]   │
-     │ Likely next step — findings after review are fixed in a new run · RUNBOOK "Changed code" · $PY/$RUN ▸   │
-     │   1 $ "$PY" -m workflow init <fixes-feature> --repo <target repo>                              [Copy]   │
-     │   2   fill in its TODOs (/workflow-grill <fixes-feature> writes decisions.md), commit them in the target │
-     │   3 $ "$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator [Copy]   │
+     │ Likely next step — findings after review are fixed in a follow-up run · RUNBOOK "Changed code" · $PY/$RUN ▸                 │
+     │   1 $ "$PY" -m workflow brief "$RUN"                                                                       [Copy]   │
+     │   2   paste what each lane needs from the brief into that lane's task, commit the feature files in the target          │
+     │   3 $ "$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic --by operator [Copy] │
 y333 └─ Run these in your terminal; this viewer never changes a run. ────────────────────────────────────────────┘
 y341  [Run] [Assignment]                                          (tablist; the Run tabpanel starts below)
 y381  [✓ Design challenge]→[✓ Launch game worker]→[✓ Freeze worker…]→[✓ Verify game]→[✓ Verify comb…]→[✗ Independent…]→[○ Integration…]→[○ Integrate…]
@@ -487,7 +487,7 @@ controller  ✓     5 of 5                                                      
 Independent review                  [✗ Failed] Blocked by review · one print job per reviewer (node-executor)
 ≈09:30:21 → 09:32:31 · ≈2m10s (print transport records no start; start inferred from the candidate)
 This step failed. 1 finding blocks integration.                                      (node-status-meaning)
-Next · findings after review are fixed in a new run (RUNBOOK › Changed code)                  (node-next)
+Next · findings after review are fixed in a follow-up run (RUNBOOK › Changed code)                  (node-next)
 ┌ P1 · open · general · lane game ───────────────────────────── apps/server/src/MatchRoom.ts:44–50 ┐
 │ Private matches can be joined without their code.                                                │
 │ authorizeEntry (apps/server/src/MatchRoom.ts:44-50) treats any request whose options lack `code`…│
@@ -656,7 +656,7 @@ It never matches older `[Errno …]`, `KeyboardInterrupt` or `blocked` rows. Gua
 | 6 | **Blocked before freeze** (`blocked_before_freeze`) | Automatic run; the focus is `handoff` or a `launch_<lane>` with status `failed`; no `verify_*` node has started; and either a `controller_blocked` row is inside the scope window (reason source 0), or `inputs.workers[].completion.status === 'blocked'` | `✗ Blocked before freeze at Freeze worker handoffs · <cause>`. Examples of `<cause>`: `Worker game deadline exhausted; no automatic relaunch`; `game reported blocked: <completion.summary>`; `game asked a fourth question: <text>` | "`repair` refuses a lane blocked before freeze; an automatic run then needs a new run." Steps: (1) if a `Could not confirm worker stop` row is in scope, stop those sessions by their exact ids first (RUNBOOK "Stopping an unfinished run"; text, no command); (2) fix the cause in the feature files if it lies there, and commit; (3) `"$PY" -m workflow launch <feature> --repo <target repo> --run-id <new run id> --live --automatic --by operator` | Status, failures and recovery › Blocked after freeze (Refused, RUNBOOK:315); One-command launch |
 | 7 | **Blocked, identical failure before review** (`blocked_identical`) | The focus is a failed `verify_<lane>` or `candidate`; **and** either the diagnosis marker for that lane is in scope, **or** its latest two attempt results (`results/<lane>/<k-1>`, `/<k>` or `candidate_<lane>/…`) have the same `error.message`; **and** no review has started (review node `pending`, no review result). This catches guardrails, which has no diagnosis event. | `✗ Blocked at Verify combined candidate · lane ui failed identically on attempts 1 and 2 · 20:27` + reason | (1) `"$PY" -m workflow repair "$RUN" ui --workspace --by operator`; (2) commit the fix in `$RUN/repair-workspace-<n>`; (3) `"$PY" -m workflow repair "$RUN" ui --commit <sha> --reason "<why>" --dry-run --by operator`; (4) the same without `--dry-run`; (5) `"$PY" -m workflow automatic "$RUN" --live --by operator` (repair.py:560-569). Manual runs use `retry "$RUN" --by operator` in place of `automatic`. | Blocked after freeze: repair a lane |
 | 8 | **Check failed, attempts left** (`check_failed`) | Failed verify or candidate below the attempt cap, not identical | `✗ Verify game failed attempt 1 of 3: unit, integration — no passing test evidence` | Automatic run: "No action: the supervisor retries by itself within the limit." Manual run: `"$PY" -m workflow retry "$RUN" --phase worker\|candidate --node <lane> --by operator` (pipeline.py:881-882) | Status, failures and recovery › Failed verification |
-| 9 | **Review blocked** (`review_blocked`) | `review.verdict === 'blocked'` | `✗ Blocked by review at Independent review · general: 1 open P1 — <first sentence>` + reviewer statuses | "Review findings are fixed in a new run, not repaired in place." Three steps: (1) `"$PY" -m workflow init <fixes-feature> --repo <target repo>` (scaffold.py:101-104); (2) fill in the TODOs it writes (`/workflow-grill <fixes-feature>` writes `decisions.md`), then commit the feature files in the target (launch refuses a TODO placeholder and an unknown feature, launch.py:68, :171); (3) `"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic --by operator` (launch.py:250-263) | Status, failures and recovery › Changed code; 5. Automatic mode: the review step › Verdict; 1. Define and commit the feature contract |
+| 9 | **Review blocked** (`review_blocked`) | `review.verdict === 'blocked'` | `✗ Blocked by review at Independent review · general: 1 open P1 — <first sentence>` + reviewer statuses | "Findings after review are fixed in a follow-up run of the same feature, not repaired in place." Three steps (C30): (1) `"$PY" -m workflow brief "$RUN"` (brief.py: each lane's restore recipe, every reviewer's findings, the workers' claims); (2) paste what each lane needs from the brief into that lane's task, then commit the feature files in the target; (3) `"$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic --by operator` (launch pins plan.follows) | Status, failures and recovery › Changed code; 5. Automatic mode: the review step › Verdict; 1. Define and commit the feature contract |
 | 10 | **Running** (`running`) | Any node `running` | `● Running · <active steps with elapsed and deadline> · last activity 40 s ago: <message>` | "No action needed: the controller is supervising." Optional: `"$PY" -m workflow.interactive attach-one "$RUN" --node <lane>` to watch a pane | — |
 | 11 | **Succeeded** (`succeeded`) | Run `succeeded` | `✓ Integrated <commit7> into <source_branch> · no push performed · took 31m50s · review approved · 2 open P2 [view]` | "Nothing required by the workflow. Merging or pushing is your decision." **No command is shown.** | 6. Approve local integration |
 | 12 | **Cancelled / pending** (`inactive`) | Run status | One plain line | None | — |
@@ -974,7 +974,7 @@ The total is about 4,000 LOC including tests.
 
 | Case | Input | Expected |
 |---|---|---|
-| `review_blocked` | skeleton-001 | The three-step `init` → fill and commit → `launch` template with `<fixes-feature>` and `<target repo>` placeholders; no concrete feature name or run id |
+| `review_blocked` | skeleton-001 | The three-step `brief` → paste and commit → `launch --follows` template with `<feature>` and `<target repo>` placeholders; no concrete feature name or run id |
 | `blocked_identical` | guardrails | `repair "$RUN" ui --workspace --by operator` … `automatic "$RUN" --live --by operator`, **without** a diagnosis event, and **not** "interrupted" or "Claude Code unavailable" despite the four stale Errno rows |
 | `succeeded` | skeleton-fixes-001 | No command |
 | `question` | synthetic | Both `answer` forms naming the lane; the `--no-herdr` form present |
@@ -1203,8 +1203,8 @@ Every finding id (`lens:id`) and the section that addresses it.
 5. **No lane cards.** A one-line-per-lane block appears only for runs with ≥2 lanes and repeats no durations. This is the operator judge's lane graft without the triage-first duplication.
 6. **Commands.** Only RUNBOOK-prescribed commands, and only for a situation matched from current state (6.2 scope rule).
    - The identical-failure rule also covers runs without a diagnosis event (guardrails).
-   - There is no `git push`, and no relaunch of the same feature to fix review findings. The review-blocked template goes through `init <fixes-feature>`.
-   - A new run of the run's own feature is suggested only for a run blocked before freeze, which RUNBOOK:315 says "then needs a new run". Even there `<feature>`, `<new run id>` and `<target repo>` stay placeholders.
+   - There is no `git push`. Review findings are fixed in a follow-up run of the same feature under a new run id: the review-blocked template goes through `brief` and `launch --follows` (C30).
+   - Otherwise a new run of the run's own feature is suggested only for a run blocked before freeze, which RUNBOOK:315 says "then needs a new run". Even there `<feature>`, `<new run id>` and `<target repo>` stay placeholders.
    - `answer` shows the `--no-herdr` form next to the Herdr form, because the operator often works from a plain SSH shell.
 7. **Section index, not sub-tabs, on node pages.** This keeps Ctrl-F working and the evidence in the DOM (both judges' `must_avoid`).
 8. **Assignment tab kept and routed.** It is not folded into per-node Inputs tabs (feasibility must_avoid: no big-bang Assignment removal). The verify node gets a Requirements section, which is the graph-inspector graft.

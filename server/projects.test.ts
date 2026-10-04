@@ -1547,6 +1547,23 @@ test('redaction covers paths next to Markdown punctuation and file URIs; links r
   })
 })
 
+test('an abandoned run reads cancelled at run level, ahead of failed and paused (C30)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const paused: RawEvent[] = [...reviewedEvents,
+      { sequence: 10, time: T2, node: 'review', status: 'interrupted', message: 'Supervisor interrupted. The reviewer session keeps running; resume with: python -m workflow automatic <path> --live' }]
+    const abandoned: RawEvent[] = [...paused,
+      { sequence: 11, time: T2, node: 'controller', status: 'cancelled', message: 'Abandoned by the operator: usage limit; followed up by run-002. Stopped: review' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'paused', values: reviewedValues(), next: ['review'], events: paused, packets: reviewedPackets, review: null, inputs: inputsSection() })
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'abandoned', values: reviewedValues(), next: ['review'], events: abandoned, packets: reviewedPackets, review: null, inputs: inputsSection() })
+    assert.equal(validateRunDetail((await get(app, url('alpha', 'main', 'paused'))).json()).summary.status, 'paused')
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'abandoned'))).json())
+    assert.equal(detail.summary.status, 'cancelled')
+    assert.equal(detail.snapshot.status, 'cancelled')
+    const timeline = (await get(app, url('alpha', 'main', 'abandoned', '/events'))).json() as { events: { sequence: number; status: string | null; node_id: string | null }[] }
+    assert.deepEqual(timeline.events.at(-1), { ...timeline.events.at(-1), sequence: 11, status: 'cancelled', node_id: null })
+  })
+})
+
 test('an interrupted native review projects the review node as paused, not pending, until the controller resumes', async () => {
   await harness(async ({ app, runsRoot }) => {
     const events: RawEvent[] = [...reviewedEvents,
