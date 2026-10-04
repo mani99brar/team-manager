@@ -3798,5 +3798,30 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertFalse((f.directory / "review.json").exists())
 
 
+class FinishNote(unittest.TestCase):
+    def test_automatic_live_says_how_a_run_on_its_own_worktree_merges_and_launch_says_it_once(self):
+        from .guardrails import LAUNCH_NOTE_ENV
+        from .pipeline import main
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "run-001"
+            directory.mkdir()
+            source = Path(temp) / "run-001.source"
+            note = (f"Merge the run branch from your checkout without switching it: git merge --ff-only feature/x/run-001. Once the run is "
+                    f"finished, remove its source checkout: git worktree remove {source}")
+            for repository, environment, expected in ((source, {}, True), (Path(temp) / "checkout", {}, False),
+                                                      (source, {LAUNCH_NOTE_ENV: "1"}, False)):
+                save_json(directory / "plan.json", {"run_id": "run-001", "repository": str(repository), "source_branch": "feature/x/run-001"})
+                with self.subTest(repository=repository.name, environment=environment), patch("workflow.automatic.supervise") as supervised, \
+                        patch.dict(os.environ, environment), patch.object(sys, "argv", ["workflow", "automatic", str(directory), "--live"]), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    main()
+                    supervised.assert_called_once_with(directory)
+                printed = output.getvalue()
+                self.assertIn("Automatic run reached a verified feature branch.", printed)
+                (self.assertIn if expected else self.assertNotIn)(note, printed)
+                if not expected:
+                    self.assertNotIn("worktree remove", printed)
+
+
 if __name__ == "__main__":
     unittest.main()

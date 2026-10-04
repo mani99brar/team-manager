@@ -254,6 +254,8 @@ const FREEZE_NOTE = /The freeze was stopping the workers/
  * (source_branch_note), or a start that did not complete reconciled, or started when the run never was (start_note).
  */
 const BRANCH_CHANGED = /^Source feature branch changed\b/
+/** The checkout the stop names (automatic.py source_branch_note): the run's own worktree since C56, else the target. */
+const BRANCH_CHANGED_PATH = /^Source feature branch changed: (.+?) is on /
 const START_INCOMPLETE = /^Automatic supervision requires a completed start\b/
 const NEVER_STARTED = /\bthe run was never started\b/
 /** automatic.py record_blocked: the reason drive gives before a stop it does not retry. */
@@ -1149,7 +1151,7 @@ function challengeNow(context: Context): Draft | null {
     reason: first ? [`${first.severity}: ${first.message}${blocking.length > 1 ? ` (+${blocking.length - 1} more)` : ''}`] : null,
     next: {
       action: 'required', label: 'Revise the feature files and rerun the challenge, or accept it with a reason', runbook: [RUNBOOK.challenge], caveat: null,
-      steps: [command(workflow('resume'), 'After editing the tasks, decisions.md or the PRD in the target:'),
+      steps: [command(workflow('resume'), "After editing the tasks, decisions.md or the PRD in the run's source checkout (the paused message and `status` name it):"),
         command(workflow('resume', '--accept-challenge', '"<reason>"'), 'Or record an override with your reason and launch the workers:')],
     },
   }
@@ -1188,9 +1190,10 @@ function resumableStopNext(context: Context, raw: string): NextStep | null {
   const resume = command(workflow('automatic', '--live'))
   if (BRANCH_CHANGED.test(raw)) {
     const branch = context.run.inputs?.source_branch ?? '<source branch>'
+    const checkout = BRANCH_CHANGED_PATH.exec(raw)?.[1] ?? '<source checkout>'
     return {
-      action: 'required', label: `Switch the target checkout back to ${branch}, then resume the controller: it relaunches nothing`,
-      runbook: [RUNBOOK.sourceBranch], steps: [prose(`In the target repository: git switch ${branch}`), resume], caveat: null,
+      action: 'required', label: `Switch the run's source checkout back to ${branch}, then resume the controller: it relaunches nothing`,
+      runbook: [RUNBOOK.sourceBranch], steps: [prose(`git -C ${checkout} switch ${branch}`), resume], caveat: null,
     }
   }
   if (!START_INCOMPLETE.test(raw)) return null

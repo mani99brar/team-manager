@@ -1127,7 +1127,8 @@ class RecordTests(unittest.TestCase):
         save_json(f.directory / "challenge.json", paused)
         printed, _ = self.status()
         self.assertTrue(printed["next_step"].startswith(
-            f"design challenge attempt 1 paused the run: edit the task files, decisions.md or the PRD, then {run('resume')}, "
+            f"design challenge attempt 1 paused the run: edit the task files, decisions.md or the PRD in the source checkout {f.plan['repository']}, "
+            f"then {run('resume')}, "
             f"or accept it with {run('resume')} --accept-challenge \"<reason>\" ({hint}). Then: "), printed["next_step"])
         # A rerun started after the pause and never decided; a resume that stopped before it pinned the revised files; one that
         # pinned them and failed before its job (its checkout): each is rerun by resume, and the override is refused.
