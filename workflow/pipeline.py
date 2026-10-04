@@ -281,8 +281,11 @@ def append_event(directory: Path, node: str, status: str, message: str) -> None:
 
 def action_event(event, actor: str, action: str, detail: str = "") -> None:
     """`<Action> by the operator|maintainer[ (via a Claude Code session)][: detail]` through `event` (Pipeline.event, or a
-    writer of the same shape): a `controller` row, which the viewer reads as a log line."""
-    event("controller", "running", f"{action.capitalize()} by {actor_text(actor)}" + (f": {detail}" if detail else ""))
+    writer of the same shape): a `controller` row with the plain record status `note`, which the server serves with no
+    status, so the viewer reads it as a log line. Never `running`: the server would take it for the controller's last
+    state, and an `automatic --live` that wrote its row and then stopped (a held run lock, a changed policy, a kill) would
+    show a paused run running while nothing runs."""
+    event("controller", "note", f"{action.capitalize()} by {actor_text(actor)}" + (f": {detail}" if detail else ""))
 
 
 def merge_lanes(left: dict | None, right: dict | None) -> dict:

@@ -748,7 +748,7 @@ class ChallengeHeartbeat(FailingChallenge):
             output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
         self.assertEqual(code, 0, output)
         self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 2))
-        self.assertIn(("controller", "running", "Resume by the maintainer: rerunning the design challenge as attempt 2"), self.events(directory))
+        self.assertIn(("controller", "note", "Resume by the maintainer: rerunning the design challenge as attempt 2"), self.events(directory))
 
     def test_ctrl_c_during_a_launchs_challenge_names_resume_not_the_supervisor(self):
         runs = []
@@ -1644,7 +1644,7 @@ class ChallengeRevision(GuardedFeature):
             output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "passed"), output)
         self.assertNotIn("maintainer", (directory / "challenge.json").read_text())  # Its schema is closed.
-        self.assertIn(("controller", "running", "Resume by the maintainer (via a Claude Code session): rerunning the design challenge as attempt 3"),
+        self.assertIn(("controller", "note", "Resume by the maintainer (via a Claude Code session): rerunning the design challenge as attempt 3"),
                       self.events(directory))
         self.assertEqual(self.launches(directory), ["challenge", "challenge", "adapter", "ui"])
 
@@ -1680,7 +1680,7 @@ class ChallengeRevision(GuardedFeature):
             output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
         self.assertEqual(code, 0, output)
         self.assertEqual([event for event in self.events(directory) if event[0] == "controller"][-1],
-                         ("controller", "running", "Resume by the maintainer: design challenge attempt 1 accepted; launching the workers"))
+                         ("controller", "note", "Resume by the maintainer: design challenge attempt 1 accepted; launching the workers"))
         self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
 
 
@@ -1702,13 +1702,13 @@ class ActorRows(GuardedFeature):
         with patch.dict(os.environ, {"CLAUDECODE": ""}), patch.object(RecordingSessions, "run", autospec=True, side_effect=ui_fails):
             output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertNotEqual(code, 0, output)
-        self.assertEqual(self.events(directory)[0], ("controller", "running", "Start by the operator"))
+        self.assertEqual(self.events(directory)[0], ("controller", "note", "Start by the operator"))
         # Reconcile is mechanical recovery: the maintainer may run it, and it rebinds the failed lane's session.
         with patch.dict(os.environ, {"CLAUDECODE": "1"}):
             output, code = self.cli(pipeline.main, ["reconcile", str(directory), "--by", "maintainer"])
         self.assertEqual(code, 0, output)
         events = self.events(directory)
-        row = events.index(("controller", "running", "Reconcile by the maintainer (via a Claude Code session): ui"))
+        row = events.index(("controller", "note", "Reconcile by the maintainer (via a Claude Code session): ui"))
         self.assertIn(("ui", "interactive", "Awaiting explicit completion signal; idle is not acceptance"), events[row:])
 
 

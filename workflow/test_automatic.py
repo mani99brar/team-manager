@@ -2576,7 +2576,7 @@ class ClaudeUnavailableTests(GraphFixture):
         # C17: crash recovery is the maintainer's to run; the supervisor records who started it once it holds the run.
         last = json.loads((f.directory / "events.jsonl").read_text().splitlines()[-1])
         self.assertEqual((last["node"], last["status"], last["message"]),
-                         ("controller", "running", "Automatic by the maintainer: the supervisor continues the run"))
+                         ("controller", "note", "Automatic by the maintainer: the supervisor continues the run"))
         self.assertIn("pid 7 in /work: claude", errors)
         self.assertNotIn("Blocked", errors)
         # A blocked step is still blocked.

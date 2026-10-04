@@ -766,7 +766,7 @@ class InterruptedCheckOnAManualRun(RepairFixture):
         self.assertEqual(read_json(directory / "verification/worker/ui/2/packet.json")["gate"]["status"], "passed")
         # C17: a retry is mechanical recovery, so the maintainer may run it; the timeline says who did.
         events = [json.loads(line) for line in (directory / "events.jsonl").read_text().splitlines()]
-        self.assertIn(("controller", "running", "Retry by the maintainer: worker/ui attempt 2"),
+        self.assertIn(("controller", "note", "Retry by the maintainer: worker/ui attempt 2"),
                       [(event["node"], event["status"], event["message"]) for event in events])
         with self.graph() as (graph, config):
             state = graph.get_state(config)
