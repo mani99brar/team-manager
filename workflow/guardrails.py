@@ -7,6 +7,9 @@
   decisions` heading only those bind and win over the task, the rest stays open to the challenge, and reviewers
   count a worker's named departure from the rest inside its lane as no contradicted requirement; a file without it
   (every one written before) binds as a whole, as before, and launch prints a note saying so.
+- Project conventions: sessions run with --safe-mode, which loads no CLAUDE.md, so prepare pins the target's CLAUDE.md as
+  the base commit holds it, up to the operator-notes heading, and every worker, challenge and reviewer prompt gets it
+  right before decisions.md.
 - Design challenge: one read-only `claude --print` job reads the pinned PRD, tasks and decisions before any worker
   starts and writes `challenge.json`. It runs inside `start` and `resume`, outside the LangGraph graph (it must decide
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
@@ -77,6 +80,11 @@ OPERATOR_DECISIONS = "## Operator decisions"
 LEGACY_DECISIONS_NOTE = (f"{DECISIONS} has no '{OPERATOR_DECISIONS}' heading, so all of it binds the run, as before. Rerun the "
                          "workflow-grill skill to bind only the operator's answers and leave its own defaults open to the design "
                          "challenge (workflow/README.md, Guardrails).")
+# The target's own conventions file (C15). Sessions start with --safe-mode, which never loads it, so prepare pins it and the
+# prompts carry it. What sessions get ends at the operator-notes heading, a line of its own: below it are the operator's notes
+# about running workflows (init's starter CLAUDE.md ends with it).
+CLAUDE_MD = "CLAUDE.md"
+OPERATOR_NOTES = "## Workflow (operator notes; workers skip this section)"
 
 
 # ---- Outcome briefs and decisions (launch and prepare) -------------------------------------------------------
@@ -192,12 +200,13 @@ def authored_task(task: str) -> str:
 
 
 def pin_guardrails(plan: dict, directory: Path, task_files: dict[str, Path], decisions: Path, prd: Path | None, challenge: bool) -> None:
-    """The plan keys of a 2.2.0 run: the completion version, the challenge flag, decisions.md, the PRD copy and the task paths."""
+    """The plan keys of a 2.2.0 run: the completion version, the challenge flag, decisions.md, the project's conventions (the
+    base commit's CLAUDE.md up to the operator-notes heading), the PRD copy and the task paths."""
     text = decisions.read_text()
     if not text.strip():
         raise ValueError(f"{decisions} is empty")
     plan.update(feature_version=GUARDED_VERSION, completion_version=COMPLETION_VERSION, challenge=challenge,
-                decisions={"path": str(decisions.resolve()), "text": text},
+                decisions={"path": str(decisions.resolve()), "text": text}, conventions=conventions(plan),
                 prd=pin_prd(directory, prd) if prd else None,
                 task_files={node: str(path.resolve()) for node, path in task_files.items()})
 
@@ -255,6 +264,82 @@ def decisions_block(plan: dict) -> str:
             "out-of-lane departure is a contradicted requirement. The file:\n" + text.rstrip() + "\n")
 
 
+def git_read(repo: Path, *arguments: str, stdin: bytes = b"") -> bytes:
+    """The stdout of a git command that only reads, fed `stdin`; CalledProcessError when it fails. It runs through Popen, never
+    subprocess.run, which is how `launch` runs each of its steps: a dry run runs none of them, it only reads."""
+    with subprocess.Popen(["git", "-C", str(repo), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        output, errors = process.communicate(stdin)
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args, output, errors)
+    return output
+
+
+def claude_md(repo: Path, commit: str) -> str | None:
+    """The target's CLAUDE.md as `commit` holds it at the root, or None when it holds none. A link inside the repository is
+    followed, as Claude Code follows it on disk; one that leaves the repository or dangles is none."""
+    found = git_read(repo, "cat-file", "--batch", "--follow-symlinks", stdin=f"{commit}:{CLAUDE_MD}\n".encode())
+    header, _, body = found.partition(b"\n")
+    fields = header.split()
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None  # `<name> missing`, `symlink`, `dangling`, `loop` or `notdir` with its size, or a directory.
+    return body[:int(fields[2])].decode(errors="replace")
+
+
+def cut_conventions(text: str) -> tuple[str, list[str] | None]:
+    """What sessions get of a CLAUDE.md: its text above the first OPERATOR_NOTES line, with the `## ` headings below that line,
+    whose sections are cut with the operator's notes; the whole text and None without that line. As in sections(), a line
+    inside a fenced code block is never a heading."""
+    lines = text.splitlines(keepends=True)
+    fence, cut, below = None, None, []
+    for index, line in enumerate(lines):
+        marker = re.match(r"(`{3,}|~{3,})", line.strip())
+        if marker and (fence is None or marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence)):
+            fence = None if fence else marker.group(1)
+        elif fence is None and re.match(r"## \S", line):
+            if cut is not None:
+                below.append(line.strip())
+            elif line.rstrip() == OPERATOR_NOTES:
+                cut = index
+    return ("".join(lines[:cut]), below) if cut is not None else (text, None)
+
+
+def conventions(plan: dict) -> dict:
+    """plan['conventions'] (C15): CLAUDE.md as the run's base commit holds it, cut at the operator-notes heading, with that
+    commit and the text's sha256; a base without the file pins an empty text. Pinned once at prepare: `repin` keeps it, since
+    resume commits only the pinned feature files, so CLAUDE.md is the same at every base a run moves to."""
+    commit = plan["base_commit"]
+    text = cut_conventions(claude_md(Path(plan["repository"]), commit) or "")[0]
+    return {"commit": commit, "sha256": digest_bytes(text.encode()), "text": text}
+
+
+def conventions_block(plan: dict) -> str:
+    """The project's conventions as every session's prompt has them, right before decisions_block: workers, reviewers (both
+    transports) and the design challenge. Empty for a plan that pinned none (a feature before 2.2.0, a run prepared before
+    C15) or an empty text."""
+    pinned = plan.get("conventions")
+    text = pinned.get("text") if isinstance(pinned, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    return (f"\n\nProject conventions ({CLAUDE_MD} at {pinned.get('commit')}; the controller's rules, the task and {DECISIONS} take "
+            f"precedence):\n{text.rstrip()}\n")
+
+
+def conventions_summary(repo: Path) -> tuple[str, str | None]:
+    """What `launch --dry-run` says of the conventions a guarded run would pin: CLAUDE.md at HEAD (the commit prepare pins)
+    with the size of the text sessions get, or "none"; and a note naming each section below the operator-notes heading, which
+    no session gets, or None."""
+    text = claude_md(repo, "HEAD")
+    if text is None:
+        return "none", None
+    sent, below = cut_conventions(text)
+    commit = git_read(repo, "rev-parse", "HEAD").decode().strip()
+    source = ("none" if not sent.strip() else f"{CLAUDE_MD} at {commit}: {len(sent.encode())} bytes, "
+              + ("up to the operator-notes heading" if below is not None else "the whole file (it has no operator-notes heading)"))
+    note = (f"{CLAUDE_MD} at {commit} has {', '.join(below)} below '{OPERATOR_NOTES}': that text is cut with the operator's notes, so "
+            "no session gets it. Move what sessions must follow above the heading." if below else None)
+    return source, note
+
+
 def has_challenge(plan: dict) -> bool:
     """The run's graph starts with the challenge node: a 2.2.0 run whose feature did not set `challenge: false`."""
     return plan.get("challenge") is True
@@ -298,7 +383,8 @@ def validate_output(value) -> None:
 
 
 def task_block(plan: dict, node: str) -> str:
-    """A lane's pinned task as the challenge prompt shows it; another block (`\\n\\n=== `) always follows it."""
+    """A lane's pinned task as the challenge prompt shows it; another block (`\\n\\n=== `: a task, CLAUDE.md or decisions.md)
+    always follows it."""
     return f"\n\n=== Task of lane {node} ===\n{plan['nodes'][node]['task']}"
 
 
@@ -344,6 +430,9 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
         parts.append("\n\nThe feature names no PRD; challenge the tasks and decisions below.")
     for node in plan_workers(plan):
         parts.append(task_block(plan, node))
+    conventions = conventions_block(plan)
+    if conventions:  # Under a banner like every other block here, so it never reads as part of the last lane's task.
+        parts.append(f"\n\n=== {CLAUDE_MD} ==={conventions}")
     parts.append(f"\n\n=== decisions.md ===\n{decisions_text(plan) or ''}")
     previous = load_challenge(directory)
     if previous is not None and previous["status"] == "paused":

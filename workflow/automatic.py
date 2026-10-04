@@ -22,7 +22,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from .checks import now
-from .guardrails import decisions_block, epoch, iso
+from .guardrails import conventions_block, decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_reviewers, plan_workers, popen_claude, read_json, review_node, reviewer_ids,
                        run_lock, save_json, terminate)
@@ -513,8 +513,8 @@ def worker_claims(runtime) -> str:
 
 def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
     """The brief, then the rubric and the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the
-    lane repairs, a 1.1.0 run's inputs and worker claims. Both transports build on it (print_review_prompt; the native
-    completion protocol), so a replay can too."""
+    lane repairs, a 1.1.0 run's inputs and worker claims, the project's conventions and decisions.md. Both transports build on
+    it (print_review_prompt; the native completion protocol), so a replay can too."""
     from .repair import repair_note
     return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " "
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
@@ -524,7 +524,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
-            + repair_note(runtime.directory) + worker_claims(runtime) + decisions_block(runtime.plan))
+            + repair_note(runtime.directory) + worker_claims(runtime) + conventions_block(runtime.plan) + decisions_block(runtime.plan))
 
 
 def print_review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:

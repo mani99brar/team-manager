@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .guardrails import decisions_block
+from .guardrails import conventions_block, decisions_block
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
                        review_nodes, run_claude, save_json, worker_effort)
@@ -272,12 +272,13 @@ SIDECAR_NOTE = ("\n\nReview sidecar: an independent reviewer reads your diff and
 
 
 def worker_prompt(directory: Path, plan: dict, node: str) -> str:
-    """What a native worker session receives: the rules, its pinned task, the run's decisions.md, a note on the review sidecar
-    when the plan has one, and in automatic mode the completion protocol."""
+    """What a native worker session receives: the rules, its pinned task, the project's conventions (CLAUDE.md), the run's
+    decisions.md, a note on the review sidecar when the plan has one, and in automatic mode the completion protocol."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
-              "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + decisions_block(plan))
+              "Completion of a turn is not workflow approval.\n\n" + plan["nodes"][node]["task"] + conventions_block(plan)
+              + decisions_block(plan))
     if isinstance(plan.get("sidecar"), dict):
         prompt += SIDECAR_NOTE
     if plan.get("automatic"):

@@ -5,6 +5,7 @@ a patched subprocess. Workers are FakeSessions; the design challenge is a fake `
 Claude model calls.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -45,6 +46,9 @@ SPLIT_DECISIONS = ("# Decisions: guarded\n\nFrom the grill session of 3 Oct 2026
                    "- [O1] Q1: Keep the lanes apart. Operator: \"yes, DECISION-MARKER-42\".\n\n## Grill defaults\n\n"
                    "- [G1] The adapter keeps VALUE an integer [added, not asked].\n\n## Changes after launch\n\nNone yet.\n\n"
                    "## Deferred\n\n- Nothing.\n")
+# A target's CLAUDE.md (C15): the project's conventions above the operator-notes heading, the operator's notes below it.
+CONVENTIONS = "# Project conventions\n\n- Run the unit tests with `python -m unittest`: CONVENTION-MARKER-9.\n\n"
+OPERATOR_NOTES = "\n\n- Workers run targeted tests only: OPERATOR-NOTE-3.\n"
 
 
 def setUpModule():
@@ -222,7 +226,8 @@ class BriefHeadings(GuardedFeature):
         prepare = printed["commands"][2]
         self.assertEqual(prepare[prepare.index("--guardrails"):], ["--guardrails", "--decisions", str(self.folder / "decisions.md"),
                                                                      "--prd", str(self.repo / "docs/PRD.md")])
-        self.assertEqual(printed["guardrails"], {"feature_version": "2.2.0", "enforced": True, "challenge": True, "migration_note": None})
+        self.assertEqual(printed["guardrails"], {"feature_version": "2.2.0", "enforced": True, "challenge": True, "migration_note": None,
+                                                 "conventions": "none"})
         self.assertEqual(printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"][0]["node_id"], "challenge")
         # The same feature at 2.1.0: nothing is refused (not even a task without headings), the commands carry no
         # guardrail flag and the launch prints the migration note beside its (empty) notes.
@@ -242,6 +247,7 @@ class BriefHeadings(GuardedFeature):
         self.assertEqual([node["node_id"] for node in printed["registry"]["entry"]["workflows"][0]["definition"]["nodes"]][:2], ["launch_ui", "launch_adapter"])
         self.assertIn("Note: feature.json 2.1.0: no guardrail is enforced", errors.getvalue())
         self.assertIn('set "version": "2.2.0"', printed["guardrails"]["migration_note"])
+        self.assertIsNone(printed["guardrails"]["conventions"])  # Prepare pins no conventions for it (C15).
         # A 2.1.0 file cannot use the 2.2.0 keys.
         save_json(self.folder / "feature.json", {**manifest, "version": "2.1.0", "challenge": False})
         self.assertIn("challenge and prd need version 2.2.0", self.refused(FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"))
@@ -371,6 +377,131 @@ class DecisionsPrecedence(unittest.TestCase):
                             self.assertEqual("For reviewers" in prompt, split)
                             if not split:
                                 self.assertIn("\n\nDecisions recorded before launch (decisions.md; they bind this run):\n" + DECISIONS.rstrip() + "\n", prompt)
+
+
+class Conventions(GuardedFeature):
+    """C15 (decision 6): sessions start with --safe-mode, which loads no CLAUDE.md, so prepare pins the target's CLAUDE.md as the
+    run's base commit holds it, cut at the operator-notes heading, and every worker, challenge and reviewer prompt gets it
+    before decisions.md. A target without the file pins an empty text; a plan pinned before C15 has no key; both get nothing."""
+
+    def commit_claude(self, text: str) -> str:
+        (self.repo / "CLAUDE.md").write_text(text)
+        commit_all(self.repo, "CLAUDE.md")
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def dry_run_output(self) -> tuple[dict, str]:
+        """The dry run's JSON and its stderr (the notes)."""
+        from .launch import main as launch_main
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            launch_main([FEATURE, "--repo", str(self.repo), "--no-herdr", "--dry-run"])
+        command.assert_not_called()
+        return json.loads(output.getvalue()), errors.getvalue()
+
+    def test_the_base_commits_claude_md_is_pinned_up_to_the_operator_notes_heading_whatever_the_tree_holds(self):
+        # A heading quoted in a code fence cuts nothing; a section above the heading is a convention like any other.
+        above = (CONVENTIONS + "Notes about runs go under this heading:\n\n```\n" + guardrails.OPERATOR_NOTES + "\n```\n\n"
+                 "## Boundaries\n\n- Never change vendor/.\n\n")
+        base = self.commit_claude(above + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        directory = self.prepare("conventions-001")
+        plan = read_json(directory / "plan.json")
+        self.assertEqual(plan["base_commit"], base)
+        self.assertEqual(plan["conventions"], {"commit": base, "sha256": hashlib.sha256(above.encode()).hexdigest(), "text": above})
+        self.assertEqual(guardrails.conventions_block(plan), f"\n\nProject conventions (CLAUDE.md at {base}; the controller's rules, the "
+                                                             f"task and decisions.md take precedence):\n{above.rstrip()}\n")
+        # Always the base commit's text: neither an edit in the checkout nor a later commit changes what that base pins.
+        (self.repo / "CLAUDE.md").write_text("# Edited in the checkout: TREE-MARKER\n")
+        self.assertEqual(guardrails.conventions(plan), plan["conventions"])
+        self.commit_claude("# Committed later: LATER-MARKER\n")
+        self.assertEqual(guardrails.conventions(plan), plan["conventions"])
+        # repin re-reads the feature files only: resume commits nothing else, so CLAUDE.md is the same at every base it moves to.
+        (self.folder / "ui-task.md").write_text(BRIEF.format(lane="ui") + "\nRe-pinned.\n")
+        repin(directory, plan, read_json(directory / "policy.json"))
+        self.assertEqual(read_json(directory / "plan.json")["conventions"], {"commit": base, "sha256": hashlib.sha256(above.encode()).hexdigest(),
+                                                                              "text": above})
+
+    def test_a_file_without_the_heading_is_sent_whole_and_none_or_a_link_out_of_the_target_pins_an_empty_text(self):
+        whole = self.commit_claude(CONVENTIONS)
+        plan = {"repository": str(self.repo), "base_commit": whole}
+        self.assertEqual(guardrails.conventions(plan), {"commit": whole, "sha256": hashlib.sha256(CONVENTIONS.encode()).hexdigest(), "text": CONVENTIONS})
+        # A link inside the target is followed, as Claude Code follows it on disk.
+        (self.repo / "AGENTS.md").write_text(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        (self.repo / "CLAUDE.md").unlink()
+        (self.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        commit_all(self.repo, "Linked")
+        self.assertEqual(guardrails.conventions({**plan, "base_commit": git(self.repo, "rev-parse", "HEAD")})["text"], CONVENTIONS)
+        empty = {"sha256": hashlib.sha256(b"").hexdigest(), "text": ""}
+        (self.repo / "CLAUDE.md").unlink()
+        (self.repo / "CLAUDE.md").symlink_to("../outside.md")
+        commit_all(self.repo, "Linked out of the target")
+        outside = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(guardrails.conventions({**plan, "base_commit": outside}), {"commit": outside, **empty})
+        (self.repo / "CLAUDE.md").unlink()
+        commit_all(self.repo, "No CLAUDE.md")
+        directory = self.prepare("no-conventions-001")
+        pinned = read_json(directory / "plan.json")
+        self.assertEqual(pinned["conventions"], {"commit": pinned["base_commit"], **empty})
+        self.assertEqual(guardrails.conventions_block(pinned), "")
+
+    def test_the_dry_run_prints_the_source_and_size_or_none_and_notes_each_section_below_the_heading(self):
+        (self.folder / "decisions.md").write_text(SPLIT_DECISIONS)  # No legacy Note: the notes below are the conventions' own.
+        commit_all(self.repo, "Split decisions")
+        printed, errors = self.dry_run_output()
+        self.assertEqual((printed["guardrails"]["conventions"], printed["notes"]), ("none", []))
+        head = self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        (self.repo / "CLAUDE.md").write_text("# An edit not committed yet\n")  # The dry run reads HEAD, which prepare pins.
+        printed, errors = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"], f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, up to the operator-notes heading")
+        self.assertEqual((printed["notes"], errors), ([], ""))
+        head = self.commit_claude(CONVENTIONS)
+        printed, _ = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"],
+                         f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, the whole file (it has no operator-notes heading)")
+        # A section below the heading is cut with the operator's notes: the dry run names it, in its notes and on stderr. A
+        # line inside a code fence is no section.
+        head = self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES + "\n## Hazards\n\n- Chains differ.\n\n```\n## not a heading\n```\n")
+        printed, errors = self.dry_run_output()
+        self.assertEqual(printed["guardrails"]["conventions"], f"CLAUDE.md at {head}: {len(CONVENTIONS.encode())} bytes, up to the operator-notes heading")
+        [note] = printed["notes"]
+        self.assertEqual(note, f"CLAUDE.md at {head} has ## Hazards below '{guardrails.OPERATOR_NOTES}': that text is cut with the operator's "
+                               "notes, so no session gets it. Move what sessions must follow above the heading.")
+        self.assertIn(f"Note: {note}\n", errors)
+        # Nothing above the heading: nothing is sent.
+        self.commit_claude(guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        self.assertEqual(self.dry_run_output()[0]["guardrails"]["conventions"], "none")
+
+    def test_every_worker_challenge_and_reviewer_prompt_gets_the_block_before_decisions_and_older_plans_get_none(self):
+        from .automatic import completion_protocol_prompt, print_review_prompt
+        self.commit_claude(CONVENTIONS + guardrails.OPERATOR_NOTES + OPERATOR_NOTES)
+        directory = self.prepare("roles-001")
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        plan = read_json(directory / "plan.json")
+        block, decisions = guardrails.conventions_block(plan), guardrails.decisions_block(plan)
+        self.assertIn("CONVENTION-MARKER-9", block)
+        challenge = self.challenge_calls()[-1]["prompt"]
+        self.assertLess(challenge.index(block), challenge.index("=== decisions.md ==="))
+        prompts = {"challenge": challenge, **{f"worker {lane}": self.given[lane]["prompt"] for lane in LANES},
+                   "automatic worker": worker_prompt(directory, {**plan, "automatic": dict(DEFAULTS)}, "ui")}
+        runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
+        for reviewer in [None, *plan["reviewers"]]:
+            name = (reviewer or {}).get("reviewer_id", "review")
+            prompts[f"print reviewer {name}"] = print_review_prompt(runtime, directory / "review.diff", reviewer)
+            prompts[f"native reviewer {name}"] = (review_prompt(runtime, directory / "review.diff", reviewer)
+                                                  + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40, name))
+        for role, prompt in prompts.items():
+            with self.subTest(role=role):
+                self.assertEqual(prompt.count(block), 1)
+                self.assertNotIn("OPERATOR-NOTE-3", prompt)
+                if role != "challenge":
+                    self.assertLess(prompt.index(block), prompt.index(decisions))
+        # A plan pinned before C15 has no conventions key, and an empty text adds nothing either.
+        for older in ({key: value for key, value in plan.items() if key != "conventions"}, {**plan, "conventions": {**plan["conventions"], "text": "\n"}}):
+            with self.subTest(conventions=older.get("conventions")):
+                self.assertEqual(guardrails.conventions_block(older), "")
+                prompts = (worker_prompt(directory, older, "ui"), review_prompt(SimpleNamespace(directory=directory, plan=older, workers=LANES),
+                                                                                  directory / "review.diff"), guardrails.challenge_prompt(directory, older))
+                self.assertFalse(any("Project conventions" in prompt for prompt in prompts))
 
 
 class FailingChallenge(GuardedFeature):

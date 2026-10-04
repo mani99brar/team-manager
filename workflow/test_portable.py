@@ -417,17 +417,22 @@ class InitScaffold(Isolated):
                          ("2.3.0", "feature/skeleton", [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]))
         # decisions.md has the grill's four sections in order (C4): the operator's answers, which alone bind, apart from the grill's own
         # defaults. Changes after launch starts as "None yet", not a placeholder; the grill fills the other three.
-        from .guardrails import CHECKS_DEFAULT, OPERATOR_DECISIONS, brief_problems, has_operator_decisions, sections
+        from .guardrails import CHECKS_DEFAULT, OPERATOR_DECISIONS, OPERATOR_NOTES, brief_problems, cut_conventions, has_operator_decisions, sections
         decisions = sections((folder / "decisions.md").read_text())
         self.assertEqual(list(decisions), ["Operator decisions", "Grill defaults", "Changes after launch", "Deferred"])
         self.assertEqual(decisions["Changes after launch"].strip(), "None yet.")
         self.assertEqual([heading for heading, body in decisions.items() if body.strip().startswith("TODO:")], ["Operator decisions", "Grill defaults", "Deferred"])
         self.assertTrue(has_operator_decisions((folder / "decisions.md").read_text()))
-        # The starter CLAUDE.md ends with the operator-notes heading, the cut point for what sessions may get (C15), and no longer
-        # claims that workers read it: every workflow session runs with --safe-mode, which does not load it.
+        # The starter CLAUDE.md ends with the operator-notes heading (C15): every session runs with --safe-mode, which loads no
+        # CLAUDE.md, and its prompt gets only what is above that heading, pinned at prepare: the project's conventions. How the
+        # file reaches the sessions is a note for the operator, below the heading, so no session reads it.
         claude = (target / "CLAUDE.md").read_text()
-        self.assertEqual([line for line in claude.splitlines() if line.startswith("## ")][-1], "## Workflow (operator notes; workers skip this section)")
-        self.assertIn("--safe-mode", claude)
+        self.assertEqual([line for line in claude.splitlines() if line.startswith("## ")][-1], OPERATOR_NOTES)
+        sent, below = cut_conventions(claude)
+        self.assertEqual(below, [])
+        self.assertIn("- Boundaries: directories and files a worker must never change.\n", sent)
+        self.assertNotIn("--safe-mode", sent)
+        self.assertIn("--safe-mode", claude[len(sent):])
         self.assertNotIn("read this file", claude)
         self.assertNotIn(OPERATOR_DECISIONS, claude)
         task = (folder / "main-task.md").read_text()

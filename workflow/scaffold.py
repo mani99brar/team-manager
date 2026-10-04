@@ -15,7 +15,7 @@ import json
 import os
 from pathlib import Path
 
-from .guardrails import CHECKS_DEFAULT
+from .guardrails import CHECKS_DEFAULT, OPERATOR_NOTES
 from .launch import FEATURE_NAME, git_root
 from .sessions import validate_node_id
 
@@ -78,19 +78,19 @@ def feature_files(feature: str) -> dict[str, str]:
             f"{LANE}-task.md": task, "decisions.md": decisions, "README.md": readme}
 
 
-# Workflow sessions start with --safe-mode, which does not load CLAUDE.md. The last heading is the cut point: what is above
-# it is the project's conventions, what is under it is for the operator only.
-STARTER_CLAUDE = """# Project conventions
-
-Keep this file short and specific. Workflow sessions start with --safe-mode, which does not load this file, so a lane's task states what that lane must follow from it.
+# Workflow sessions start with --safe-mode, which does not load CLAUDE.md. The last heading is the cut point
+# (guardrails.OPERATOR_NOTES): what is above it, the project's conventions, every session's prompt gets; what is under it is
+# for the operator only, so the note on how the file reaches the sessions is there.
+STARTER_CLAUDE = f"""# Project conventions
 
 - Build and test commands: list them here.
 - Code style: what to match, and what to avoid.
 - Boundaries: directories and files a worker must never change.
 
-## Workflow (operator notes; workers skip this section)
+{OPERATOR_NOTES}
 
-- Notes for you and the orchestrator about running workflows in this repository. Keep what every session must follow above this heading.
+- Keep this file short and specific. Workflow sessions start with --safe-mode, which does not load it: for a feature at feature.json 2.2.0 or 2.3.0 the controller pins what is above this heading, as the run's base commit holds it, and puts it in every worker, design challenge and reviewer prompt. No session gets this section.
+- Notes for you and the orchestrator about running workflows in this repository.
 """
 
 
