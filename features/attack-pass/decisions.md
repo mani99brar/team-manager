@@ -49,6 +49,14 @@ Run attack-pass-001, design challenge attempt 1 (2026-10-04), recorded by the Cl
 - [L7] Concern 9: the default secret-file list is read through one function the tests patch, and subprocess launch tests run with `HOME` set to a temporary directory, so no test depends on the files of the host that runs it.
 - [L8] Concerns 10 and 11: the overall bound's formula and its value under pine's defaults go into the engine handoff and the RUNBOOK's Attack pass section (PRD section 9 points there); a test asserts the attacker's environment keeps `CLAUDE_CODE_OAUTH_TOKEN` and drops `GITHUB_TOKEN` and `*_KEY` names. G7 stays: a Claude Code outage during the review loses the attacker running at that moment, and the handoff says so.
 
+Design challenge attempt 2 (2026-10-04), recorded the same way:
+
+- [L9] Concern 1 (P1, Acts: operator), changes [L4]'s exit rule: the review counts as decided when `<run>/review.json` for this candidate exists once `review_candidate` exits, by return or by exception (approved, blocked, a deadline's partial record, a reviewer stop not confirmed). Then `close_or_wait_attack` waits for the pass up to its overall bound, and the exception, if any, is raised again afterwards. Only an exit with no such `review.json` stops the child and records the pass `failed`; `KeyboardInterrupt` and `TransientInfraError` stop the child, record nothing, and the next controller resumes the pass.
+- [L10] Concern 4, changes [L2]'s reset: between angles and before each re-run the worktree is reset with `git checkout -- . && git clean -fd` (no `-x`: ignored files such as `node_modules`, build outputs and `.env.test` stay), then `git status --porcelain` must be empty. The RUNBOOK's pre-pilot check ([L5]) runs the `attack_check` on a known-failing test in a reset worktree.
+- [L11] Concern 3: the child is started with `sys.executable -m workflow.attack <run>` and `cwd` the controller's own checkout (`Path(__file__).resolve().parents[1]`), as `supervise` starts `automatic-step`; one test starts the real child from a temporary cwd and sees a terminal `attack.json`.
+- [L12] Concern 2: `attack-tally` reports per run whether an attacker finished before the review decided (its `finished_at` before the review's acceptance), and the RUNBOOK's Attack pass section says the reviewers can reach the run directory, where `attack.json` lives.
+- [L13] Concern 5: the engine handoff lists as an open follow-up that PRD 5.0's calibration needs a way to give a staged copy of an old run `plan.attack` and an `attack_check` (`attack-pass` refuses a plan without `attack`).
+
 ## Deferred
 
 - The OS sandbox (the C14 sudo steps), blocking mode and the `blocking` key (PRD section 7), and attacks on live services.

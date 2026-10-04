@@ -100,7 +100,7 @@ It never raises into the run. Every step runs under one guard like the sidecar's
 
 ### 4.4 The re-run
 
-For each finding, the controller re-runs the test on a clean copy (decisions [L2], [L5]): one re-run worktree of the candidate commit outside the run directory (`<runs root>/<run id>.attack/rerun`), set up once with the policy's `setup` before the attacker starts and reset between findings (`git checkout -- . && git clean -fdx -e node_modules`, then `git status --porcelain` empty). It copies in only that finding's test file, at its relative path, and runs `attack_check` with `{file}` replaced by the file's absolute path. The result is recorded: exit code, duration, the last 200 lines of output.
+For each finding, the controller re-runs the test on a clean copy (decisions [L2], [L5]): one re-run worktree of the candidate commit outside the run directory (`<runs root>/<run id>.attack/rerun`), set up once with the policy's `setup` before the attacker starts and reset between findings (`git checkout -- . && git clean -fd`, keeping ignored setup outputs, then `git status --porcelain` empty; decisions [L10]). It copies in only that finding's test file, at its relative path, and runs `attack_check` with `{file}` replaced by the file's absolute path. The result is recorded: exit code, duration, the last 200 lines of output.
 
 A finding whose test passes, or does not run (no test collected, setup error, timeout), is `not_reproduced` and goes no further.
 
