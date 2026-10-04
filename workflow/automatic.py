@@ -984,7 +984,9 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the "
                                                        "grace after the block ends, or its deadline")
-                pane_attention(runtime, f"Reviewer {reviewer_id}", node)  # The same record as before the block: never a second line.
+                # The same text as before the block: a pane already recorded is not recorded again, one that blocks again after
+                # its session worked is.
+                pane_attention(runtime, f"Reviewer {reviewer_id}", node)
         if remaining:
             sleep(2)
 
