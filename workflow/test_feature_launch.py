@@ -846,13 +846,20 @@ class UntriedLimit(unittest.TestCase):
         self.assertIn("alpha/search (run " + str(self.waiting[1]), self.refused())
 
     def test_a_continuation_still_launches(self):
+        def preflight_passes(commands):
+            # Preflight checks the limit again, first: the command launch gives it gets past that check (the rest of preflight
+            # then reads the real environment).
+            result = subprocess.run(commands[0], cwd=TOOL, capture_output=True, text=True, timeout=120)
+            self.assertNotIn("wait for your tryout", result.stdout + result.stderr)
         with self.subTest("a follow-up run"):
             _, commands, _ = self.launch(follows=str(self.waiting[0]))
             self.assertIn("--tryout", commands[2])
+            preflight_passes(commands)
         with self.subTest("a run of a feature that is untried itself"):
             self.integrated(self.own_root / "board-001")
             _, commands, _ = self.launch("board-002")
             self.assertIn("--tryout", commands[0])
+            preflight_passes(commands)
 
     def test_launch_passes_tryout_to_preflight_and_prepare_which_pins_it(self):
         save_json(self.waiting[0] / "tryout.json", {"verdicts": [{"result": "works", "note": None, "at": ago(0), "by": "operator"}]})
