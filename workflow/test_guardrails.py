@@ -99,7 +99,9 @@ def concern(severity: str, message: str = "A concern") -> dict:
 
 class RecordingSessions(FakeSessions):
     """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends,
-    which they also keep as `<lane>.prompt.txt`, as InteractiveSessions.run does (the viewer shows it)."""
+    which they also keep as `<lane>.prompt.txt`, as InteractiveSessions.run does (the viewer shows it). That file is the fake's
+    own copy, so an assertion on it here passes by construction: test_interactive's test_worker_launch_records_the_exact_prompt
+    pins what InteractiveSessions.run writes there, the challenge notes included."""
 
     def __init__(self, directory, plan, given: dict):
         super().__init__(directory, plan)

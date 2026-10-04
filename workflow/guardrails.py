@@ -240,19 +240,21 @@ READING = ("When you would build on a reading of a task line that departs from i
 
 
 def reading_rule(plan: dict) -> str:
-    """C16 step 1, for a run whose completions are 1.1.0: what a worker does before it builds on its own reading of a task line.
-    An attended run's worker asks (status question) and a manual run's asks in its pane; an unattended run's records the reading
-    where reviewers read it and goes on. Slice 3 pins the profile as plan.automatic.profile; until then an automatic run is
-    unattended. Empty for a 1.0.0 run, which has no question status."""
-    if completion_version(plan) != COMPLETION_VERSION:
-        return ""
+    """C16 step 1: what a worker does before it builds on its own reading of a task line. An attended run's worker asks (status
+    question) and a manual run's asks in its pane; an unattended run's records the reading where reviewers read it and goes on.
+    Slice 3 pins the profile as plan.automatic.profile; until then an automatic run is unattended. A 1.0.0 run (a 2.0.0 or 2.1.0
+    feature) has no question status and no untested field: its automatic worker records the reading in open_assumptions, which
+    1.0.0 has, whatever the profile."""
     automatic = plan.get("automatic")
     if not isinstance(automatic, dict):
         return READING + "ask in this pane, quoting that line, before building on it."
+    record = READING + "record an open assumption that starts with \"reading:\" and quotes that line, and go on."
+    if completion_version(plan) != COMPLETION_VERSION:
+        return record
     if automatic.get("profile") == "attended":
         rule = READING + "write the completion file with status question quoting that line before building on it."
     else:
-        rule = READING + "record an open assumption that starts with \"reading:\" and quotes that line, and go on."
+        rule = record
     return rule + " A behaviour you could not test is no such reading: list it in untested."
 
 
@@ -292,8 +294,13 @@ def decisions_block(plan: dict) -> str:
 
 
 def git_read(repo: Path, *arguments: str, stdin: bytes = b"") -> bytes:
-    """The stdout of a git command that only reads, fed `stdin`; CalledProcessError when it fails. It runs through Popen, never
-    subprocess.run, which is how `launch` runs each of its steps: a dry run runs none of them, it only reads."""
+    """The stdout of a git command that only reads, fed `stdin`; CalledProcessError when it fails.
+
+    It runs through Popen for a test constraint, not a production one: about 20 dry-run tests patch
+    workflow.launch.subprocess.run (the one `subprocess` module, so every caller's run) to fake launch's steps, and
+    conventions_summary reads CLAUDE.md during such a dry run. Routed through subprocess.run, sessions.git or check_output
+    (both call run), it would get the mock's return value and fail with "not enough values to unpack". Moving it needs a
+    seam for launch's steps that those tests patch instead."""
     with subprocess.Popen(["git", "-C", str(repo), *arguments], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         output, errors = process.communicate(stdin)
     if process.returncode:

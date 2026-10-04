@@ -33,12 +33,20 @@ def is_review_node(node: str) -> bool:
 
 
 def refuse_long_prompt(node: str, prompt: str) -> None:
-    """Refuse a prompt over PROMPT_ARGV_LIMIT bytes; the launch calls it before it writes the receipt."""
+    """Refuse a prompt over PROMPT_ARGV_LIMIT bytes; the launch calls it before it writes the receipt. The remedy names what
+    fills that role's prompt. A reviewer's refusal still leaves its review needing reconciliation (automatic._review_native
+    records any launch error so), and reviewers launched before it keep running."""
     size = len(prompt.encode())
     if size > PROMPT_ARGV_LIMIT:
+        if is_review_node(node):
+            remedy = ("Shorten what fills it (the reviewer's brief, the worker claims, CLAUDE.md above its operator-notes heading, "
+                      "decisions.md). The review is left needing reconciliation, and reviewers launched before this one keep running: "
+                      "stop them, then prepare a new run.")
+        else:
+            remedy = ("Shorten what fills it (the task, the design challenge's notes, CLAUDE.md above its operator-notes heading, "
+                      "decisions.md) and prepare a new run.")
         raise RuntimeError(f"{node_title(node)}'s prompt is {size} bytes, over the {PROMPT_ARGV_LIMIT} bytes one command-line argument can "
-                           "safely carry; nothing was launched and no receipt was written. Shorten what the run pinned into it (the "
-                           "task or the reviewer's brief, CLAUDE.md above its operator-notes heading, decisions.md) and prepare a new run.")
+                           f"safely carry; nothing was launched and no receipt was written. {remedy}")
 
 
 def pane_label(node: str) -> str:

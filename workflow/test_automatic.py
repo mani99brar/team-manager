@@ -45,7 +45,7 @@ class CompletionTests(unittest.TestCase):
                 "status": "completed", "summary": "Synthetic work", "open_assumptions": []}
 
     def test_the_worker_prompt_states_the_lanes_deadline_in_utc(self):
-        # C16 step 6: the receipt's launch_requested_at (saved before the prompt is built) plus worker_timeout_seconds and any
+        # C16 step 6: the receipt's launch_requested_at (passed to the prompt as launched_at, then saved) plus worker_timeout_seconds and any
         # answered question's pause: the deadline wait_handoffs holds the lane to. Without a readable receipt, the bound only.
         from .automatic import completion_prompt, lane_deadline
         prompt = " ".join(completion_prompt(self.root, self.plan, "ui").split())
@@ -79,13 +79,25 @@ class CompletionTests(unittest.TestCase):
         # note or a sidecar message suggests), the worker of an attended run writes a question, that of an unattended run records
         # an open assumption starting "reading:" and goes on, and a manual run's worker asks in its pane. Untestable behaviour
         # stays in untested. Slice 3 pins the profile (plan.automatic.profile); until then an automatic run is unattended. A
-        # 1.0.0 run has no question status and is told nothing new.
+        # 1.0.0 run (a 2.0.0 or 2.1.0 feature, still launchable) has no question status and no untested field: its automatic
+        # worker records the reading in open_assumptions, which 1.0.0 has, whatever the profile, and its manual worker asks in
+        # its pane.
         from .automatic import completion_prompt
         from .interactive import worker_prompt
         reading = ("When you would build on a reading of a task line that departs from its plain words (your own reading, or one an "
                    "advisory note or a sidecar message suggests), ")
         untested = " A behaviour you could not test is no such reading: list it in untested."
-        self.assertNotIn("reading of a task line", completion_prompt(self.root, self.plan, "ui"))
+        self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        legacy = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn(reading + 'record an open assumption that starts with "reading:" and quotes that line, and go on.', legacy)
+        self.assertNotIn("untested", legacy)
+        self.assertNotIn("status question", legacy)
+        self.plan["automatic"]["profile"] = "attended"  # No question status in 1.0.0: still recorded.
+        self.assertEqual(" ".join(completion_prompt(self.root, self.plan, "ui").split()), legacy)
+        del self.plan["automatic"]["profile"]
+        self.assertEqual(worker_prompt(self.root, self.plan, "ui").count("reading of a task line"), 1)
+        legacy_manual = " ".join(worker_prompt(self.root, {key: value for key, value in self.plan.items() if key != "automatic"}, "ui").split())
+        self.assertIn(reading + "ask in this pane, quoting that line, before building on it.", legacy_manual)
         self.plan["completion_version"] = "1.1.0"
         self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
         unattended = " ".join(completion_prompt(self.root, self.plan, "ui").split())

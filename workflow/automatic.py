@@ -72,14 +72,14 @@ def reviewer_transport(plan: dict) -> str:
 
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
     """An automatic worker's completion protocol: its bounds, the default on running checks (C16 step 8; a manual worker has no
-    Bash), the completion file, and for 1.1.0 the evidence, questions and the reading rule (C16 step 1). Its deadline counts
+    Bash), the completion file, for 1.1.0 the evidence and questions, and the reading rule (C16 step 1). Its deadline counts
     from `launched_at` when given (deadline_sentence)."""
     from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, completion_version, reading_rule, stop_rule
     version = completion_version(plan)
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
                "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
                "summary": "Describe actual work and checks executed", "open_assumptions": []}
-    evidence = ""
+    evidence = "\n" + reading_rule(plan)  # A 1.0.0 run gets the reading rule alone.
     if version == COMPLETION_VERSION:
         example.update(untested=["A behaviour no executed check covers"], falsifying_check="The check id (or exact command) that would fail if this were wrong",
                        verify_yourself="One assumption the operator should verify independently", question=None)

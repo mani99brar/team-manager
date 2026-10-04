@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 import os
+import re
 import subprocess
 import time
 import unittest
@@ -507,6 +508,13 @@ class InteractiveTests(unittest.TestCase):
             self.sessions.locate("review", [self.reviewer_row(sessionId="44444444-4444-4444-8444-444444444444")])
 
     def test_worker_launch_records_the_exact_prompt(self):
+        # The production path: InteractiveSessions.run builds the prompt with the design challenge's notes from challenge.json in
+        # the run directory, sends it as the last argv entry and keeps it as <lane>.prompt.txt (test_guardrails' RecordingSessions
+        # writes its own copy, so this is the test that pins prompt.txt).
+        save_json(self.directory / "challenge.json", {"status": "passed", "attempt": 1, "concerns": [
+            {"severity": "P2", "kind": "assumption", "message": "The ui copy may drift.\nRecommendation: pin it.\nActs: worker",
+             "consequence": "The ui shows stale text"}]})
+
         def started(*args, **kwargs):
             kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
             return subprocess.CompletedProcess([], 0)
@@ -516,6 +524,9 @@ class InteractiveTests(unittest.TestCase):
         prompt = self.directory / "ui.prompt.txt"
         self.assertEqual(prompt.read_text(), launch.call_args.args[0][-1])
         self.assertIn(self.plan["nodes"]["ui"]["task"], prompt.read_text())
+        self.assertIn("\n\nDesign challenge notes (advisory, attempt 1)\n", prompt.read_text())
+        self.assertIn("1. P2 [assumption] The ui copy may drift.\nRecommendation: pin it.\nActs: worker\n   Consequence: The ui shows stale text\n",
+                      prompt.read_text())
         self.assertEqual(prompt.stat().st_mode & 0o777, 0o600)
 
     def test_a_prompt_too_long_for_one_argument_is_refused_before_any_receipt(self):
@@ -531,11 +542,18 @@ class InteractiveTests(unittest.TestCase):
         candidate = self.plan["base_commit"]
         launches = {"ui": ("Worker ui", lambda: self.sessions.run("ui")),
                     "review": ("Reviewer review", lambda: self.sessions.run_reviewer("review", "x" * (PROMPT_ARGV_LIMIT + 1), self.TOKEN, candidate))}
+        # The remediation names what fills that role's prompt. A reviewer's refusal leaves the review needing reconciliation
+        # (_review_native records it so) while reviewers launched before it keep running.
+        remedies = {"ui": " Shorten what fills it (the task, the design challenge's notes, CLAUDE.md above its operator-notes heading, "
+                          "decisions.md) and prepare a new run.",
+                    "review": " Shorten what fills it (the reviewer's brief, the worker claims, CLAUDE.md above its operator-notes heading, "
+                              "decisions.md). The review is left needing reconciliation, and reviewers launched before this one keep "
+                              "running: stop them, then prepare a new run."}
         for node, (title, launch_one) in launches.items():
             with self.subTest(node=node), patch.object(self.sessions, "inventory", return_value=[]), \
                     patch("workflow.interactive.git", side_effect=[candidate, ""]), patch("workflow.interactive.subprocess.run") as launch:
                 with self.assertRaisesRegex(RuntimeError, rf"^{title}'s prompt is \d+ bytes, over the 120000 bytes one command-line argument "
-                                                          r"can safely carry; nothing was launched and no receipt was written\."):
+                                                          r"can safely carry; nothing was launched and no receipt was written\." + re.escape(remedies[node]) + "$"):
                     launch_one()
                 launch.assert_not_called()
                 for suffix in ("interactive.json", "prompt.txt", "launch.log"):
