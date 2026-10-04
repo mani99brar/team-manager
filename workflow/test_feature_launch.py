@@ -825,6 +825,16 @@ class UntriedLimit(unittest.TestCase):
                 save_json(self.waiting[2] / "tryout.json", {"verdicts": [{"result": result, "note": None, "at": ago(0), "by": "operator"}]})
                 self.launch()
 
+    def test_a_verdict_on_an_older_run_leaves_a_newer_untried_run_counting(self):
+        # The latest integrated run is the one whose `Fast-forwarded to` row is latest, not the one written to last: the tryout
+        # row (and `automatic --live`'s action row) on an older run moves its last event, never its integration.
+        older = self.integrated(self.runs / "alpha" / "search" / "search-001", hours=10)
+        save_json(older / "tryout.json", {"verdicts": [{"result": "skipped", "note": None, "at": ago(0), "by": "operator"}]})
+        with (older / "events.jsonl").open("a") as events:
+            events.write(json.dumps({"sequence": 2, "time": ago(0), "node": "controller", "status": "note",
+                                     "message": "Tryout recorded by the operator: skipped"}) + "\n")
+        self.assertIn("alpha/search (run " + str(self.waiting[1]), self.refused())
+
     def test_a_continuation_still_launches(self):
         with self.subTest("a follow-up run"):
             _, commands, _ = self.launch(follows=str(self.waiting[0]))

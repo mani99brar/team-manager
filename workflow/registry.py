@@ -263,8 +263,8 @@ def parse_time(value) -> datetime | None:
 
 
 def run_record(directory: Path) -> dict | None:
-    """One run directory: its plan, pinned policy (None before prepare pinned one), integration state, candidate commit and
-    last event time; None when it has no readable plan."""
+    """One run directory: its plan, pinned policy (None before prepare pinned one), integration state (the integrated commit
+    and the time of its `Fast-forwarded to` row), candidate commit and last event time; None when it has no readable plan."""
     try:
         plan = read_json(directory / "plan.json")
         if not isinstance(plan, dict):
@@ -282,10 +282,11 @@ def run_record(directory: Path) -> dict | None:
             with contextlib.suppress(ValueError):
                 events.append(json.loads(line))
     events = [event for event in events if isinstance(event, dict)]
-    integrated = None
+    integrated = integrated_at = None
     for event in events:
         found = FAST_FORWARDED.match(str(event.get("message", ""))) if event.get("node") == "integrate" and event.get("status") == "succeeded" else None
-        integrated = found[1] if found else integrated
+        if found:
+            integrated, integrated_at = found[1], parse_time(event.get("time"))
     # The candidate the run reviewed, else its latest candidate generation (candidate.json, then candidate-<g>.json).
     candidate = (optional("review-bundle.json") or {}).get("candidate_commit")
     if candidate is None:
@@ -297,7 +298,7 @@ def run_record(directory: Path) -> dict | None:
         candidate = (optional(generations[max(generations)].name) or {}).get("commit") if generations else None
     times = [parsed for parsed in (parse_time(event.get("time")) for event in events) if parsed]
     return {"directory": directory, "run_id": plan.get("run_id", directory.name), "plan": plan, "policy": optional("policy.json"),
-            "integration": {"intent": (directory / "integration-intent.json").is_file(), "integrated_commit": integrated},
+            "integration": {"intent": (directory / "integration-intent.json").is_file(), "integrated_commit": integrated, "integrated_at": integrated_at},
             "candidate_commit": candidate if isinstance(candidate, str) else None, "last_event": max(times) if times else None}
 
 

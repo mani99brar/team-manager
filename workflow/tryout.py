@@ -56,10 +56,11 @@ def is_untried(run: dict) -> bool:
 
 
 def latest_integrated(runs: list[dict]) -> dict | None:
-    """The run that integrated last, by its last event, then its plan's created_at; None when none integrated."""
+    """The run that integrated last, by the time of its `Fast-forwarded to` row, then its plan's created_at; None when none
+    integrated. Its last event would not do: a tryout verdict or an action row on an older run moves that, not its integration."""
     integrated = [run for run in runs if run["integration"]["integrated_commit"]]
     floor = datetime.min.replace(tzinfo=timezone.utc)
-    return max(integrated, key=lambda run: (run["last_event"] or floor, str(run["plan"].get("created_at") or "")), default=None)
+    return max(integrated, key=lambda run: (run["integration"].get("integrated_at") or floor, str(run["plan"].get("created_at") or "")), default=None)
 
 
 def untried_features(runs_root: Path, repository: Path | None = None, feature: str | None = None,
