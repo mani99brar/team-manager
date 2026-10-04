@@ -110,7 +110,7 @@ Offline unless marked live.
 | Scenario id | Asserts |
 | --- | --- |
 | three-lane-run | a `FakeSessions` automatic run with lanes `ui`, `adapter`, `docs` reaches a verified branch whose commits are the three lane snapshots in declared order; every per-lane file exists under its lane id |
-| one-lane-run | a run selecting one lane verifies it in both phases and integrates it |
+| one-lane-run | a run selecting one lane verifies it and integrates it; without a browser check its candidate reuses the worker packet (C28) |
 | subset-pinned | `launch --workers ui,docs` pins `workers` and `excluded_workers`; `prepare` creates two worktrees; `status` and the export list two lanes |
 | excluded-ownership | a selected lane whose snapshot touches a path owned by an excluded lane blocks at freeze with an ownership violation naming both lanes |
 | unknown-worker | `--workers ui,nope` and `--workers ui,ui` are refused before `git switch` |

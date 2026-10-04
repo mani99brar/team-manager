@@ -182,6 +182,9 @@ class ThreeLaneRun(LaneRun):
             for name in (f"{node}.interactive.json", f"{node}.handoff.json", f"{node}.snapshot-index", f"worktree-{node}",
                          f"verification/worker/{node}/1/packet.json", f"verification/candidate/{node}/1/packet.json"):
                 self.assertTrue((self.directory / name).exists(), name)
+        for node in LANES:  # Several lanes: every lane's checks run again on the combined revision, in their own worktree.
+            self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/worktree").is_dir())
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
@@ -205,7 +208,7 @@ class ThreeLaneRun(LaneRun):
         self.assertIn("ui, adapter, docs, multiple or none", prompt)
         self.assertNotIn("both or none", prompt)
 
-    def test_one_lane_run_verifies_the_lane_in_both_phases_and_integrates_it(self):
+    def test_one_lane_run_without_a_browser_check_reuses_its_worker_packet_at_the_candidate_and_integrates_it(self):
         self.prepare(["adapter"])
         self.assertEqual((self.plan["workers"], self.plan["excluded_workers"], list(self.plan["nodes"])), (["adapter"], ["ui", "docs"], ["adapter"]))
         commit = self.manual_run()
@@ -213,8 +216,21 @@ class ThreeLaneRun(LaneRun):
         self.assertEqual((self.repo / "backend.py").read_text(), "VALUE = 2\n")
         self.assertEqual((self.repo / "ui.txt").read_text(), "before")
         self.assertEqual(self.sessions.starts, ["adapter"])
-        self.assertTrue((self.directory / "verification/worker/adapter/1/packet.json").exists())
-        self.assertTrue((self.directory / "verification/candidate/adapter/1/packet.json").exists())
+        worker = self.directory / "verification/worker/adapter/1/packet.json"
+        self.assertTrue(worker.exists())
+        # The lone snapshot is the candidate itself (cherry-pick --ff), so its worker packet answers the candidate gate:
+        # no second verification worktree, and the candidate packet names the packet it reused.
+        snapshot = read_json(self.directory / "snapshots.json")["adapter"]["commit"]
+        self.assertEqual((read_json(self.directory / "candidate.json")["commit"], commit), (snapshot, snapshot))
+        candidate = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertEqual(candidate["reused_from"], {"path": "verification/worker/adapter/1/packet.json", "sha256": digest_file(worker)})
+        self.assertEqual((candidate["phase"], candidate["expected"]["attempt"], candidate["expected"]["output_commit"], candidate["gate"]["status"]),
+                         ("candidate", 1, snapshot, "passed"))
+        self.assertEqual(sorted(path.name for path in (self.directory / "verification/candidate/adapter/1").iterdir()), ["packet.json"])
+        events = [json.loads(line) for line in (self.directory / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["message"] for event in events if event["node"] == "candidate_adapter"],
+                         [f"Combined revision {snapshot}; worker checks reused from verification/worker/adapter/1/packet.json "
+                          "(one lane, no browser check, the candidate is its snapshot)"])
         self.assertEqual(sorted(path.name for path in self.directory.glob("worktree-*")), ["worktree-adapter"])
         self.assertFalse((self.directory / "verification/worker/ui").exists())
         bundle = read_json(self.directory / "review-bundle.json")
@@ -227,6 +243,44 @@ class ThreeLaneRun(LaneRun):
         positions, edges, width, height = lane_positions(["adapter"])
         self.assertEqual((positions["launch_adapter"], positions["handoff"], positions["integrate"], height), ((90, 70), (280, 70), (1230, 70), 140))
         self.assertEqual(len(edges), 6)
+
+    def test_a_one_lane_browser_check_reruns_at_the_candidate(self):
+        self.prepare(["ui"])
+        # The ui lane gains a browser check; its worker gate records it for the candidate gate, which runs it again.
+        browser = {"id": "ui-browser", "kind": "browser", "argv": ["python", "-c", "pass"], "timeout_seconds": 10,
+                   "scenarios": [{"id": "shows-after", "description": "ui.txt says after"}]}
+        self.policy["workers"][0].update(required_check_kinds=["build", "browser"], checks=[*self.policy["workers"][0]["checks"], browser])
+        self.plan["policy_sha256"] = policy_digest(self.policy)
+        save_json(self.directory / "policy.json", self.policy)
+        save_json(self.directory / "plan.json", self.plan)
+        self.attach(self.directory)
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(Command(resume={"freeze": True}), self.config)
+        candidate = read_json(self.directory / "verification/candidate/ui/1/packet.json")
+        self.assertNotIn("reused_from", candidate)
+        self.assertTrue((self.directory / "verification/candidate/ui/1/worktree").is_dir())
+        self.assertIn("ui-browser: no Playwright report written (exit 0); the suite did not start", candidate["gate"]["reasons"])
+
+    def test_a_candidate_retry_after_a_reused_packet_runs_the_checks(self):
+        self.prepare(["ui"])
+        self.sessions.edits["ui"] = ("ui.txt", "almost")  # The ui build fails: recorded by the worker gate, gated at the candidate.
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(Command(resume={"freeze": True}), self.config)
+            first = read_json(self.directory / "verification/candidate/ui/1/packet.json")
+            self.assertEqual((first["reused_from"]["path"], first["gate"]["status"]), ("verification/worker/ui/1/packet.json", "blocked"))
+            self.runtime.retry_check("candidate", "ui")
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(None, self.config)
+        second = read_json(self.directory / "verification/candidate/ui/2/packet.json")
+        self.assertNotIn("reused_from", second)
+        self.assertTrue((self.directory / "verification/candidate/ui/2/worktree").is_dir())
+        self.assertEqual(second["result"]["checks"][0]["exit_code"], 1)
 
     def test_report_positions_follow_the_lane_count(self):
         positions, edges, width, height = lane_positions(LANES)

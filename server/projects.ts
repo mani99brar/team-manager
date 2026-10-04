@@ -302,6 +302,11 @@ const packetSchema = z.object({
   gate: z.object({ status: z.string(), reasons: z.array(z.string()), deferred_checks: z.array(z.string()).optional() }),
   /** Evidence receipts map check IDs to `result.checks` entries; read only to name deferred checks. */
   evidence: z.object({ checks: z.array(z.object({ id: z.string(), worker_check_index: z.number().int().nonnegative() })) }).optional(),
+  /**
+   * A candidate packet that reused a lane's worker packet (workflow/checks.py reuse_packet): that packet's run-relative path.
+   * Its result is a copy of the worker packet's, whose artifacts and worktree stay beside the worker packet.
+   */
+  reused_from: z.object({ path: z.string().regex(/^verification\/worker\/[^/]+\/\d+\/packet\.json$/), sha256: hex64 }).optional(),
 })
 
 /** A check the gate recorded but did not gate on in the packet's phase, by its executed `result.checks` index. */
@@ -315,7 +320,7 @@ type InputsSection = z.infer<typeof inputsSectionSchema>
 
 /** A registered packet after loading: either verified content or the reason it cannot be trusted. */
 type LoadedPacket = PacketRegistration & (
-  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[] }
+  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[]; reusedFrom: string | null }
   | { ok: false; reason: string }
 )
 
@@ -980,6 +985,7 @@ export class RunStore {
     let untrusted = false
     for (const packet of run.packets) {
       if (!packet.ok) { untrusted = true; continue }
+      if (packet.reusedFrom !== null) continue  // Its artifacts are the reused worker packet's, registered beside that packet.
       const artifacts = Array.isArray(packet.result.artifacts) ? packet.result.artifacts as Record<string, unknown>[] : []
       for (const artifact of artifacts) {
         if (artifact?.artifact_id !== artifactId) continue
@@ -1189,7 +1195,7 @@ export class RunStore {
       if (packet.data.phase !== registration.phase) { packets.push({ ...registration, ok: false, reason: 'packet phase differs from its registration' }); continue }
       const deferredIds = new Set(packet.data.gate.deferred_checks ?? [])
       const deferred = (packet.data.evidence?.checks ?? []).filter(check => deferredIds.has(check.id)).map(check => ({ id: check.id, check_index: check.worker_check_index }))
-      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred })
+      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred, reusedFrom: packet.data.reused_from?.path ?? null })
     }
     return packets
   }
@@ -1619,7 +1625,9 @@ function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet
     throw new ProjectApiError(500, 'EVIDENCE_MISMATCH', 'The verification packet result does not match its registration.')
   }
   const passed = packet.gate.status === 'passed'
-  const checks = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]).map(check => ({ ...check, cwd: `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree` })) : raw.checks
+  // A reused candidate packet's checks ran in its worker packet's worktree.
+  const worktree = packet.reusedFrom !== null ? packet.reusedFrom.replace(/packet\.json$/, 'worktree') : `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree`
+  const checks = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]).map(check => ({ ...check, cwd: worktree })) : raw.checks
   const artifacts = Array.isArray(raw.artifacts) ? (raw.artifacts as Record<string, unknown>[]).map(artifact => ({
     ...artifact, uri: typeof artifact.artifact_id === 'string' ? `${runRoute(scope, runId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}` : artifact.uri,
   })) : raw.artifacts

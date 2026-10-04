@@ -1082,6 +1082,26 @@ test('the same artifact ID registered twice is served only when both registratio
   })
 })
 
+test('a reused candidate packet serves its worker packet\'s artifacts and names that packet\'s worktree', async () => {
+  // workflow/checks.py reuse_packet (C28): one lane without a browser check; the candidate packet names the worker packet it
+  // reused, copies its result and holds no artifact of its own.
+  await harness(async ({ app, runsRoot }) => {
+    const reused_from = { path: 'verification/worker/ui/1/packet.json', sha256: 'a'.repeat(64) }
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'reused', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['review'], events: launchEvents,
+      packets: [
+        { node: 'ui', phase: 'candidate', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n', skipWrite: true }],
+          mutate: packet => { packet.reused_from = reused_from } },
+        { node: 'ui', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n' }] },
+      ] })
+    const log = await get(app, url('alpha', 'main', 'reused', '/artifacts/log-0-444444444444'))
+    assert.equal(log.status, 200)
+    assert.equal(log.body, 'checked once\n')
+    const result = await get(app, url('alpha', 'main', 'reused', '/results/candidate_ui/1'))
+    assert.equal(result.status, 200)
+    assert.deepEqual(JSON.parse(result.body).checks.map((check: { cwd: string }) => check.cwd), ['verification/worker/ui/1/worktree'])
+  })
+})
+
 // ---------------------------------------------------------------------------------------------------------------
 // Review results and run inputs (export sections 1.1.0 / 1.2.0)
 

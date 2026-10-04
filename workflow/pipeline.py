@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from .attention import attention
-from .checks import now, recheck_packet, verify_revision
+from .checks import now, recheck_packet, reuse_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
@@ -584,6 +584,19 @@ class Pipeline:
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
 
+    def reusable_packet(self, node: str, attempt: int, commit: str, state: PipelineState, repaired: bool) -> Path | None:
+        """The worker packet the candidate gate of `node` reuses (C28), or None when its checks run again.
+
+        Only a run of one selected lane, whose candidate is that lane's snapshot, on the lane's first candidate attempt (a
+        retry runs the checks), before any lane repair, and only a lane without a browser check: md-manager's browser
+        harness depends on the phase. Several lanes and repaired candidates run every check, as before.
+        """
+        if len(self.workers) != 1 or attempt != 1 or repaired or state["snapshots"][node]["commit"] != commit:
+            return None
+        if any(check["kind"] == "browser" for check in self.worker_policy(node)["checks"]):
+            return None
+        return Path(state["packets"][node])
+
     def candidate(self, state: PipelineState) -> str:
         from .repair import applied_repairs, candidate_paths as generation_paths
         # Validate branch evidence again before combining anything.
@@ -608,7 +621,8 @@ class Pipeline:
             for node in self.workers:  # Declared order, selected lanes only.
                 commit = state["snapshots"][node]["commit"]
                 if commit != self.plan["base_commit"]:
-                    subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", commit], env=commit_env(), check=True, capture_output=True)
+                    # --ff: the first snapshot's parent is the base, so it becomes the candidate commit itself (C28).
+                    subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", "--ff", commit], env=commit_env(), check=True, capture_output=True)
             candidate = {"commit": git(cwd, "rev-parse", "HEAD"), "worktree": str(cwd)}
             save_json(saved, candidate)
         expected_tree = repairs[-1]["expected_candidate_tree"] if repairs else None
@@ -617,11 +631,17 @@ class Pipeline:
         candidate_paths = []
         for node in self.workers:
             attempt = self.attempt("candidate", node)
-            packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
-                                     changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
-                                     state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
+            reused = self.reusable_packet(node, attempt, candidate["commit"], state, repaired=bool(repairs))
+            if reused:
+                packet = reuse_packet(self.directory, self.plan, self.policy, node, candidate["commit"], reused, attempt=attempt)
+                note = f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
+            else:
+                packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
+                                         changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
+                                         state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
+                note = ""
             path = self.directory / "verification" / "candidate" / node / str(attempt) / "packet.json"
-            self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}")
+            self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}{note}")
             # A second event says why, or that this attempt passed after the one before failed; the first stays as the viewer reads it.
             if packet["gate"]["status"] != "passed":
                 self.event(f"candidate_{node}", packet["gate"]["status"], f"Candidate gate blocked on attempt {attempt}: {'; '.join(packet['gate']['reasons'])}")
