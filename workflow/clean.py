@@ -232,22 +232,51 @@ def remembered_gitdir(path: Path) -> Path | None:
     return gitdir if gitdir.exists() else None
 
 
+def leftover_refusal(path: Path) -> str | None:
+    """Why remove_leftover refuses a worktree's folder when no checkout of the repository is left to ask Git with, said of
+    "Git cannot read <path>", or None when Git forgot it: no `.git` at all, or a `.git` file naming a gitdir that is gone.
+    Anything else is no evidence of that: a `.git` symlink, a `.git` file that cannot be read or names no gitdir, and one
+    naming a gitdir that exists (Git cannot run here). A `.git` directory is refused by remove_leftover itself."""
+    if not path.is_dir() or path.is_symlink():
+        return None
+    marker = path / ".git"
+    if marker.is_symlink():
+        return "and its .git is a symlink"
+    if not marker.is_file():
+        return None
+    try:
+        text = marker.read_text(errors="replace")
+    except OSError:
+        return "and its .git file names no gitdir it can check"
+    if not (text.startswith("gitdir:") and text.strip().removeprefix("gitdir:").strip()):
+        return "and its .git file names no gitdir it can check"
+    gitdir = remembered_gitdir(path)
+    return None if gitdir is None else f"although its repository {gitdir} exists"
+
+
 def remove_leftover(path: Path) -> None:
     """A worktree's folder when no checkout of the repository is left to ask Git with: deleted, as remove_worktree deletes
-    a leftover Git no longer lists, but only when Git forgot it (no `.git` file, or one naming a gitdir that is gone). An
-    independent repository (a `.git` directory) is never deleted."""
+    a leftover Git no longer lists, but only when Git forgot it (no `.git`, or a `.git` file naming a gitdir that is gone).
+    An independent repository (a `.git` directory) is never deleted."""
     if not (path.exists() or path.is_symlink()):
         return
-    if (path / ".git").is_dir():
+    if (path / ".git").is_dir() and not (path / ".git").is_symlink():
         raise RuntimeError(f"{path} holds its own repository (a .git directory); clean never deletes one")
-    gitdir = remembered_gitdir(path) if path.is_dir() and not path.is_symlink() else None
-    if gitdir is not None:
-        raise RuntimeError(f"Git cannot read {path} although its repository {gitdir} exists: check `git -C {path} status`, "
-                           "then rerun clean")
+    refusal = leftover_refusal(path)
+    if refusal is not None:
+        raise RuntimeError(f"Git cannot read {path} {refusal}: check `git -C {path} status`, then rerun clean")
     if path.is_symlink() or path.is_file():
         path.unlink()
     else:
         remove_tree(path)
+
+
+def refusal_note(path: Path) -> str:
+    """The dry run's mark on a folder remove_leftover will refuse while no checkout of the run is readable; empty otherwise."""
+    if (path / ".git").is_dir() and not (path / ".git").is_symlink():
+        return "it holds its own repository (a .git directory): clean will refuse it"
+    refusal = leftover_refusal(path)
+    return "" if refusal is None else f"Git cannot read it {refusal}: clean will refuse it"
 
 
 def clean_main(argv=None):
@@ -282,17 +311,21 @@ def clean_main(argv=None):
             else:
                 print(f"Clean {directory} will remove:")
                 for folder, names in attempts:
-                    print(f"  passed attempt {folder.relative_to(directory)}: {', '.join(names)}")
+                    # With no checkout Git can read, the removal below goes through remove_leftover: say what it will refuse.
+                    refused = refusal_note(folder / "worktree") if repository is None else ""
+                    print(f"  passed attempt {folder.relative_to(directory)}: {', '.join(names)}" + (f" ({refused})" if refused else ""))
                 frozen = snapshot_commits(directory, plan)
                 for label, path in worktrees:
                     changes = uncommitted(path) if label == "lane worktree" else 0
                     plural = "s" if changes != 1 else ""
                     # Freeze commits a lane's edits to its snapshot ref and leaves the worktree dirty: only an unfrozen lane's
                     # changes are their only copy.
-                    note = (" (Git cannot tell whether it holds uncommitted changes)" if changes is None else
-                            f" ({changes} uncommitted change{plural}, captured in snapshot {frozen[path][:12]})" if changes and path in frozen else
-                            f" ({changes} uncommitted change{plural}: the lane's only copy of them)" if changes else "")
-                    print(f"  {label} {path}{note}")
+                    note = ("Git cannot tell whether it holds uncommitted changes" if changes is None else
+                            f"{changes} uncommitted change{plural}, captured in snapshot {frozen[path][:12]}" if changes and path in frozen else
+                            f"{changes} uncommitted change{plural}: the lane's only copy of them" if changes else "")
+                    refused = refusal_note(path) if repository is None else ""
+                    notes = "; ".join(item for item in (note, refused) if item)
+                    print(f"  {label} {path}" + (f" ({notes})" if notes else ""))
             for folder in kept_attempts:
                 print(f"Kept: {folder.relative_to(directory)}: an attempt that did not pass, kept whole")
             for line in kept:
@@ -302,13 +335,14 @@ def clean_main(argv=None):
             if args.dry_run:
                 print("Dry run: nothing removed.")
                 return
-            errors = []
+            errors, removed = [], 0
             for folder, _ in attempts:
                 try:
                     if repository is None:
                         remove_leftover(folder / "worktree")
                     prune_attempt(repository, folder)
                     print(f"Removed: passed attempt {folder.relative_to(directory)} pruned")
+                    removed += 1
                 except Exception as error:  # Whatever one removal raises, the others still run.
                     errors.append(f"{folder}: {error}")
             for label, path in worktrees:
@@ -322,6 +356,7 @@ def clean_main(argv=None):
                     else:
                         remove_worktree(repository, path)
                     print(f"Removed: {label} {path}")
+                    removed += 1
                 except Exception as error:
                     errors.append(f"{path}: {error}")
             if (attempts or worktrees) and repository is not None:
@@ -330,6 +365,7 @@ def clean_main(argv=None):
                 except Exception as error:  # Reported with the removals that failed, never in their place.
                     errors.append(f"git worktree prune: {error}")
             if errors:
-                raise RuntimeError("some removals failed, the rest are done; rerun clean once fixed:\n" + "\n".join(errors))
+                header = "some removals failed, the rest are done" if removed else "nothing was removed"
+                raise RuntimeError(f"{header}; rerun clean once fixed:\n" + "\n".join(errors))
     except (ValueError, RuntimeError, OSError, KeyError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nEvidence retained at {directory}.\n")

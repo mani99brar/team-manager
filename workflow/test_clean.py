@@ -225,6 +225,45 @@ class CleanTests(unittest.TestCase):
             code, _, err = self.clean("--by", "operator")
         self.refused_while_git_cannot_run(code, err)
 
+    def test_a_git_file_that_cannot_be_read_or_names_no_gitdir_is_refused_while_git_cannot_run(self):
+        # Only a missing .git is evidence that Git forgot a worktree: an unreadable, empty or overwritten one is not.
+        lane = self.run / "worktree-ui"
+        (lane / "work.txt").write_text("the worker's only copy\n")
+        marker = lane / ".git"
+        original = marker.read_text()
+        for case, damage in (("unreadable", lambda: marker.chmod(0)), ("empty", lambda: marker.write_text("")),
+                             ("overwritten", lambda: marker.write_text("not a gitdir line\n"))):
+            with self.subTest(case=case):
+                damage()
+                try:
+                    with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1"}):
+                        code, _, err = self.clean("--by", "operator")
+                finally:
+                    marker.chmod(0o644)
+                    marker.write_text(original)
+                self.assertEqual(code, 1, err)
+                self.assertIn(f"Git cannot read {lane} and its .git file names no gitdir it can check", err)
+                self.assertIn("nothing was removed", err)
+                self.assertTrue((lane / "work.txt").exists())
+                self.untouched()
+                self.assertIn(str(lane), self.listed())
+
+    def test_a_dry_run_while_git_cannot_run_marks_every_folder_clean_will_refuse(self):
+        (self.run / "worktree-ui" / ".git").write_text("")
+        with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1"}):
+            code, out, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+        lane = self.run / "worktree-ui"
+        self.assertIn(f"  lane worktree {lane} (Git cannot tell whether it holds uncommitted changes; Git cannot read it and its .git "
+                      "file names no gitdir it can check: clean will refuse it)", out)
+        for label, path in (("candidate worktree", self.run / "candidate"), ("review worktree", self.run / "review-worktree")):
+            gitdir = (path / ".git").read_text().removeprefix("gitdir:").strip()
+            self.assertIn(f"  {label} {path} (Git cannot read it although its repository {gitdir} exists: clean will refuse it)", out)
+        gitdir = (self.passed / "worktree" / ".git").read_text().removeprefix("gitdir:").strip()
+        self.assertIn(f"  passed attempt verification/worker/ui/1: worktree, npm_config_cache, xdg_cache_home, browser-0 (Git cannot read it "
+                      f"although its repository {gitdir} exists: clean will refuse it)", out)
+        self.untouched()
+
     def test_an_unparsable_shared_git_config_is_refused_and_removes_nothing(self):
         (self.run / "worktree-ui" / "work.txt").write_text("the worker's only copy\n")
         config = self.repo / ".git" / "config"
