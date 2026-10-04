@@ -1082,6 +1082,26 @@ test('the same artifact ID registered twice is served only when both registratio
   })
 })
 
+test('a reused candidate packet serves its worker packet\'s artifacts and names that packet\'s worktree', async () => {
+  // workflow/checks.py reuse_packet (C28): one lane without a browser check; the candidate packet names the worker packet it
+  // reused, copies its result and holds no artifact of its own.
+  await harness(async ({ app, runsRoot }) => {
+    const reused_from = { path: 'verification/worker/ui/1/packet.json', sha256: 'a'.repeat(64) }
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'reused', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['review'], events: launchEvents,
+      packets: [
+        { node: 'ui', phase: 'candidate', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n', skipWrite: true }],
+          mutate: packet => { packet.reused_from = reused_from } },
+        { node: 'ui', artifacts: [{ id: 'log-0-444444444444', kind: 'log', content: 'checked once\n' }] },
+      ] })
+    const log = await get(app, url('alpha', 'main', 'reused', '/artifacts/log-0-444444444444'))
+    assert.equal(log.status, 200)
+    assert.equal(log.body, 'checked once\n')
+    const result = await get(app, url('alpha', 'main', 'reused', '/results/candidate_ui/1'))
+    assert.equal(result.status, 200)
+    assert.deepEqual(JSON.parse(result.body).checks.map((check: { cwd: string }) => check.cwd), ['verification/worker/ui/1/worktree'])
+  })
+})
+
 // ---------------------------------------------------------------------------------------------------------------
 // Review results and run inputs (export sections 1.1.0 / 1.2.0)
 
@@ -1566,6 +1586,23 @@ test('redaction covers paths next to Markdown punctuation and file URIs; links r
     assert.deepEqual(review.findings[1].requirement_found_in, [])
     // A sibling run keeps the workflow list healthy: free-form policy labels are not malformed storage.
     assert.equal((await get(app, url('alpha', 'main'))).status, 200)
+  })
+})
+
+test('an abandoned run reads cancelled at run level, ahead of failed and paused (C30)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const paused: RawEvent[] = [...reviewedEvents,
+      { sequence: 10, time: T2, node: 'review', status: 'interrupted', message: 'Supervisor interrupted. The reviewer session keeps running; resume with: python -m workflow automatic <path> --live' }]
+    const abandoned: RawEvent[] = [...paused,
+      { sequence: 11, time: T2, node: 'controller', status: 'cancelled', message: 'Abandoned by the operator: usage limit; followed up by run-002. Stopped: review' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'paused', values: reviewedValues(), next: ['review'], events: paused, packets: reviewedPackets, review: null, inputs: inputsSection() })
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'abandoned', values: reviewedValues(), next: ['review'], events: abandoned, packets: reviewedPackets, review: null, inputs: inputsSection() })
+    assert.equal(validateRunDetail((await get(app, url('alpha', 'main', 'paused'))).json()).summary.status, 'paused')
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'abandoned'))).json())
+    assert.equal(detail.summary.status, 'cancelled')
+    assert.equal(detail.snapshot.status, 'cancelled')
+    const timeline = (await get(app, url('alpha', 'main', 'abandoned', '/events'))).json() as { events: { sequence: number; status: string | null; node_id: string | null }[] }
+    assert.deepEqual(timeline.events.at(-1), { ...timeline.events.at(-1), sequence: 11, status: 'cancelled', node_id: null })
   })
 })
 
@@ -2063,6 +2100,22 @@ test('[C52] the controller drift warning is a node-less log row, on a lane named
   })
 })
 
+test('[B1] on a lane named controller, prepare\'s launch notes belong to the run, never starting the lane', async () => {
+  // pipeline.py prepare records the launch's notes (C23, C27) as one `controller` row, before any lane launches.
+  const notes = 'Launch notes: Lane controller requires fewer checks than the policy of lane-000: required kind contract removed.'
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [{ sequence: 1, time: T0, node: 'controller', status: 'running', message: notes }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [[1, null, 'running', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'pending', 'the launch notes never start the lane')
+  })
+})
+
 test('[B1] on a lane named controller, the stops said bare off the source branch belong to the run, never failing the lane', async () => {
   // automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
   // failed are said as drive says them, without `Controller blocked: `. On a lane named `controller` each row would otherwise land on
@@ -2179,7 +2232,9 @@ test('[B2] a run summary carries its activity: feature, recency, focus, attentio
     // `note` and `answer` need no controller: their plain records (raw status `note`) on a lane keep the interruption.
     const noted: RawEvent[] = [...launchEvents, { ...interrupted, message: interrupted.message.replace('/interrupted --live', '/noted --live') },
       { sequence: 6, time: T2, node: 'ui', status: 'note', message: 'Note N-1 from the operator to worker ui: undeliverable, not typed (lane_blocked)' },
-      { sequence: 7, time: T2, node: 'adapter', status: 'note', message: 'Question 1 of adapter answered by the operator' }]
+      { sequence: 7, time: T2, node: 'adapter', status: 'note', message: 'Question 1 of adapter answered by the operator' },
+      // A controller action row (C17) after the interruption is a plain record too: the run stays paused, its handoff waiting.
+      { sequence: 8, time: T2, node: 'controller', status: 'note', message: 'Automatic by the operator: the supervisor continues the run' }]
     await writeRun(rootDir, { ...waitingRun, runId: 'noted', events: noted, inputs: inputsSection({}, { ui: liveWorker, adapter: liveWorker }) })
     await writeRun(rootDir, { runId: 'paused', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: [], events: [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' }] })
 
@@ -2215,7 +2270,8 @@ test('[B2] a run summary carries its activity: feature, recency, focus, attentio
     const notedActivity = activity('noted')!
     assert.deepEqual({ focus: notedActivity.focus, attention: notedActivity.attention }, { focus: stopped.focus, attention: stopped.attention })
     const timeline = (await get(app, url('alpha', 'main', 'noted', '/events'))).json() as { events: { node_id: string | null; status: string | null; type: string }[] }
-    assert.deepEqual(timeline.events.slice(-2).map(event => [event.node_id, event.status, event.type]), [['launch_ui', null, 'log'], ['launch_adapter', null, 'log']])
+    assert.deepEqual(timeline.events.slice(-3).map(event => [event.node_id, event.status, event.type]),
+      [['launch_ui', null, 'log'], ['launch_adapter', null, 'log'], [null, null, 'log']])
     assert.deepEqual(activity('paused'), {
       ...none, feature: null, last_activity_at: T1, finished_at: null, headline: 'Freeze worker handoffs · Immutable snapshots captured',
       focus: { node_id: 'handoff', label: 'Freeze worker handoffs', status: 'paused', since: T1 }, attention: { kind: 'paused', node_id: 'handoff', since: T1 },

@@ -316,6 +316,11 @@ const packetSchema = z.object({
   gate: z.object({ status: z.string(), reasons: z.array(z.string()), deferred_checks: z.array(z.string()).optional() }),
   /** Evidence receipts map check IDs to `result.checks` entries; read only to name deferred checks. */
   evidence: z.object({ checks: z.array(z.object({ id: z.string(), worker_check_index: z.number().int().nonnegative() })) }).optional(),
+  /**
+   * A candidate packet that reused a lane's worker packet (workflow/checks.py reuse_packet): that packet's run-relative path.
+   * Its result is a copy of the worker packet's, whose artifacts and worktree stay beside the worker packet.
+   */
+  reused_from: z.object({ path: z.string().regex(/^verification\/worker\/[^/]+\/\d+\/packet\.json$/), sha256: hex64 }).optional(),
 })
 
 /** A check the gate recorded but did not gate on in the packet's phase, by its executed `result.checks` index. */
@@ -329,7 +334,7 @@ type InputsSection = z.infer<typeof inputsSectionSchema>
 
 /** A registered packet after loading: either verified content or the reason it cannot be trusted. */
 type LoadedPacket = PacketRegistration & (
-  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[] }
+  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[]; reusedFrom: string | null }
   | { ok: false; reason: string }
 )
 
@@ -419,14 +424,16 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
  * The controller process's own rows. `controller` is not a reserved lane ID (C6), so on a lane of that name the raw
  * `controller` node would alias these onto the lane's launch node; they concern the run, so they stay node-less (B1).
  * Then automatic.py's resumable stops (resumable_stop): a changed source branch, a start that did not complete; and the
- * reason drive gives before a stop it does not retry (record_blocked, `Controller blocked: …`), and who ran a gate
- * action (pipeline.py action_event, C17).
+ * reason drive gives before a stop it does not retry (record_blocked, `Controller blocked: …`), who ran a gate
+ * action (pipeline.py action_event, C17), and an abandoned run's row (abandon.py, C30).
  */
 const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
   /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/, /^Controller blocked: /,
   /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/,
   // automatic.py note_controller_drift: the step runs another controller commit than prepare pinned (a `warning`, served status-less).
   /^Controller commit [0-9a-f]+ runs this step\b/,
+  // abandon.py: the run's `cancelled` row.
+  /^Abandoned by the (?:operator|maintainer)\b/,
   // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them. Then the
   // failed wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a fourth question
   // from guardrails.py record_question, a missing session) and read_signal's refusals (`Invalid completion` covers
@@ -434,7 +441,9 @@ const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Cod
   /^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion\b/,
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
   /^Worker \S+ asked question \d+; at most \d+ are answered\b/,
-  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
+  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/,
+  // pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches.
+  /^Launch notes: /]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
 /** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
 const QUESTIONS_BYTE_LIMIT = 256 * 1024
@@ -452,6 +461,8 @@ const EVENT_STATUS: Record<string, RunSnapshot['status']> = {
   paused: 'paused',
   /** The controller stepped away (Ctrl-C) while a native session kept running: unresolved until `automatic --live` resumes it. */
   interrupted: 'paused',
+  /** `workflow abandon` (abandon.py, C30): the operator closed the run; nothing changes it any more. */
+  cancelled: 'cancelled',
 }
 const CONTENT_TYPES: Record<ArtifactContent['kind'], string> = {
   log: 'text/plain; charset=utf-8', patch: 'text/plain; charset=utf-8', test_report: 'application/json; charset=utf-8',
@@ -1009,6 +1020,7 @@ export class RunStore {
     let untrusted = false
     for (const packet of run.packets) {
       if (!packet.ok) { untrusted = true; continue }
+      if (packet.reusedFrom !== null) continue  // Its artifacts are the reused worker packet's, registered beside that packet.
       const artifacts = Array.isArray(packet.result.artifacts) ? packet.result.artifacts as Record<string, unknown>[] : []
       for (const artifact of artifacts) {
         if (artifact?.artifact_id !== artifactId) continue
@@ -1218,7 +1230,7 @@ export class RunStore {
       if (packet.data.phase !== registration.phase) { packets.push({ ...registration, ok: false, reason: 'packet phase differs from its registration' }); continue }
       const deferredIds = new Set(packet.data.gate.deferred_checks ?? [])
       const deferred = (packet.data.evidence?.checks ?? []).filter(check => deferredIds.has(check.id)).map(check => ({ id: check.id, check_index: check.worker_check_index }))
-      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred })
+      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred, reusedFrom: packet.data.reused_from?.path ?? null })
     }
     return packets
   }
@@ -1435,8 +1447,11 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   })
   const statuses = new Set(nodes.map(node => node.status))
   const integrated = hasEvidence(state, 'integrate', map)
+  // An abandoned run (its controller `cancelled` row, abandon.py) is closed whatever its steps read: it leaves the running lists.
+  const abandoned = rawEvents.some(event => event.node === 'controller' && event.status === 'cancelled')
   let status: NodeStatus
-  if (statuses.has('failed')) status = 'failed'
+  if (abandoned) status = 'cancelled'
+  else if (statuses.has('failed')) status = 'failed'
   else if (statuses.has('awaiting_approval')) status = 'awaiting_approval'
   else if (statuses.has('paused')) status = 'paused'
   else if (integrated && state.next.length === 0 && !statuses.has('running') && !statuses.has('pending')) status = 'succeeded'
@@ -1649,7 +1664,9 @@ function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet
     throw new ProjectApiError(500, 'EVIDENCE_MISMATCH', 'The verification packet result does not match its registration.')
   }
   const passed = packet.gate.status === 'passed'
-  const checks = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]).map(check => ({ ...check, cwd: `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree` })) : raw.checks
+  // A reused candidate packet's checks ran in its worker packet's worktree.
+  const worktree = packet.reusedFrom !== null ? packet.reusedFrom.replace(/packet\.json$/, 'worktree') : `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree`
+  const checks = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]).map(check => ({ ...check, cwd: worktree })) : raw.checks
   const artifacts = Array.isArray(raw.artifacts) ? (raw.artifacts as Record<string, unknown>[]).map(artifact => ({
     ...artifact, uri: typeof artifact.artifact_id === 'string' ? `${runRoute(scope, runId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}` : artifact.uri,
   })) : raw.artifacts

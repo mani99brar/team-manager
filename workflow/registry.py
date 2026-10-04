@@ -6,6 +6,9 @@ is pure too: it splices that entry into the registry text, replacing only the wo
 `register` holds a lock on the registry's directory across read, merge and write, so concurrent launches cannot drop
 each other's entries, and writes through a symlinked registry to its target. Nothing here ever removes or rewrites
 another entry.
+
+`registered_runs` reads every run under every registered runs root, for the launch notes on parallel work (C23):
+`overlap_notes` names each owned path another feature's recent run on the same repository also owns.
 """
 from __future__ import annotations
 
@@ -14,10 +17,15 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .export_state import definition
+from .sessions import plan_workers, read_json
+from .verification import owns
+from .worktrees import run_checkouts
 
 REGISTRY_ENV = "MD_MANAGER_PROJECTS_CONFIG"
 REGISTRY_VERSION = 1
@@ -239,3 +247,205 @@ def register(path: Path, entry: dict) -> str:
         if text is not None:
             write_atomic(path, text)
     return note
+
+
+# Run records for launch notes (C23). Reading only: a run that cannot be read is left out, never an error.
+RECENT = timedelta(hours=48)  # A run with no event for longer is idle and gives no note.
+FAST_FORWARDED = re.compile(r"^Fast-forwarded to ([0-9a-f]{40})\b")
+
+
+def parse_time(value) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def run_record(directory: Path) -> dict | None:
+    """One run directory: its plan, pinned policy (None before prepare pinned one), integration state, candidate commit and
+    last event time; None when it has no readable plan."""
+    try:
+        plan = read_json(directory / "plan.json")
+        if not isinstance(plan, dict):
+            return None
+    except (OSError, ValueError):
+        return None
+    def optional(name: str):
+        try:
+            return read_json(directory / name) if (directory / name).is_file() else None
+        except (OSError, ValueError):
+            return None
+    events = []
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        for line in (directory / "events.jsonl").read_text().splitlines():
+            with contextlib.suppress(ValueError):
+                events.append(json.loads(line))
+    events = [event for event in events if isinstance(event, dict)]
+    integrated = None
+    for event in events:
+        found = FAST_FORWARDED.match(str(event.get("message", ""))) if event.get("node") == "integrate" and event.get("status") == "succeeded" else None
+        integrated = found[1] if found else integrated
+    # The candidate the run reviewed, else its latest candidate generation (candidate.json, then candidate-<g>.json).
+    candidate = (optional("review-bundle.json") or {}).get("candidate_commit")
+    if candidate is None:
+        generations = {}
+        for path in directory.glob("candidate*.json"):
+            suffix = path.stem.removeprefix("candidate")
+            if suffix == "" or (suffix.startswith("-") and suffix[1:].isdigit()):
+                generations[int(suffix[1:] or 0)] = path
+        candidate = (optional(generations[max(generations)].name) or {}).get("commit") if generations else None
+    times = [parsed for parsed in (parse_time(event.get("time")) for event in events) if parsed]
+    return {"directory": directory, "run_id": plan.get("run_id", directory.name), "plan": plan, "policy": optional("policy.json"),
+            "integration": {"intent": (directory / "integration-intent.json").is_file(), "integrated_commit": integrated},
+            "candidate_commit": candidate if isinstance(candidate, str) else None, "last_event": max(times) if times else None}
+
+
+def run_folders(runs_root: Path) -> list[Path]:
+    """Every run directory (one with a plan.json) directly under a runs root, by name."""
+    try:
+        return sorted(item for item in runs_root.iterdir() if item.is_dir() and (item / "plan.json").is_file())
+    except OSError:
+        return []
+
+
+def touched_since(directory: Path, since: datetime | None) -> bool:
+    """The run's timeline was written at or after `since` (always true without one). Events are appended at their own time,
+    so a file last modified earlier holds no later event, and is not read at all."""
+    if since is None:
+        return True
+    try:
+        return datetime.fromtimestamp((directory / "events.jsonl").stat().st_mtime, timezone.utc) >= since
+    except OSError:
+        return False
+
+
+def runs_in(runs_root: Path, since: datetime | None = None) -> list[dict]:
+    """Every readable run directly under a runs root, by name; with `since`, only runs whose timeline was written since."""
+    folders = [folder for folder in run_folders(runs_root) if touched_since(folder, since)]
+    return [record for record in (run_record(folder) for folder in folders) if record is not None]
+
+
+def registered_runs(path: Path | None = None, since: datetime | None = None) -> list[dict]:
+    """Each run under each runs root the registry at `path` (default registry_path()) names, once per runs root, with its
+    project_id, workflow_id, resolved runs_root and the project's repository (your checkout, which launch registers); with
+    `since`, only runs whose events.jsonl was modified since (the others are never parsed). A missing or malformed registry
+    has no runs."""
+    try:
+        document = json.loads((path or registry_path()).read_text())
+    except (OSError, ValueError):
+        return []
+    runs, seen = [], set()
+    for project in document.get("projects", []) if isinstance(document, dict) and isinstance(document.get("projects"), list) else []:
+        for workflow in project.get("workflows", []) if isinstance(project, dict) and isinstance(project.get("workflows"), list) else []:
+            if not isinstance(workflow, dict) or not isinstance(workflow.get("runs_root"), str):
+                continue
+            root = Path(workflow["runs_root"]).expanduser().resolve()
+            if root in seen:
+                continue
+            seen.add(root)
+            for record in runs_in(root, since):
+                runs.append({**record, "project_id": project.get("project_id"), "workflow_id": workflow.get("workflow_id"), "runs_root": root,
+                             "project_repository": project.get("repository")})
+    return runs
+
+
+def previous_policy(runs_root: Path, current: Path) -> tuple[str, dict] | None:
+    """The pinned policy of the feature's latest other run in `runs_root` (by the plan's created_at), with its run id. Reads
+    plan.json and policy.json only; a run without both readable is left out."""
+    pinned = []
+    for folder in run_folders(runs_root):
+        if folder.resolve() == current.resolve():
+            continue
+        try:
+            plan, policy = read_json(folder / "plan.json"), read_json(folder / "policy.json")
+        except (OSError, ValueError):
+            continue
+        if isinstance(plan, dict) and isinstance(policy, dict):
+            pinned.append((str(plan.get("created_at") or ""), folder.name, plan.get("run_id", folder.name), policy))
+    if not pinned:
+        return None
+    _, _, run_id, policy = max(pinned, key=lambda item: item[:2])
+    return run_id, policy
+
+
+def read_git(path: Path, *arguments: str) -> tuple[int, str]:
+    """A read-only Git command's exit code and output, (-1, "") when it cannot run. Popen: a read during a dry run, like
+    guardrails.git_read."""
+    try:
+        with subprocess.Popen(["git", "-C", str(path), *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, text=True) as process:
+            try:
+                output, _ = process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return -1, ""
+            return process.returncode, output.strip()
+    except OSError:
+        return -1, ""
+
+
+def repository_identity(path: Path) -> tuple[str, frozenset] | None:
+    """A checkout's git common directory and root commits; None when it is gone or not a repository."""
+    code, common = read_git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    roots_code, roots = read_git(path, "rev-list", "--max-parents=0", "HEAD")
+    if code != 0 or roots_code != 0:
+        return None
+    return os.path.realpath(common), frozenset(roots.split())
+
+
+def in_base(repository: Path, commit: str, base: str) -> bool:
+    """`commit` is an ancestor of `base`; an unknown commit is not."""
+    return read_git(repository, "merge-base", "--is-ancestor", commit, base)[0] == 0
+
+
+def overlap_notes(repository: Path, lanes: list[dict], runs_root: Path, base: str, runs: list[dict] | None = None,
+                  now: datetime | None = None) -> list[str]:
+    """A launch note for each owned path of `lanes` (policy workers) that a run of another feature on the same repository
+    also owns while its work is not in `base` (C23). Only runs from another runs root (a feature's own lanes are disjoint
+    and its earlier runs superseded), with an event in the last RECENT. The same repository is the same git common
+    directory (a linked worktree) or a shared root commit (a clone). The other run's repository is read from the first of its
+    checkouts that is still a repository (worktrees.run_checkouts: plan.repository, a C56 run's `<run>.source` that clean or
+    the operator removes once it finished, then the run's worktrees), else from its registered project's checkout; a run
+    with none left is skipped. The work is in the base when its integrated, else its candidate, commit is an ancestor of `base`."""
+    own = repository_identity(repository)
+    if own is None:
+        return []
+    now = now or datetime.now(timezone.utc)
+    runs = registered_runs(since=now - RECENT) if runs is None else runs
+    identities: dict[str, tuple | None] = {}
+    notes = []
+    for run in runs:
+        if Path(run["runs_root"]).resolve() == runs_root.resolve() or run["last_event"] is None or now - run["last_event"] > RECENT:
+            continue
+        if not isinstance(run["plan"].get("repository"), str) or not isinstance(run["policy"], dict):
+            continue
+        other = None
+        for checkout in [*run_checkouts(run["plan"], Path(run["directory"])), run.get("project_repository")]:
+            if isinstance(checkout, str) and checkout not in identities:
+                identities[checkout] = repository_identity(Path(checkout)) if Path(checkout).is_dir() else None
+            other = identities.get(checkout) if isinstance(checkout, str) else None
+            if other is not None:
+                break
+        if other is None or (other[0] != own[0] and not other[1] & own[1]):
+            continue
+        landed = run["integration"]["integrated_commit"] or run["candidate_commit"]
+        if landed and in_base(repository, landed, base):
+            continue
+        try:
+            selected = set(plan_workers(run["plan"]))
+            claimed = [(worker["node_id"], path) for worker in run["policy"]["workers"] if worker["node_id"] in selected
+                       for path in worker["owned_paths"] if isinstance(path, str)]
+        except (KeyError, TypeError, ValueError):
+            continue
+        state = f"its candidate {landed[:12]} is not in this base" if landed else "no candidate yet"
+        for worker in lanes:
+            for path in worker["owned_paths"]:
+                matches = [f"{other_path} (lane {other_lane})" for other_lane, other_path in claimed
+                           if owns(path.rstrip("/"), other_path.rstrip("/")) or owns(other_path.rstrip("/"), path.rstrip("/"))]
+                if matches:
+                    hours = (now - run["last_event"]).total_seconds() / 3600
+                    notes.append(f"Owned path {path} of lane {worker['node_id']} overlaps {', '.join(matches)} of run {run['run_id']} "
+                                 f"(feature {run.get('workflow_id') or Path(run['runs_root']).name}, last event {hours:.0f} h ago), whose work is "
+                                 f"not in this base: {state}. Check that the two runs do not conflict before merging either.")
+    return notes

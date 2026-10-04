@@ -41,6 +41,8 @@ REPO = Path(__file__).resolve().parents[1]
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 PY = sys.executable
 LANES = ["ui", "adapter", "docs"]
+# policy_lint's information note (C27) on the ui lane, which runs a build check and no tests.
+UI_NO_TESTS = "Lane ui requires no test kind (unit, integration, contract or browser), only build. That is allowed when tests were declined; for information only."
 
 
 def setUpModule():
@@ -183,6 +185,10 @@ class ThreeLaneRun(LaneRun):
             for name in (f"{node}.interactive.json", f"{node}.handoff.json", f"{node}.snapshot-index", f"worktree-{node}",
                          f"verification/worker/{node}/1/packet.json", f"verification/candidate/{node}/1/packet.json"):
                 self.assertTrue((self.directory / name).exists(), name)
+        for node in LANES:  # Several lanes: every lane's checks run again on the combined revision, in their own worktree.
+            self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
+            # The passed attempt's worktree is pruned (C47); its check log stays as the evidence the checks ran there.
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/check-0.log").is_file())
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
@@ -206,7 +212,7 @@ class ThreeLaneRun(LaneRun):
         self.assertIn("ui, adapter, docs, multiple or none", prompt)
         self.assertNotIn("both or none", prompt)
 
-    def test_one_lane_run_verifies_the_lane_in_both_phases_and_integrates_it(self):
+    def test_one_lane_run_without_a_browser_check_reuses_its_worker_packet_at_the_candidate_and_integrates_it(self):
         self.prepare(["adapter"])
         self.assertEqual((self.plan["workers"], self.plan["excluded_workers"], list(self.plan["nodes"])), (["adapter"], ["ui", "docs"], ["adapter"]))
         commit = self.manual_run()
@@ -214,8 +220,21 @@ class ThreeLaneRun(LaneRun):
         self.assertEqual((self.repo / "backend.py").read_text(), "VALUE = 2\n")
         self.assertEqual((self.repo / "ui.txt").read_text(), "before")
         self.assertEqual(self.sessions.starts, ["adapter"])
-        self.assertTrue((self.directory / "verification/worker/adapter/1/packet.json").exists())
-        self.assertTrue((self.directory / "verification/candidate/adapter/1/packet.json").exists())
+        worker = self.directory / "verification/worker/adapter/1/packet.json"
+        self.assertTrue(worker.exists())
+        # The lone snapshot is the candidate itself (cherry-pick --ff), so its worker packet answers the candidate gate:
+        # no second verification worktree, and the candidate packet names the packet it reused.
+        snapshot = read_json(self.directory / "snapshots.json")["adapter"]["commit"]
+        self.assertEqual((read_json(self.directory / "candidate.json")["commit"], commit), (snapshot, snapshot))
+        candidate = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertEqual(candidate["reused_from"], {"path": "verification/worker/adapter/1/packet.json", "sha256": digest_file(worker)})
+        self.assertEqual((candidate["phase"], candidate["expected"]["attempt"], candidate["expected"]["output_commit"], candidate["gate"]["status"]),
+                         ("candidate", 1, snapshot, "passed"))
+        self.assertEqual(sorted(path.name for path in (self.directory / "verification/candidate/adapter/1").iterdir()), ["packet.json"])
+        events = [json.loads(line) for line in (self.directory / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["message"] for event in events if event["node"] == "candidate_adapter"],
+                         [f"Combined revision {snapshot}; worker checks reused from verification/worker/adapter/1/packet.json "
+                          "(one lane, no browser check, the candidate is its snapshot)"])
         self.assertEqual(sorted(path.name for path in self.directory.glob("worktree-*")), ["worktree-adapter"])
         self.assertFalse((self.directory / "verification/worker/ui").exists())
         bundle = read_json(self.directory / "review-bundle.json")
@@ -228,6 +247,117 @@ class ThreeLaneRun(LaneRun):
         positions, edges, width, height = lane_positions(["adapter"])
         self.assertEqual((positions["launch_adapter"], positions["handoff"], positions["integrate"], height), ((90, 70), (280, 70), (1230, 70), 140))
         self.assertEqual(len(edges), 6)
+
+    def candidate_step(self, before):
+        """Through freeze to the review, calling `before(runtime, state)` as the candidate step begins."""
+        from .pipeline import Pipeline
+        original = Pipeline.candidate
+
+        def candidate(runtime, state):
+            before(runtime, state)
+            return original(runtime, state)
+        with patch.object(Pipeline, "candidate", autospec=True, side_effect=candidate), \
+                SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            verified = graph.invoke(Command(resume={"freeze": True}), self.config)
+        self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+        return [json.loads(line)["message"] for line in (self.directory / "events.jsonl").read_text().splitlines()
+                if json.loads(line)["node"] == "candidate_adapter"]
+
+    def test_a_regular_candidate_packet_already_cached_at_attempt_1_is_reported_as_it_is(self):
+        # A controller from before C28 ran this lane's candidate checks (a plain cherry-pick gave the same commit here, since
+        # the lane changed only its own paths) and wrote a regular packet; the upgraded controller re-enters the step.
+        from .checks import verify_revision
+        from .pipeline import changed_files
+        self.prepare(["adapter"])
+
+        def seed(runtime, state):
+            snapshot = state["snapshots"]["adapter"]["commit"]
+            verify_revision(runtime.directory, runtime.plan, runtime.policy, "adapter", snapshot, state["snapshots"]["adapter"]["changed_files"],
+                            state["snapshots"]["adapter"]["session_id"], phase="candidate", attempt=1)
+        messages = self.candidate_step(seed)
+        snapshot = read_json(self.directory / "snapshots.json")["adapter"]["commit"]
+        self.assertEqual(messages, [f"Combined revision {snapshot}"])
+        packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertNotIn("reused_from", packet)
+        self.assertEqual(packet["gate"]["status"], "passed")
+
+    def test_a_candidate_written_before_ff_runs_the_checks_in_their_own_worktree(self):
+        # candidate.json from a controller before C28: a plain cherry-pick made a new commit, not the snapshot itself.
+        self.prepare(["adapter"])
+        made = {}
+
+        def seed(runtime, state):
+            snapshot = state["snapshots"]["adapter"]["commit"]
+            commit = git(self.repo, "commit-tree", f"{snapshot}^{{tree}}", "-p", self.plan["base_commit"], "-m", "adapter (cherry-picked)")
+            git(self.repo, "worktree", "add", "-q", "--detach", str(self.directory / "candidate"), commit)
+            save_json(self.directory / "candidate.json", {"commit": commit, "worktree": str(self.directory / "candidate")})
+            made["commit"] = commit
+        messages = self.candidate_step(seed)
+        self.assertEqual(messages, [f"Combined revision {made['commit']}"])
+        packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertNotIn("reused_from", packet)
+        self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", made["commit"]))
+        self.assertTrue((self.directory / "verification/candidate/adapter/1/check-0.log").is_file())  # The checks ran.
+
+    def test_a_one_lane_browser_check_reruns_at_the_candidate(self):
+        self.prepare(["ui"])
+        # The ui lane gains a browser check; its worker gate records it for the candidate gate, which runs it again.
+        browser = {"id": "ui-browser", "kind": "browser", "argv": ["python", "-c", "pass"], "timeout_seconds": 10,
+                   "scenarios": [{"id": "shows-after", "description": "ui.txt says after"}]}
+        self.policy["workers"][0].update(required_check_kinds=["build", "browser"], checks=[*self.policy["workers"][0]["checks"], browser])
+        self.plan["policy_sha256"] = policy_digest(self.policy)
+        save_json(self.directory / "policy.json", self.policy)
+        save_json(self.directory / "plan.json", self.plan)
+        self.attach(self.directory)
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(Command(resume={"freeze": True}), self.config)
+        candidate = read_json(self.directory / "verification/candidate/ui/1/packet.json")
+        self.assertNotIn("reused_from", candidate)
+        self.assertTrue((self.directory / "verification/candidate/ui/1/worktree").is_dir())
+        self.assertIn("ui-browser: no Playwright report written (exit 0); the suite did not start", candidate["gate"]["reasons"])
+
+    def test_a_candidate_retry_after_a_reused_packet_runs_the_checks(self):
+        self.prepare(["ui"])
+        self.sessions.edits["ui"] = ("ui.txt", "almost")  # The ui build fails: recorded by the worker gate, gated at the candidate.
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(Command(resume={"freeze": True}), self.config)
+            first = read_json(self.directory / "verification/candidate/ui/1/packet.json")
+            self.assertEqual((first["reused_from"]["path"], first["gate"]["status"]), ("verification/worker/ui/1/packet.json", "blocked"))
+            self.runtime.retry_check("candidate", "ui")
+            with self.assertRaisesRegex(RuntimeError, "Combined candidate failed ui checks"):
+                graph.invoke(None, self.config)
+        second = read_json(self.directory / "verification/candidate/ui/2/packet.json")
+        self.assertNotIn("reused_from", second)
+        self.assertTrue((self.directory / "verification/candidate/ui/2/worktree").is_dir())
+        self.assertEqual(second["result"]["checks"][0]["exit_code"], 1)
+
+    def test_two_lanes_run_the_candidate_checks_even_when_one_lane_changes_nothing(self):
+        # docs/docs.md is in the base and the docs worker rewrites it unchanged: its snapshot is the base, so the --ff
+        # candidate is the ui snapshot. Several lanes still run every candidate check (C28 reuses only for one lane).
+        (self.repo / "docs/docs.md").write_text("# docs\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Docs page"], check=True)
+        self.prepare(["ui", "docs"])
+        self.sessions.edits["docs"] = ("docs/docs.md", "# docs\n")
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            verified = graph.invoke(Command(resume={"freeze": True}), self.config)
+            self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+        snapshots = read_json(self.directory / "snapshots.json")
+        self.assertEqual(snapshots["docs"]["commit"], self.plan["base_commit"])
+        self.assertEqual(read_json(self.directory / "candidate.json")["commit"], snapshots["ui"]["commit"])
+        for node in ("ui", "docs"):
+            self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/check-0.log").is_file(), node)  # Its worktree is pruned (C47).
 
     def test_report_positions_follow_the_lane_count(self):
         positions, edges, width, height = lane_positions(LANES)
@@ -248,7 +378,7 @@ class SubsetSelection(LaneRun):
         self.assertEqual(prepare_command[prepare_command.index("--workers") + 1], "ui,docs")  # Declared order, whatever was typed.
         tasks = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--task"]
         self.assertEqual([task.split("=", 1)[0] for task in tasks], ["ui", "docs"])
-        self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs)."])
+        self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs).", UI_NO_TESTS])
         # Run the real prepare command in the run's own worktree: no agent launches, the selection is pinned, only the
         # selected worktrees exist.
         subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
@@ -273,7 +403,7 @@ class SubsetSelection(LaneRun):
         _, commands, notes = launch_commands(self.repo, "lanes", "lanes-002", self.run_root, herdr=False)
         self.assertNotIn("--workers", commands[2])
         self.assertEqual([item.split("=", 1)[0] for item in commands[2][commands[2].index("--task") + 1::2] if "=" in item], LANES)
-        self.assertEqual(notes, [])
+        self.assertEqual(notes, [UI_NO_TESTS])
 
     def test_selected_lane_touching_an_excluded_lanes_path_blocks_at_freeze(self):
         self.prepare(["ui", "docs"])
@@ -357,7 +487,7 @@ class DeclaredReviewers(LaneRun):
         prepare_command = commands[2]
         briefs = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--reviewer"]
         self.assertEqual([item.split("=", 1)[0] for item in briefs], ["general", "coverage"])
-        self.assertEqual(notes, [])
+        self.assertEqual(notes, [UI_NO_TESTS])
         subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))  # In the run's own worktree.
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
@@ -461,7 +591,8 @@ class DeclaredReviewers(LaneRun):
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), read_json(self.directory / "run-state.json")["values"]["integrated_commit"])
         branch = self.plan["source_branch"]
         note = (f"Merge the run branch from your checkout without switching it: git merge --ff-only {branch}. Once the run is finished, "
-                f"remove its source checkout: git worktree remove {self.repo}")
+                f"`python -m workflow clean {self.directory} --by operator` removes its checkouts, its source checkout last (by hand: "
+                f"git worktree remove {self.repo})")
         self.assertIn(note, result.stdout)
         # status's finished next step says it too.
         result = self.cli("status", str(self.directory))

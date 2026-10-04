@@ -1,5 +1,7 @@
 """Worker-phase file capture (PRD_VIEWER_CLARITY 4.1): real Git snapshots, real verification worktrees and checks."""
+import contextlib
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -12,9 +14,10 @@ from unittest.mock import patch
 from jsonschema.exceptions import ValidationError
 
 from . import checks
-from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, text_test_counts, verify_revision
-from .sessions import git
+from .checks import FILE_CAPTURE_LIMIT, PACKET_FILE_CAPTURE_LIMIT, recheck_packet, reuse_packet, text_test_counts, verify_revision
+from .sessions import git, save_json
 from .verification import validate_schema
+from .worktrees import git_worktree
 
 UNIT = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"]
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
@@ -241,6 +244,202 @@ class FileCaptureTests(unittest.TestCase):
         validate_schema("verificationEvidence", packet["evidence"])
         validate_schema("workerResult", packet["result"])
         self.assertEqual(recheck_packet(json.loads(saved), policy, self.run_dir)["gate"]["status"], "passed")
+
+
+class ReusedPacketTests(unittest.TestCase):
+    """C28: a single lane without a browser check reuses its worker packet at the candidate gate, by reference."""
+
+    def setUp(self):
+        self.fixture = FileCaptureTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        f = self.fixture
+        self.commit, self.changed = f.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        self.worker = f.verify(self.commit, self.changed)
+        self.worker_path = f.run_dir / "verification/worker/adapter/1/packet.json"
+
+    def reuse(self, policy=None, attempt=1, worker_path=None, commit=None):
+        f = self.fixture
+        return reuse_packet(f.run_dir, f.plan, policy or f.policy(), "adapter", commit or self.commit, worker_path or self.worker_path, attempt=attempt)
+
+    def test_the_candidate_packet_names_the_worker_packet_and_runs_nothing(self):
+        f = self.fixture
+        packet = self.reuse()
+        path = f.run_dir / "verification/candidate/adapter/1/packet.json"
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["phase"], "candidate")
+        self.assertEqual({key: saved["expected"][key] for key in ("run_id", "node_id", "attempt", "output_commit")},
+                         {"run_id": "run", "node_id": "adapter", "attempt": 1, "output_commit": self.commit})
+        self.assertEqual(saved["reused_from"], {"path": "verification/worker/adapter/1/packet.json",
+                                                "sha256": hashlib.sha256(self.worker_path.read_bytes()).hexdigest()})
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), ["packet.json"])  # No worktree, no check ran.
+        self.assertEqual((saved["gate"]["status"], saved["result"]["attempt"], saved["result"]["node_id"]), ("passed", 1, "adapter"))
+        self.assertEqual(saved["artifact_paths"], self.worker["artifact_paths"])  # The links resolve to the worker's artifacts.
+        self.assertEqual((packet["phase"], packet["gate"]["status"], packet["reused_from"]), ("candidate", "passed", saved["reused_from"]))
+        # The cache answers the same call with the same packet; recheck_packet re-gates the referenced worker packet.
+        self.assertEqual(recheck_packet(json.loads(path.read_text()), f.policy(), f.run_dir)["gate"]["status"], "passed")
+        self.assertEqual(self.reuse()["gate"]["status"], "passed")
+        self.assertEqual(f.verify(self.commit, self.changed, phase="candidate")["gate"]["status"], "passed")
+
+    def test_the_worker_packet_is_regated_in_the_candidate_phase(self):
+        f = self.fixture
+        policy = f.policy()
+        policy["workers"][0]["checks"].append({"id": "build", "kind": "build", "argv": [sys.executable, "-c", "raise SystemExit(1)"],
+                                               "timeout_seconds": 60, "scenarios": []})
+        commit, changed = f.snapshot({"docs/OTHER.md": b"# Other\n"})
+        worker = verify_revision(f.run_dir, f.plan, policy, "adapter", commit, changed, "session", attempt=2)
+        self.assertEqual((worker["gate"]["status"], worker["gate"]["deferred_checks"]), ("passed", ["build"]))
+        packet = self.reuse(policy=policy, commit=commit, worker_path=f.run_dir / "verification/worker/adapter/2/packet.json")
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        self.assertIn("build: exit 1", packet["gate"]["reasons"])
+        self.assertEqual(json.loads((f.run_dir / "verification/candidate/adapter/1/packet.json").read_text())["gate"]["status"], "blocked")
+
+    def test_a_changed_or_foreign_worker_packet_is_refused(self):
+        f = self.fixture
+        with self.assertRaisesRegex(ValueError, "is not the worker packet of adapter at"):
+            self.reuse(commit=self.fixture.base)  # Another revision than the one the worker packet verified.
+        self.assertFalse((f.run_dir / "verification/candidate").exists())
+        self.reuse()
+        path = f.run_dir / "verification/candidate/adapter/1/packet.json"
+        saved = json.loads(path.read_text())
+        # C24 still holds: the reused packet at another attempt's path is not that attempt's packet, and runs nothing.
+        other = f.run_dir / "verification/candidate/adapter/2/packet.json"
+        other.parent.mkdir(parents=True)
+        other.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, re.escape(f"Existing verification at {other} is the candidate packet of adapter attempt 1, "
+                                                          "not the candidate packet of adapter attempt 2")):
+            f.verify(self.commit, self.changed, phase="candidate", attempt=2)
+        # A reference to another file, or a worker packet changed after the reuse, is refused when rechecked.
+        for reference, message in (({**saved["reused_from"], "sha256": "0" * 64}, "Reused worker packet .* changed"),
+                                   ({**saved["reused_from"], "path": "../outside/packet.json"}, "Reused worker packet .* outside the run"),
+                                   ({**saved["reused_from"], "path": "verification/candidate/adapter/1/packet.json",
+                                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}, "is not the worker packet of adapter")):
+            with self.subTest(reference=reference["path"]), self.assertRaisesRegex(ValueError, message):
+                recheck_packet({**saved, "reused_from": reference}, f.policy(), f.run_dir)
+        self.worker_path.chmod(0o600)
+        self.worker_path.write_text(self.worker_path.read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "Reused worker packet .* changed"):
+            recheck_packet(json.loads(path.read_text()), f.policy(), f.run_dir)
+
+
+class PruneTests(unittest.TestCase):
+    """C47: a passed attempt keeps its folder, packet, logs, artifacts and browser reports, and loses its worktree, its caches and
+    the raw browser output; a failed attempt is kept whole."""
+
+    setUp, policy, snapshot, verify = FileCaptureTests.setUp, FileCaptureTests.policy, FileCaptureTests.snapshot, FileCaptureTests.verify
+
+    # Writes what a real attempt leaves beside its evidence: a cache entry, raw browser output and a browser report.
+    LEAVE = ("import os, pathlib, sys\n"
+             "pathlib.Path(os.environ['npm_config_cache'], 'entry').write_text('cached')\n"
+             "pathlib.Path(os.environ['XDG_CACHE_HOME'], 'entry').write_text('cached')\n"
+             "pathlib.Path('../browser-0/trace').mkdir(parents=True)\n"
+             "pathlib.Path('../browser-0/trace/shot.png').write_bytes(b'png')\n"
+             "pathlib.Path('../browser-report-0.json').write_text('{}')\n")
+
+    def attempt(self, code):
+        commit, changed = self.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        argv = [sys.executable, "-c", self.LEAVE + f"print('Ran 1 test in 0.001s\\n\\nOK'); sys.exit({code})"]
+        policy = self.policy(argv)
+        return self.verify(commit, changed, policy=policy), policy, self.run_dir / "verification/worker/adapter/1"
+
+    def worktrees(self):
+        return git(self.repo, "worktree", "list", "--porcelain")
+
+    def test_a_passed_attempt_keeps_its_evidence_and_loses_its_worktree_and_caches(self):
+        packet, policy, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        for name in ("worktree", "npm_config_cache", "xdg_cache_home", "browser-0"):
+            self.assertFalse((folder / name).exists(), name)
+        self.assertNotIn(str(folder / "worktree"), self.worktrees())
+        for name in ("packet.json", "check-0.log", "browser-report-0.json"):
+            self.assertTrue((folder / name).is_file(), name)
+        self.assertTrue(all(Path(path).is_file() for path in packet["artifact_paths"].values()))
+        saved = json.loads((folder / "packet.json").read_text())
+        self.assertEqual(recheck_packet(saved, policy, self.run_dir)["gate"]["status"], "passed")
+        # Asked again for the same revision, the pruned attempt's packet is rechecked and reused.
+        self.assertEqual(self.verify(packet["expected"]["output_commit"], packet["result"]["changed_files"], policy=policy)["gate"]["status"], "passed")
+
+    def test_a_failed_attempt_is_kept_whole(self):
+        packet, _, folder = self.attempt(1)
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        for name in ("worktree", "npm_config_cache/entry", "xdg_cache_home/entry", "browser-0/trace/shot.png", "browser-report-0.json"):
+            self.assertTrue((folder / name).exists(), name)
+        self.assertIn(str(folder / "worktree"), self.worktrees())
+
+    def test_prune_attempt_is_idempotent(self):
+        packet, _, folder = self.attempt(0)
+        self.assertEqual(checks.prune_attempt(self.repo, folder), [])
+        self.assertTrue((folder / "packet.json").is_file())
+
+    def test_an_unreadable_cache_directory_is_removed_too(self):
+        # A check may leave a directory its owner cannot list (0o000, 0o300), or can list but not search (0o400, 0o600),
+        # where rmtree's lstat and unlink of each entry fail; every mode is removed.
+        self.LEAVE = (self.LEAVE + "for name, mode in (('m000', 0o000), ('m100', 0o100), ('m300', 0o300), ('m400', 0o400), ('m500', 0o500), "
+                      "('m555', 0o555), ('m600', 0o600), ('m700', 0o700)):\n"
+                      "    path = pathlib.Path(os.environ['npm_config_cache'], name, 'inner')\n"
+                      "    path.mkdir(parents=True); (path / 'entry').write_text('x'); path.parent.chmod(mode)\n")
+        packet, _, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        self.assertFalse((folder / "npm_config_cache").exists())
+
+    def test_a_removal_that_fails_is_only_a_warning(self):
+        with patch.object(checks, "prune_attempt", side_effect=TypeError("boom")):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                packet, _, folder = self.attempt(0)
+        self.assertEqual(packet["gate"]["status"], "passed")
+        self.assertIn(f"Warning: passed attempt {folder} was not pruned (boom)", err.getvalue())
+
+    def test_a_worktree_git_no_longer_lists_is_deleted(self):
+        # `git worktree remove --force` that fails partway still unregisters the worktree; a leftover is deleted and pruned.
+        for breaking in ("read-only", "unregistered"):
+            with self.subTest(breaking=breaking):
+                folder = self.run_dir / breaking
+                worktree = folder / "worktree"
+                git_worktree(self.repo, "add", "--detach", str(worktree), self.base)
+                if breaking == "read-only":
+                    (worktree / "locked").mkdir()
+                    (worktree / "locked/entry").write_text("x")
+                    (worktree / "locked").chmod(0o500)
+                else:
+                    (worktree / ".git").unlink()
+                    git_worktree(self.repo, "prune")
+                self.assertEqual(checks.prune_attempt(self.repo, folder), [worktree])
+                self.assertFalse(worktree.exists())
+                self.assertNotIn(str(worktree), self.worktrees())
+
+    def test_a_worktree_git_still_lists_is_never_deleted_as_a_leftover(self):
+        # A locked worktree: `git worktree remove --force` refuses it, and Git still lists it, so nothing deletes it.
+        folder = self.run_dir / "locked"
+        worktree = folder / "worktree"
+        git_worktree(self.repo, "add", "--detach", str(worktree), self.base)
+        (worktree / "uncommitted.txt").write_text("keep me\n")
+        git(self.repo, "worktree", "lock", str(worktree))
+        with self.assertRaises(checks.WorktreeError):
+            checks.prune_attempt(self.repo, folder)
+        self.assertEqual((worktree / "uncommitted.txt").read_text(), "keep me\n")
+        self.assertIn(str(worktree), self.worktrees())
+        git(self.repo, "worktree", "unlock", str(worktree))
+
+    def test_an_independent_repository_is_never_deleted_as_a_leftover(self):
+        folder = self.run_dir / "clone"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(folder / "worktree")], check=True)
+        with self.assertRaises(checks.WorktreeError):
+            checks.prune_attempt(self.repo, folder)
+        self.assertTrue((folder / "worktree/.git").is_dir())
+
+    def test_a_failed_deferred_browser_check_keeps_its_raw_output(self):
+        # Browser checks are deferred in the worker phase: a passed attempt may hold one that failed, whose raw output is
+        # the only copy of its failure screenshots and traces.
+        folder = self.run_dir / "verification/worker/adapter/1"
+        for index in (0, 1, 2):
+            (folder / f"browser-{index}/trace").mkdir(parents=True)
+        save_json(folder / "packet.json", {"gate": {"status": "passed"}, "capture_errors": ["e2e: exit 1"], "scenario_errors": ["smoke/home: no screenshot"],
+                                           "evidence": {"checks": [{"id": "e2e", "worker_check_index": 0}, {"id": "smoke", "worker_check_index": 1},
+                                                                   {"id": "fine", "worker_check_index": 2}]}})
+        self.assertEqual(checks.prunable(folder), [folder / "browser-2"])
+        checks.prune_attempt(self.repo, folder)
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["browser-0", "browser-1", "packet.json"])
 
 
 class VitestCountsTests(unittest.TestCase):

@@ -30,14 +30,14 @@ from langgraph.types import Command, interrupt
 
 from .actor import BY_OPERATOR, actor_text, add_actor_argument, require_actor
 from .attention import attention
-from .checks import now, recheck_packet, verify_revision
+from .checks import now, recheck_packet, reuse_packet, verify_revision
 from .export_state import export_state
 from .outcome import outcome_block
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, override_note, pin_roles, plan_excluded, run_claude, plan_workers,
                        prepare, read_json, review_node, reviewer_ids, run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id,
                        worker_authority, worker_effort)
-from .verification import owns, policy_digest, safe_path, validate_policy
+from .verification import owns, policy_digest, safe_path, slow_checks, validate_policy
 from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
 # The gate actions of this CLI: each requires --by (actor.require_actor) and records who ran it in one `controller` event.
@@ -290,6 +290,15 @@ def action_event(event, actor: str, action: str, detail: str = "") -> None:
     event("controller", "note", f"{action.capitalize()} by {actor_text(actor)}" + (f": {detail}" if detail else ""))
 
 
+CANDIDATE_REF = "candidate"
+
+
+def run_ref(directory: Path, name: str) -> str:
+    """`refs/workflow/<run hash>/<name>`: a lane's snapshot (freeze) or the run's candidate (`candidate`), so each stays
+    reachable after the run's worktrees are cleaned up; `brief` restores from them."""
+    return f"refs/workflow/{hashlib.sha256(str(Path(directory).resolve()).encode()).hexdigest()[:16]}/{name}"
+
+
 def merge_lanes(left: dict | None, right: dict | None) -> dict:
     """Parallel lane nodes each write their own key; the channel keeps every lane."""
     return {**(left or {}), **(right or {})}
@@ -323,8 +332,13 @@ def lane_positions(workers: list[str]) -> tuple[dict, list, int, int]:
 
 
 class Pipeline:
-    def __init__(self, directory: Path, sessions=None):
+    def __init__(self, directory: Path, sessions=None, abandoned_ok: bool = False):
+        """`abandoned_ok` is `abandon`'s own: every other command that builds a Pipeline changes the run, so an abandoned run is
+        refused here (status, export and brief never build one)."""
         self.directory = directory.resolve()
+        if not abandoned_ok:
+            from .abandon import refuse_abandoned
+            refuse_abandoned(self.directory)
         self.plan = read_json(self.directory / "plan.json")
         if "automatic" in self.plan:
             from .automatic import validate_automatic
@@ -552,8 +566,7 @@ class Pipeline:
             if changed:
                 commit = subprocess.check_output(["git", "-C", str(cwd), "-c", "commit.gpgsign=false", "commit-tree", tree,
                                                   "-p", self.plan["base_commit"], "-m", f"Workflow {self.plan['run_id']}: {node}"], env=env, text=True).strip()
-            ref = f"refs/workflow/{hashlib.sha256(str(self.directory).encode()).hexdigest()[:16]}/{node}"
-            subprocess.run(["git", "-C", str(cwd), "update-ref", ref, commit], check=True)
+            subprocess.run(["git", "-C", str(cwd), "update-ref", run_ref(self.directory, node), commit], check=True)
             receipt = read_json(self.directory / f"{node}.interactive.json")
             snapshots[node] = {"commit": commit, "changed_files": changed, "session_id": receipt["session_id"], **handoffs[node]}
         save_json(record, snapshots)
@@ -590,10 +603,13 @@ class Pipeline:
         snap = snapshots[node]
         attempt = self.attempt("worker", node)
         self.event(f"verify_{node}", "running", f"Attempt {attempt}; revision {snap['commit']}")
-        packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"], attempt=attempt)
-        path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
         drill = self.failure_drill()
-        if drill and drill["node_id"] == node and attempt == 1:
+        drilled = bool(drill) and drill["node_id"] == node and attempt == 1
+        # The drill fails this attempt whatever its checks say, so it is kept whole like any failed attempt (C47).
+        packet = verify_revision(self.directory, self.plan, self.policy, node, snap["commit"], snap["changed_files"], snap["session_id"],
+                                 attempt=attempt, prune=not drilled)
+        path = self.directory / "verification" / "worker" / node / str(attempt) / "packet.json"
+        if drilled:
             marker = "Intentional lab drill: verification branch failure, not a worker or test failure"
             if marker not in packet["capture_errors"]:
                 packet["capture_errors"].append(marker)
@@ -607,10 +623,28 @@ class Pipeline:
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
         retried = attempt if failed_before(self.directory, "worker", node, attempt, snap["commit"]) else None
-        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed_message(packet, retried))
+        self.event(f"verify_{node}", packet["gate"]["status"], ("; ".join(packet["gate"]["reasons"]) or passed_message(packet, retried)) + self.slow_note(node, packet))
         if packet["gate"]["status"] != "passed":
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
+
+    def slow_note(self, node: str, packet: dict) -> str:
+        """`; slow: <check> took <s> s of its <t> s timeout (<p>%)` for each check over SLOW_SHARE of its timeout (C27), else ""."""
+        slow = slow_checks(self.worker_policy(node), packet["result"], packet["evidence"])
+        return f"; slow: {', '.join(slow)}" if slow else ""
+
+    def reusable_packet(self, node: str, attempt: int, commit: str, state: PipelineState, repaired: bool) -> Path | None:
+        """The worker packet the candidate gate of `node` reuses (C28), or None when its checks run again.
+
+        Only a run of one selected lane, whose candidate is that lane's snapshot, on the lane's first candidate attempt (a
+        retry runs the checks), before any lane repair, and only a lane without a browser check: md-manager's browser
+        harness depends on the phase. Several lanes and repaired candidates run every check, as before.
+        """
+        if len(self.workers) != 1 or attempt != 1 or repaired or state["snapshots"][node]["commit"] != commit:
+            return None
+        if any(check["kind"] == "browser" for check in self.worker_policy(node)["checks"]):
+            return None
+        return Path(state["packets"][node])
 
     def candidate(self, state: PipelineState) -> str:
         from .repair import applied_repairs, candidate_paths as generation_paths
@@ -636,20 +670,31 @@ class Pipeline:
             for node in self.workers:  # Declared order, selected lanes only.
                 commit = state["snapshots"][node]["commit"]
                 if commit != self.plan["base_commit"]:
-                    subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", commit], env=commit_env(), check=True, capture_output=True)
+                    # --ff: the first snapshot's parent is the base, so it becomes the candidate commit itself (C28).
+                    subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", "--ff", commit], env=commit_env(), check=True, capture_output=True)
             candidate = {"commit": git(cwd, "rev-parse", "HEAD"), "worktree": str(cwd)}
             save_json(saved, candidate)
+        # The latest generation's commit, also when a controller stopped before it was written: update-ref is idempotent.
+        subprocess.run(["git", "-C", self.plan["repository"], "update-ref", run_ref(self.directory, CANDIDATE_REF), candidate["commit"]], check=True)
         expected_tree = repairs[-1]["expected_candidate_tree"] if repairs else None
         if expected_tree and git(Path(self.plan["repository"]), "rev-parse", f"{candidate['commit']}^{{tree}}") != expected_tree:
             raise ValueError(f"Candidate {candidate['commit']} differs from the repaired tree of repair {repairs[-1]['n']}; inspect")
         candidate_paths = []
         for node in self.workers:
             attempt = self.attempt("candidate", node)
-            packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
-                                     changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
-                                     state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
+            reused = self.reusable_packet(node, attempt, candidate["commit"], state, repaired=bool(repairs))
+            if reused:
+                packet = reuse_packet(self.directory, self.plan, self.policy, node, candidate["commit"], reused, attempt=attempt)
+                # A regular candidate packet already cached at this attempt (an earlier controller ran the checks) comes back as it is.
+                note = (f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
+                        if "reused_from" in packet else self.slow_note(node, packet))
+            else:
+                packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
+                                         changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
+                                         state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
+                note = self.slow_note(node, packet)
             path = self.directory / "verification" / "candidate" / node / str(attempt) / "packet.json"
-            self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}")
+            self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}{note}")
             # A second event says why, or that this attempt passed after the one before failed; the first stays as the viewer reads it.
             if packet["gate"]["status"] != "passed":
                 self.event(f"candidate_{node}", packet["gate"]["status"], f"Candidate gate blocked on attempt {attempt}: {'; '.join(packet['gate']['reasons'])}")
@@ -1174,6 +1219,15 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
     return f"{steps}: running now, or stopped mid-step (no step recorded an error). If no workflow command is running on this run, {recovery}"
 
 
+def abandoned_step(directory: Path, record: dict) -> str:
+    """`status`'s next step of an abandoned run: nothing goes on in it; its brief feeds a follow-up run."""
+    run = shlex.quote(str(directory))
+    by = f" by the {record['by']}" if record.get("by") else ""
+    return (f"none: the run was abandoned{by} ({record.get('reason')}), and every command that would change it refuses. For a follow-up: "
+            f"{sys.executable} -m workflow brief {run}, then {sys.executable} -m workflow launch <feature> --repo <target repo> --run-id <feature>-00N --follows {run} "
+            f"--live --automatic {BY_OPERATOR}")
+
+
 def complete_events(directory: Path) -> list[dict]:
     """events.jsonl as a reader beside a running controller sees it: a line counts once its newline is written."""
     path = directory / "events.jsonl"
@@ -1214,7 +1268,11 @@ def run_status(directory: Path) -> tuple[dict, str]:
     workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
     if workspaces:
         status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
-    status["next_step"] = next_step(directory, plan, exported)
+    from .abandon import abandoned
+    record = abandoned(directory)
+    if record is not None:
+        status["abandoned"] = {key: record.get(key) for key in ("reason", "by", "abandoned_at", "stopped", "not_running")}
+    status["next_step"] = abandoned_step(directory, record) if record is not None else next_step(directory, plan, exported)
     events = complete_events(directory)
     shared_git = [event["message"] for event in events if str(event.get("message", "")).startswith("Shared .git ")]
     if shared_git:
@@ -1230,8 +1288,8 @@ def main():
     controller_git_config(os.environ)  # As `python -m workflow` does, for `python -m workflow.pipeline`; added once only.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
-                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar) and repair have their own "
-             "options: python -m workflow resume|answer|sidecar-pass|repair --help")
+                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar), repair, note, brief, "
+             "abandon, clean and ledger have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon|clean|ledger --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -1271,12 +1329,14 @@ def main():
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
     parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
+    parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
+                                                                   "{run_id, verdict, candidate_commit}")
     add_actor_argument(parser)
     args = parser.parse_args()
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
-                                                                         args.judge_model, args.judge_effort)):
-        # Prepare pins them (C52); any other action would ignore them silently, `automatic --live` resuming a run included.
-        parser.error("--profile and the role flags apply to prepare only; the pins cannot change after it")
+                                                                         args.judge_model, args.judge_effort, args.restore_from)):
+        # Prepare pins them (C52, C12); any other action would ignore them silently, `automatic --live` resuming a run included.
+        parser.error("--profile, --restore-from and the role flags apply to prepare only; the pins cannot change after it")
     if args.action != "prepare" and args.critical:
         parser.error("--critical applies to prepare only; the finish it pins cannot change after it")
     if args.action != "prepare" and args.hold_challenge:
@@ -1286,6 +1346,11 @@ def main():
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
         actor = require_actor(args, args.action) if args.action in GATE_ACTIONS else None
+        if args.follows and args.action != "prepare":
+            parser.error("--follows applies to prepare only")
+        if args.action not in {"preflight", "prepare", "status", "export"}:
+            from .abandon import refuse_abandoned
+            refuse_abandoned(directory)  # Before `automatic` records its action: an abandoned run changes no more.
         if args.action == "preflight":
             if not args.policy:
                 parser.error("preflight requires --policy")
@@ -1374,7 +1439,13 @@ def main():
             if args.restore_from is not None:  # Before the run directory.
                 check_restore(args.automatic, selected)
                 restore = resolve_commit(args.repo.resolve(), args.restore_from)
+            from .brief import follows_record
+            follows = follows_record(args.follows) if args.follows else None  # Refused before the run directory is made.
+            from .launch import launch_notes
+            notes = launch_notes(args.repo.resolve(), policy, selected, directory)  # As the launch printed them, before this run exists.
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
+            if follows:
+                plan["follows"] = follows
             if reviewers:
                 plan["reviewers"] = reviewers
             drill = policy.get("failure_drill")
@@ -1400,6 +1471,13 @@ def main():
                                                        critical=args.critical)
             elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
+            # C45: what the base holds that no approved run reviewed, pinned and printed. It changes nothing else, and a
+            # registry or run it cannot read only costs the record.
+            from .ledger import base_unreviewed, describe, runs_roots
+            try:
+                plan["base_unreviewed"] = base_unreviewed(Path(plan["repository"]), plan["base_commit"], runs_roots(extra=[directory.parent]))
+            except Exception as error:  # The run is already allocated: whatever the ledger raises, prepare finishes.
+                print(f"Warning: base_unreviewed not pinned: {error}", file=sys.stderr)
             save_json(directory / "policy.json", policy)
             save_json(directory / "plan.json", plan)
             if args.sidecar_brief:
@@ -1409,10 +1487,14 @@ def main():
             runtime = Pipeline(directory)
             if drill_skipped:
                 runtime.event("controller", "running", f"Failure drill skipped: its lane {drill['node_id']} is not selected for this run")
+            if notes:
+                runtime.event("controller", "running", "Launch notes: " + " ".join(notes))
             export_state(runtime, SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in selected), tasks=[]))
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}. Lanes: {', '.join(selected)}"
                   + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else "")
                   + f". Reviewers: {', '.join(reviewer_ids(plan))}")
+            if "base_unreviewed" in plan:
+                print(describe(plan["base_unreviewed"], plan["base_commit"]))
             return
         if args.action == "automatic":
             if not args.live:

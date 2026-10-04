@@ -488,6 +488,73 @@ class SnapshotBaseAndSpanningFixes(RepairFixture):
         self.assertEqual(self.tree(self.candidate_commit(1)), self.tree(fix))
 
 
+class OneLaneRepair(RepairFixture):
+    """A run of the ui lane alone: its first candidate attempt reuses the worker packet (C28), which the candidate gate blocks
+    on the ui build; the repaired candidate runs its checks again on the new tree."""
+
+    automatic = False
+    lane = "ui"
+
+    def prepare(self, name: str) -> OfflinePipeline:
+        directory = self.root / name
+        policy = repair_policy()
+        plan = prepare(directory, self.repo, "HEAD", {self.lane: "Do the lane's work."}, True, declared=LANES)
+        plan.update(mode="interactive", policy_sha256=policy_digest(policy), source_branch=git(self.repo, "symbolic-ref", "--short", "HEAD"))
+        save_json(directory / "plan.json", plan)
+        save_json(directory / "policy.json", policy)
+        self.directory = directory
+        self.sessions = FakeSessions(directory, plan)
+        self.sessions.edits.update(ui=("ui.txt", "almost"), adapter=("backend.py", "VALUE = 5\n"))
+        self.runtime = OfflinePipeline(directory, self.sessions)
+        return self.runtime
+
+    def test_a_repaired_one_lane_candidate_verifies_its_new_tree(self):
+        self.block_at_candidate()
+        blocked = read_json(self.directory / "verification/candidate/ui/1/packet.json")
+        self.assertEqual((blocked["reused_from"]["path"], blocked["gate"]["status"]), ("verification/worker/ui/1/packet.json", "blocked"))
+        # The reused packet's folder holds only packet.json: the brief lists the worker packet's logs.
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 0, err)
+        brief = (self.directory / "repair-workspace-1.brief.md").read_text()
+        for expected in ("ui-build: exit 1", str(self.directory / "verification/candidate/ui/1/packet.json"),
+                         str(self.directory / "verification/worker/ui/1/packet.json"), str(self.directory / "verification/worker/ui/1/check-0.log")):
+            self.assertIn(expected, brief)
+        fix = self.commit_on(self.snapshot("ui"), {"ui.txt": "after"})
+        code, _, err = self.cli("ui", "--commit", fix, "--reason", REASON)
+        self.assertEqual(code, 0, err)
+        with self.graph() as (graph, config):
+            self.assertEqual(graph.invoke(None, config)["__interrupt__"][0].value["kind"], "independent_review")
+        [entry] = self.entries()
+        bundle = read_json(self.directory / "review-bundle.json")
+        [candidate] = [Path(item["path"]) for item in bundle["packets"] if Path(item["path"]).parts[-4] == "candidate"]
+        packet = read_json(candidate)
+        self.assertNotIn("reused_from", packet)
+        self.assertTrue((candidate.parent / "check-0.log").is_file())  # The checks ran there; the passed attempt's worktree is pruned (C47).
+        self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", self.candidate_commit(1)))
+        self.assertEqual(self.tree(self.candidate_commit(1)), self.tree(entry["lanes"]["ui"]["commit"]))
+
+
+class OneLaneWorkerRepair(OneLaneRepair):
+    """The adapter lane alone, blocked by its own unit check: after the repair its candidate's first attempt is still
+    attempt 1, and it runs the checks on the repaired tree, as before."""
+
+    lane = "adapter"
+
+    def test_a_repaired_one_lane_candidate_verifies_its_new_tree(self):
+        self.start()
+        with self.graph() as (graph, config), self.assertRaisesRegex(RuntimeError, "adapter verification blocked"):
+            graph.invoke(Command(resume={"freeze": True}), config)
+        fix = self.commit_on(self.snapshot("adapter"), {"backend.py": "VALUE = 2\n"})
+        code, _, err = self.cli("adapter", "--commit", fix, "--reason", "VALUE must be 2")
+        self.assertEqual(code, 0, err)
+        with self.graph() as (graph, config):
+            self.assertEqual(graph.invoke(None, config)["__interrupt__"][0].value["kind"], "independent_review")
+        packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
+        self.assertNotIn("reused_from", packet)
+        self.assertTrue((self.directory / "verification/candidate/adapter/1/check-0.log").is_file())  # Its worktree is pruned (C47).
+        self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", self.candidate_commit(1)))
+
+
 class RefusedCommits(RepairFixture):
     automatic = False
 

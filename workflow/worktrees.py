@@ -21,7 +21,7 @@ import re
 import stat
 import subprocess
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 # Kept in the repository's common Git directory, so every linked worktree of one repository shares it.
@@ -38,6 +38,36 @@ class WorktreeError(subprocess.CalledProcessError):
 
     def __str__(self) -> str:
         return f"{super().__str__()}\n{self.stderr.strip()}"
+
+
+def gitdir_common(checkout: Path) -> Path | None:
+    """The common Git directory a linked worktree's `.git` file points to (its `commondir`, else the parent of `worktrees/`),
+    None when there is no such file. It still names the repository once Git has forgotten the worktree."""
+    try:
+        line = (checkout / ".git").read_text().strip() if (checkout / ".git").is_file() else ""
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = Path(checkout, line.removeprefix("gitdir:").strip())
+    with suppress(OSError):
+        return Path(gitdir, (gitdir / "commondir").read_text().strip()).resolve()
+    return gitdir.parent.parent.resolve() if gitdir.parent.name == "worktrees" else None
+
+
+def run_checkouts(plan: dict, directory: Path) -> list[str]:
+    """Where a run's repository may still be read, in order: plan.repository (a C56 run's `<run>.source`, which clean or the
+    operator removes once the run is finished), the lane worktrees, the candidate, review and challenge worktrees, the
+    verification attempts' worktrees, then the common Git directory any of their `.git` files names. The caller keeps the
+    first one Git can read."""
+    nodes = plan.get("nodes") if isinstance(plan.get("nodes"), dict) else {}
+    paths = [Path(info["worktree"]) for info in nodes.values() if isinstance(info, dict) and isinstance(info.get("worktree"), str)]
+    paths += sorted(path for path in directory.glob("candidate*") if path.is_dir())
+    paths += [directory / name for name in ("review-worktree", "challenge-worktree")]
+    paths += sorted(directory.glob("verification/*/*/*/worktree"))
+    found = [str(plan.get("repository")), *(str(path) for path in paths)]
+    found += [str(common) for common in (gitdir_common(path) for path in paths) if common is not None]
+    return list(dict.fromkeys(found))
 
 
 def common_dir(repository) -> Path:

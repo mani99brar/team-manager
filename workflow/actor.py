@@ -3,8 +3,10 @@
 The operator is the person who owns the run. The maintainer is a Claude session acting for them, limited to mechanical
 recovery (decision 2a): it may retry, reconcile, supervise again (`automatic --live`), start, and resume a design
 challenge that waits for nothing the operator decides. It is refused the operator's decisions: an answer, an accepted
-challenge, the release of a held challenge (`resume --launch`, C8), a repair, an approval and a launch. `resume` refuses it on a paused challenge itself
-(guardrails.resume_challenge), because only the run's state says whether a rerun would decide anything.
+challenge, the release of a held challenge (`resume --launch`, C8), a repair, an approval, a launch, abandoning a run
+and cleaning one up. `resume` refuses it on a paused challenge itself (guardrails.resume_challenge), and, with no record or
+after an interrupted rerun, while a pinned feature file holds a later edit, because only the run's state says whether a
+rerun would decide anything.
 
 The label is cooperative: nothing checks it. The actor goes into the event text, the questions record (answered_by), the
 repair journal and the note file, never into challenge.json, whose schema is closed. When CLAUDECODE=1 the command ran
@@ -17,7 +19,7 @@ import os
 
 ACTORS = ("operator", "maintainer")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
-OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch"})
+OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean"})
 # What every printed next-step command carries: they are addressed to the operator.
 BY_OPERATOR = "--by operator"
 VIA_CLAUDE_CODE = " (via a Claude Code session)"

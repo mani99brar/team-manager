@@ -791,6 +791,32 @@ class ChallengeHeartbeat(FailingChallenge):
         self.assertEqual(files(), before)
         self.assertFalse(any(directory.glob("*.interactive.json")))
 
+    def test_with_no_record_the_maintainer_is_refused_a_later_edit_but_finishes_a_recorded_revision(self):
+        """C17: the no-record refusal's other paths. (a) A run prepared but never started (no challenge.running.json): a
+        dirty pinned file is still an edit made after prepare. (b) An operator's interrupted resume that recorded the
+        revision intent before its commit: the maintainer finishes it, committing exactly those files."""
+        directory = self.prepare("noattempt-001")
+        plan = read_json(directory / "plan.json")
+        repository = Path(plan["repository"])
+        task = Path(plan["task_files"]["ui"])
+        task.write_text(task.read_text() + "\nAn edit after prepare.\n")
+        edited = task.relative_to(repository).as_posix()
+        head = git(repository, "rev-parse", "HEAD")
+        self.mode.write_text("pass")
+        with self.subTest("without challenge.running.json"):
+            output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+            self.assertEqual(code, 1, output)
+            self.assertIn(f"Feature files were edited after the run was prepared ({edited})", output)
+            self.assertEqual((git(repository, "rev-parse", "HEAD"), (directory / "challenge.json").exists()), (head, False))
+        with self.subTest("the revision intent names the edited file"):
+            save_json(directory / guardrails.REVISION_INTENT, {"base_commit": plan["base_commit"], "paths": [edited]})
+            with patch.dict(os.environ, {"CLAUDECODE": ""}):
+                output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+            self.assertEqual(code, 0, output)
+            self.assertNotEqual(git(repository, "rev-parse", "HEAD"), head)
+            self.assertEqual(git(repository, "show", "--name-only", "--format=", "HEAD").splitlines(), [edited])
+            self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+
     def test_ctrl_c_during_a_launchs_challenge_names_resume_not_the_supervisor(self):
         runs = []
 
@@ -1269,8 +1295,8 @@ class ChallengeResumeSupervises(GuardedFeature):
         self.assertEqual(supervised, [(directory, ["challenge", "challenge", "adapter", "ui"])])
         self.assertIn("Automatic run reached a verified feature branch", output)
         # The run's branch is in its own worktree: merged from your checkout without switching, then the worktree removed.
-        self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, remove its source checkout: "
-                      f"git worktree remove {self.repo}", output)
+        self.assertIn(f"git merge --ff-only feature/{FEATURE}/auto-001. Once the run is finished, `python -m workflow clean "
+                      f"{directory} --by operator` removes its checkouts, its source checkout last (by hand: git worktree remove {self.repo})", output)
 
 
 class ChallengeHold(GuardedFeature):

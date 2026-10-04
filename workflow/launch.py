@@ -19,10 +19,10 @@ from .actor import BY_OPERATOR, add_actor_argument, require_actor
 from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, check_restore, conventions_summary, finished_note,
                          has_operator_decisions, is_guarded, is_held, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
-from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
+from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
-from .verification import validate_schema
+from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
 
 # The repository this tool lives in: the fallback target, and the working directory of every
@@ -211,7 +211,8 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
-                    roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False) -> tuple[Path, list[list[str]], list[str]]:
+                    roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
+                    follows: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
@@ -227,9 +228,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     `hold_challenge` (C8) holds the run after a passing design challenge until `resume --launch`; prepare pins it as
     plan.holds. It is refused for a feature without the challenge (before 2.2.0, or challenge: false).
+    `follows` names the run this one follows up (C30): a run directory, or a run id under `run_root`; prepare pins it as
+    plan.follows.
     """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
+    followed = followed_run(follows, run_root) if follows is not None else None
     repo = repo.resolve()
     folder = feature_folder(repo, feature)
     left = placeholders(folder)
@@ -300,6 +304,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     prepare = [*base, "prepare", str(run), "--repo", str(source), "--policy", str(in_source(policy_path))]
     if workers is not None:
         prepare.extend(["--workers", ",".join(selected)])
+    if followed is not None:
+        prepare.extend(["--follows", str(followed)])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
@@ -345,7 +351,35 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     drill = policy.get("failure_drill")
     if drill and drill["node_id"] not in selected:
         notes.append(f"Failure drill skipped: its lane {drill['node_id']} is not selected (selected: {', '.join(selected)}).")
+    notes.extend(launch_notes(repo, policy, selected, run))
     return run, commands, notes
+
+
+def followed_run(value: str, run_root: Path) -> Path:
+    """The run directory `--follows` names: a path, or a run id under the run root. Refused when it holds no plan.json."""
+    from .brief import follows_record
+    path = Path(value).expanduser()
+    if not path.exists() and not path.is_absolute() and FEATURE_NAME.fullmatch(value):
+        path = run_root / value
+    path = path.resolve()
+    follows_record(path)  # Refuses a directory without plan.json, before any Git action.
+    return path
+
+
+def launch_notes(repo: Path, policy: dict, selected: list[str], run: Path) -> list[str]:
+    """The notes on the selected lanes that prepare records as one run event; never a refusal. policy_lint's (C27: a lane
+    with no test kind, kinds and checks removed since the feature's previous run in this runs root), then overlap_notes'
+    (C23: owned paths a recent run of another feature on this repository also owns, its work not in HEAD)."""
+    lanes = [worker for worker in policy["workers"] if worker["node_id"] in selected]
+    notes: list[str] = []
+    try:
+        previous = previous_policy(run.parent, run)
+        notes += policy_lint({**policy, "workers": lanes}, previous[1] if previous else None, since=previous[0] if previous else None)
+        code, base = read_git(repo, "rev-parse", "HEAD")
+        notes += overlap_notes(repo, lanes, run.parent, base) if code == 0 else []
+    except Exception:
+        pass  # Another run's files (a corrupt pinned policy, a registry root it cannot expand): fewer notes, never a refused launch.
+    return notes
 
 
 def challenge_paused(run: Path) -> str | None:
@@ -393,6 +427,8 @@ def main(argv=None):
     parser.add_argument("--hold-challenge", action="store_true", help="Stop after a passing design challenge and print every concern; "
                                                                       "`resume --launch` launches the workers (pinned at prepare)")
     parser.add_argument("--dry-run", action="store_true", help="Validate feature configuration and print commands and the registry entry only")
+    parser.add_argument("--follows", metavar="RUN", help="The run this one follows up (its directory, or its run id under the run root): "
+                                                         "prepare pins its id, verdict and candidate as plan.follows. See `python -m workflow brief`")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
@@ -409,7 +445,7 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles, args.restore_from, args.hold_challenge)
+                                               by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]

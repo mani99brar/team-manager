@@ -120,6 +120,8 @@ def note_main(argv=None):
     directory = args.directory.resolve()
     try:
         actor = require_actor(args, "note")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)
         from .pipeline import Pipeline
         entry = send_note(Pipeline(directory), args.node, actor, args.text)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

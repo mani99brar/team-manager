@@ -6,15 +6,18 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from .export_state import export_state
 from .guardrails import LAUNCH_NOTE_ENV
-from .launch import launch_commands, main
-from .sessions import save_json
+from .launch import TOOL, launch_commands, main
+from .registry import previous_policy
+from .sessions import git, read_json, save_json
 from .worktrees import LOCK_NAME
 from .test_pipeline import stub_claude_cli
 
@@ -127,7 +130,8 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertTrue(all("env" not in call.kwargs for call in command.call_args_list))
         source, branch = (runs / "project-workflows-001.source").resolve(), "feature/project-workflows/project-workflows-001"
         self.assertIn(f"Once it integrates: Merge the run branch from your checkout without switching it: git -C {self.repo} merge --ff-only "
-                      f"{branch}. Once the run is finished, remove its source checkout: git -C {self.repo} worktree remove {source}", output.getvalue())
+                      f"{branch}. Once the run is finished, `python -m workflow clean {source.with_name('project-workflows-001')} --by operator` removes "
+                      "its checkouts, its source checkout last\n", output.getvalue())
 
     def test_a_launch_from_a_runs_own_source_checkout_is_refused(self):
         # The cwd rule would take the run's worktree for the target: a project named after it, branched from the run's branch.
@@ -460,6 +464,55 @@ class FeatureLaunchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launch_commands(self.repo, "project-workflows", run_id, Path("/tmp/workflow-launch-tests"))
 
+    def followed(self, name: str, **files) -> Path:
+        """A finished run's directory: plan.json plus the given files ({name: JSON value})."""
+        directory = self.root / "runs" / name
+        directory.mkdir(parents=True)
+        save_json(directory / "plan.json", {"run_id": name, "base_commit": "a" * 40})
+        for file, value in files.items():
+            save_json(directory / file.replace("_", "-").replace("-json", ".json"), value)
+        return directory
+
+    def test_follows_reaches_prepare_and_a_run_without_plan_json_is_refused_before_any_git_action(self):
+        """C30: a follow-up is a new run of the same feature; --follows names the run it follows (a directory, or a run id under the run root)."""
+        old = self.followed("project-workflows-001")
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", follows=str(old))
+        self.assertEqual(commands[2][commands[2].index("--follows") + 1], str(old))
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", follows="project-workflows-001")
+        self.assertEqual(commands[2][commands[2].index("--follows") + 1], str(old.resolve()))
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs")
+        self.assertNotIn("--follows", commands[2])
+        (self.root / "runs" / "empty").mkdir()
+        for value in (str(self.root / "runs" / "empty"), "missing-001"):
+            with self.subTest(follows=value), patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(SystemExit):
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--run-id", "project-workflows-002",
+                          "--run-root", str(self.root / "runs"), "--follows", value])
+                command.assert_not_called()
+                self.assertIn("has no plan.json", errors.getvalue())
+
+    def test_prepare_pins_what_the_run_follows(self):
+        from .test_pipeline import pipeline_cli
+        folder = self.repo / "features" / "project-workflows"
+        tasks = ["--task", f"ui={folder / 'ui-task.md'}", "--task", f"adapter={folder / 'adapter-task.md'}"]
+        blocked = self.followed("blocked-001", review_json={"verdict": "blocked", "candidate_commit": "c" * 40})
+        limited = self.followed("limited-001", candidate_json={"commit": "d" * 40, "worktree": "/gone"})
+        bare = self.followed("bare-001")
+        for followed, expected in ((blocked, {"run_id": "blocked-001", "verdict": "blocked", "candidate_commit": "c" * 40}),
+                                   (limited, {"run_id": "limited-001", "verdict": None, "candidate_commit": "d" * 40}),
+                                   (bare, {"run_id": "bare-001", "verdict": None, "candidate_commit": None})):
+            with self.subTest(followed=followed.name):
+                run = self.root / "follow-ups" / followed.name
+                code, out, err = pipeline_cli("prepare", str(run), "--repo", str(self.repo), "--policy", str(folder / "policy.json"), *tasks,
+                                              "--follows", str(followed))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads((run / "plan.json").read_text())["follows"], expected)
+        code, _, err = pipeline_cli("prepare", str(self.root / "follow-ups" / "refused"), "--repo", str(self.repo), "--policy", str(folder / "policy.json"),
+                                    *tasks, "--follows", str(self.root / "runs" / "nothing-here"))
+        self.assertEqual(code, 1)
+        self.assertIn("has no plan.json", err)
+        self.assertFalse((self.root / "follow-ups" / "refused" / "plan.json").exists())
+
     def test_export_is_stable_until_state_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -476,6 +529,182 @@ class FeatureLaunchTests(unittest.TestCase):
             self.assertEqual(second["created_at"], first["created_at"])
             self.assertNotEqual(second["values"], first["values"])
             self.assertEqual(len(second["definition"]["nodes"]), 9)
+
+
+def ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+
+
+class LaunchNotes(unittest.TestCase):
+    """C23 and C27: notes at launch, dry runs included, that prepare records as one run event. Never a refusal."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.repo = fixture_target(self.root)
+        # The launched feature's adapter lane also owns package.json.
+        policy_path = self.repo / "features/project-workflows/policy.json"
+        policy = json.loads(policy_path.read_text())
+        policy["workers"][1]["owned_paths"].append("package.json")
+        policy_path.write_text(json.dumps(policy, indent=2) + "\n")
+        git(self.repo, "commit", "-qam", "adapter owns package.json")
+        self.base = git(self.repo, "rev-parse", "HEAD")
+        self.registry = self.root / "config" / "projects.json"
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.registry), "HOME": str(self.root / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.runs = self.root / "runs"
+        self.own_root = self.runs / "project-workflows"
+        # Another feature of the same repository, still running: its web lane owns package.json too.
+        self.first = self.make_run(self.runs / "first" / "first-001", self.repo, [{"node_id": "web", "owned_paths": ["package.json", "web"]}])
+        self.registry.parent.mkdir(parents=True)
+        save_json(self.registry, {"version": 1, "projects": [{"project_id": "target", "name": "target", "repository": str(self.repo), "workflows": [
+            {"workflow_id": "first", "runs_root": str(self.runs / "first")},
+            {"workflow_id": "project-workflows", "runs_root": str(self.own_root)}]}]})
+
+    def make_run(self, directory: Path, repository: Path, lanes: list[dict], *, hours: float = 1, kinds: dict | None = None) -> Path:
+        """A run directory as prepare and the controller leave it: plan, pinned policy and an event `hours` ago."""
+        workers = [{"node_id": lane["node_id"], "role": "backend", "required_check_kinds": (kinds or {}).get(lane["node_id"], ["unit"]),
+                    "owned_paths": lane["owned_paths"], "checks": [
+                        {"id": f"{lane['node_id']}-{kind}", "kind": kind, "argv": ["npm", "run", f"{lane['node_id']}-{kind}"], "timeout_seconds": 60, "scenarios": []}
+                        for kind in (kinds or {}).get(lane["node_id"], ["unit"])]} for lane in lanes]
+        directory.mkdir(parents=True, exist_ok=True)
+        save_json(directory / "plan.json", {"run_id": directory.name, "repository": str(repository), "base_commit": self.base, "created_at": ago(hours),
+                                            "workers": [lane["node_id"] for lane in lanes], "excluded_workers": []})
+        save_json(directory / "policy.json", {"version": "1.2.0", "feature": directory.parent.name, "independent_review": True,
+                                              "integration_approval": True, "workers": workers})
+        (directory / "events.jsonl").write_text(json.dumps({"sequence": 1, "time": ago(hours), "node": "controller", "status": "running", "message": "x"}) + "\n")
+        return directory
+
+    def notes(self, run_id: str = "project-workflows-002") -> list[str]:
+        _, _, notes = launch_commands(self.repo, "project-workflows", run_id, self.own_root, herdr=False)
+        return notes
+
+    def overlaps(self) -> list[str]:
+        return [note for note in self.notes() if "overlaps" in note]
+
+    def test_a_running_feature_of_the_same_repository_that_owns_the_same_path_is_named(self):
+        [note] = self.overlaps()
+        self.assertIn("package.json", note)
+        self.assertIn("first-001", note)
+        self.assertIn("no candidate yet", note)
+        # The dry run prints it among its notes and runs nothing.
+        with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--run-root", str(self.own_root)])
+        command.assert_not_called()
+        self.assertEqual([item for item in json.loads(output.getvalue())["notes"] if "overlaps" in item], [note])
+        self.assertIn(f"Note: {note}", errors.getvalue())
+        # A candidate that is not in the new base still counts.
+        git(self.repo, "switch", "-qc", "side")
+        (self.repo / "package.json").write_text("{}\n")
+        git(self.repo, "add", "package.json")
+        git(self.repo, "commit", "-qm", "side")
+        side = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "switch", "-q", "-")
+        save_json(self.first / "review-bundle.json", {"candidate_commit": side})
+        [note] = self.overlaps()
+        self.assertIn(f"candidate {side[:12]} is not in this base", note)
+
+    def test_a_finished_run_whose_source_checkout_was_removed_is_still_named(self):
+        # A launched (C56) run: plan.repository is its <run>.source worktree, which clean or the operator removes once it finished.
+        source = self.runs / "first" / "first-001.source"
+        git(self.repo, "worktree", "add", "-q", "-b", "feature/first/first-001", str(source), "HEAD")
+        (source / "package.json").write_text("{}\n")
+        git(source, "add", "package.json")
+        git(source, "commit", "-qm", "first's work")
+        integrated = git(source, "rev-parse", "HEAD")
+        plan = json.loads((self.first / "plan.json").read_text())
+        save_json(self.first / "plan.json", {**plan, "repository": str(source)})
+        save_json(self.first / "review-bundle.json", {"candidate_commit": integrated})
+        [note] = self.overlaps()
+        git(self.repo, "worktree", "remove", str(source))
+        # Its commit is still in the repository, not in the new base: the registry's checkout of the project names the repository.
+        self.assertEqual(self.overlaps(), [note])
+        self.assertIn(f"candidate {integrated[:12]} is not in this base", note)
+
+    def test_runs_whose_work_is_in_the_base_idle_runs_earlier_runs_of_the_feature_and_other_repositories_give_none(self):
+        with self.subTest("candidate in the new base"):
+            save_json(self.first / "review-bundle.json", {"candidate_commit": self.base})
+            self.assertEqual(self.overlaps(), [])
+            (self.first / "review-bundle.json").unlink()
+        with self.subTest("idle for more than 48 hours"):
+            self.make_run(self.first, self.repo, [{"node_id": "web", "owned_paths": ["package.json"]}], hours=49)
+            self.assertEqual(self.overlaps(), [])
+        with self.subTest("an earlier run of the same feature"):
+            self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "adapter", "owned_paths": ["package.json"]}])
+            self.assertEqual(self.overlaps(), [])
+        with self.subTest("another repository"):
+            other = self.root / "other"
+            other.mkdir()
+            for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["commit", "-q", "--allow-empty", "-m", "Other"]):
+                subprocess.run(["git", "-C", str(other), *args], check=True)
+            self.make_run(self.first, other, [{"node_id": "web", "owned_paths": ["package.json"]}])
+            self.assertEqual(self.overlaps(), [])
+        with self.subTest("a checkout that is gone"):
+            # Neither the run's checkout nor its project's registered one is left: nothing names its repository.
+            self.make_run(self.first, self.root / "gone", [{"node_id": "web", "owned_paths": ["package.json"]}])
+            registry = json.loads(self.registry.read_text())
+            registry["projects"][0]["repository"] = str(self.root / "gone")
+            save_json(self.registry, registry)
+            self.assertEqual(self.overlaps(), [])
+
+    def test_a_timeline_last_modified_before_the_window_is_not_read(self):
+        # Events are appended at their own time, so a file older than RECENT holds no recent event: it is not even parsed.
+        # (Its one event is stamped an hour ago here only to show that it was not read.)
+        old = time.time() - 49 * 3600
+        os.utime(self.first / "events.jsonl", (old, old))
+        self.assertEqual(self.overlaps(), [])
+        # previous_policy reads plan.json and policy.json only, never a timeline.
+        self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "adapter", "owned_paths": ["server"]}])
+        with patch("workflow.registry.run_record", side_effect=AssertionError("a timeline was read")):
+            run_id, policy = previous_policy(self.own_root, self.own_root / "project-workflows-002")
+        self.assertEqual((run_id, [worker["node_id"] for worker in policy["workers"]]), ("project-workflows-001", ["adapter"]))
+
+    def test_a_malformed_previous_policy_or_registry_root_never_refuses_the_launch(self):
+        previous = self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "adapter", "owned_paths": ["server"]}])
+        valid = read_json(previous / "policy.json")
+        for workers in (None, ["adapter"]):  # Hand-edited or corrupt: no list, or an entry that is not an object.
+            with self.subTest(workers=workers):
+                save_json(previous / "policy.json", {**read_json(previous / "policy.json"), "workers": workers})
+                self.assertIsInstance(self.notes(), list)
+        save_json(previous / "policy.json", valid)
+        # A registry runs_root naming an unknown user: Path.expanduser raises RuntimeError.
+        save_json(self.registry, {"version": 1, "projects": [{"project_id": "target", "name": "target", "repository": str(self.repo), "workflows": [
+            {"workflow_id": "first", "runs_root": "~no-such-user-m5/runs"},
+            {"workflow_id": "project-workflows", "runs_root": str(self.own_root)}]}]})
+        self.assertIsInstance(self.notes(), list)
+
+    def test_a_linked_worktree_and_a_clone_of_the_same_repository_each_give_one(self):
+        worktree, clone = self.root / "linked", self.root / "clone"
+        git(self.repo, "worktree", "add", "-q", "--detach", str(worktree))
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(clone)], check=True)
+        for checkout in (worktree, clone):
+            with self.subTest(checkout=checkout.name):
+                self.make_run(self.first, checkout, [{"node_id": "web", "owned_paths": ["package.json"]}])
+                self.assertEqual(len(self.overlaps()), 1)
+
+    def test_a_kind_removed_since_the_previous_run_is_noted_and_prepare_records_the_notes(self):
+        self.make_run(self.own_root / "project-workflows-001", self.repo, [{"node_id": "ui", "owned_paths": ["src"]}, {"node_id": "adapter", "owned_paths": ["server"]}],
+                 kinds={"ui": ["build", "browser"], "adapter": ["unit", "contract", "integration"]})
+        removed = ("Lane adapter requires fewer checks than the policy of project-workflows-001: required kind contract removed; "
+                   "required kind integration removed; check adapter-contract removed; check adapter-integration removed; check adapter-unit removed.")
+        with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--run-root", str(self.own_root), "--run-id", "project-workflows-002"])
+        notes = json.loads(output.getvalue())["notes"]
+        self.assertIn(removed, notes)
+        # prepare (the real command, no agent) records the launch's notes as one run event.
+        run, commands, expected = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.own_root, herdr=False)
+        self.assertEqual(expected, notes)
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)  # The run's own worktree, as launch adds it.
+        result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()]
+        launch = [event for event in events if event["message"].startswith("Launch notes: ")]
+        self.assertEqual([(event["node"], event["status"]) for event in launch], [("controller", "running")])
+        for note in expected:
+            self.assertIn(note, launch[0]["message"])
 
 
 if __name__ == "__main__":

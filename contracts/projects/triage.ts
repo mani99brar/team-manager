@@ -279,10 +279,17 @@ const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed a
 const CONTROLLER_DRIFT = /^Controller commit [0-9a-f]+ runs this step\b/
 /** pipeline.py action_event: who ran a gate action (C17), a log line. */
 const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
-/** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT]
+/** abandon.py (C30): the `cancelled` row of a run the operator abandoned. */
+const ABANDONED_ROW = /^Abandoned by the (?:operator|maintainer)\b/
+/** pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches. */
+const LAUNCH_NOTES = /^Launch notes: /
+/**
+ * Node-less rows that are no block: the controller's running rows, and C17's action rows (raw status note, served with no status).
+ * Any other node-less row without a status was `blocked` (before B1).
+ */
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT, LAUNCH_NOTES]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS, LAUNCH_NOTES]
 /** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
 const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */
@@ -359,9 +366,10 @@ const PHRASES: Phrase[] = [
   [/^Launching or reconciling the exact native session$/, () => 'launching the native session'],
   [PID_ROW, pid => `controller started (PID ${pid})`],
   [/^Attempt (\d+); revision (\S+)$/, (k, revision) => `attempt ${k} started · revision ${revision}`],
-  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+?)(?:; (passed on attempt \d+ after attempt \d+ failed))?$/,
-    (checks, retry) => `passed · ${checks} gated at the candidate${retry ? ` · ${retry}` : ''}`],
-  [/^Combined revision (\S+)$/, revision => `combined revision ${revision}`],
+  // The retry, then C27's slow note, follow the checks; C28's reuse note or the slow note follow a combined revision.
+  [/^Required tests and artifacts passed; recorded for the candidate gate: (.+?)(?:; (passed on attempt \d+ after attempt \d+ failed))?(?:; (slow: .+))?$/,
+    (checks, retry, slow) => `passed · ${checks} gated at the candidate${retry ? ` · ${retry}` : ''}${slow ? ` · ${slow}` : ''}`],
+  [/^Combined revision (\S+)(?:; (.+))?$/, (revision, note) => `combined revision ${revision}${note ? ` · ${note}` : ''}`],
   [/^Candidate gate blocked on attempt (\d+): (.+)$/, (k, reasons) => `gate blocked on attempt ${k}: ${reasons}`],
   [/^Candidate gate passed on attempt (\d+) after attempt (\d+) failed$/, (k, before) => `gate passed on attempt ${k} after attempt ${before} failed`],
   [/^Fast-forwarded to (\S+); no push performed$/, commit => `fast-forwarded to ${commit} · no push performed`],
@@ -1067,7 +1075,12 @@ export function deriveNow(run: NowInput): Now {
     run, timeline, rows, focus, scope: scopeStart(run.detail, rows, focus), status: run.detail.snapshot.status, results: run.results ?? new Map(), missing: new Set(),
     automatic: automaticRun(run, rows),
   }
-  const rules = [questionNow, paneNow, approvalNow, challengeHeldNow, challengeNow, interruptedNow, blockedBeforeFreezeNow, identicalNow, checkFailedNow, reviewBlockedNow, runningNow, succeededNow, inactiveNow, unmatchedNow]
+  // An abandoned run (C30) reads cancelled at run level while its nodes keep their statuses: the rules that assume a live
+  // run (a gate to decide, a challenge to resume, a lane to repair or retry, steps still running) no longer apply, since
+  // abandon refuses every command they name. A review-blocked run keeps its brief and follow-up launch.
+  const live = context.status !== 'cancelled'
+  const rules = [questionNow, paneNow, ...live ? [approvalNow, challengeHeldNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
+    ...live ? [identicalNow, checkFailedNow] : [], reviewBlockedNow, ...live ? [runningNow] : [], succeededNow, inactiveNow, unmatchedNow]
   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
   return { interruption: null, lane: null, reason: null, reasonSource: null, since: focus?.since ?? null, ...now, focus, missing: [...context.missing] }
 }
@@ -1498,12 +1511,14 @@ function reviewBlockedNow(context: Context): Draft | null {
     headline: [`✗ Blocked by review at ${label} · `, clock(review.reviewed_at), ' (', ago(review.reviewed_at), `).${DID_NOT_COMPLETE}`],
     reason: [reviewers.map(line => /[.!?]$/.test(line) ? line : `${line}.`).join(' ')], reasonSource: 1,
     next: {
-      action: 'required', label: 'Findings after review are fixed in a new run, not repaired in place', caveat: null,
+      action: 'required', label: 'Findings after review are fixed in a follow-up run of the same feature, not repaired in place', caveat: null,
       runbook: [RUNBOOK.changedCode, RUNBOOK.verdict, RUNBOOK.contract],
+      // C30: the brief prints each lane's restore recipe, every reviewer's findings and the workers' claims; the follow-up is a
+      // new run id of the same feature that pins what it follows (launch --follows).
       steps: [
-        command('"$PY" -m workflow init <fixes-feature> --repo <target repo>'),
-        prose('Fill in the TODOs it writes (/workflow-grill <fixes-feature> writes decisions.md), then commit the feature files in the target.'),
-        command(`"$PY" -m workflow launch <fixes-feature> --repo <target repo> --live --automatic ${BY_OPERATOR}`),
+        command(workflow('brief')),
+        prose('Paste what each lane needs from the brief (its restore recipe, the findings to fix, its untested claims) into that lane\'s task, then commit the feature files in the target.'),
+        command(`"$PY" -m workflow launch <feature> --repo <target repo> --run-id <feature>-<next number> --follows "$RUN" --live --automatic ${BY_OPERATOR}`),
       ],
     },
   }
@@ -1567,8 +1582,10 @@ function succeededNow(context: Context): Draft | null {
 
 function inactiveNow(context: Context): Draft | null {
   if (context.status !== 'cancelled' && context.status !== 'pending') return null
+  // abandon.py's row says who abandoned the run and why.
+  const abandoned = context.rows.filter(row => row.status === 'cancelled' && ABANDONED_ROW.test(row.event.message)).at(-1) ?? null
   return {
-    situation: 'inactive', tone: 'inactive', glyph: '○',
+    situation: 'inactive', tone: 'inactive', glyph: '○', ...abandoned ? { since: abandoned.event.occurred_at, reason: [abandoned.event.message], reasonSource: 0 as const } : {},
     headline: [context.status === 'cancelled' ? '○ Cancelled before completion' : '○ Not started: nothing has run yet'],
     next: { action: 'none', label: 'Nothing to do.', runbook: [], steps: [], caveat: null },
   }

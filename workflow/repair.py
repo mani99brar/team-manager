@@ -547,8 +547,10 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
              f"Detached at {base}, {what}. Commit the fix here, never on the source branch {runtime.plan['source_branch']}: "
              f"integration needs it at the run's base {runtime.plan['base_commit']}.", "", f"## Blocked: {blocked['step']}"]
     for packet in blocked["packets"]:
-        folder = (directory / packet["path"]).parent
-        evidence = sorted(folder.glob("setup-*.log")) + sorted(folder.glob("check-*.log")) + sorted(folder.glob("browser-report-*.json"))
+        # A reused candidate packet (C28) holds only packet.json: its logs and reports are the worker packet's.
+        reused = read_json(directory / packet["path"]).get("reused_from")
+        folder = (directory / (reused["path"] if reused else packet["path"])).parent
+        evidence = ([folder / "packet.json"] if reused else []) + sorted(folder.glob("setup-*.log")) + sorted(folder.glob("check-*.log")) + sorted(folder.glob("browser-report-*.json"))
         brief += ["", f"{packet['phase']}/{packet['node_id']} attempt {packet['attempt']} at {packet['output_commit']}, gate reasons verbatim:",
                   *(f"- {item}" for item in packet["reasons"]), "", "Evidence:", f"- {directory / packet['path']}", *(f"- {item}" for item in evidence)]
     brief += ["", "## Lanes to repair"]
@@ -579,6 +581,8 @@ def repair_main(argv=None):
     directory = args.directory.resolve()
     try:
         actor = require_actor(args, "repair")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)
         if bool(args.commit) == args.workspace:
             raise ValueError("Give exactly one of --commit <sha> (apply a fix) and --workspace (make a worktree to commit one in)")
         if args.commit and not (args.reason or "").strip():

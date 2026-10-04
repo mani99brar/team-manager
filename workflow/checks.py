@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .sessions import git, save_json, scrub_env, terminate
 from .verification import evaluate_worker, policy_digest
-from .worktrees import git_worktree, without_controller_git_config
+from .worktrees import WorktreeError, git_worktree, without_controller_git_config
 
 
 def now() -> str:
@@ -275,9 +275,116 @@ def browser_evidence(report_path: Path, output_root: Path, requirement: dict, ca
     return counts, [{"id": item["id"], "status": item["status"], "screenshot_artifact_id": item["screenshot"]} for item in found.values()]
 
 
+# What a passed attempt no longer needs (C47): the checkout and caches its checks ran in, and Playwright's raw output, whose
+# screenshots are already artifacts. The folder, packet.json, the logs, artifacts/ and browser-report-<n>.json stay, and so
+# does the raw output of a browser check that failed: deferred in the worker phase, it fails without failing the attempt,
+# and its failure screenshots and traces may be in that output only.
+PRUNED_CACHES = ("npm_config_cache", "xdg_cache_home")
+RAW_BROWSER_OUTPUT = re.compile(r"browser-(\d+)")
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes what a check left read-only (an npm cache entry, a Go module cache), or unreadable."""
+    def writable(function, name, _):
+        if function in (os.open, os.scandir, os.listdir):
+            # A directory rmtree cannot open or list: make it the owner's again and remove it whole. rmtree goes on.
+            os.chmod(name, 0o700)
+            remove_tree(Path(name))
+            return
+        if function in (os.lstat, os.unlink):
+            # In a directory its owner can list but not search (0o400, 0o600) every entry's lstat and unlink fail with
+            # EACCES, and so would lexists below: search it first.
+            os.chmod(os.path.dirname(name), 0o700)
+        if not os.path.lexists(name):
+            return  # Removed above, after a failed listing of it.
+        os.chmod(os.path.dirname(name), 0o700)
+        if os.path.isdir(name) and not os.path.islink(name):
+            os.chmod(name, 0o700)
+            if function is os.lstat:  # rmtree skipped the entry it could not stat: remove it whole, as an unlistable one.
+                remove_tree(Path(name))
+                return
+        if function is os.lstat:
+            os.unlink(name)
+            return
+        function(name)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable)
+    else:
+        shutil.rmtree(path, onerror=lambda function, name, info: writable(function, name, info[1]))
+
+
+def registered_worktree(repository, path: Path) -> bool:
+    """Whether `git worktree list` still names this path."""
+    listed = git(repository, "worktree", "list", "--porcelain").splitlines()
+    return f"worktree {path.resolve()}" in listed or f"worktree {path}" in listed
+
+
+def remove_worktree(repository, path: Path) -> None:
+    """`git worktree remove --force`, under the repository's worktree lock. A removal that fails partway (read-only content)
+    still unregisters the worktree, and Git then refuses the leftover as "not a working tree" for good: once Git no longer
+    lists the path, the leftover is deleted and pruned. An independent repository (a `.git` directory) is never deleted."""
+    try:
+        git_worktree(repository, "remove", "--force", str(path))
+        return
+    except WorktreeError:
+        if not (path.exists() or path.is_symlink()) or registered_worktree(repository, path) or (path / ".git").is_dir():
+            raise
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    else:
+        remove_tree(path)
+    git_worktree(repository, "prune")
+
+
+def failed_browser_output(directory: Path) -> set[str]:
+    """The `browser-<n>` folders of the attempt's checks that failed, by its packet; none when there is no packet to read."""
+    try:
+        packet = json.loads((directory / "packet.json").read_text())
+        receipts = packet["evidence"]["checks"]
+        errors = [str(error) for error in [*packet.get("capture_errors", []), *packet.get("scenario_errors", [])]]
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    failed = set()
+    for receipt in receipts if isinstance(receipts, list) else []:
+        if isinstance(receipt, dict) and any(error.startswith((f"{receipt.get('id')}:", f"{receipt.get('id')}/")) for error in errors):
+            failed.add(f"browser-{receipt.get('worker_check_index')}")
+    return failed
+
+
+def prunable(directory: Path) -> list[Path]:
+    """What prune_attempt removes from this attempt folder now, in order: the worktree, the caches, the raw browser output of
+    the checks that did not fail."""
+    if not directory.is_dir():
+        return []
+    keep = failed_browser_output(directory)
+    raw = sorted((path for path in directory.iterdir() if RAW_BROWSER_OUTPUT.fullmatch(path.name) and path.name not in keep),
+                 key=lambda path: int(path.name.removeprefix("browser-")))
+    return [path for path in [directory / "worktree", *(directory / name for name in PRUNED_CACHES), *raw]
+            if path.exists() or path.is_symlink()]
+
+
+def prune_attempt(repository, directory: Path) -> list[Path]:
+    """Remove a passed attempt's worktree (remove_worktree, under the repository's worktree lock), its caches and the raw
+    browser output of its checks that did not fail; returns what it removed, nothing when it was already pruned.
+    recheck_packet reads only the packet and artifacts/, so the attempt still rechecks and is still reused. Never called on
+    an attempt that failed."""
+    removed = []
+    for path in prunable(directory):
+        if path.name == "worktree":
+            remove_worktree(repository, path)
+        elif path.is_symlink() or path.is_file():
+            path.unlink()
+        else:
+            remove_tree(path)
+        removed.append(path)
+    return removed
+
+
 def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
-                    session_id: str, phase: str = "worker", attempt: int = 1) -> dict:
-    """One fresh verification worktree per node/phase/attempt, artifacts retained."""
+                    session_id: str, phase: str = "worker", attempt: int = 1, prune: bool = True) -> dict:
+    """One fresh verification worktree per node/phase/attempt, artifacts retained. A passed attempt is pruned once its
+    packet is saved (prune_attempt); a failed one is kept whole, and so is one the caller may still fail (`prune=False`:
+    the failure drill's attempt)."""
     worker = next(worker for worker in policy["workers"] if worker["node_id"] == node)
     directory = run / "verification" / phase / node / str(attempt)
     packet_path = directory / "packet.json"
@@ -289,7 +396,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
         if found != (phase, node, attempt):
             raise ValueError(f"Existing verification at {packet_path} is the {found[0]} packet of {found[1]} attempt {found[2]}, "
                              f"not the {phase} packet of {node} attempt {attempt}; it is never reused")
-        if packet["expected"]["output_commit"] != commit or packet["evidence"]["policy_sha256"] != policy_digest(policy):
+        # A reused candidate packet has no evidence of its own: recheck_packet gates its worker packet's against the policy.
+        if packet["expected"]["output_commit"] != commit or ("evidence" in packet and packet["evidence"]["policy_sha256"] != policy_digest(policy)):
             raise ValueError("Existing verification belongs to a different revision/policy")
         return recheck_packet(packet, policy, run)
     if directory.exists():
@@ -345,6 +453,12 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
               "dropped_env_names": dropped}
     packet = recheck_packet(packet, policy, run)
     save_json(packet_path, packet)
+    if prune and packet["gate"]["status"] == "passed":
+        try:
+            prune_attempt(plan["repository"], directory)
+        except Exception as error:  # Whatever the removal raises, the check passed.
+            # The evidence is saved and passed; what is left only takes disk. `workflow clean` prunes it later.
+            print(f"Warning: passed attempt {directory} was not pruned ({error}); `python -m workflow clean` prunes it", file=sys.stderr)
     return packet
 
 
@@ -434,7 +548,64 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": scenarios})
 
 
+def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, worker_path: Path, attempt: int = 1) -> dict:
+    """The candidate packet of a lane whose candidate is its own snapshot: the worker packet at `worker_path`, re-gated in the
+    candidate phase, instead of a second verification worktree (C28). Nothing runs.
+
+    The saved packet carries the call's own phase, lane and attempt and `reused_from`: the worker packet's run-relative path
+    and sha256. recheck_packet loads that packet again, checks its digest and gates it as a candidate packet, so the cache
+    rule of verify_revision (a packet of another phase, lane or attempt is never reused) still holds. Its `result` and
+    `artifact_paths` are copies for readers of the file (the viewer, report.html); no gate trusts them.
+    """
+    directory = run / "verification" / "candidate" / node / str(attempt)
+    packet_path = directory / "packet.json"
+    if packet_path.exists():
+        return verify_revision(run, plan, policy, node, commit, [], "", phase="candidate", attempt=attempt)
+    if directory.exists():
+        raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
+    worker_path = Path(worker_path).resolve()
+    if not worker_path.is_relative_to(run.resolve()):
+        raise ValueError(f"Reused worker packet {worker_path} is outside the run")
+    with worker_path.open("rb") as handle:
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+    worker = json.loads(worker_path.read_text())
+    expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
+                "output_commit": commit, "verification_cwd": worker["expected"]["verification_cwd"]}
+    packet = {"phase": "candidate", "expected": expected,
+              "reused_from": {"path": str(worker_path.relative_to(run.resolve())), "sha256": digest}}
+    gated = recheck_packet(packet, policy, run)
+    reused = packet["reused_from"]["path"]
+    directory.mkdir(parents=True, mode=0o700)
+    result = {**gated["result"], "attempt": attempt, "summary": f"Worker check capture {reused} reused for the candidate gate; not integration approval"}
+    save_json(packet_path, {**packet, "result": result, "artifact_root": gated["artifact_root"], "artifact_paths": gated["artifact_paths"],
+                            "gate": gated["gate"]})
+    return gated
+
+
+def recheck_reused(packet: dict, policy: dict, run: Path) -> dict:
+    """A reused candidate packet (reuse_packet): its worker packet, unchanged since, of this lane and revision, gated as a
+    candidate packet, under the candidate packet's own phase, expectation and reference."""
+    reference = packet["reused_from"]
+    path = (run / reference["path"]).resolve()
+    if not path.is_relative_to(run.resolve()):
+        raise ValueError(f"Reused worker packet {reference['path']} is outside the run")
+    if not path.is_file():
+        raise ValueError(f"Reused worker packet {reference['path']} is missing")
+    with path.open("rb") as handle:
+        if hashlib.file_digest(handle, "sha256").hexdigest() != reference["sha256"]:
+            raise ValueError(f"Reused worker packet {reference['path']} changed after its reuse")
+    worker = json.loads(path.read_text())
+    expected = packet["expected"]
+    if (worker.get("phase"), "reused_from" in worker) != ("worker", False) or any(
+            worker["expected"][key] != expected[key] for key in ("run_id", "node_id", "base_commit", "output_commit")):
+        raise ValueError(f"{reference['path']} is not the worker packet of {expected['node_id']} at {expected['output_commit']}")
+    gated = recheck_packet({**worker, "phase": "candidate"}, policy, run)
+    return {**gated, "phase": "candidate", "expected": expected, "reused_from": reference}
+
+
 def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
+    if "reused_from" in packet:
+        return recheck_reused(packet, policy, run)
     root = Path(packet["artifact_root"]).resolve()
     if not root.is_relative_to(run.resolve()):
         raise ValueError("Artifact root outside run")
