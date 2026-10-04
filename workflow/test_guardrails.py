@@ -3296,6 +3296,27 @@ class CriticalFeature(GuardedFeature):
         plan = read_json(self.prepare("crit-001", automatic=True) / "plan.json")
         self.assertEqual((plan["automatic"]["finish"], plan["automatic"]["profile"]), ("approval", "unattended"))
 
+    def test_launch_says_first_that_a_critical_feature_stops_for_approval(self):
+        # The first line comes from the settings prepare pins: launch passes the feature's critical flag to them as to prepare.
+        from .launch import main as launch_main
+        self.save(version="2.4.0", critical=True)
+        with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            launch_main([FEATURE, "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--no-herdr", "--run-id", "crit-launch-001",
+                         "--run-root", str(self.runs)])
+        first = output.getvalue().splitlines()[0]
+        self.assertIn("(profile unattended): automatic, finish approval (a feature marked critical): once every reviewer approves, the run "
+                      "stops for your approval", first)
+
+    def test_prepare_refuses_critical_without_automatic(self):
+        # A manual run stops for approval anyway; --critical pins an automatic finish, so a manual prepare refuses it before the run exists.
+        self.save(version="2.4.0", critical=True)
+        run, commands, _ = launch_commands(self.repo, FEATURE, "crit-manual-001", self.runs, herdr=False)
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        result = subprocess.run([*commands[2], "--critical"], cwd=TOOL, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--profile and --critical apply to --automatic runs only", result.stderr)
+        self.assertFalse(run.exists())
+
     def test_a_feature_not_marked_critical_keeps_the_verified_feature_branch_finish(self):
         self.save(version="2.4.0", critical=False)
         _, commands, _ = launch_commands(self.repo, FEATURE, "plain-001", self.runs, herdr=False, automatic=True)

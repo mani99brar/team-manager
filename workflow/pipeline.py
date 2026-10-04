@@ -1271,6 +1271,9 @@ def main():
         parser.error("--profile and the role flags apply to prepare only; the pins cannot change after it")
     if args.action != "prepare" and args.critical:
         parser.error("--critical applies to prepare only; the finish it pins cannot change after it")
+    if args.action != "prepare" and args.hold_challenge:
+        # C8: prepare pins plan.holds; a `start` or `automatic` given it would launch the workers without the hold, saying nothing.
+        parser.error("--hold-challenge applies to prepare only: the hold is pinned there (launch --hold-challenge, or prepare --hold-challenge)")
     directory = args.directory.resolve()
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.

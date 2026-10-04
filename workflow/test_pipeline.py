@@ -1419,6 +1419,17 @@ class RecordTests(unittest.TestCase):
                 code, _, err = pipeline_cli(*argv)
                 self.assertEqual(code, 2, err)
                 self.assertIn("--profile and the role flags apply to prepare only; the pins cannot change after it", err)
+        # The hold (C8) and the finish (C51) are pinned at prepare too: on any other action they would be ignored silently.
+        for argv, message in ((["start", str(f.directory), "--live", "--hold-challenge"],
+                               "--hold-challenge applies to prepare only: the hold is pinned there (launch --hold-challenge, or prepare --hold-challenge)"),
+                              (["automatic", str(f.directory), "--live", "--hold-challenge"],
+                               "--hold-challenge applies to prepare only: the hold is pinned there (launch --hold-challenge, or prepare --hold-challenge)"),
+                              (["automatic", str(f.directory), "--live", "--critical"],
+                               "--critical applies to prepare only; the finish it pins cannot change after it")):
+            with self.subTest(argv):
+                code, _, err = pipeline_cli(*argv)
+                self.assertEqual(code, 2, err)
+                self.assertIn(message, err)
         self.assertEqual(read_json(f.directory / "plan.json"), plan)
 
     def test_the_drift_check_reads_only_the_controller_head_and_prepare_reads_dirt_without_optional_locks(self):
