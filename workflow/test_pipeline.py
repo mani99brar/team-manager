@@ -1260,7 +1260,7 @@ class RecordTests(unittest.TestCase):
             graph.invoke(Command(resume=decision), f.config)
             report(f.runtime, graph.get_state(f.config))
         page = (f.directory / "report.html").read_text()
-        self.assertIn("<h1>Workflow report</h1><h2>Outcome</h2><pre>Outcome: approved by review; nothing open.</pre>", page)
+        self.assertIn("<h1>Workflow report</h1><h2>Outcome</h2><pre>Outcome: approved by review; no open P0/P1.</pre>", page)
 
     def test_prepare_pins_the_worker_authority_and_the_report_shows_it(self):
         # C14 slice 1: no sandbox on this host; every launch runs as the operator's account, and the run records it with the

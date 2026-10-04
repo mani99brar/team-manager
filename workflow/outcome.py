@@ -4,8 +4,8 @@ It is built from the export's own section builders (review_section, each lane's 
 reviewers' status files (`automatic-review*.json`), never from an orchestrator's memory. It lists each reviewer's verdict (the
 derived one, and the one its file says when they differ), or `no verdict accepted` with the reason and whether a file was
 written; late verdicts; open P0/P1 with their first sentences; accepted P2s as "Known limits"; each lane's untested and
-verify_yourself items; and the review sidecar's unresolved list. A clean approval is one line: every completed 1.1.0 lane
-carries a verify_yourself line, so those lines alone never make an approval unclean (they show once the block is longer,
+verify_yourself items; and the review sidecar's unresolved list. A clean approval is one line, `no open P0/P1` with the count of
+open P2s (never "nothing open": most approved runs keep open P2s). Every completed 1.1.0 lane carries a verify_yourself line, so those lines alone never make an approval unclean (they show once the block is longer,
 and always in `open_items_only`).
 
 `status`, the success lines, the Blocked handlers and report.html print it. It reads files the controller replaces atomically
@@ -52,13 +52,26 @@ def no_verdict_reason(directory: Path, reviewer_id: str, status: dict) -> str:
     return "no status recorded" if word is None else str(word)
 
 
+def print_output_fact(output: Path) -> str:
+    """A print reviewer's job output (`<node>.stdout.json`): what its structured verdict says, with its open P0/P1, when the
+    job succeeded with one (a job that exited after the reviewer was superseded, as in old runs); else whether it wrote any."""
+    from .automatic import open_counts
+    if not (output.exists() and output.stat().st_size > 0):
+        return "its print job wrote no output"
+    result = load_optional(output)
+    structured = result.get("structured_output") if isinstance(result, dict) and result.get("is_error") is False else None
+    verdict = structured.get("verdict") if isinstance(structured, dict) else None
+    if verdict not in {"approved", "blocked"}:
+        return "its print job's output was not accepted"
+    findings = structured.get("findings") if isinstance(structured.get("findings"), list) else []
+    return f"its print job's output says {verdict} ({open_counts([item for item in findings if isinstance(item, dict)])})"
+
+
 def file_fact(directory: Path, reviewer_id: str, status: dict) -> str:
     """Whether the reviewer wrote its completion file, and what verdict it says when it can be read. A print reviewer writes
-    no completion file: the fact is whether its job wrote output (`<node>.stdout.json`)."""
+    no completion file: the fact is what its job's output says (print_output_fact)."""
     if status.get("transport") == "print":
-        output = directory / f"{review_node(reviewer_id)}.stdout.json"
-        written = output.exists() and output.stat().st_size > 0
-        return "its print job's output was not accepted" if written else "its print job wrote no output"
+        return print_output_fact(directory / f"{review_node(reviewer_id)}.stdout.json")
     path = directory / f"{review_node(reviewer_id)}.completion.json"
     if not path.exists():
         return "no file written"
@@ -162,7 +175,9 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         if verdict == "approved":
             header = f"Outcome: approved by {listing(ids)}"
             if not caveat and not open_:
-                return header + "; nothing open."
+                # Never "nothing open": an approved run usually keeps open P2s, which review.json lists (automatic.open_counts' words).
+                p2 = sum(isinstance(item, dict) and item.get("severity") == "P2" and item.get("disposition") == "open" for item in findings)
+                return header + "; no open P0/P1" + (f" ({p2} open P2 in review.json)" if p2 else "") + "."
             return "\n".join([header, "Reviewers:", *lines, *items])
         header = f"Outcome: {verdict}" if verdict else "Outcome: no review.json recorded"
         return "\n".join([header, "Reviewers:", *lines, *items])

@@ -73,7 +73,16 @@ class OutcomeBlock(OutcomeRun):
         for reviewer in REVIEWERS:
             self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
         block = outcome_block(self.directory)
-        self.assertEqual(block, "Outcome: approved by general and coverage; nothing open.")
+        self.assertEqual(block, "Outcome: approved by general and coverage; no open P0/P1.")
+
+    def test_a_clean_approval_counts_the_open_p2_it_leaves_and_never_says_nothing_open(self):
+        # Most approved runs keep open P2s in review.json: the one line says what is not open, and how many P2s are.
+        p2s = [finding("P2", "The empty state could say more."), finding("P2", "A test name is vague.", reviewer="coverage"),
+               finding("P2", "Fixed already.", "resolved")]
+        self.review("approved", [("general", "approved"), ("coverage", "approved")], p2s)
+        for reviewer in REVIEWERS:
+            self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
+        self.assertEqual(outcome_block(self.directory), "Outcome: approved by general and coverage; no open P0/P1 (2 open P2 in review.json).")
 
     def test_a_blocked_run_with_a_missing_verdict_prints_the_reason_and_that_no_file_was_written(self):
         self.review("blocked", [("general", None), ("coverage", "approved")])
@@ -121,7 +130,7 @@ class OutcomeBlock(OutcomeRun):
         for reviewer in REVIEWERS:
             self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved"), derived=True)
         self.lane()
-        self.assertEqual(outcome_block(self.directory), "Outcome: approved by general and coverage; nothing open.")
+        self.assertEqual(outcome_block(self.directory), "Outcome: approved by general and coverage; no open P0/P1.")
         # The approval stop (unit T4) still lists it among the open items.
         self.assertEqual(outcome_block(self.directory, open_items_only=True).splitlines(),
                          ["Lane ui:", "  verify yourself: Open the page and see the new heading."])
@@ -172,6 +181,26 @@ class OutcomeBlock(OutcomeRun):
         self.assertIn("  general: no verdict accepted (Reviewer general stdout refused: no structured output); "
                       "its print job's output was not accepted", lines)
         self.assertIn("  coverage: no verdict accepted (deadline exhausted); its print job wrote no output", lines)
+
+    def test_a_superseded_print_reviewer_says_what_its_job_output_holds(self):
+        # claims-005 and the like: the job exited with a valid structured verdict after the reviewer was superseded. The block
+        # says what that output says, with its open P0/P1, not only that it was not accepted.
+        save_json(self.directory / "automatic-review.json", {"transport": "print", "status": "blocked", "reviewers": REVIEWERS})
+        self.status("general", transport="print", status="superseded")
+        self.status("coverage", transport="print", status="superseded")
+        save_json(self.directory / "review-general.stdout.json", {"type": "result", "is_error": False, "structured_output": {
+            "verdict": "blocked", "findings": [finding("P1", "Tokens leak into the log."), finding("P2", "Naming.")]}})
+        save_json(self.directory / "review-coverage.stdout.json", {"type": "result", "is_error": False, "structured_output": {
+            "verdict": "approved", "findings": []}})
+        lines = outcome_block(self.directory).splitlines()
+        self.assertIn("  general: no verdict accepted (superseded); its print job's output says blocked (1 open P1)", lines)
+        self.assertIn("  coverage: no verdict accepted (superseded); its print job's output says approved (no open P0/P1)", lines)
+        # An error result, or output without a verdict, is still only "not accepted".
+        save_json(self.directory / "review-general.stdout.json", {"type": "result", "is_error": True, "structured_output": {"verdict": "blocked"}})
+        save_json(self.directory / "review-coverage.stdout.json", {"type": "result", "is_error": False, "result": "no structured output"})
+        lines = outcome_block(self.directory).splitlines()
+        self.assertIn("  general: no verdict accepted (superseded); its print job's output was not accepted", lines)
+        self.assertIn("  coverage: no verdict accepted (superseded); its print job's output was not accepted", lines)
 
     def test_an_unreadable_plan_never_raises(self):
         self.review("approved", [("general", "approved"), ("coverage", "approved")])
