@@ -370,9 +370,11 @@ class DecisionsPrecedence(unittest.TestCase):
         # file only an Operator decision is such a line: a worker's permitted, named departure from a grill default must not block the
         # candidate. A file without the heading still binds as a whole, in the wording runs always had.
         from .automatic import REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_prompt
-        self.assertIn("A candidate behaviour that contradicts a quoted line of a task, of a document a task cites or of an Operator decision "
-                      "in decisions.md (all of decisions.md when it has no Operator decisions heading) is P1 at least", REVIEW_RUBRIC)
+        self.assertIn("A candidate behaviour that contradicts a quoted requirement, a line of a task, of a document a task cites or of an "
+                      "Operator decision in decisions.md (all of decisions.md when it has no Operator decisions heading) included, is P1 at "
+                      "least", REVIEW_RUBRIC)
         self.assertNotIn("or of decisions.md is P1", REVIEW_RUBRIC)
+        self.assertNotIn("or of decisions.md included", REVIEW_RUBRIC)
         coverage = {"reviewer_id": "coverage", "prompt": (TOOL / "workflow/prompts/reviewers/coverage.md").read_text()}
         with tempfile.TemporaryDirectory() as root:
             patch_path = Path(root) / "review.diff"
