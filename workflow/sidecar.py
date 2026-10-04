@@ -40,8 +40,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from .attention import attention
 from .guardrails import epoch, input_shown, iso, pane_attachment, went_on, waiting_question
-from .sessions import plan_workers, popen_claude, read_json, save_json, terminate
+from .sessions import plan_reviewers, plan_workers, popen_claude, read_json, save_json, terminate
 from .verification import CONTRACTS, validate_schema
 
 SIDECAR = "sidecar"
@@ -61,7 +62,9 @@ TERMINAL = frozenset({"verified_resolved", "withdrawn", "accepted_trade_off"})
 GATE_STATES = frozenset({"working", "idle"})
 LANE_STATES = frozenset({"idle", "working", "blocked", "done"})
 OPEN = ("open", "acknowledged", "fix_reported")
+RANK = {"P1": 1, "P0": 2}  # The severities that page the operator when no lane takes them (Pass.page); P2 never does.
 GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0"}  # The sidecar never takes a worker's index.lock.
+GIT_TIMEOUT_SECONDS = 60  # A lane Git call that waits longer (on a FIFO planted in the shared .git) fails its pass, not the poll.
 LEDGER = "sidecar.ledger.json"
 LOCK = "sidecar.lock"
 RUNNING = "sidecar.running.json"
@@ -326,6 +329,68 @@ def merge(ledger: dict, output: dict, record: dict, lanes: list[str], at: str, r
     return merged, messages, escalations
 
 
+def became_blocking(before: dict | None, after: dict) -> bool:
+    """`after` is an open P0/P1 it was not before the pass (`before` None for a new finding): new, raised from a lower
+    severity, or reopened from a terminal disposition."""
+    if after["severity"] not in RANK or after["disposition"] not in OPEN:
+        return False
+    return before is None or before["disposition"] not in OPEN or RANK[after["severity"]] > RANK.get(before["severity"], -1)
+
+
+# ---- Paging the operator (C41, decision 12) --------------------------------------------------------------------------
+# A finding a pass made an open P0/P1 that no message of that pass delivered to its lane, and every escalation, is one `sidecar`
+# attention record on the finding's lane, written once: when the ledger first says the lane will not get it. Unlike the events,
+# the text quotes the first sentence: the operator may have only this line. attention() never raises.
+
+def read_it(directory: Path) -> str:
+    return f"Read it in {ledger_path(directory)} or on the run's sidecar page."
+
+
+def page_finding(directory: Path, n: int, finding: dict, why: str) -> None:
+    """Pass `n`'s P0/P1 that did not reach its lane: `why` is how its message there ended (`refused, lane_finished`,
+    `undeliverable, interrupted`, ...) or `no message to it`."""
+    from .automatic import first_sentence
+    attention(directory, "sidecar", f"Review sidecar pass {n}: {finding['severity']} {finding['id']} on lane {finding['lane']} did not reach "
+                                    f"the lane ({why}): {first_sentence(finding['problem'])} {read_it(directory)}", node=finding["lane"])
+
+
+def page_escalation(directory: Path, escalation: dict, lane: str | None) -> None:
+    from .automatic import first_sentence
+    attention(directory, "sidecar", f"Review sidecar pass {escalation['pass']}: escalation {escalation['finding_id']} ({escalation['kind']})"
+                                    f"{f' on lane {lane}' if lane else ''}: {first_sentence(escalation['text'])} {read_it(directory)}", node=lane)
+
+
+def findings_read(directory: Path, n: int) -> dict | None:
+    """The severity and disposition of each finding, by id, in the ledger pass `n` read before its merge (its inputs'
+    ledger.json, which only the controller writes); None once those inputs are gone or unreadable."""
+    try:
+        findings = read_json(directory / INPUTS / str(n) / "ledger.json")["findings"]
+        return {finding["id"]: {"severity": finding["severity"], "disposition": finding["disposition"]} for finding in findings}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def page_interrupted(directory: Path, ledger: dict, messages: list[dict]) -> None:
+    """recover(): what the delivery of `messages`, now `undeliverable` (`interrupted`), would have paged had its controller not
+    stopped (Pass.page_outcome): each finding a message carried on its own lane that the message's pass made an open P0/P1. A
+    finding on another lane was paged at the merge, before anything was typed (Pass.page). The ledger that pass read says
+    which ones it made blocking; without it, a finding with a history entry of that pass counts as new or raised there."""
+    findings = {finding["id"]: finding for finding in ledger["findings"]}
+    for message in messages:
+        earlier = findings_read(directory, message["pass"])
+        for finding_id in message["finding_ids"]:
+            finding = findings.get(finding_id)
+            if finding is None or finding["lane"] != message["lane"]:
+                continue
+            if earlier is not None:
+                blocking = became_blocking(earlier.get(finding_id), finding)
+            else:
+                blocking = (finding["severity"] in RANK and finding["disposition"] in OPEN
+                            and any(entry.get("pass") == message["pass"] for entry in finding["history"]))
+            if blocking:
+                page_finding(directory, message["pass"], finding, "undeliverable, interrupted")
+
+
 # ---- The job's schema and prompt -----------------------------------------------------------------------------------
 
 def schema() -> dict:
@@ -363,8 +428,29 @@ def owned_paths(directory: Path) -> dict[str, list[str]]:
     return {worker["node_id"]: list(worker["owned_paths"]) for worker in read_json(policy).get("workers", [])}
 
 
+# The sidecar's own severity rule (C41, operator decisions 4 and 12, 3 Oct 2026), never a reviewer brief's bar: the briefs are
+# context in tasks/reviewers/. Without a rule every finding of 35 live passes came out P2.
+SEVERITY_RULE = ("Severity, the operator's rule for your findings, whatever a reviewer brief says: P0 or P1 only for a defect shown by the "
+                 "code, a check or a pane; work that contradicts a line of a task, of decisions.md or a safety line of the PRD; a failure "
+                 "the worker disclosed; or a security or data-loss risk. P0 when the lane's work must not merge at all. Untested "
+                 "behaviour, risks and suggestions are P2, however likely; P2 is the lowest.")
+
+
+def conventions_block(plan: dict) -> str:
+    """The "Project conventions" block every role's prompt carries (C15): the target's CLAUDE.md as prepare pinned it in
+    `plan.conventions.text`; empty for a plan without it (every run prepared before). A local stand-in for
+    guardrails.conventions_block, which the prompt-builder chain adds."""
+    conventions = plan.get("conventions")
+    text = conventions.get("text") if isinstance(conventions, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    return (f"\n\nProject conventions (CLAUDE.md at {plan['base_commit']}; the task and decisions.md take precedence):\n"
+            + text.rstrip() + "\n")
+
+
 def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path) -> str:
-    """The pinned brief, then the controller's protocol block (PRD section 3): vocabulary, owned paths, inputs, ledger, rules."""
+    """The pinned brief, the project conventions, then the controller's protocol block (PRD section 3): vocabulary, owned
+    paths, inputs, ledger, the severity rule and the rules."""
     lanes = plan_workers(plan)
     owned = owned_paths(directory)
     vocabulary = "; ".join(f"{lane} (worktree {plan['nodes'][lane]['worktree']}, owns {', '.join(owned.get(lane, [])) or 'its assigned paths'})"
@@ -374,15 +460,18 @@ def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path)
              "check), each a list of short strings." if trigger == "final" else
              " handoff is null: only the final pass fills it.")
     limit = plan["sidecar"]["max_messages_per_lane"]
-    return (plan["sidecar"]["prompt"].rstrip() + "\n\n"
+    tasks = ("tasks/ holds the pinned tasks, decisions.md, the policy, the design challenge record and, in reviewers/, the briefs of "
+             "the run's reviewers: what review will look at, never a severity rule for your findings." if (inputs / "tasks" / "reviewers").is_dir()
+             else "tasks/ holds the pinned tasks, decisions.md, the policy and the design challenge record.")
+    return ((plan["sidecar"]["prompt"].rstrip() + conventions_block(plan)).rstrip() + "\n\n"
             f"=== Review sidecar protocol (appended by the controller) ===\n"
             f"Run {plan['run_id']}, pass {n} ({trigger}), base commit {plan['base_commit']}. Lanes: {vocabulary}.\n"
             f"Inputs of this pass, in {inputs}: manifest.json lists per lane its head commit, native state (idle, working, blocked, done, "
             "stopped or unknown), completion, whether a question waits, its deadline, diff_file (git diff against the base commit, then "
             "the untracked files, which you read in the worktree), pane_file (the visible text of its pane, null when not captured) and the "
             "copies of its completion and questions files. ledger.json is the ledger you hold so far: your memory between passes, with "
-            "every finding, its disposition and history, and the messages sent and what became of them. tasks/ holds the pinned tasks, "
-            "decisions.md, the policy and the design challenge record.\n"
+            f"every finding, its disposition and history, and the messages sent and what became of them. {tasks}\n"
+            f"{SEVERITY_RULE}\n"
             "Rules: only read; you change nothing and run nothing. Return the requested JSON schema. Every finding names a lane of this "
             "run, a file and a revision (the lane's head commit as the manifest spells it, or working-tree for uncommitted changes). "
             "Update a finding of the ledger by its id (S-<n>), giving every field: the upsert replaces them. A new finding has id null "
@@ -401,7 +490,11 @@ def pass_prompt(directory: Path, plan: dict, n: int, trigger: str, inputs: Path)
 # ---- Pass inputs ---------------------------------------------------------------------------------------------------
 
 def lane_git(worktree: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(worktree), *args], env={**os.environ, **GIT_ENV}, check=True, capture_output=True).stdout.decode(errors="replace")
+    """Git in a lane worktree, without optional locks, for at most GIT_TIMEOUT_SECONDS. A pass runs inside wait_handoffs' poll,
+    and a FIFO planted at the shared .git's info/exclude blocks `git diff` and `git ls-files` there: past the bound Git is
+    killed and TimeoutExpired fails the pass (Scheduler.guard records it `failed`), and the run goes on."""
+    return subprocess.run(["git", "-C", str(worktree), *args], env={**os.environ, **GIT_ENV}, check=True, capture_output=True,
+                          timeout=GIT_TIMEOUT_SECONDS).stdout.decode(errors="replace")
 
 
 def safe_text(value: str) -> str:
@@ -493,14 +586,18 @@ def write_inputs(runtime, n: int, trigger: str, rows, herdr: Herdr, lanes: dict)
     for name in ("policy.json", "challenge.json"):
         if (directory / name).is_file():
             shutil.copyfile(directory / name, tasks / name)
+    if plan.get("reviewers") is not None:  # The briefs the run pinned, as context only (C41); the built-in reviewer pins none.
+        (tasks / "reviewers").mkdir(mode=0o700)
+        for reviewer in plan_reviewers(plan):
+            (tasks / "reviewers" / f"{reviewer['reviewer_id']}.md").write_text(reviewer["prompt"])
     save_json(inputs / "ledger.json", load_ledger(directory, plan))
     manifest = {"run_id": plan["run_id"], "pass": n, "trigger": trigger, "base_commit": plan["base_commit"], "inputs": str(inputs),
                 "ledger_file": str(inputs / "ledger.json"), "tasks_dir": str(tasks), "lanes": {}}
     for lane in plan_workers(plan):
         worktree = Path(plan["nodes"][lane]["worktree"])
         head = lane_git(worktree, "rev-parse", "HEAD").strip()
-        diff = lane_git(worktree, "diff", "--no-color", "--no-ext-diff", plan["base_commit"])
-        numstat = lane_git(worktree, "diff", "--numstat", "--no-renames", "-z", plan["base_commit"])
+        diff = lane_git(worktree, "diff", "--no-color", "--no-ext-diff", "--no-textconv", plan["base_commit"])
+        numstat = lane_git(worktree, "diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", plan["base_commit"])
         binary = sorted(entry.split("\t", 2)[2] for entry in numstat.split("\0") if entry.startswith("-\t-\t"))
         untracked = sorted(filter(None, lane_git(worktree, "ls-files", "--others", "--exclude-standard", "-z").split("\0")))
         diff_file = inputs / f"{lane}.diff"
@@ -660,7 +757,8 @@ def claim(directory: Path, record: dict) -> None:
 
 
 class Pass:
-    """One pass: inputs, the polled print job, the merge, the deliveries and the events. Every step may raise; the caller guards."""
+    """One pass: inputs, the polled print job, the merge, the deliveries, the events and the pages. Every step may raise; the
+    caller guards."""
 
     def __init__(self, runtime, n: int, trigger: str, clock, detail: str = ""):
         self.runtime, self.directory, self.plan = runtime, runtime.directory, runtime.plan
@@ -801,14 +899,20 @@ class Pass:
                   "session_id": self.session_id, "lanes": self.lanes}
         try:
             with ledger_lock(directory):
-                merged, messages, escalations = merge(load_ledger(directory, plan), output, record, plan_workers(plan), at,
-                                                      lambda lane: refusal(directory, plan, lane))
+                before = load_ledger(directory, plan)
+                merged, messages, escalations = merge(before, output, record, plan_workers(plan), at, lambda lane: refusal(directory, plan, lane))
                 save_ledger(directory, merged)  # Before anything is typed: a pane never holds an id the ledger does not.
         except Rejected as error:
             self.reject(error)
             return
         self.release()
-        outcomes = self.deliver([message for message in messages if message["status"] == "pending"])
+        earlier = {finding["id"]: finding for finding in before["findings"]}
+        blocking = {finding["id"]: finding for finding in merged["findings"] if became_blocking(earlier.get(finding["id"]), finding)}
+        # Said and paged before anything is typed: a controller stopped while typing (a Ctrl-C, a kill) loses neither.
+        for escalation in escalations:
+            self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
+        self.page(merged, blocking, messages, escalations)
+        outcomes = self.deliver([message for message in messages if message["status"] == "pending"], blocking)
         counts = merged["passes"][-1]["counts"]
         resolved = sum(1 for upsert in output["findings"] if upsert["disposition"] == "verified_resolved")
         delivered = [message["lane"] for message in outcomes if message["status"] == "delivered"]
@@ -817,26 +921,48 @@ class Pass:
         self.event("running", f"{self.label}: {counts['new']} new finding(s), {counts['changed']} changed, {resolved} verified resolved; "
                               f"{len(delivered)} message(s) delivered" + (f" to {', '.join(delivered)}" if delivered else "")
                               + f", {refused} refused, {undeliverable} undeliverable")
-        for escalation in escalations:
-            self.event("interactive", f"escalation {escalation['finding_id']} ({escalation['kind']}): see the sidecar page")
 
-    def deliver(self, messages: list[dict]) -> list[dict]:
-        """Each pending message in order: gated, typed or not, then flipped with one atomic write. Errors make it undeliverable."""
+    def page(self, merged: dict, blocking: dict, messages: list[dict], escalations: list[dict]) -> None:
+        """Right after the merge write, before anything is typed: the operator's `sidecar` attention record of every escalation,
+        and of every finding this pass made an open P0/P1 (`blocking`: new, raised or reopened) that no message of this pass can
+        still deliver to its lane: each one there refused, or none sent. One with a message pending on its lane waits for that
+        delivery, paged by page_outcome when it fails, or by recover() when the controller stops first. A delivered one is the
+        lane's to act on."""
+        for finding in blocking.values():
+            tried = [message for message in messages if message["lane"] == finding["lane"] and finding["id"] in message["finding_ids"]]
+            if not any(message["status"] == "pending" for message in tried):
+                page_finding(self.directory, self.n, finding, f"{tried[-1]['status']}, {tried[-1]['reason']}" if tried else "no message to it")
+        lanes = {finding["id"]: finding["lane"] for finding in merged["findings"]}
+        for escalation in escalations:
+            page_escalation(self.directory, escalation, lanes.get(escalation["finding_id"]))
+
+    def page_outcome(self, message: dict, blocking: dict) -> None:
+        """A pending message the ledger now records undelivered (refused at the gate, or undeliverable): each finding it carried
+        on its lane that this pass made an open P0/P1, paged with that outcome."""
+        for finding_id in message["finding_ids"]:
+            finding = blocking.get(finding_id)
+            if finding is not None and finding["lane"] == message["lane"]:
+                page_finding(self.directory, self.n, finding, f"{message['status']}, {message['reason']}")
+
+    def deliver(self, messages: list[dict], blocking: dict) -> list[dict]:
+        """Each pending message in order: gated, typed or not, then flipped with one atomic write. Errors make it undeliverable.
+        An outcome the ledger records undelivered pages at once (page_outcome), before the next message is tried."""
         outcomes = []
         for message in messages:
             try:
                 status, reason = deliver_one(self.runtime, message, self.herdr)
                 error = None
             except KeyboardInterrupt:
-                raise  # It stays pending; the next controller makes it undeliverable (interrupted).
+                raise  # It stays pending; the next controller makes it undeliverable (interrupted) and pages it (recover).
             except BaseException as caught:
                 status, reason, error = "undeliverable", failure_reason(caught), caught
             try:
                 flip(self.directory, self.plan, message["id"], status, reason, iso(self.clock()))
+                recorded = True
             except KeyboardInterrupt:
                 raise
             except BaseException as caught:
-                error = error or caught
+                error, recorded = error or caught, False
             if error is not None:
                 try:
                     log_error(self.log, f"message {message['id']} undeliverable", error)
@@ -845,6 +971,8 @@ class Pass:
                 self.event("interactive", f"{self.label}: message {message['id']} to {message['lane']} undeliverable after an error "
                                           f"({type(error).__name__}); see {self.log.name}")
             outcomes.append({**message, "status": status, "reason": reason})
+            if recorded and status != "delivered":
+                self.page_outcome(outcomes[-1], blocking)  # A flip that failed leaves it pending: recover() pages it, so never twice.
         return outcomes
 
 
@@ -888,8 +1016,9 @@ def kill_orphan(pid, session_id) -> bool:
 
 
 def recover(runtime, clock=time.time) -> None:
-    """A controller (re)starting: every `pending` message becomes `undeliverable` (interrupted), and a pass left running is recorded
-    `interrupted` after its orphaned job, if it still runs, is killed. Then the running marker is removed."""
+    """A controller (re)starting: every `pending` message becomes `undeliverable` (interrupted), paging what its delivery would
+    have (page_interrupted), and a pass left running is recorded `interrupted` after its orphaned job, if it still runs, is
+    killed. Then the running marker is removed."""
     directory, plan = runtime.directory, runtime.plan
     marker = directory / RUNNING
     with deferred_interrupt(), ledger_lock(directory):
@@ -932,6 +1061,7 @@ def recover(runtime, clock=time.time) -> None:
     if pending:
         runtime.event(SIDECAR, "interactive", f"Review sidecar: {len(pending)} message(s) left pending by a stopped controller recorded "
                                               f"undeliverable (interrupted): {', '.join(message['id'] for message in pending)}")
+        page_interrupted(directory, ledger, pending)  # After the write: stopped before it, the next controller pages them; never twice.
     if stale is not None and stale.get("recorded"):
         runtime.event(SIDECAR, "interactive", f"Review sidecar pass {stale['pass']} recorded interrupted: the controller stopped while it ran"
                                               + ("; its orphaned job was stopped" if stale["killed"] else ""))

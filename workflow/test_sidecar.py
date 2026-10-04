@@ -26,12 +26,12 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from . import sidecar
 from .automatic import DEFAULTS as AUTOMATIC, automatic_settings, drive, wait_handoffs
 from .export_state import graph_nodes
-from .guardrails import iso
+from .guardrails import input_shown, iso
 from .interactive import SIDECAR_NOTE, worker_prompt
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, export_run
 from .sessions import TransientInfraError, git, prepare, read_json, save_json
-from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, pane_process_info, two_lane_policy
+from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, input_at_bottom, pane_process_info, two_lane_policy
 from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
 from .test_portable import commit_all
 from .verification import policy_digest, validate_schema
@@ -430,6 +430,51 @@ class PassInputs(SidecarRun):
         self.assertEqual(len(self.ledger()["passes"]), 10)
 
 
+class PassPrompt(SidecarRun):
+    def test_the_prompt_holds_the_operators_severity_rule_and_the_reviewer_briefs_are_inputs_only(self):
+        # C41 (decisions 4 and 12): the prompt defined no severity, and all 23 findings of 35 live passes came out P2. The rule is
+        # the operator's, not the reviewer briefs' (coverage's stricter bar would contradict decision 4): those are context.
+        self.plan["reviewers"] = [{"reviewer_id": "general", "prompt": "Review like a staff engineer. GENERAL-BRIEF."},
+                                  {"reviewer_id": "coverage", "prompt": "Block on every missing test. COVERAGE-BRIEF."}]
+        self.run_pass()
+        [call] = self.job_calls()
+        prompt = " ".join(call["prompt"].split())
+        self.assertIn("Severity, the operator's rule for your findings, whatever a reviewer brief says: P0 or P1 only for a defect shown by "
+                      "the code, a check or a pane; work that contradicts a line of a task, of decisions.md or a safety line of the PRD; a "
+                      "failure the worker disclosed; or a security or data-loss risk. P0 when the lane's work must not merge at all. "
+                      "Untested behaviour, risks and suggestions are P2, however likely; P2 is the lowest.", prompt)
+        self.assertIn("tasks/ holds the pinned tasks, decisions.md, the policy, the design challenge record and, in reviewers/, the briefs "
+                      "of the run's reviewers: what review will look at, never a severity rule for your findings.", prompt)
+        self.assertNotIn("GENERAL-BRIEF", prompt)
+        tasks = self.directory / "sidecar-inputs" / "1" / "tasks"
+        self.assertEqual({path.name: path.read_text() for path in (tasks / "reviewers").iterdir()},
+                         {"general.md": "Review like a staff engineer. GENERAL-BRIEF.", "coverage.md": "Block on every missing test. COVERAGE-BRIEF."})
+        # A run with the single built-in reviewer pins no brief: no folder, and the prompt names none.
+        del self.plan["reviewers"]
+        self.run_pass()
+        self.assertFalse((self.directory / "sidecar-inputs" / "2" / "tasks" / "reviewers").exists())
+        prompt = " ".join(self.job_calls()[-1]["prompt"].split())
+        self.assertIn("tasks/ holds the pinned tasks, decisions.md, the policy and the design challenge record.", prompt)
+        self.assertIn("Severity, the operator's rule for your findings", prompt)
+
+    def test_the_prompt_carries_the_project_conventions_and_an_old_plan_none(self):
+        # C15: the conventions block every role gets, from plan.conventions (pinned at prepare); a plan without one has none.
+        self.run_pass()
+        self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
+        self.plan["conventions"] = {"text": "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n\n"}
+        self.run_pass()
+        prompt = self.job_calls()[-1]["prompt"]
+        block = (f"\n\nProject conventions (CLAUDE.md at {self.plan['base_commit']}; the task and decisions.md take precedence):\n"
+                 "# Project conventions\n\nRun the unit tests with pytest -q. CONVENTIONS-MARKER-9.\n")
+        self.assertEqual(sidecar.conventions_block(self.plan), block)
+        self.assertIn(BRIEF + block + "\n=== Review sidecar protocol", prompt)  # After the brief, before the protocol block.
+        for value in ({"text": "  \n"}, {"text": None}, "not a record"):
+            with self.subTest(conventions=value):
+                self.plan["conventions"] = value
+                self.run_pass()
+                self.assertNotIn("Project conventions", self.job_calls()[-1]["prompt"])
+
+
 # ---- ledger-merge ----------------------------------------------------------------------------------------------------
 
 class LedgerMerge(SidecarRun):
@@ -585,6 +630,25 @@ class Messages(SidecarRun):
         validate_schema("sidecar", self.ledger())
         self.assert_node_statuses()
 
+    def test_the_gate_reads_an_input_line_at_the_bottom_of_the_capture(self):
+        # In 20 of the 25 `pane_busy` refusals in pine's sidecar ledgers Herdr's capture ended at the `❯` line with no closing rule
+        # under it, 17 of them on an empty input. The input then runs to the end of the screen, so an empty one there takes the message.
+        for screen in (input_at_bottom(), input_at_bottom() + "\n\n"):
+            with self.subTest(screen=screen):
+                self.herdr.screens["pane-ui"] = screen
+                self.assert_outcome("delivered", None, typed=True)
+        self.assertIsNone(input_shown(input_at_bottom(), ""))
+        # A draft there is still refused (6 of the 25 held a typed `[Operator] ...` draft), and so is a screen whose `❯` line is
+        # under no rule: a transcript line, or a dialog's option.
+        draft = input_at_bottom("[Operator] The host is out of memory: hold the tests.", "Reply not needed.")
+        for screen, shown in ((draft, "its input line shows '[Operator] The host is out of memory: hold the tests. Reply not needed.'"),
+                              ("● Done.\n❯ Use option B\n", "Herdr shows no Claude Code input line in it"),
+                              (DIALOG, "Herdr shows no Claude Code input line in it")):
+            with self.subTest(shown=shown):
+                self.assertEqual(input_shown(screen, ""), shown)
+                self.herdr.screens["pane-ui"] = screen
+                self.assert_outcome("undeliverable", "pane_busy")
+
     def test_a_message_citing_an_existing_finding_and_a_ref_is_typed_with_the_resolved_ids(self):
         self.deliver()
         [recorded] = self.deliver(message(finding_ids=["S-1", "new-1"], text="Two\r\nthings\tand \x1b[31mred\x1b[0m."), findings=[upsert()])
@@ -661,6 +725,139 @@ class Messages(SidecarRun):
         self.assertFalse(any(node == "controller" for node, _, _ in self.events))
         validate_schema("sidecar", self.ledger())
         self.assert_node_statuses()
+
+
+class Paging(SidecarRun):
+    """C41 (decision 12): a P0/P1 a pass made that no lane took, and every escalation, reach the operator as one `sidecar`
+    attention record on that lane; a P0/P1 delivered to its lane does not."""
+
+    def setUp(self):
+        super().setUp()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def records(self) -> list:
+        feed = self.root / "config" / "attention.jsonl"
+        return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed.read_text().splitlines())] if feed.exists() else []
+
+    def run_output(self, findings=(), messages=(), escalations=()) -> list:
+        """One pass returning this output; the attention records it added."""
+        before = len(self.records())
+        self.script_steps([*([{}] * len(self.job_calls())), {"output": output(findings, messages, escalations)}])
+        self.assertEqual(self.run_pass()["status"], "completed")
+        return self.records()[before:]
+
+    def test_a_p1_no_lane_took_and_an_escalation_page_the_operator_and_a_delivered_p1_does_not(self):
+        ledger = self.directory / "sidecar.ledger.json"
+        where = f"Read it in {ledger} or on the run's sidecar page."
+        # Delivered to its lane: the lane has it, nothing pages.
+        self.assertEqual(self.run_output([upsert()], [message()]), [])
+        self.assertEqual(self.ledger()["messages"][-1]["status"], "delivered")
+        # Refused because the lane finished (a one-lane run's final pass reaches no worker): one record, on that lane.
+        self.completion("ui")
+        problem = "The ui text is still wrong after the fix. It says before."
+        self.assertEqual(self.run_output([upsert(problem=problem)], [message()]),
+                         [("sidecar", "ui", f"Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (refused, lane_finished): "
+                                            f"The ui text is still wrong after the fix. {where}")])
+        (self.directory / "ui.completion.json").unlink()
+        # Not messaged at all, or undeliverable: each pages once.
+        self.herdr.screens["pane-adapter"] = claude_screen("my own draft")
+        self.assertEqual(self.run_output([upsert(lane="adapter", severity="P0", problem="Deletes the database. Always.")],
+                                         [message(lane="adapter")]),
+                         [("sidecar", "adapter", f"Review sidecar pass 3: P0 S-3 on lane adapter did not reach the lane (undeliverable, pane_busy): "
+                                                 f"Deletes the database. {where}")])
+        self.assertEqual(len(self.run_output([upsert(ref="new-1", lane="adapter")])), 1)
+        # Not new and not raised: a P1 updated again, a P2, a P1 resolved, a delivered P1 upserted without a message.
+        self.assertEqual(self.run_output([upsert(finding_id="S-1", note="Still open."), upsert(ref="new-1", severity="P2"),
+                                          upsert(finding_id="S-4", lane="adapter", disposition="verified_resolved", evidence="Fixed in b2c3d4e.")]), [])
+        # Raised from P2, and reopened from verified_resolved: each pages, with no message to it.
+        raised = self.run_output([upsert(finding_id="S-5", severity="P1", problem="Now it loses data."),
+                                  upsert(finding_id="S-4", lane="adapter", evidence="It broke again in c3d4e5f.")])
+        self.assertEqual(raised, [  # In the ledger's order.
+            ("sidecar", "adapter", f"Review sidecar pass 6: P1 S-4 on lane adapter did not reach the lane (no message to it): The ui text is wrong. {where}"),
+            ("sidecar", "ui", f"Review sidecar pass 6: P1 S-5 on lane ui did not reach the lane (no message to it): Now it loses data. {where}")])
+        # Every escalation pages, here of a finding delivered to its lane, which itself does not; its event keeps the fixed form.
+        escalated = self.run_output([upsert(ref="new-1", problem="Leaks the token.")], [message()],
+                                    [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])
+        self.assertEqual(escalated, [("sidecar", "ui", f"Review sidecar pass 7: escalation S-6 (security) on lane ui: The token reaches the log. {where}")])
+        self.assertIn(("interactive", "escalation S-6 (security): see the sidecar page"), self.sidecar_events())
+        self.assertEqual([item["status"] for item in self.ledger()["messages"]][-1], "delivered")
+        # The run's record holds the latest record per lane.
+        states = read_json(self.directory / "attention.json")["states"]
+        self.assertEqual([(state["kind"], state["node"]) for state in states], [("sidecar", "adapter"), ("sidecar", "ui")])
+        self.assert_node_statuses()
+
+    def interrupted_pass(self, findings, messages, escalations=(), deliver=KeyboardInterrupt) -> None:
+        """One pass returning this output whose delivery is cut short (a Ctrl-C, or a controller killed while typing)."""
+        self.script_steps([*([{}] * len(self.job_calls())), {"output": output(findings, messages, escalations)}])
+        with patch("workflow.sidecar.deliver_one", side_effect=deliver), self.assertRaises(KeyboardInterrupt):
+            self.run_pass()
+
+    def test_a_delivery_cut_short_loses_no_page_and_repeats_none(self):
+        # The 3 Oct OOM, or a Ctrl-C, while a message is typed. What the merge wrote pages before anything is typed: an escalation,
+        # a P0/P1 never sent to its lane (adapter's P0 rides only on ui's message) or refused there. An undeliverable one pages as its
+        # delivery ends. The one whose message was left pending pages when the next controller records it interrupted. Each once.
+        where = f"Read it in {self.directory / 'sidecar.ledger.json'} or on the run's sidecar page."
+        self.interrupted_pass([upsert(problem="The ui text is wrong. It says before."),
+                               upsert(ref="new-2", lane="adapter", severity="P0", problem="Deletes the database. Always."),
+                               upsert(ref="new-3", problem="The ui title is wrong too.")],
+                              [message(finding_ids=["new-1", "new-2"]), message(finding_ids=["new-3"], text="And the title.")],
+                              [{"finding_id": "new-1", "kind": "security", "text": "The token reaches the log. Rotate it."}])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in self.ledger()["messages"]],
+                         [("M-1", "pending", None), ("M-2", "refused", "rate_limited")])
+        merged = [("sidecar", "adapter", f"Review sidecar pass 1: P0 S-2 on lane adapter did not reach the lane (no message to it): Deletes the database. {where}"),
+                  ("sidecar", "ui", f"Review sidecar pass 1: P1 S-3 on lane ui did not reach the lane (refused, rate_limited): The ui title is wrong too. {where}"),
+                  ("sidecar", "ui", f"Review sidecar pass 1: escalation S-1 (security) on lane ui: The token reaches the log. {where}")]
+        self.assertEqual(self.records(), merged)
+        self.assertIn(("interactive", "escalation S-1 (security): see the sidecar page"), self.sidecar_events())
+        # The next controller records M-1 interrupted and pages the P1 it carried; a later one pages nothing more.
+        interrupted = ("sidecar", "ui", f"Review sidecar pass 1: P1 S-1 on lane ui did not reach the lane (undeliverable, interrupted): "
+                                        f"The ui text is wrong. {where}")
+        for _ in range(2):
+            sidecar.recover(self.runtime, self.clock)
+            self.assertEqual(self.records(), [*merged, interrupted])
+        # ui's message ends undeliverable (a draft in its pane) and pages at once; adapter's delivery is then cut short, and the next
+        # controller pages adapter's P1 only.
+        real = sidecar.deliver_one
+
+        def cut_short(runtime, pending, herdr):
+            if pending["lane"] == "adapter":
+                raise KeyboardInterrupt
+            return real(runtime, pending, herdr)
+        self.herdr.screens["pane-ui"] = claude_screen("my own draft")
+        before = len(self.records())
+        self.interrupted_pass([upsert(problem="The ui footer is wrong."), upsert(ref="new-2", lane="adapter", problem="The adapter drops a row.")],
+                              [message(), message(lane="adapter", finding_ids=["new-2"])], deliver=cut_short)
+        self.assertEqual(self.records()[before:], [
+            ("sidecar", "ui", f"Review sidecar pass 2: P1 S-4 on lane ui did not reach the lane (undeliverable, pane_busy): The ui footer is wrong. {where}")])
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records()[before + 1:], [
+            ("sidecar", "adapter", f"Review sidecar pass 2: P1 S-5 on lane adapter did not reach the lane (undeliverable, interrupted): "
+                                   f"The adapter drops a row. {where}")])
+        self.assertEqual([(item["id"], item["status"], item["reason"]) for item in self.ledger()["messages"][2:]],
+                         [("M-3", "undeliverable", "pane_busy"), ("M-4", "undeliverable", "interrupted")])
+        validate_schema("sidecar", self.ledger())
+        self.assert_node_statuses()
+
+    def test_the_next_controller_pages_only_what_the_interrupted_pass_made_blocking(self):
+        # As that delivery would have: the ledger the pass read (its inputs' ledger.json) says which findings it made an open P0/P1.
+        # A P1 it only updated, and a P2, carried by the same message, page nothing.
+        where = f"Read it in {self.directory / 'sidecar.ledger.json'} or on the run's sidecar page."
+        self.assertEqual(self.run_output([upsert()], [message()]), [])  # S-1, a P1 delivered to ui.
+        self.interrupted_pass([upsert(finding_id="S-1", evidence="It still says before in b2c3d4e."), upsert(ref="new-1", problem="The ui footer is wrong."),
+                               upsert(ref="new-2", severity="P2")], [message(finding_ids=["S-1", "new-1", "new-2"])])
+        self.assertEqual(self.records(), [])  # Its one new P1 waits for the message.
+        sidecar.recover(self.runtime, self.clock)
+        paged = [("sidecar", "ui", f"Review sidecar pass 2: P1 S-2 on lane ui did not reach the lane (undeliverable, interrupted): The ui footer is wrong. {where}")]
+        self.assertEqual(self.records(), paged)
+        # Its inputs gone (removed by hand, or pruned under a message left pending): a finding with a history entry of that pass counts
+        # as new or raised there.
+        self.interrupted_pass([upsert(ref="new-1", lane="adapter", problem="The adapter drops a row.")], [message(lane="adapter")])
+        (self.directory / "sidecar-inputs" / "3" / "ledger.json").unlink()
+        sidecar.recover(self.runtime, self.clock)
+        self.assertEqual(self.records(), [*paged, ("sidecar", "adapter", f"Review sidecar pass 3: P1 S-4 on lane adapter did not reach the lane "
+                                                                         f"(undeliverable, interrupted): The adapter drops a row. {where}")])
 
 
 class LedgerLock(SidecarRun):
@@ -1008,6 +1205,45 @@ class NeverBlocks(SidecarRun):
         [recorded] = self.ledger()["messages"][:1]
         self.assertEqual((recorded["status"], recorded["reason"]), ("undeliverable", "herdr_timeout"))
         self.assertTrue(any("undeliverable after an error (TimeoutExpired)" in text for _, text in self.sidecar_events()))
+
+    def test_a_lane_git_call_that_hangs_fails_its_pass_and_the_wait_goes_on(self):
+        # A FIFO planted at the shared .git's info/exclude blocks `git diff` and `git ls-files` in every lane worktree (Git 2.43).
+        # The pass's Git calls run inside wait_handoffs' poll, so unbounded they would hold the whole controller in the worker phase.
+        # Bounded, each pass is recorded failed, the wait hands off, and with the FIFO removed (RUNBOOK) the next pass completes.
+        exclude = self.repo / ".git" / "info" / "exclude"
+        exclude.unlink(missing_ok=True)
+        os.mkfifo(exclude)
+        errors = []
+
+        def wait():
+            try:
+                self.wait_with_passes()
+            except BaseException as error:  # Reported by the test thread.
+                errors.append(error)
+        with patch("workflow.sidecar.GIT_TIMEOUT_SECONDS", 1):
+            thread = threading.Thread(target=wait, daemon=True)
+            thread.start()
+            thread.join(30)
+            hung = thread.is_alive()
+            if hung:  # A failing run leaves Git waiting on the FIFO: move it away and release the reader, so the suite goes on.
+                stale = exclude.with_name("exclude.fifo")
+                exclude.rename(stale)
+                for _ in range(40):
+                    with contextlib.suppress(OSError):  # No reader waits on it yet.
+                        os.close(os.open(stale, os.O_WRONLY | os.O_NONBLOCK))
+                    thread.join(0.5)
+                    if not thread.is_alive():
+                        break
+        self.assertFalse(hung, "a lane Git call of the sidecar waited on the FIFO")
+        self.assertEqual(errors, [])
+        passes = self.ledger()["passes"]
+        self.assertEqual([(item["trigger"], item["status"]) for item in passes], [("cadence", "failed"), ("final", "failed")])
+        self.assertTrue(all(item["summary"].startswith("failed: TimeoutExpired: ") for item in passes), passes)
+        self.assertEqual([text for status, text in self.sidecar_events() if status == "interactive"], [
+            "Review sidecar pass 1 (cadence) failed (TimeoutExpired); the run continues without it, see sidecar-1.stderr.log",
+            "Review sidecar pass 2 (final) failed (TimeoutExpired); the run continues without it, see sidecar-2.stderr.log"])
+        exclude.unlink()
+        self.assertEqual(self.run_pass()["status"], "completed")
 
     def test_a_controller_interrupted_between_the_merge_and_the_delivery_leaves_pane_and_ledger_agreeing(self):
         self.script_steps([{"output": output([upsert()], [message()])}])

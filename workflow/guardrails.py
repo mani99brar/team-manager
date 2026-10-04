@@ -847,7 +847,8 @@ def resume_deadline(directory: Path, node: str, at: float) -> None:
 
 
 def record_question(runtime, node: str, item: dict, clock=None) -> dict:
-    """A `question` completion: kept as `<node>.question-<n>.json`, listed, and the lane's deadline paused. A fourth blocks."""
+    """A `question` completion: kept as `<node>.question-<n>.json`, listed, and the lane's deadline paused. A fourth blocks.
+    The event is followed by the run's `question` attention record (C44), on one line; the poll forgets it once answered."""
     directory = runtime.directory
     with question_lock(directory):
         questions = load_questions(directory, node)
@@ -864,6 +865,10 @@ def record_question(runtime, node: str, item: dict, clock=None) -> dict:
         save_json(directory / f"{node}.deadline.json", deadline)
     runtime.event(node, "interactive", f"Worker {node} asked question {number} of {MAX_QUESTIONS}; its deadline is paused until "
                                        f"`python -m workflow answer {directory} {node} \"<text>\"`: {item['question']}")
+    from .attention import attention
+    asked = " ".join(item["question"].split())
+    attention(directory, "question", f"Worker {node} asked question {number} of {MAX_QUESTIONS}: {asked}{'' if asked.endswith(('.', '?', '!')) else '.'} "
+                                     f"Answer: python -m workflow answer {directory} {node} \"<text>\"", node=node)
     return entry
 
 
@@ -977,14 +982,16 @@ def input_shown(screen: str, text: str) -> str | None:
     """None when the Claude Code input on the pane's screen (`herdr pane read`) holds `text`, else what the screen shows.
 
     The input is the last line starting with `❯` under a rule (a line of `─`, perhaps labelled), wrapped onto the lines
-    below it down to the closing rule; the transcript above it never counts. Whitespace is ignored: a wrap may split a word.
+    below it down to the closing rule, or to the end of the screen when no rule closes it: Herdr's capture can end at the
+    input (20 of the 25 sidecar `pane_busy` refusals on pine did, 17 of them on an empty input). The transcript above it never counts.
+    Whitespace is ignored: a wrap may split a word. Both the sidecar's gate and `answer`'s Enter-only rerun read it.
     """
     lines = screen.splitlines()
     start = next((index for index in range(len(lines) - 1, 0, -1)
                   if lines[index].lstrip().startswith("❯") and lines[index - 1].lstrip().startswith("─")), None)
-    end = None if start is None else next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("─")), None)
-    if end is None:
+    if start is None:
         return "Herdr shows no Claude Code input line in it"
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("─")), len(lines))
     held = " ".join(" ".join([lines[start].lstrip()[1:], *lines[start + 1:end]]).split())
     if held.replace(" ", "") == "".join(text.split()):
         return None

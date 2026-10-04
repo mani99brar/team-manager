@@ -119,7 +119,10 @@ class CompletionTests(unittest.TestCase):
             states["ui"] = next(sequence)
         wait_handoffs(self.runtime, clock=lambda: 1, sleep=settle)
         self.assertEqual(read_json(self.root / "ui.handoff.json")["summary"], "Synthetic work")
-        self.assertEqual([event[1] for event in self.events], ["interactive"])
+        # The pane attention once, then each lane's completion as it is accepted (C41): adapter at once, ui once idle.
+        self.assertEqual(self.events, [("ui", "interactive", "Worker ui needs attention in its pane (native state blocked); waiting until its deadline"),
+                                       ("adapter", "interactive", "Worker adapter completion accepted: 0 untested, verify_yourself none"),
+                                       ("ui", "interactive", "Worker ui completion accepted: 0 untested, verify_yourself none")])
 
     def test_completion_while_working_is_not_accepted(self):
         for node in self.plan["nodes"]:
@@ -166,7 +169,9 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(len(polls), 6)
         self.assertEqual({node: read_json(self.root / f"{node}.handoff.json")["summary"] for node in self.plan["nodes"]},
                          {"ui": "Synthetic work", "adapter": "Synthetic work"})
-        self.assertEqual([event[:2] for event in self.events], [("ui", "interactive"), ("adapter", "interactive")])
+        self.assertEqual([event[:2] for event in self.events], [("ui", "interactive"), ("adapter", "interactive")] * 2)
+        self.assertEqual([message for _, _, message in self.events[2:]], [f"Worker {node} completion accepted: 0 untested, verify_yourself none"
+                                                                         for node in ("ui", "adapter")])  # Both at the last poll (C41).
         for (node, _, message), listed in zip(self.events, ("state='working', status='waiting'", "state='working', status=None")):
             self.assertTrue(message.startswith(f"Worker {node}'s completion signal has waited over 2 minutes for its turn to end"), message)
             self.assertIn(f"its session reads {listed}", message)
@@ -200,7 +205,9 @@ class CompletionTests(unittest.TestCase):
         wait_handoffs(self.runtime, clock=lambda: 1, sleep=lambda _: None)
         self.assertEqual({node: read_json(self.root / f"{node}.handoff.json")["summary"] for node in self.plan["nodes"]},
                          {"ui": "Synthetic work", "adapter": "Synthetic work"})
-        self.assertEqual(self.events, [])
+        # Only each completion as it is accepted (C41): adapter at the first poll, ui once idle; nothing about the gap.
+        self.assertEqual(self.events, [(node, "interactive", f"Worker {node} completion accepted: 0 untested, verify_yourself none")
+                                       for node in ("adapter", "ui")])
         for node in self.plan["nodes"]:
             (self.root / f"{node}.handoff.json").unlink()
         # The finished lane stays missing: after the grace the wait ends as Claude Code unavailable.
@@ -326,6 +333,178 @@ class CompletionTests(unittest.TestCase):
             validate_automatic(self.plan)
 
 
+class FinalPassScheduler:
+    """sidecar.Scheduler as wait_handoffs sees it: the final pass is recorded two polls after every lane's completion was accepted."""
+
+    def __init__(self, runtime, workers, clock):
+        self.final_polls = 0
+
+    def tick(self, rows, accepted, done) -> bool:
+        self.final_polls += done
+        return not done or self.final_polls > 2
+
+    def abandon(self) -> None:
+        pass
+
+
+class CompletionAcceptedTests(unittest.TestCase):
+    """C41 phase 1: one `interactive` event on a lane when its completion is first accepted, with how many behaviours it left
+    untested and whether it named an assumption to verify. A later poll, the final sidecar pass and a restarted controller
+    never say it again; the last lane of a run without a sidecar says it too (it is met before the handoffs are saved)."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.temp = Path(temp.name)
+
+    def runtime(self, lanes: list, sidecar: bool = False, name: str = "run"):
+        self.root = self.temp / name
+        self.root.mkdir()
+        self.events, self.states = [], {lane: "working" for lane in lanes}
+        plan = {"run_id": "test", "source_branch": "feature/test", "automatic": dict(DEFAULTS), "completion_version": "1.1.0",
+                "nodes": {lane: {"session_id": f"{lane}-token"} for lane in lanes}}
+        if sidecar:
+            plan["sidecar"] = {"prompt": "Review."}  # The scheduler is FinalPassScheduler.
+        for lane in lanes:
+            save_json(self.root / f"{lane}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00"})
+        sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": self.states[node]})
+        return SimpleNamespace(directory=self.root, plan=plan, sessions=sessions, workers=list(lanes),
+                               event=lambda node, status, message: self.events.append((node, status, message)))
+
+    def complete(self, lane: str, untested=()) -> None:
+        save_json(self.root / f"{lane}.completion.json", {
+            "version": "1.1.0", "run_id": "test", "node_id": lane, "launch_token": f"{lane}-token", "status": "completed", "summary": "Work",
+            "open_assumptions": [], "untested": list(untested), "falsifying_check": "unit", "verify_yourself": "It builds", "question": None})
+        self.states[lane] = "idle"
+
+    def wait(self, runtime, *steps) -> None:
+        """wait_handoffs, playing one of `steps` at each poll's sleep."""
+        steps = iter(steps)
+
+        def sleep(_):
+            step = next(steps, None)
+            if step:
+                step()
+        with patch("workflow.sidecar.Scheduler", FinalPassScheduler):
+            wait_handoffs(runtime, clock=lambda: 1, sleep=sleep)
+
+    def accepted(self) -> list:
+        return [(node, status, message) for node, status, message in self.events if "completion accepted" in message]
+
+    def test_each_lane_says_once_that_its_completion_was_accepted_with_and_without_a_sidecar(self):
+        from .guardrails import deadline_met
+        ui = ("ui", "interactive", "Worker ui completion accepted: 2 untested, verify_yourself given")
+        adapter = ("adapter", "interactive", "Worker adapter completion accepted: 0 untested, verify_yourself given")
+        for sidecar in (False, True):
+            for lanes in (["ui"], ["ui", "adapter"]):
+                with self.subTest(sidecar=sidecar, lanes=lanes):
+                    runtime = self.runtime(lanes, sidecar, name=f"{'sidecar' if sidecar else 'plain'}-{len(lanes)}")
+                    self.complete("ui", untested=["The empty state", "A narrow screen"])
+                    self.wait(runtime, *([lambda: self.complete("adapter")] if "adapter" in lanes else []))
+                    expected = [ui, adapter][:len(lanes)]
+                    self.assertEqual(self.accepted(), expected)
+                    self.assertTrue(all(deadline_met(self.root, lane) for lane in lanes))  # Before the handoffs were saved.
+                    self.assertTrue(all((self.root / f"{lane}.handoff.json").exists() for lane in lanes))
+                    # A restarted controller reads the met lanes back and says nothing again.
+                    self.wait(runtime)
+                    self.assertEqual(self.accepted(), expected)
+                    # The text matches none of the viewer's pane or question patterns (contracts/projects/triage.ts PANE, QUESTION_EVENT).
+                    for _, _, message in expected:
+                        self.assertNotRegex(message, r"needs attention in its pane")
+                        self.assertNotRegex(message, r"^Worker (\S+) asked question (\d+) of \d+;")
+
+    def test_a_restart_between_two_acceptances_repeats_neither(self):
+        runtime = self.runtime(["ui", "adapter"])
+        self.complete("ui")
+
+        def interrupt():
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.wait(runtime, interrupt)  # Ctrl-C while adapter works.
+        self.assertEqual(self.accepted(), [("ui", "interactive", "Worker ui completion accepted: 0 untested, verify_yourself given")])
+        self.wait(runtime, lambda: self.complete("adapter"))
+        self.assertEqual([node for node, _, _ in self.accepted()], ["ui", "adapter"])
+
+    def test_a_1_0_0_completion_names_no_evidence(self):
+        runtime = self.runtime(["ui"])
+        runtime.plan["completion_version"] = "1.0.0"
+        save_json(self.root / "ui.completion.json", {"version": "1.0.0", "run_id": "test", "node_id": "ui", "launch_token": "ui-token",
+                                                     "status": "completed", "summary": "Work", "open_assumptions": []})
+        self.states["ui"] = "idle"
+        self.wait(runtime)
+        self.assertEqual(self.accepted(), [("ui", "interactive", "Worker ui completion accepted: 0 untested, verify_yourself none")])
+
+
+class WorkerAttentionTests(unittest.TestCase):
+    """C44: a question waiting and a pane that needs attention each write one line to attention.jsonl beside a temporary
+    registry, never the operator's. The next poll and a restarted controller never repeat a line; a state that ended (the
+    question answered, the session working again) is forgotten, so it is recorded again when it comes back."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name) / "run-001"
+        self.root.mkdir()
+        self.registry = Path(temp.name) / "config" / "projects.json"
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.registry)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        plan = {"run_id": "run-001", "source_branch": "feature/test", "automatic": dict(DEFAULTS), "completion_version": "1.1.0",
+                "nodes": {lane: {"session_id": f"{lane}-token"} for lane in ("ui", "adapter")}}
+        save_json(self.root / "plan.json", plan)
+        self.states = {"ui": "working", "adapter": "working"}
+        self.events = []
+        sessions = SimpleNamespace(inventory=lambda: [], locate=lambda node, rows: {"state": self.states[node]})
+        self.runtime = SimpleNamespace(directory=self.root, plan=plan, sessions=sessions, workers=["ui", "adapter"],
+                                       event=lambda node, status, message: self.events.append((node, status, message)))
+        for lane in ("ui", "adapter"):
+            save_json(self.root / f"{lane}.interactive.json", {"launch_requested_at": "1970-01-01T00:00:00+00:00"})
+
+    def lines(self) -> list:
+        from .attention import feed_path
+        feed = feed_path()
+        return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed.read_text().splitlines())] if feed.exists() else []
+
+    def wait(self, *steps) -> None:
+        """wait_handoffs, playing one step at each poll's sleep, then a Ctrl-C."""
+        steps = iter(steps)
+
+        def sleep(_):
+            step = next(steps, None)
+            if step is None:
+                raise KeyboardInterrupt
+            step()
+        with self.assertRaises(KeyboardInterrupt):
+            wait_handoffs(self.runtime, clock=lambda: 10.0, sleep=sleep)
+
+    def test_a_waiting_question_and_a_pane_are_one_line_each_and_come_back_once_they_ended(self):
+        import shlex
+        from .attention import feed_path
+        from .guardrails import record_answer
+        self.assertEqual(feed_path(), self.registry.parent / "attention.jsonl")
+        self.assertFalse(feed_path().is_relative_to(Path.home() / ".config" / "md-manager"))
+        # ui's turn ends on a question; adapter's session blocks in its pane, waiting on a human.
+        save_json(self.root / "ui.completion.json", {
+            "version": "1.1.0", "run_id": "run-001", "node_id": "ui", "launch_token": "ui-token", "status": "question", "summary": "Asking",
+            "open_assumptions": [], "untested": None, "falsifying_check": "", "verify_yourself": "", "question": "Option A\nor B?"})
+        self.states.update(ui="idle", adapter="blocked")
+        self.wait(lambda: None, lambda: None)
+        question = ("question", "ui", f'Worker ui asked question 1 of 3: Option A or B? Answer: python -m workflow answer {self.root} ui "<text>"')
+        attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", "adapter"])
+        pane = ("pane", "adapter", f"Worker adapter needs attention in its pane (native state blocked): answer it there. Reattach the pane with: {attach}")
+        self.assertEqual(self.lines(), [question, pane])
+        # A restarted controller sees both states again, and says the pane on its timeline again: no second line.
+        self.wait(lambda: None)
+        self.assertEqual(self.lines(), [question, pane])
+        self.assertEqual(sum("needs attention in its pane" in message for _, _, message in self.events), 2)
+        # The question is answered and adapter works again: both are forgotten. adapter blocks again: a new line.
+        self.wait(lambda: (record_answer(self.root, "ui", "Use option B", clock=lambda: 20.0), self.states.update(adapter="working")),
+                  lambda: self.states.update(adapter="blocked"), lambda: None)
+        self.assertEqual(self.lines(), [question, pane, pane])
+        record = read_json(self.root / "attention.json")
+        self.assertEqual([(state["kind"], state["node"]) for state in record["states"]], [("pane", "adapter")])
+
+
 class ControllerBlockedTests(unittest.TestCase):
     def test_the_event_names_each_failed_step_with_its_error_once_per_controller_process(self):
         # C44: before drive's non-retryable raise. The checkpoint keeps a step's error as its repr; the event gives its text.
@@ -352,6 +531,41 @@ class ControllerBlockedTests(unittest.TestCase):
             record_blocked(runtime, reason="Unexpected manual gate in automatic run; inspect state")
             record_blocked(runtime, state, reason="No verified feature-branch completion")
         self.assertEqual(events, [("controller", "blocked", "Controller blocked: Unexpected manual gate in automatic run; inspect state")])
+
+    def test_each_stop_the_controller_does_not_retry_writes_one_controller_blocked_attention_line(self):
+        # C44: record_blocked (drive's non-retryable raise and its own stops) and advance_or_block (identical failures, the attempt
+        # limit) add a `controller_blocked` line beside a temporary registry; a new controller saying the same adds none.
+        from .attention import feed_path
+        from .automatic import advance_or_block, record_blocked
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name) / "run-001"
+        root.mkdir()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        events = []
+        runtime = SimpleNamespace(directory=root, policy={"max_verification_attempts": 3}, workers=["ui"], attempt=lambda phase, node: 2,
+                                  retry_check=lambda phase, node: self.fail("Nothing is retried"), event=lambda *event: events.append(event))
+        state = SimpleNamespace(next=("verify_ui",), tasks=[SimpleNamespace(name="verify_ui", error="RuntimeError('Check ui-unit left no packet')")])
+        for _ in range(2):
+            with patch("workflow.automatic.BLOCKED_RUNS", set()):  # Each a new controller process.
+                record_blocked(runtime, state)
+        for attempt in (1, 2):
+            (root / "verification" / "worker" / "ui" / str(attempt)).mkdir(parents=True)
+            save_json(root / "verification" / "worker" / "ui" / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "failed identically"):
+                advance_or_block(runtime, state)
+        lines = [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed_path().read_text().splitlines())]
+        status = f"Status: python -m workflow status {root}"
+        self.assertEqual(lines, [
+            ("controller_blocked", "controller", "Controller blocked: the verify_ui step failed: Check ui-unit left no packet; not retried, inspect "
+                                                 f"retained evidence. {status}"),
+            ("controller_blocked", "controller", f"worker/ui failed identically on attempts 1 and 2; not transient, inspect "
+                                                 f"{root / 'verification/worker/ui/2/packet.json'}. Before review a code fix is a lane repair (RUNBOOK). {status}")])
+        self.assertEqual([status for _, status, _ in events], ["blocked"] * 4)  # The timeline still says each one.
+        self.assertEqual(feed_path().parent, Path(temp.name) / "config")
 
 
 class SupervisorTimelineTests(unittest.TestCase):
@@ -716,6 +930,42 @@ class ReviewCompletionTests(unittest.TestCase):
         self.never_accepted(last)
         with self.assertRaisesRegex(RuntimeError, f"Native reviewer {last} missing; reconciliation"):
             wait_reviews(self.runtime, clock=lambda: 1, sleep=lambda _: None)
+
+    def test_a_reviewer_blocked_in_its_pane_is_one_attention_line_until_its_session_works_again(self):
+        # C44: the `pane` attention record on the reviewer's node, beside a temporary registry. A restarted wait repeats nothing;
+        # a pane that blocks again after its session worked is recorded again.
+        import shlex
+        from .attention import feed_path
+        from .automatic import wait_reviews
+        last = self.ids[-1]
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+        def lines():
+            return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed_path().read_text().splitlines())] if feed_path().exists() else []
+
+        def ticks():
+            return iter([1] * (2 * len(self.ids) + 1) + [DEFAULTS["review_timeout_seconds"] + 1] * len(self.ids))
+        self.rows[last]["state"] = "blocked"
+        for _ in range(2):  # The second wait is a restarted controller's.
+            with self.assertRaisesRegex(RuntimeError, "deadline exhausted"):
+                wait_reviews(self.runtime, clock=lambda clock=ticks(): next(clock), sleep=lambda _: None)
+        attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", self.node(last)])
+        pane = ("pane", self.node(last), f"Reviewer {last} needs attention in its pane (native state blocked): answer it there. "
+                                         f"Reattach the pane with: {attach}")
+        self.assertEqual(lines(), [pane])
+        self.assertEqual(feed_path(), self.root / "config" / "attention.jsonl")
+        # Answered in the pane, it works, blocks on a second prompt, then finishes: the second block is a second line.
+        for reviewer_id in self.ids:
+            self.write(reviewer_id)
+        states = iter(["working", "blocked", "idle"])
+
+        def settle(_seconds):
+            self.rows[last]["state"] = next(states)
+        wait_reviews(self.runtime, clock=lambda: 1, sleep=settle)
+        self.assertEqual(lines(), [pane, pane])
+        self.assertEqual(read_json(self.root / "attention.json")["states"], [])  # Accepted: its pane needs nothing any more.
 
     def test_a_reviewer_whose_row_still_reads_working_with_an_idle_status_is_accepted(self):
         # The stale row seen for workers (C18): state working with status idle is a turn that is over. A busy status is a turn
@@ -1144,19 +1394,35 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
     def test_a_reviewer_waiting_in_its_pane_is_named_again_after_each_note_of_the_grace(self):
         # The viewer and the server show a pane that needs attention only while it is the review node's latest record. Each note
         # of the grace (its start, another reviewer's late verdict) is a later record, so the attention is said again after it.
+        # The `pane` attention record, beside a temporary registry, is one line while the pane waits, from before the block through
+        # the grace's notes; a second once it worked and blocks again inside the grace. A late verdict read while its row still
+        # reads blocked forgets the state (wait_grace's ended), so its pane needs nobody any more.
+        import shlex
+        from .attention import feed_path
         from .automatic import ReviewStatus, wait_reviews
         self.reviewers = ["general", "coverage", "security"]
         self.setUp()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+        def lines():
+            return [(line["kind"], line["node"], line["text"]) for line in map(json.loads, feed_path().read_text().splitlines())] if feed_path().exists() else []
         self.rows["general"]["state"] = "blocked"  # A question in its pane, seen before the block.
         self.rows["security"]["state"] = "working"
         self.write("coverage", verdict="blocked", findings=[])
+        seen = {}
 
         def finishes(now):
+            seen[now] = lines()
             if now == 160:
                 self.write("security")
-            if now == 280:  # Answered in its pane.
+            if now == 280:  # Answered in its pane: it works.
+                self.rows["general"]["state"] = "working"
+            if now == 340:  # A second prompt in its pane.
+                self.rows["general"]["state"] = "blocked"
+            if now == 400:  # Answered: it wrote its verdict, and its row still reads blocked.
                 self.write("general")
-                self.rows["general"]["state"] = "idle"
         clock, sleep, _ = self.ticking(100, 60, finishes)
         decisions = wait_reviews(self.runtime, ReviewStatus.load(self.runtime), clock=clock, sleep=sleep)
         self.assertEqual(sorted(decisions), sorted(self.ids))
@@ -1165,7 +1431,15 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
             ("interactive", "Reviewer general needs attention in its pane (native state blocked); waiting until the deadline"),
             ("note", "Reviewer coverage blocked the candidate"), ("interactive", pane),
             ("note", "Reviewer security's late verdict recorded"), ("interactive", pane),
+            ("interactive", pane),  # Blocked again after it worked.
             ("note", "Reviewer general's late verdict recorded")])
+        attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(self.root), "--node", self.node("general")])
+        line = ("pane", self.node("general"), f"Reviewer general needs attention in its pane (native state blocked): answer it there. "
+                                              f"Reattach the pane with: {attach}")
+        self.assertEqual(seen[280], [line])  # wait_reviews' record, not repeated by the grace's start or by security's late verdict.
+        self.assertEqual(lines(), [line, line])
+        self.assertEqual(feed_path(), self.root / "config" / "attention.jsonl")
+        self.assertEqual(read_json(self.root / "attention.json")["states"], [])
 
     def test_a_reviewer_still_working_at_the_end_of_the_grace_ends_superseded_without_a_verdict(self):
         from .automatic import REVIEW_GRACE_SECONDS, ReviewStatus, wait_reviews
@@ -1872,6 +2146,13 @@ sys.exit(knob.get('exit', 0))
     def events(self) -> list:
         return [json.loads(line) for line in (self.fixture.directory / "events.jsonl").read_text().splitlines()]
 
+    def attention_lines(self) -> list:
+        """This run's lines of attention.jsonl, beside the module's temporary registry (setUpModule), never the operator's."""
+        from .attention import feed_path
+        self.assertFalse(feed_path().is_relative_to(Path.home() / ".config" / "md-manager"))
+        lines = [json.loads(line) for line in feed_path().read_text().splitlines()] if feed_path().exists() else []
+        return [(line["kind"], line["node"], line["text"]) for line in lines if line["run_dir"] == str(self.fixture.directory.resolve())]
+
     def sessions_joined(self) -> str:
         return ", ".join(self.status(reviewer_id)["session_id"] for reviewer_id in self.ids)
 
@@ -1979,6 +2260,8 @@ sys.exit(0 if commit else 75)
                 drive(f.runtime)
         stop.assert_called_once()
         self.assertEqual(self.reviewer_launches(), 0)
+        self.assertEqual(self.attention_lines(), [("controller_blocked", "controller", "Worker ui deadline exhausted; no automatic relaunch. "
+                                                                                     f"Status: python -m workflow status {f.runtime.directory}")])
 
     def test_reviewer_block_preserves_branch_and_does_not_relaunch(self):
         f = self.fixture
@@ -2014,6 +2297,11 @@ sys.exit(0 if commit else 75)
         with patch("workflow.automatic.BLOCKED_RUNS", set()), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
             drive(f.runtime)  # A new controller process (`automatic --live` again) says it again.
         self.assertEqual(controller_blocked(), [stopped, stopped])
+        # The attention records (C44): one `review_blocked` on the review node and one `controller_blocked`; the controllers that
+        # stop at the same block again add none.
+        self.assertEqual(self.attention_lines(), [
+            ("review_blocked", "review", f"{blocked[0]}. Read {f.runtime.directory / 'review.json'}; review findings are fixed in a new run."),
+            ("controller_blocked", "controller", f"{stopped}. Status: python -m workflow status {f.runtime.directory}")])
 
     def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
         # C34: the controller derives each reviewer's verdict from its findings. Every reviewer writes blocked with P2 findings
@@ -2206,6 +2494,13 @@ class ClaudeUnavailableTests(GraphFixture):
             graph.unavailable = False
             self.assertIsNone(drive(f.runtime, single_step=True))  # The stop is retried, and this time the node ends.
         self.assertEqual(graph.invokes, [None, None, None, None])
+        # Each block is a `controller_blocked` attention record with the timeline's text (C44): the outage that ended the
+        # review, then the step drive does not retry; the resumable interruption is none.
+        blocked = [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", "blocked")]
+        self.assertEqual([message.startswith("Controller blocked: the review step failed: ") for message in blocked], [False, True, False])
+        self.assertTrue(blocked[0].startswith(f"{self.unavailable()}. The review step ended on it in a state no resume continues"))
+        self.assertEqual(self.attention_lines(), [("controller_blocked", "controller", f"{message}. Status: python -m workflow status {f.runtime.directory}")
+                                                  for message in blocked])
 
     def lanes_live(self):
         """Each lane's session as a live `sleep` process listed by a registry the test controls; `claude stop` ends it."""
@@ -2352,6 +2647,108 @@ class ControllerStopTests(GraphFixture):
             drive(f.runtime)
         wait.assert_called_once()
         self.assertRegex(self.said("running")[-1], r"^Automatic checkpoint controller PID \d+$")
+
+    def test_a_run_that_stopped_for_good_keeps_its_block_when_the_checkout_left_the_source_branch(self):
+        # P's review: the review blocked, then `automatic --live` ran with the target checkout on another branch. The resumable
+        # `interrupted` row hid the block from triage, and switching back would only stop at the block again. drive reads the graph
+        # state first (read only) and keeps the block's framing: the failed step with its error, and nothing launched.
+        f = self.fixture
+        self.verdict.write_text("blocked")
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(f.runtime)
+        [stopped] = self.said()
+        git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        before = len(self.events())
+        with patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                self.assertRaisesRegex(RuntimeError, f"^{re.escape(stopped.removeprefix('Controller blocked: '))}$"):
+            drive(f.runtime)  # A new controller process, as `automatic --live` starts one.
+        self.assertEqual([(event["node"], event["status"], event["message"]) for event in self.events()[before:]], [("controller", "blocked", stopped)])
+        self.assertEqual((self.said("interrupted"), self.reviewer_launches()), ([], len(self.ids)))
+
+    def test_a_stop_said_bare_on_the_source_branch_is_said_the_same_off_it_and_pages_once(self):
+        # S2's review: verify_ui failed identically. On the source branch advance_or_block says the reason bare; off it, drive said
+        # `Controller blocked: <reason>`, a second controller_blocked text, so each switch of the checkout paged the operator again
+        # for the same stop. final_stop also says how drive frames it, so every controller says it the same, and it pages once.
+        f = self.fixture
+        packets = f.directory / "verification" / "worker" / "ui"
+        for attempt in (1, 2):
+            (packets / str(attempt)).mkdir(parents=True)
+            save_json(packets / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
+        save_json(f.directory / "attempts.json", {"worker:ui": 2})
+        state = SimpleNamespace(values={"run_id": "run"}, next=("verify_ui",),
+                                tasks=[SimpleNamespace(name="verify_ui", error="RuntimeError('Required checks failed')", interrupts=[])])
+        stop = (f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
+                "fix is a lane repair (RUNBOOK)")
+        git(f.repo, "branch", "feature/elsewhere")
+        graph = SimpleNamespace(get_state=lambda config: state)
+        for branch in ("feature/automatic-test", "feature/elsewhere", "feature/automatic-test", "feature/elsewhere"):
+            git(f.repo, "switch", "-q", branch)
+            with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                    self.assertRaisesRegex(RuntimeError, f"^{re.escape(stop)}$"):
+                drive(f.runtime)  # A new controller each time, as `automatic --live` starts one.
+        self.assertEqual(self.attention_lines(), [("controller_blocked", "controller", f"{stop}. Status: python -m workflow status {f.runtime.directory}")])
+        self.assertEqual(self.said(), [stop] * 4)
+        self.assertEqual(read_json(f.directory / "attempts.json"), {"worker:ui": 2})  # Nothing was retried.
+
+    def test_off_the_source_branch_only_a_run_that_can_continue_reads_interrupted(self):
+        # drive's own classification, read only: what it would continue (a wait, a resumed freeze, a review re-entered once, a check
+        # it retries) is the resumable interruption; what it stops for good keeps the block's framing, word for word as on the source
+        # branch: `Controller blocked: <reason>` where record_blocked says it, the bare reason where the failed wait or
+        # advance_or_block (identical failures, the attempt limit) says it.
+        import shlex
+        from .automatic import FREEZE_INTERRUPTED
+        f = self.fixture
+        git(f.repo, "switch", "-q", "-c", "feature/elsewhere")
+        repository = shlex.quote(f.plan["repository"])
+        interrupted = (f"Source feature branch changed: {repository} is on feature/elsewhere, not feature/automatic-test. Nothing was stopped "
+                       f"or relaunched: switch it back with: git -C {repository} switch feature/automatic-test, then resume with: "
+                       f"python -m workflow automatic {f.directory} --live")
+
+        def task(name, error=None, *kinds):
+            return SimpleNamespace(name=name, error=error, interrupts=[SimpleNamespace(value={"kind": kind}) for kind in kinds])
+
+        def at(step, *tasks):
+            return SimpleNamespace(values={"run_id": "run"}, next=step, tasks=list(tasks))
+        handoff = at(("handoff",), task("handoff", None, "worker_handoff"))
+        frozen = at((), task("handoff", "RuntimeError('Stop failed for ui')", "worker_handoff"))
+        review = at(("review",), task("review", "RuntimeError('Reviewer review deadline exhausted')"))
+        verify = at(("verify_ui",), task("verify_ui", "RuntimeError('Required checks failed')"))
+        packets = f.directory / "verification" / "worker" / "ui"
+
+        def packet(attempt):
+            (packets / str(attempt)).mkdir(parents=True, exist_ok=True)
+            save_json(packets / str(attempt) / "packet.json", {"gate": {"status": "blocked", "reasons": ["ui-unit: exit 1"]}})
+        cases = [  # (name, state, arrange, the stop's reason or None for the interruption, said bare)
+            ("the workers' handoffs are awaited", handoff, lambda: None, None, False),
+            ("the workers were stopped when the wait failed", handoff,
+             lambda: (save_json(f.directory / "ui.stop.json", {"stopped": True}), (f.directory / "ui.completion.json").unlink(missing_ok=True)),
+             "Invalid completion file for ui", True),
+            ("a freeze an outage interrupted", frozen, lambda: save_json(f.directory / FREEZE_INTERRUPTED, {"error": "Claude Code unavailable"}), None, False),
+            ("a freeze that failed", frozen, lambda: (f.directory / FREEZE_INTERRUPTED).unlink(),
+             "Freeze failed: Stop failed for ui; non-retryable graph failure, inspect retained evidence", False),
+            ("an unexpected manual gate", at(("review",), task("review", None, "independent_review")), lambda: None,
+             "Unexpected manual gate in automatic run; inspect state", False),
+            ("a review that failed before any reviewer launched", review, lambda: None, None, False),
+            ("a review that ended blocked", review,
+             lambda: save_json(f.directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": ["review"]}),
+             "the review step failed: Reviewer review deadline exhausted; not retried, inspect retained evidence", False),
+            ("a check drive retries", verify, lambda: packet(1), None, False),
+            ("a check that failed identically", verify, lambda: (packet(2), save_json(f.directory / "attempts.json", {"worker:ui": 2})),
+             f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
+             "fix is a lane repair (RUNBOOK)", True),
+        ]
+        for name, state, arrange, block, bare in cases:
+            with self.subTest(name):
+                arrange()
+                before = len(self.events())
+                graph = SimpleNamespace(get_state=lambda config, state=state: state)
+                with patch("workflow.pipeline.build_pipeline", return_value=graph), patch("workflow.automatic.BLOCKED_RUNS", set()), \
+                        self.assertRaisesRegex(RuntimeError, f"^{re.escape(interrupted if block is None else block)}$"):
+                    drive(f.runtime)
+                said = [(event["node"], event["status"], event["message"]) for event in self.events()[before:]]
+                self.assertEqual(said, [("controller", "interrupted", interrupted)] if block is None
+                                 else [("controller", "blocked", block if bare else f"Controller blocked: {block}")])
+        self.assertEqual((read_json(f.directory / "attempts.json"), self.reviewer_launches()), ({"worker:ui": 2}, 0))  # Nothing was retried or launched.
 
     def test_a_start_that_did_not_complete_is_an_interruption_that_names_reconcile_or_start(self):
         # Launches that did not complete are reconciled (RUNBOOK, Ambiguous startup), and a run that was never started is started;

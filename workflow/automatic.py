@@ -21,6 +21,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
+from . import attention as attention_record  # Not `attention`: the waits keep sets of that name.
 from .checks import now
 from .guardrails import decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
@@ -265,6 +266,18 @@ def question_asked_at(runtime, node: str, now: float) -> float:
     return max(min(now, (runtime.directory / f"{node}.completion.json").stat().st_mtime), *ran)
 
 
+def handoffs_after_stop(runtime, workers: list) -> bool:
+    """A lane's stop intent exists (`<lane>.stop.json`): True when every lane's saved handoff is still its completion, as after a
+    controller crash between the saved handoffs and the snapshot; else this raises, as after a wait that failed and stopped the
+    workers. False when no lane was stopped. Read only."""
+    if not any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
+        return False
+    for node in workers:
+        if read_completion(runtime, node) != read_json(runtime.directory / f"{node}.handoff.json"):
+            raise RuntimeError("Handoff changed after stop intent")
+    return True
+
+
 def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     """Idle alone never means completion. Deadlines survive controller restart.
 
@@ -281,12 +294,8 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
     from .sidecar import Scheduler, has_sidecar
     validate_automatic(runtime.plan)
     workers = lanes(runtime)
-    if any((runtime.directory / f"{node}.stop.json").exists() for node in workers):
-        # Recover a controller crash after durable handoffs/stop intent, before snapshot.
-        for node in workers:
-            if read_completion(runtime, node) != read_json(runtime.directory / f"{node}.handoff.json"):
-                raise RuntimeError("Handoff changed after stop intent")
-        return
+    if handoffs_after_stop(runtime, workers):
+        return  # Recover a controller crash after durable handoffs/stop intent, before snapshot.
     attention: set[str] = set()
     # Lanes whose completion signal was accepted once their turn ended: their deadline is met while another lane still
     # needs the run, whatever their session does afterwards (an operator prompt in its pane, a command of its own). Kept
@@ -305,13 +314,49 @@ def wait_handoffs(runtime, *, clock=time.time, sleep=time.sleep) -> None:
             sidecar.abandon()
 
 
+def pane_attention(runtime, who: str, node: str) -> None:
+    """The `pane` attention record of a worker or reviewer whose session waits on a human in its pane (C44), with the command
+    that reattaches its pane. Its text never changes, so only attention_record.resolved, called on each poll that finds the
+    session not blocked, lets a pane that blocks again be recorded again."""
+    attach = shlex.join([sys.executable, "-m", "workflow.interactive", "attach-one", str(runtime.directory), "--node", node])
+    attention_record(runtime.directory, "pane", f"{who} needs attention in its pane (native state blocked): answer it there. "
+                                                f"Reattach the pane with: {attach}", node=node)
+
+
+def blocked_attention(runtime, message: str) -> None:
+    """The `controller_blocked` attention record of a stop the controller does not retry (C44): the timeline's text, then the
+    command that shows the run's state."""
+    attention_record(runtime.directory, "controller_blocked", f"{message.rstrip('.')}. Status: python -m workflow status {runtime.directory}",
+                     node="controller")
+
+
+def accepted_message(node: str, item: dict) -> str:
+    """The one event of a lane whose completion was first accepted (C41): how many behaviours its completion lists as untested
+    and whether it names an assumption to verify yourself (a 1.0.0 completion has neither). It never matches the viewer's
+    PANE or QUESTION_EVENT patterns (contracts/projects/triage.ts)."""
+    untested, verify = item.get("untested"), item.get("verify_yourself")
+    return (f"Worker {node} completion accepted: {len(untested) if isinstance(untested, list) else 0} untested, "
+            f"verify_yourself {'given' if isinstance(verify, str) and verify.strip() else 'none'}")
+
+
+def accept_completions(runtime, workers: list, signals: dict, met: set, clock) -> None:
+    """The lanes whose completion this poll accepted (`signals`, their completion files) and that are not met yet, in lane
+    order: each says so once (accepted_message), then is recorded met (`met_at` in `<lane>.deadline.json`), which a
+    restarted controller reads back, so nothing is said twice."""
+    from .guardrails import mark_deadline_met
+    for node in workers:
+        if node in signals and node not in met:
+            runtime.event(node, "interactive", accepted_message(node, signals[node]))
+            mark_deadline_met(runtime.directory, node, clock())
+            met.add(node)
+
+
 def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sidecar, stalls, clock, sleep) -> None:
     """wait_handoffs' poll loop."""
-    from .guardrails import (PANE_ANSWER, iso, load_questions, mark_deadline_met, record_pane_answer, record_question,
-                             waiting_question)
+    from .guardrails import PANE_ANSWER, iso, load_questions, record_pane_answer, record_question, waiting_question
     while True:
         rows = runtime.sessions.inventory()
-        handoffs = {}
+        handoffs, signals = {}, {}
         for node in workers:
             try:
                 row = gaps.row(node, rows)
@@ -319,6 +364,9 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
                 continue  # An update is respawning this lane's session (an idle one: finished, or paused on a question); no verdict.
             if row is None:
                 raise RuntimeError("Native worker missing; reconciliation required")
+            if row["state"] != "blocked":
+                # Whatever this controller's set holds (a restart empties it): a pane that blocks again is recorded again.
+                attention_record.resolved(runtime.directory, "pane", node=node)
             path = runtime.directory / f"{node}.completion.json"
             # The turn is over (turn_over), so the file is final. A turn that ends on a question reports its turn over or,
             # waiting on the operator, blocked; a `completed` or `blocked` file is still accepted only once the turn is over
@@ -333,6 +381,8 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
                 # is recorded); until that next signal it still records and delivers an answer.
                 record_pane_answer(runtime.directory, node, clock)
                 waiting = None
+            if waiting is None:
+                attention_record.resolved(runtime.directory, "question", node=node)  # Answered, here or by `answer`: forgotten.
             for entry in load_questions(runtime.directory, node):
                 if entry["answer"] is not None and (node, entry["n"]) not in answered:
                     answered.add((node, entry["n"]))
@@ -348,7 +398,7 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
                                    "until the worker writes its next completion signal")
                     runtime.event(node, "interactive", message)
             if item and item["status"] != "question" and row["state"] != "blocked":
-                handoffs[node] = read_completion(runtime, node)
+                handoffs[node], signals[node] = read_completion(runtime, node), item
                 continue  # Its completion signal met the deadline.
             deadline = lane_deadline(runtime, node)  # None while a question waits: that lane has no running deadline.
             if node in met:
@@ -382,18 +432,20 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
                 runtime.event(node, "interactive", f"Worker {node} needs attention in its pane (native state blocked); " + (
                     "its completion signal met its deadline, so the run waits for it while another lane works or waits on a question, "
                     "then until the latest lane deadline" if node in met else "waiting until its deadline"))
+                pane_attention(runtime, f"Worker {node}", node)
             elif row["state"] != "blocked":
                 attention.discard(node)
         done = set(handoffs) == set(workers)
         if done and (sidecar is None or sidecar.tick(rows, handoffs, True)):
+            # The last lanes too are met before the handoffs are saved: said once (the last lane of a run without a sidecar
+            # included), and never again by a restarted controller.
+            accept_completions(runtime, workers, signals, met, clock)
             for node, value in handoffs.items():
                 save_json(runtime.directory / f"{node}.handoff.json", value)
             return
         if sidecar is not None and not done:
             sidecar.tick(rows, handoffs, False)
-        for node in set(handoffs) - met:
-            mark_deadline_met(runtime.directory, node, clock())
-            met.add(node)
+        accept_completions(runtime, workers, signals, met, clock)
         sleep(2)
 
 
@@ -808,11 +860,16 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 continue
             if row is None:
                 continue
+            if row["state"] != "blocked":
+                # As for a worker: a block after this is said again, and recorded again whatever `attention` held (a restart empties it).
+                attention.discard(reviewer_id)
+                attention_record.resolved(runtime.directory, "pane", node=node)
             if row["state"] == "blocked" and reviewer_id not in attention:
                 # A native session reports `blocked` when it needs a human: a question or a prompt
                 # it cannot answer itself. The operator may answer in the pane; the deadline bounds it.
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the deadline")
+                pane_attention(runtime, f"Reviewer {reviewer_id}", node)
             # Its turn is over (turn_over); a blocked session needs attention in its pane and is not accepted, whatever its status.
             # Its file met the deadline, also when first read after it (a controller resumed late).
             if turn_over(row) and row["state"] != "blocked" and (runtime.directory / f"{node}.completion.json").exists():
@@ -870,9 +927,11 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
     attention = set()  # The reviewers whose pane attention was said since the last note on the review node.
 
     def ended(reviewer_id: str) -> None:
-        """No longer waited for; the note that follows hides any pane attention said before it, so it is said again."""
+        """No longer waited for; the note that follows hides any pane attention said before it, so it is said again. Its own
+        pane needs nobody any more."""
         remaining.remove(reviewer_id)
         attention.clear()
+        attention_record.resolved(runtime.directory, "pane", node=review_node(reviewer_id))
 
     if remaining and clock() < grace_end:
         announce_grace(runtime, state, remaining, grace_end)
@@ -896,6 +955,9 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
                 ended(reviewer_id)
                 supersede_late(runtime, state, reviewer_id, f"its session is {row['state']}" if row else "its session is not listed")
                 continue
+            if row["state"] != "blocked":
+                attention.discard(reviewer_id)
+                attention_record.resolved(runtime.directory, "pane", node=node)
             path = runtime.directory / f"{node}.completion.json"
             refused = None
             if path.exists():
@@ -922,6 +984,9 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
                 attention.add(reviewer_id)
                 runtime.event("review", "interactive", f"Reviewer {reviewer_id} needs attention in its pane (native state blocked); waiting until the "
                                                        "grace after the block ends, or its deadline")
+                # The same text as before the block: a pane already recorded is not recorded again, one that blocks again after
+                # its session worked is.
+                pane_attention(runtime, f"Reviewer {reviewer_id}", node)
         if remaining:
             sleep(2)
 
@@ -952,7 +1017,7 @@ def review_candidate(runtime) -> dict:
     git_worktree(runtime.plan["repository"], "add", "--detach", str(cwd), bundle["candidate_commit"])
     patch = runtime.directory / "review.diff"
     with patch.open("w") as handle:
-        subprocess.run(["git", "-C", str(cwd), "diff", "--binary", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
+        subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
     if reviewer_transport(runtime.plan) == "print":
         return _review_print(runtime, bundle, digest, cwd, patch)
     return _review_native(runtime, bundle, digest, patch)
@@ -1075,7 +1140,10 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
         blockers = mark_blockers(state, decisions)
         state.save()
-        runtime.event("review", "blocked", blocked_event(state, decisions, blockers, undecided))
+        message = blocked_event(state, decisions, blockers, undecided)
+        runtime.event("review", "blocked", message)
+        attention_record(runtime.directory, "review_blocked", f"{message}. Read {runtime.directory / 'review.json'}; review findings are fixed "
+                                                              "in a new run.", node="review")  # C44
         raise RuntimeError(blocked_error(blockers or undecided or late, blockers, decisions))
     runtime.validate_review(review)
     for status in state.statuses.values():
@@ -1468,8 +1536,10 @@ def request_retry(runtime, phase: str, node: str, attempt: int) -> None:
     save_json(path, requests)
 
 
-def advance_failed_checks(runtime, state) -> bool:
-    """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review."""
+def check_retries(runtime, state) -> tuple[list, list] | None:
+    """advance_failed_checks' decision, read only: the checks to rerun, as (phase, node), and the `retry` requests to consume;
+    None when the failed steps are not all checks it reruns, or one has nothing to rerun. Raises RuntimeError when a check
+    failed identically on two attempts of one revision, or the attempt limit is reached."""
     from .repair import attempt_floor
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
@@ -1478,7 +1548,7 @@ def advance_failed_checks(runtime, state) -> bool:
     retryable = {f"verify_{node}" for node in workers} | {"candidate"}
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]
     if not failures or any(name not in retryable for name in failures):
-        return False
+        return None
     requests_path = runtime.directory / RETRY_REQUESTS
     requests = read_json(requests_path) if requests_path.exists() else {}
     targets, requested = [], []
@@ -1500,17 +1570,27 @@ def advance_failed_checks(runtime, state) -> bool:
                                        f"not transient, inspect {path}. Before review a code fix is a lane repair (RUNBOOK)")
                 stage_targets.append((phase, node))
         if not stage_targets and not stage_requested:
-            return False
+            return None
         targets.extend(stage_targets)
         requested.extend(stage_requested)
     # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision.
     if any(runtime.attempt(p, n) >= attempt_floor(runtime.directory, p, n) + runtime.policy.get("max_verification_attempts", 3) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
+    return targets, requested
+
+
+def advance_failed_checks(runtime, state) -> bool:
+    """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review."""
+    retries = check_retries(runtime, state)
+    if retries is None:
+        return False
+    targets, requested = retries
     for phase, node in targets:
         runtime.retry_check(phase, node)
     if requested:
         # Consumed before the rerun: one that fails before its check starts is classified as that failure, never rerun again.
-        remaining = {key: value for key, value in requests.items() if key not in requested}
+        requests_path = runtime.directory / RETRY_REQUESTS
+        remaining = {key: value for key, value in read_json(requests_path).items() if key not in requested}
         if remaining:
             save_json(requests_path, remaining)
         else:
@@ -1525,6 +1605,7 @@ def advance_or_block(runtime, state) -> bool:
         return advance_failed_checks(runtime, state)
     except RuntimeError as error:
         runtime.event("controller", "blocked", str(error))
+        blocked_attention(runtime, str(error))
         raise
 
 
@@ -1682,6 +1763,12 @@ def resume_interrupted_review(runtime, state) -> bool:
 REVIEW_RESTART = "review-restart.json"
 
 
+def partial_review_stop(runtime, worktree: Path) -> str:
+    """The stop for a review worktree a failed review left behind, with the commands that remove it and continue the run."""
+    return (f"Partial review worktree {worktree} left by the failed review; remove it with git worktree remove --force {worktree}, "
+            f"then rerun: python -m workflow automatic {runtime.directory} --live")
+
+
 def restart_review(runtime, state) -> bool:
     """The review node failed before it launched any reviewer: no reviewer status and no review worktree exist.
 
@@ -1695,8 +1782,7 @@ def restart_review(runtime, state) -> bool:
         return False
     worktree = runtime.directory / "review-worktree"
     if worktree.exists():
-        raise stop_error(runtime, f"Partial review worktree {worktree} left by the failed review; remove it with "
-                                  f"git worktree remove --force {worktree}, then rerun: python -m workflow automatic {runtime.directory} --live")
+        raise stop_error(runtime, partial_review_stop(runtime, worktree))
     marker = runtime.directory / REVIEW_RESTART
     if marker.exists():
         return False  # Re-entered once already under this supervisor: the same failure again stops it.
@@ -1766,32 +1852,50 @@ def step_error(error) -> str:
     return text
 
 
-def record_blocked(runtime, state=None, *, reason: str | None = None) -> None:
+MANUAL_GATE = "Unexpected manual gate in automatic run; inspect state"
+
+
+def failed_steps(state) -> str:
+    """record_blocked's reason for graph steps that failed: each with its error (the pending ones, else any), and that drive does
+    not retry them."""
+    failed = [task for task in state.tasks if task.error and task.name in state.next] or [task for task in state.tasks if task.error]
+    return "; ".join(f"the {task.name} step failed: {step_error(task.error)}" for task in failed) + "; not retried, inspect retained evidence"
+
+
+def freeze_stop(error) -> str:
+    """The stop for a freeze that failed for another reason than an outage: a failed stop, an ownership violation, a moved HEAD."""
+    return f"Freeze failed: {step_error(error)}; non-retryable graph failure, inspect retained evidence"
+
+
+def record_blocked(runtime, state=None, *, reason: str | None = None, bare: bool = False) -> None:
     """The `controller` `blocked` event before drive stops at a failure it does not retry (C44), so the timeline's last word
     says why: `reason` for a stop of its own (a failed freeze, a review worktree left behind, an unexpected manual gate, ...),
-    else each failed step of `state` with its error. At most once per controller process and run; a later `automatic --live`
-    is a new process and says it again. A stop the operator can resume is resumable_stop's instead."""
+    else each failed step of `state` with its error, as `Controller blocked: <reason>`. `bare` says the reason alone, as
+    advance_or_block and a failed wait do on the source branch (final_stop's framing, off it). At most once per controller
+    process and run; a later `automatic --live` is a new process and says it again. A stop the operator can resume is
+    resumable_stop's instead."""
     if str(runtime.directory) in BLOCKED_RUNS:
         return
     BLOCKED_RUNS.add(str(runtime.directory))
     if reason is None:
-        failed = [task for task in state.tasks if task.error and task.name in state.next] or [task for task in state.tasks if task.error]
-        reason = "; ".join(f"the {task.name} step failed: {step_error(task.error)}" for task in failed) + "; not retried, inspect retained evidence"
-    runtime.event("controller", "blocked", f"Controller blocked: {reason}")
+        reason = failed_steps(state)
+    text = reason if bare else f"Controller blocked: {reason}"
+    runtime.event("controller", "blocked", text)
+    blocked_attention(runtime, text)
 
 
-def stop_error(runtime, message: str) -> RuntimeError:
+def stop_error(runtime, message: str, *, bare: bool = False) -> RuntimeError:
     """A stop drive does not retry, said on the timeline first (record_blocked): the error to raise."""
-    record_blocked(runtime, reason=message)
+    record_blocked(runtime, reason=message, bare=bare)
     return RuntimeError(message)
 
 
 def resumable_stop(runtime, message: str) -> RuntimeError:
     """A stop drive makes before any step that the operator can resume (C44 review): the target checkout is off the run's source
-    branch (source_branch_note), or the start did not complete (start_note). Nothing is stopped or relaunched. It is said on the
-    timeline first as a `controller` `interrupted` event that names what comes before `automatic --live`, never `Controller
-    blocked:`, so the viewer offers that resume rather than a new run. Once per controller process and run, as record_blocked.
-    The error to raise."""
+    branch while the run can continue (source_branch_note; final_stop decides), or the start did not complete (start_note).
+    Nothing is stopped or relaunched. It is said on the timeline first as a `controller` `interrupted` event that names what
+    comes before `automatic --live`, never `Controller blocked:`, so the viewer offers that resume rather than a new run. Once
+    per controller process and run, as record_blocked. The error to raise."""
     if str(runtime.directory) not in BLOCKED_RUNS:
         BLOCKED_RUNS.add(str(runtime.directory))
         runtime.event("controller", "interrupted", message)
@@ -1823,6 +1927,57 @@ def start_note(runtime, state) -> str:
             f"python -m workflow reconcile {runtime.directory}, {resume_note(runtime)}")
 
 
+def graph_state(runtime):
+    """The run's persisted graph state, read only; None before `start` wrote a checkpoint."""
+    from .pipeline import build_pipeline, graph_config
+    path = runtime.directory / "pipeline.sqlite"
+    if not path.exists():
+        return None
+    with SqliteSaver.from_conn_string(str(path)) as saver:
+        return build_pipeline(saver, runtime).get_state(graph_config(runtime))
+
+
+def final_stop(runtime, state) -> tuple[str, bool] | None:
+    """Why drive would stop at `state` for good and how it says it, `(reason, bare)`, or None while the run can continue: drive's
+    own classification, read only (no check retried, no review re-entered, nothing written). `bare` is a stop the source branch
+    says as the reason alone (the failed wait in drive, advance_or_block); every other one record_blocked says as
+    `Controller blocked: <reason>`. drive asks it when the target checkout is off the source branch (P's review): a run that
+    already stopped for good keeps its block's framing, word for word, since the resumable interruption would hide the block
+    from the viewer, switching back would only stop at it again, and another text would page the operator again for one stop."""
+    if not state.values or any(name.startswith("launch_") for name in state.next):
+        return None  # A start that did not complete: reconciled or started, the run goes on.
+    frozen = freeze_failure(state)
+    if frozen:
+        return None if (runtime.directory / FREEZE_INTERRUPTED).exists() else (freeze_stop(frozen), False)
+    if not state.next:
+        return None  # The graph finished: back on the source branch, drive checks the integrated commit.
+    pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
+    if pending == ["worker_handoff"]:
+        try:
+            handoffs_after_stop(runtime, lanes(runtime))
+        except Exception as error:  # What wait_handoffs raises: the workers were stopped when their wait failed.
+            return str(error), True
+        return None
+    if pending:
+        return MANUAL_GATE, False
+    if not any(task.error for task in state.tasks):
+        return None
+    try:
+        if check_retries(runtime, state) is not None:
+            return None
+    except RuntimeError as error:  # Identical failures or the attempt limit: advance_or_block's stop.
+        return str(error), True
+    if reviewer_stop_pending(runtime, state) or review_interrupted(runtime, state):
+        return None
+    if [task.name for task in state.tasks if task.error and task.name in state.next] == ["review"] and not combined_status_path(runtime).exists():
+        worktree = runtime.directory / "review-worktree"
+        if worktree.exists():
+            return partial_review_stop(runtime, worktree), False
+        if not (runtime.directory / REVIEW_RESTART).exists():
+            return None  # restart_review re-enters a review that launched nothing, once.
+    return failed_steps(state), False
+
+
 def drive(runtime, *, single_step=False) -> str | None:
     """Advance persisted graph state; CLI supervision restarts this process at joins."""
     from .pipeline import advance, build_pipeline, graph_config, report
@@ -1831,6 +1986,14 @@ def drive(runtime, *, single_step=False) -> str | None:
     refuse_recorded(runtime.directory)
     branch = git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD")
     if branch != runtime.plan["source_branch"]:
+        try:
+            state = graph_state(runtime)
+            stopped = None if state is None else final_stop(runtime, state)
+        except Exception:  # The state cannot be read here: the resumable framing, as before.
+            stopped = None
+        if stopped is not None:
+            reason, bare = stopped
+            raise stop_error(runtime, reason, bare=bare)  # It already stopped for good: its block as the source branch says it.
         raise resumable_stop(runtime, source_branch_note(runtime, branch))
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
     config = graph_config(runtime)
@@ -1843,7 +2006,7 @@ def drive(runtime, *, single_step=False) -> str | None:
             frozen = freeze_failure(state)
             if frozen and not (runtime.directory / FREEZE_INTERRUPTED).exists():
                 # A stop that failed, an ownership violation, a moved HEAD: never re-entered, or the supervisor would loop.
-                raise stop_error(runtime, f"Freeze failed: {step_error(frozen)}; non-retryable graph failure, inspect retained evidence")
+                raise stop_error(runtime, freeze_stop(frozen))
             if not state.next and not frozen:
                 commit = state.values.get("integrated_commit")
                 if (not commit or git(Path(runtime.plan["repository"]), "rev-parse", "HEAD") != commit
@@ -1873,6 +2036,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                     # Deadline, quota block, missing/blocked completion: stop the workers so
                     # no session keeps consuming usage for a run that cannot continue.
                     runtime.event("controller", "blocked", str(error))
+                    blocked_attention(runtime, str(error))
                     try:
                         runtime.stop_workers()
                     except Exception as cleanup_error:
@@ -1885,7 +2049,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                     resume_interrupted_freeze(runtime)
                 value = Command(resume={"freeze": True})
             elif pending:
-                raise stop_error(runtime, "Unexpected manual gate in automatic run; inspect state")
+                raise stop_error(runtime, MANUAL_GATE)
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
                 if not restart_review(runtime, state):
@@ -1914,8 +2078,9 @@ def drive(runtime, *, single_step=False) -> str | None:
                     # Exit 75 is only for a state `automatic --live` continues. This node ended on the outage for good (a print
                     # review terminated its jobs, a reviewer launch needs reconciliation): the run is blocked, classified below.
                     names = ", ".join(task.name for task in failed.tasks if task.error and task.name in failed.next)
-                    runtime.event("controller", "blocked", f"{error}. The {names} step ended on it in a state no resume continues; "
-                                                           "inspect retained evidence")
+                    ended = f"{error}. The {names} step ended on it in a state no resume continues; inspect retained evidence"
+                    runtime.event("controller", "blocked", ended)
+                    blocked_attention(runtime, ended)
                 settle_interruption(runtime)
                 if reviewer_stop_pending(runtime, failed):
                     # Not retried in this loop: the operator inspects the session first; a resumed

@@ -194,6 +194,43 @@ class FileCaptureTests(unittest.TestCase):
             forged["result"]["files_not_captured"] = entries
             self.assertEqual(recheck_packet(forged, policy, self.run_dir)["gate"]["status"], "blocked", entries)
 
+    def test_checks_run_without_secret_like_names_and_the_packet_names_them(self):
+        """C14 slice 1: names ending in _KEY, _TOKEN, _SECRET or _PASSWORD, and GH_* and GITHUB_* names, never reach a check;
+        *_URL names do (pine-chain's fork check reads GNOSIS_RPC_URL). Hooks and Git prompts are off. The packet lists the
+        dropped names, never their values, beside the evidence, whose schema is closed."""
+        secrets = {"GH_TOKEN": "ghp_fake0token", "GITHUB_ACTOR": "fake-actor", "DEEPSEEK_API_KEY": "sk-fake0deepseek",
+                   "DEPLOYER_KEY": "0xfake0deployer", "APP_SECRET": "fake0app0secret", "MY_SERVICE_PASSWORD": "fake0password"}
+        kept = {"GNOSIS_RPC_URL": "https://rpc.example.invalid/v1", "GITHUB_API_URL": "https://api.example.invalid"}
+        names = [*secrets, *kept, "PATH", "HUSKY", "GIT_TERMINAL_PROMPT"]
+        probe = [sys.executable, "-c", "import json, os\n"
+                 f"print('SEEN ' + json.dumps({{name: os.environ.get(name) for name in {names!r}}}))\n"
+                 "print('Ran 1 test in 0.001s\\n\\nOK')\n"]
+        commit, changed = self.snapshot({"docs/GUIDE.md": b"# Guide\n"})
+        policy = self.policy(probe)
+        with patch.dict("os.environ", {**secrets, **kept, "HUSKY": "1", "GIT_TERMINAL_PROMPT": "1"}):
+            packet = self.verify(commit, changed, policy=policy)
+        self.assertEqual(packet["gate"]["status"], "passed", packet["gate"]["reasons"])
+        log = Path(packet["artifact_paths"][packet["result"]["checks"][0]["log_artifact_id"]]).read_text()
+        seen = json.loads(next(line for line in log.splitlines() if line.startswith("SEEN "))[len("SEEN "):])
+        self.assertEqual({name: seen[name] for name in secrets}, dict.fromkeys(secrets))
+        self.assertEqual({name: seen[name] for name in kept}, kept)
+        self.assertTrue(seen["PATH"])
+        self.assertEqual((seen["HUSKY"], seen["GIT_TERMINAL_PROMPT"]), ("0", "0"))
+        # Every dropped name is listed in order (the controller's own environment may add more of the same kind), no value is.
+        dropped = packet["dropped_env_names"]
+        self.assertEqual(dropped, sorted(dropped))
+        self.assertLessEqual(set(secrets), set(dropped))
+        self.assertFalse(set(kept) & set(dropped))
+        for name in dropped:
+            self.assertRegex(name.upper(), r"(_KEY|_TOKEN|_SECRET|_PASSWORD)$|^(GH|GITHUB)_")
+        saved = (self.run_dir / "verification/worker/adapter/1/packet.json").read_text()
+        self.assertEqual(json.loads(saved)["dropped_env_names"], dropped)
+        for value in secrets.values():
+            self.assertNotIn(value, saved)
+        validate_schema("verificationEvidence", packet["evidence"])
+        validate_schema("workerResult", packet["result"])
+        self.assertEqual(recheck_packet(json.loads(saved), policy, self.run_dir)["gate"]["status"], "passed")
+
 
 class VitestCountsTests(unittest.TestCase):
     SUMMARY = ("\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m6 passed\x1b[39m\x1b[22m\x1b[90m (6)\x1b[39m\n"

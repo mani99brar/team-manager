@@ -961,6 +961,20 @@ describe('deriveNow', () => {
     assert.equal(textToString(now.headline, T0), '✗ Failed at Freeze worker handoffs · Worker ui deadline exhausted; no automatic relaunch. The workflow did not complete.')
   })
 
+  it('blocked_before_freeze: on a lane named controller, a Controller blocked row aliased onto the lane is the run\'s, as source 0', () => {
+    // automatic.py record_blocked says why drive stops (`Controller blocked: …`). As a server before B1 serves the row, aliased onto
+    // launch_controller; CONTROLLER_LANE_ROWS makes it the run's row, as for the deadline row above once B1 serves it node-less.
+    const stop = 'Controller blocked: Freeze failed: Stop failed for ui; inspect native session before retrying; non-retryable graph failure, inspect retained evidence'
+    const now = checked(synthetic({
+      base: guardrails, status: 'failed', nodes: { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'failed' },
+      events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [0, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
+        [5, 'launch_controller', 'running', 'Automatic checkpoint controller PID 5151'], [3600, 'launch_controller', 'failed', stop]],
+    }))
+    assert.equal(now.situation, 'blocked_before_freeze')
+    assert.equal(now.reasonSource, 0)
+    assert.match(textToString(now.reason, T0), /Controller blocked: Freeze failed: Stop failed for ui/)
+  })
+
   it('scope: a stale [Errno 2] row before the focus attempt is ignored', () => {
     const run = (second: number) => synthetic({
       status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'succeeded', approval: 'succeeded', integrate: 'failed' },

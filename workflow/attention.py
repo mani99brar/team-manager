@@ -32,10 +32,10 @@ from .sessions import read_json, save_json
 VERSION = "1.0.0"
 RECORD = "attention.json"
 FEED = "attention.jsonl"
-KINDS = frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished"})
-# Named for the units that add them, and refused until they join KINDS: a review sidecar finding no lane could take
-# (C41) and a run paused on a usage limit (C46).
-RESERVED_KINDS = frozenset({"sidecar", "usage_limit"})
+# `sidecar`: a review sidecar P0/P1 that reached no lane, or an escalation (C41), recorded on the finding's lane.
+KINDS = frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar"})
+# Named for the unit that adds it, and refused until it joins KINDS: a run paused on a usage limit (C46).
+RESERVED_KINDS = frozenset({"usage_limit"})
 # The feed's lock is taken without blocking, retried every LOCK_RETRY_SECONDS for at most LOCK_WAIT_SECONDS: a holder that
 # never lets go (a process suspended inside attention, a reader that locks the feed, a hung filesystem) costs a caller
 # one bounded wait, never its run.

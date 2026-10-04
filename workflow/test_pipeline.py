@@ -854,11 +854,12 @@ class BundleTests(unittest.TestCase):
 
 
 def pipeline_cli(*arguments: str) -> tuple[int, str, str]:
-    """`python -m workflow <action> ...` in this process: (exit code, stdout, stderr)."""
+    """`python -m workflow <action> ...` in this process: (exit code, stdout, stderr). The controller's Git configuration
+    main() adds to the environment stays with the call, as it would with its own process."""
     from . import pipeline
     out, err = io.StringIO(), io.StringIO()
     code = 0
-    with patch.object(sys, "argv", ["workflow", *arguments]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    with patch.object(sys, "argv", ["workflow", *arguments]), patch.dict(os.environ), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             pipeline.main()
         except SystemExit as exit_:
@@ -1204,6 +1205,81 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"Report: {f.directory / 'report.html'}", out)
         self.assertIn("<h1>Workflow report</h1>", (f.directory / "report.html").read_text())
+
+    def test_prepare_pins_the_worker_authority_and_the_report_shows_it(self):
+        # C14 slice 1: no sandbox on this host; every launch runs as the operator's account, and the run records it with the
+        # digest of the exact --settings its workers get (sessions.worker_settings), in plan.json and report.html.
+        import hashlib
+        from .sessions import worker_settings
+        f = self.fixture
+        policy = f.root / "policy.json"
+        save_json(policy, f.policy)
+        tasks = []
+        for node in ("ui", "adapter"):
+            (f.root / f"{node}-task.md").write_text(f"Change {node}.\n")
+            tasks += ["--task", f"{node}={f.root / f'{node}-task.md'}"]
+        run = f.root / "cli-run"
+        code, out, err = pipeline_cli("prepare", str(run), "--repo", str(f.repo), "--policy", str(policy), *tasks)
+        self.assertEqual(code, 0, err)
+        authority = {"worker_settings_sha256": hashlib.sha256(worker_settings(run)[1].encode()).hexdigest(), "sandbox": False, "authority": "account"}
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["worker_authority"], authority)
+        self.assertEqual(plan["shared_git"]["entries"], read_json(f.directory / "plan.json")["shared_git"]["entries"])
+        code, _, err = pipeline_cli("export", str(run))
+        self.assertEqual(code, 0, err)
+        page = (run / "report.html").read_text()
+        self.assertIn("<h2>Worker authority</h2>", page)
+        self.assertIn(authority["worker_settings_sha256"], page)
+        self.assertIn("&quot;authority&quot;: &quot;account&quot;", page)
+        # A run prepared before the record says nothing about it.
+        self.pin()
+        report(f.runtime, SimpleNamespace(values={}, next=(), tasks=[]))
+        self.assertNotIn("Worker authority", (f.directory / "report.html").read_text())
+
+    def test_a_changed_shared_git_is_a_warning_at_freeze_review_and_integrate_never_a_refusal(self):
+        # C25: prepare recorded a digest of what in the shared .git can make a Git command run something. Freeze (after the
+        # workers stop), the review node (before the review diff) and integrate compare against it; a change is one named
+        # event naming the keys or files, and the run goes on. The same report is never repeated; status shows the latest.
+        f = self.fixture
+        self.pin()
+        common = f.repo / ".git"
+        with self.graph() as graph:
+            graph.invoke({"run_id": "run"}, f.config)
+            with (common / "info" / "attributes").open("a") as handle:
+                handle.write("*.txt -diff\n")  # Turns a text change into an opaque binary patch in review.diff.
+            outcome = graph.invoke(Command(resume={"freeze": True}), f.config)
+            self.assertEqual(outcome["__interrupt__"][0].value["kind"], "independent_review")
+            decision = f.review()
+            hook = common / "hooks" / "post-checkout"
+            hook.write_text("#!/bin/sh\nexit 0\n")
+            hook.chmod(0o755)
+            outcome = graph.invoke(Command(resume=decision), f.config)  # The review node runs again from its start.
+            self.assertEqual(outcome["__interrupt__"][0].value["kind"], "integration_approval")
+            git(f.repo, "config", "filter.planted.clean", "cat")
+            commit = graph.invoke(Command(resume={"approve": decision["bundle_sha256"]}), f.config)["integrated_commit"]
+            report(f.runtime, graph.get_state(f.config))
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), commit)
+        warnings = [(event["node"], event["message"]) for event in map(json.loads, (f.directory / "events.jsonl").read_text().splitlines())
+                    if event["status"] == "warning"]
+        self.assertEqual(warnings, [("freeze", "Shared .git changed during the run: info/attributes"),
+                                    ("review", "Shared .git changed during the run: hooks/post-checkout, info/attributes"),
+                                    ("integrate", "Shared .git changed during the run: hooks/post-checkout, info/attributes, local filter.planted.clean")])
+        freeze = [message for status, message in self.events("freeze")]
+        self.assertLess(freeze.index("Fake workers have no background processes"), freeze.index(warnings[0][1]))
+        self.assertLess(freeze.index(warnings[0][1]), freeze.index("Immutable snapshots captured; worker-reported checks are not trusted"))
+        self.assertEqual(self.status()[0]["shared_git"], warnings[-1][1])
+        # Compared again with nothing new: nothing more is recorded.
+        f.runtime.check_shared_git("integrate")
+        self.assertEqual(len([line for line in (f.directory / "events.jsonl").read_text().splitlines() if '"warning"' in line]), 3)
+
+    def test_runs_prepared_before_the_shared_git_digest_compare_nothing(self):
+        f = self.fixture
+        f.plan.pop("shared_git")
+        self.pin()
+        (f.repo / ".git" / "info" / "attributes").write_text("*.txt -diff\n")
+        f.runtime.check_shared_git("freeze")
+        self.assertFalse((f.directory / "events.jsonl").exists())
+        self.assertNotIn("shared_git", self.status()[0])
 
 
 class AdvanceTests(unittest.TestCase):

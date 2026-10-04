@@ -369,7 +369,9 @@ class InteractiveTests(unittest.TestCase):
             with self.subTest(command[command.index("--name") + 1]):
                 self.assertEqual(command[:2], ["claude", "--bg"])
                 self.assertEqual(command.count("--settings"), 1)
-                self.assertEqual(json.loads(command[command.index("--settings") + 1]), {"env": {"DISABLE_AUTOUPDATER": "1"}})
+                settings = json.loads(command[command.index("--settings") + 1])
+                self.assertEqual((settings["env"]["DISABLE_AUTOUPDATER"], settings["env"]["CLAUDE_BG_ISOLATION"]), ("1", "none"))
+                self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
                 # The helper itself still runs with the auto-updater off and without the controller's Herdr variables.
                 self.assertEqual(call.kwargs["env"]["DISABLE_AUTOUPDATER"], "1")
                 self.assertFalse(any(key.startswith("HERDR_") for key in call.kwargs["env"]))
@@ -378,6 +380,49 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(worker[-2], "manual")
         self.assertEqual(reviewer[-3:], ["--permission-mode", "dontAsk", "Review this candidate."])
         self.assertEqual(automatic[-3:-1], ["bypassPermissions", "--dangerously-skip-permissions"])
+
+    def test_workers_carry_the_deny_rules_in_their_one_settings_and_reviewers_only_the_isolation(self):
+        # C14 slice 1 and C19: every worker launch, manual or automatic, passes worker_settings as its only --settings; the
+        # reviewer keeps background_settings (bgIsolation and the auto-updater, no rules). The prompt stays the last argument.
+        from .automatic import DEFAULTS
+        from .sessions import background_settings, worker_settings
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        ids = {row["name"]: row["id"] for row in (self.row(), self.reviewer_row(), self.row("adapter"))}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]):
+                self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
+            self.plan.update(automatic=dict(DEFAULTS), source_branch="feature/test")
+            save_json(self.directory / "plan.json", self.plan)
+            self.sessions = InteractiveSessions(self.directory, executable="claude")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row("adapter")]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("adapter")
+        worker, reviewer, automatic = (call.args[0] for call in launch.call_args_list)
+        for command, prompt in ((worker, self.directory / "ui.prompt.txt"), (automatic, self.directory / "adapter.prompt.txt")):
+            with self.subTest(command[command.index("--name") + 1]):
+                self.assertEqual(command.count("--settings"), 1)
+                self.assertEqual(command[command.index("--settings") + 1], worker_settings(self.directory)[1])
+                settings = json.loads(command[command.index("--settings") + 1])
+                for rule in ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git commit:*)", "Read(~/.ssh/**)",
+                             "Edit(~/.ssh/**)", "Read(~/.config/vps-wallet.env)", "Read(~/.claude/.credentials.json)", "Edit(~/.gitconfig)",
+                             "Edit(~/.config/git/**)", "Read(~/.claude/projects/**/*.jsonl)", "Edit(~/.claude/projects/**)"):
+                    self.assertIn(rule, settings["permissions"]["deny"])
+                self.assertNotIn("Read(~/.claude/projects/**)", settings["permissions"]["deny"])  # A worker Reads its saved tool output.
+                self.assertEqual({key: settings["env"][key] for key in ("HUSKY", "GIT_TERMINAL_PROMPT", "CLAUDE_BG_ISOLATION")},
+                                 {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0", "CLAUDE_BG_ISOLATION": "none"})
+                self.assertEqual(command[-1], prompt.read_text())
+                self.assertNotIn("--disallowedTools", command)
+        self.assertEqual(reviewer[reviewer.index("--settings") + 1], background_settings()[1])
+        settings = json.loads(reviewer[reviewer.index("--settings") + 1])
+        self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
+        self.assertNotIn("permissions", settings)
+        self.assertNotIn("HUSKY", settings["env"])
+        self.assertEqual(reviewer[-1], "Review this candidate.")
 
     def test_only_workers_take_the_worker_effort(self):
         (self.directory / "review-worktree").mkdir()

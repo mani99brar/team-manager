@@ -1992,6 +1992,31 @@ test('[B1] on a lane named controller, the controller\'s resumable stops belong 
   })
 })
 
+test('[B1] on a lane named controller, a Controller blocked row belongs to the run, never failing the lane', async () => {
+  // automatic.py record_blocked: drive says why it stops before its non-retryable raise, as a `controller` `blocked` row that starts
+  // `Controller blocked:`. On a lane named `controller` it would otherwise land on that lane's launch node.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const blocked = 'Controller blocked: the review step failed: Independent reviewer blocked the candidate (review); not retried, inspect retained evidence'
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 2088885' },
+      { sequence: 4, time: T2, node: 'controller', status: 'blocked', message: blocked },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [
+      [1, 'launch_controller', 'running', 'status_changed'], [2, 'launch_ui', 'running', 'status_changed'],
+      [3, null, 'running', 'log'], [4, null, 'failed', 'log']])
+    assert.equal(served[3].message, blocked)
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the controller\'s stop never fails the lane')
+  })
+})
+
 test('[B1] candidate events name the lane whose combined check they report', async () => {
   await harness(async ({ app, runsRoot }) => {
     await writeRun(runsRoot('alpha', 'main'), { runId: 'combined', values: reviewedValues(), next: ['review'], events: reviewedEvents, packets: reviewedPackets })
