@@ -2034,7 +2034,7 @@ def note_controller_drift(runtime, current: str | None = None) -> None:
         return
     if current is None:
         from .sessions import controller_commit
-        current = controller_commit()[0]
+        current = controller_commit()
     if current is None or current == pinned["commit"]:
         return
     message = (f"Controller commit {current[:12]} runs this step, not {pinned['commit'][:12]} pinned at prepare: the controller checkout "

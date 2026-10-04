@@ -32,7 +32,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, export_run
 from .sessions import TransientInfraError, git, prepare, read_json, save_json
 from .test_guardrails import FEATURE, LANES, GuardedFeature, attached_pane, claude_screen, input_at_bottom, pane_process_info, two_lane_policy
-from .test_pipeline import FakeSessions, OfflinePipeline, isolate_registry
+from .test_pipeline import CLAUDE_VERSION_STUB, FakeSessions, OfflinePipeline, isolate_registry, stub_claude_cli
 from .test_portable import commit_all
 from .verification import policy_digest, validate_schema
 
@@ -45,6 +45,7 @@ SETTINGS = dict(sidecar.DEFAULTS)
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # Prepare's version record (Declare, Graph) runs a stand-in claude, never the operator's.
 
 
 def appendix_b() -> dict:
@@ -273,6 +274,8 @@ class Declare(GuardedFeature):
         plan = read_json(directory / "plan.json")
         self.assertEqual(plan["sidecar"], {"prompt": brief.read_text(), **SETTINGS})
         self.assertEqual((plan["feature_version"], sorted(plan["nodes"])), ("2.3.0", sorted(LANES)))
+        # Prepare's version record ran the stand-in claude (setUpModule), never the operator's CLI.
+        self.assertEqual(plan["controller"]["claude_version"], CLAUDE_VERSION_STUB)
         self.assertEqual(read_json(directory / "sidecar.ledger.json"), sidecar.initial_ledger(plan))
         # A feature file brief with its own bounds.
         (self.folder / "sidecar-brief.md").write_text("Look at the adapter first.\n")

@@ -1376,6 +1376,42 @@ class RecordTests(unittest.TestCase):
         self.pin()
         Pipeline(f.directory, f.sessions)  # An automatic plan without profile validates.
 
+    def test_the_role_flags_and_the_profile_are_refused_on_every_action_but_prepare(self):
+        # The pins never change after prepare: a role flag or --profile on another action would be ignored silently, so it is
+        # refused before the run is read (`automatic --live` resumes a run; an operator who passes a pin believes it changed).
+        f = self.fixture
+        self.pin()
+        plan = read_json(f.directory / "plan.json")
+        for argv in (["automatic", str(f.directory), "--live", "--judge-effort", "low"], ["status", str(f.directory), "--worker-model", "x"],
+                     ["start", str(f.directory), "--live", "--profile", "attended"]):
+            with self.subTest(argv):
+                code, _, err = pipeline_cli(*argv)
+                self.assertEqual(code, 2, err)
+                self.assertIn("--profile and the role flags apply to prepare only; the pins cannot change after it", err)
+        self.assertEqual(read_json(f.directory / "plan.json"), plan)
+
+    def test_the_drift_check_reads_only_the_controller_head_and_prepare_reads_dirt_without_optional_locks(self):
+        # The drift check runs at every checkpoint against the operator's live checkout: `git rev-parse HEAD` only, never a
+        # `git status`, which may refresh and lock its index. Prepare's one dirty check runs with GIT_OPTIONAL_LOCKS=0.
+        from . import sessions
+        from .automatic import note_controller_drift
+        calls = []
+        real = subprocess.check_output
+
+        def record(command, *args, **kwargs):
+            calls.append((command[3:], (kwargs.get("env") or {}).get("GIT_OPTIONAL_LOCKS")))
+            return real(command, *args, **kwargs)
+        f = self.fixture
+        self.pin(controller={"commit": "a" * 40, "dirty": False, "claude_version": None})
+        with patch("workflow.sessions.subprocess.check_output", side_effect=record):
+            note_controller_drift(f.runtime)
+        self.assertEqual(calls, [(["rev-parse", "HEAD"], None)])
+        calls.clear()
+        with patch("workflow.sessions.subprocess.check_output", side_effect=record), patch("workflow.sessions.claude_version", return_value=None):
+            record_ = sessions.controller_record()
+        self.assertEqual(calls, [(["rev-parse", "HEAD"], None), (["status", "--porcelain", "--untracked-files=no"], "0")])
+        self.assertIsInstance(record_["dirty"], bool)
+
     def test_a_step_on_another_controller_commit_than_the_pinned_one_writes_one_warning(self):
         from .automatic import note_controller_drift
         f = self.fixture

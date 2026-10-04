@@ -461,15 +461,25 @@ def job_env() -> dict:
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
-def controller_commit(tool: Path = CONTROLLER) -> tuple[str | None, bool | None]:
-    """The controller checkout's HEAD and whether a tracked file differs from it (untracked files do not count); (None, None)
-    when the package does not run from a Git checkout."""
+def controller_commit(tool: Path = CONTROLLER) -> str | None:
+    """The controller checkout's HEAD; None when the package does not run from a Git checkout. Only `git rev-parse`: the drift
+    check reads it at every checkpoint, against a checkout the operator may be committing in."""
     try:
-        commit = git(tool, "rev-parse", "HEAD")
-        dirty = bool(git(tool, "status", "--porcelain", "--untracked-files=no"))
+        return git(tool, "rev-parse", "HEAD")
     except (OSError, subprocess.SubprocessError):
-        return None, None
-    return commit, dirty
+        return None
+
+
+def controller_dirty(tool: Path = CONTROLLER) -> bool | None:
+    """Whether a tracked file of the controller checkout differs from its HEAD (untracked files do not count); None when it
+    cannot be read. Prepare's one check: GIT_OPTIONAL_LOCKS=0, so `git status` never takes the checkout's index.lock to
+    refresh the index (an operator's `git add` or `git commit` there would fail on it), as the sidecar's reads never do."""
+    try:
+        status = subprocess.check_output(["git", "-C", str(tool), "status", "--porcelain", "--untracked-files=no"], text=True,
+                                         env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(status.strip())
 
 
 def claude_version(executable: str = "claude") -> str | None:
@@ -484,8 +494,8 @@ def claude_version(executable: str = "claude") -> str | None:
 
 def controller_record(tool: Path = CONTROLLER, executable: str = "claude") -> dict:
     """What prepare pins as plan.controller: `{commit, dirty, claude_version}`, each null when it cannot be read."""
-    commit, dirty = controller_commit(tool)
-    return {"commit": commit, "dirty": dirty, "claude_version": claude_version(executable)}
+    commit = controller_commit(tool)
+    return {"commit": commit, "dirty": None if commit is None else controller_dirty(tool), "claude_version": claude_version(executable)}
 
 
 def wait_out_update(start, grace: float, sleep=None, retry_output=None):

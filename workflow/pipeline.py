@@ -1199,6 +1199,10 @@ def main():
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
     add_actor_argument(parser)
     args = parser.parse_args()
+    if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
+                                                                         args.judge_model, args.judge_effort)):
+        # Prepare pins them (C52); any other action would ignore them silently, `automatic --live` resuming a run included.
+        parser.error("--profile and the role flags apply to prepare only; the pins cannot change after it")
     directory = args.directory.resolve()
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
