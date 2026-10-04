@@ -114,15 +114,19 @@ def sections(text: str) -> dict[str, str]:
 
 def brief_problems(text: str) -> list[str]:
     """`missing ## Stop`, `empty ## Acceptance`, ...: a required heading needs at least one non-blank line before the next `## `.
-    init's default line on running the checks (CHECKS_DEFAULT, however wrapped) is process, not content: alone it leaves the
-    section empty, so an Acceptance emptied of everything init wrote but that line is still refused."""
+    init's default line on running the checks (CHECKS_DEFAULT, however wrapped, bulleted or not) is process, not content: alone
+    it leaves the section empty, so an Acceptance emptied of everything init wrote but that line is still refused, saying so."""
     found = sections(text)
     problems = []
+    default = re.compile(r"(?:^|(?<= ))(?:[-*+]|\d+[.)])? ?" + re.escape(CHECKS_DEFAULT))
     for heading in REQUIRED_HEADINGS:
+        body = " ".join(found.get(heading, "").split())
         if heading not in found:
             problems.append(f"missing ## {heading}")
-        elif not " ".join(found[heading].split()).replace(CHECKS_DEFAULT, "").strip():
+        elif not body:
             problems.append(f"empty ## {heading}")
+        elif not default.sub("", body).strip():
+            problems.append(f"## {heading} has only init's default line on running the checks; add the results it must deliver")
     return problems
 
 
@@ -258,8 +262,9 @@ def decisions_text(plan: dict) -> str | None:
 
 
 def has_operator_decisions(text: str) -> bool:
-    """Whether decisions.md has the `## Operator decisions` heading on a line of its own: then only those bind (C4)."""
-    return re.search(rf"^{re.escape(OPERATOR_DECISIONS)}[ \t]*$", text, re.MULTILINE) is not None
+    """Whether decisions.md has the `## Operator decisions` heading: then only those bind (C4). The heading as sections() reads
+    it, which brief_problems uses too: a line inside a fenced code block, such as a quoted template, is never a heading."""
+    return OPERATOR_DECISIONS[3:] in sections(text)
 
 
 def decisions_block(plan: dict) -> str:
@@ -685,8 +690,9 @@ def challenge_block(directory: Path, plan: dict, dropped: set[int] | frozenset[i
              "why not; a fallback such as \"or at least\" is not the recommendation. A note marked \"Acts: operator\" is the operator's "
              f"decision: if your work depends on it, {ask} instead of choosing.", *(item(*note) for note in notes)]
     if overridden:
-        lines.append("Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
-                     f"it with the reason: {record['accepted_reason']}")
+        lines.append("Accepted by the operator: context only. Do not act on them and do not ask about them, whatever their \"Acts:\" line "
+                     "says: the operator decided them. These P0/P1 concerns paused the run, and the operator launched it with the reason: "
+                     f"{record['accepted_reason']}")
         lines += [item(*concern) for concern in overridden]
     return "\n".join(lines) + "\n"
 

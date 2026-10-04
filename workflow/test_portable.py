@@ -450,8 +450,13 @@ class InitScaffold(Isolated):
         self.assertEqual(default, CHECKS_DEFAULT)
         edited = task.replace(acceptance[acceptance.index("Browser checks"):], "").replace(todo, "")
         self.assertEqual(sections(edited)["Acceptance"].strip(), default)
-        self.assertEqual(brief_problems(edited), ["empty ## Acceptance"])
-        self.assertEqual(brief_problems(edited.replace(default, default.replace("; ", ";\n  "))), ["empty ## Acceptance"])
+        # The refusal says why a section that visibly holds a line is refused; a bulleted copy of the line is that line too.
+        only_default = ["## Acceptance has only init's default line on running the checks; add the results it must deliver"]
+        self.assertEqual(brief_problems(edited), only_default)
+        self.assertEqual(brief_problems(edited.replace(default, default.replace("; ", ";\n  "))), only_default)
+        for marker in ("- ", "* ", "1. "):
+            self.assertEqual(brief_problems(edited.replace(default, marker + default)), only_default, marker)
+        self.assertEqual(brief_problems(edited.replace(default, "")), ["empty ## Acceptance"])
         self.assertEqual(brief_problems(edited.replace(default, f"- It runs.\n\n{default}")), [])
         self.assertEqual(brief_problems(edited.replace(default, f"{default} It also prints a summary.")), [])
         # Never overwrites: a second init is refused and changes nothing; CLAUDE.md is written only when missing.

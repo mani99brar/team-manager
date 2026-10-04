@@ -31,7 +31,7 @@ You interview the operator about the one feature named in the argument, then wri
 - Accept a short answer ("yes", "the default", "B"). When the operator answers in their own words, restate the answer in one sentence at the start of your next message, so a misreading can be corrected. If an answer opens a new, more important uncertainty, it may replace a lower-ranked question; the limit stays five.
 - A delegation ("you decide") reaches only as far as the operator said: record it as a Grill default that names the items it covers, and apply it to nothing else.
 - A question asked but not answered, including a "clarify" reply that was never settled, stays open: write it as `TODO: Q<n> <question>` under `## Operator decisions`. Launch refuses the feature until the operator answers it.
-- After the fifth answer, ask nothing more until the read-back. Resolve what is still open yourself with its recommended default (a Grill default), or move it to `## Deferred` when it does not block this feature.
+- After the fifth answer, ask nothing more until the read-back. Resolve what is still open and was never asked yourself with its recommended default (a Grill default), or move it to `## Deferred` when it does not block this feature; a question asked and not answered stays a `TODO: Q<n>` line.
 
 ## 3. Write `features/<feature>/decisions.md`
 
@@ -62,14 +62,14 @@ None yet.
 - `## Operator decisions` holds only the operator's answers. Each `[O<n>]` records its question number, the chosen option's text and the operator's words verbatim; an answer given after the grill carries its date or run id instead of a question number. Never edit one in place: a later reading or change is a new bullet that cites the id it changes.
 - `## Grill defaults` holds everything you chose, as `[G<n>]`: what the lanes may assume without asking, defaults after the fifth question, delegations with the items they cover and riders tagged `[added, not asked]`.
 - `## Changes after launch` holds `[L<n>]` items, each with the run id and attempt; before any run it says "None yet".
-- An existing file keeps its Operator decisions as they are; number new bullets after them. An older file without `## Operator decisions` does not record which bullets were the operator's answers: carry its decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which carried-over bullets are the operator's own (§4).
+- An existing file keeps its Operator decisions and its Changes after launch as they are; number new bullets after them. An older file without `## Operator decisions` does not record which bullets were the operator's answers: carry its decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which carried-over bullets are the operator's own (§4).
 - The only line that may begin with `TODO:` is an unanswered question, and launch refuses the feature while one remains.
 - Quote file paths, check ids and lane ids exactly as the feature files spell them.
 - Do not edit the tasks, the policy, the PRD or any code. If an answer means a task must change, say which file and what to change, and leave the edit to the operator.
 
 ## 4. Read back, then hand back
 
-Always read back before the hand-back, also when the operator asked up front to grill and launch. Send one message that lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, every Deferred bullet and any `TODO:` line), then each Operator decision on one line. End it with one short question: confirm, or say what to change. After carrying over an older file, the same question also asks which carried-over bullets are the operator's own.
+Always read back before the hand-back, also when the operator asked up front to grill and launch. Send one message that lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, every Deferred bullet, every Changes after launch item `[L<n>]` an existing file holds and any `TODO:` line), then each Operator decision on one line. End it with one short question: confirm, or say what to change. After carrying over an older file, the same question also asks which carried-over bullets are the operator's own.
 
 The answer is the operator's own: record it before you hand back. Each bullet the answer changes, and each one it confirms by its id, becomes a new `[O<n>]` with the date and the operator's words verbatim, citing what it changes (`[O6] Read-back <date>, changes [G3]: <the new text>. Operator: "<the operator's words>".`). A Grill default or Deferred bullet so replaced leaves its section, and a `TODO: Q<n>` line it answers gives way to its `[O<n>]`, since launch refuses the line; an Operator decision stays as written. A plain "confirm" changes nothing.
 

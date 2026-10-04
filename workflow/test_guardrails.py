@@ -354,7 +354,9 @@ class DecisionsPrecedence(unittest.TestCase):
 
     def test_a_file_without_the_heading_binds_as_a_whole_with_todays_wording(self):
         lookalikes = (DECISIONS, DECISIONS + "\n### Operator decisions\n\n- A level-3 heading.\n", DECISIONS + "\nSee ## Operator decisions.\n",
-                      DECISIONS.replace("## Decisions", "## Operator decisions made"), DECISIONS.replace("## Decisions", "## Operator Decisions"))
+                      DECISIONS.replace("## Decisions", "## Operator decisions made"), DECISIONS.replace("## Decisions", "## Operator Decisions"),
+                      # A legacy file that quotes the grill's template in a fence (a feature about the grill itself): as sections() reads it.
+                      DECISIONS + "\n```markdown\n## Operator decisions\n\n- [O1] Q1: <the chosen option's text>.\n```\n")
         for text in lookalikes:
             with self.subTest(text=text):
                 plan = self.plan(text)
@@ -915,7 +917,10 @@ class ChallengePasses(GuardedFeature):
 
     def test_an_accepted_challenge_lists_the_overridden_p0_p1_apart_as_context_only(self):
         directory = self.prepare("accepted-notes-001")
-        self.challenge_says([concern("P1", "The lanes overlap"), concern("P2", "Minor")])
+        # The overridden P1 is the kind of concern most likely marked "Acts: operator": the header's rule to ask about such a note
+        # applies to the advisory notes only, since the operator already decided the accepted ones.
+        overlap = {**concern("P1", "The lanes overlap\nRecommendation: split the lanes\nActs: operator"), "consequence": "The lanes overlap breaks the run"}
+        self.challenge_says([overlap, concern("P2", "Minor")])
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
         output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Ownership is checked at freeze"])
@@ -925,9 +930,11 @@ class ChallengePasses(GuardedFeature):
                     "recommendation. A note marked \"Acts: operator\" is the operator's decision: if your work depends on it, ask in this "
                     "pane instead of choosing.\n"
                     "2. P2 [assumption] Minor\n   Consequence: Minor breaks the run\n"
-                    "Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
-                    "it with the reason: Ownership is checked at freeze\n"
-                    "1. P1 [assumption] The lanes overlap\n   Consequence: The lanes overlap breaks the run\n")
+                    "Accepted by the operator: context only. Do not act on them and do not ask about them, whatever their \"Acts:\" line "
+                    "says: the operator decided them. These P0/P1 concerns paused the run, and the operator launched it with the reason: "
+                    "Ownership is checked at freeze\n"
+                    "1. P1 [assumption] The lanes overlap\nRecommendation: split the lanes\nActs: operator\n"
+                    "   Consequence: The lanes overlap breaks the run\n")
         for lane in LANES:
             self.assertIn(expected, self.given[lane]["prompt"])
             self.assertIn(expected, (directory / f"{lane}.prompt.txt").read_text())
@@ -2588,6 +2595,10 @@ class GrillSkill(unittest.TestCase):
         # The read-back's question is not a sixth question: the limit of five never skips or softens it (C1).
         self.assertIn("never more than five questions in total. The read-back's confirm question (§4) is not one of the five.", ask)
         self.assertIn("After the fifth answer, ask nothing more until the read-back.", ask)
+        # Only what was never asked takes a default: a question asked and not answered stays a TODO line, which launch refuses (C5).
+        self.assertIn("Resolve what is still open and was never asked yourself with its recommended default (a Grill default), or move it to "
+                      "`## Deferred` when it does not block this feature; a question asked and not answered stays a `TODO: Q<n>` line.", ask)
+        self.assertNotIn("Resolve what is still open yourself", ask)
         self.assertIn("restate the answer in one sentence at the start of your next message", ask)
         self.assertIn("record it as a Grill default that names the items it covers", ask)
         self.assertIn("A question asked but not answered, including a \"clarify\" reply that was never settled, stays open: write it as "
@@ -2611,10 +2622,13 @@ class GrillSkill(unittest.TestCase):
                       "decisions and assumptions over as Grill defaults and its deferrals as they are, then ask at the read-back which "
                       "carried-over bullets are the operator's own (§4).", write)
         self.assertNotIn("that you cannot trace to an operator's answer", body)
+        # A re-grill keeps the changes recorded at a paused challenge: the template's "None yet." is only for a new file.
+        self.assertIn("An existing file keeps its Operator decisions and its Changes after launch as they are; number new bullets after them.", write)
         # §4: the read-back always runs before the hand-back, the bullets the operator did not choose first, then one short question (C1).
         self.assertIn("Always read back before the hand-back, also when the operator asked up front to grill and launch.", back)
         self.assertIn("lists in full every bullet the operator did not choose (every Grill default, `[added, not asked]` riders included, "
-                      "every Deferred bullet and any `TODO:` line), then each Operator decision on one line.", back)
+                      "every Deferred bullet, every Changes after launch item `[L<n>]` an existing file holds and any `TODO:` line), then "
+                      "each Operator decision on one line.", back)
         self.assertIn("End it with one short question: confirm, or say what to change. After carrying over an older file, the same question "
                       "also asks which carried-over bullets are the operator's own.", back)
         self.assertLess(back.index("Always read back"), back.index("--dry-run"))
