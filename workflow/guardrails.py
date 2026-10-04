@@ -886,6 +886,22 @@ def release_hold(runtime, record: dict, actor: str, dropped: frozenset[int]) -> 
     save_hold(directory, {"attempt": record["attempt"], "held_at": held_at, "released_at": now(), "released_by": actor, "dropped": sorted(dropped)})
 
 
+def unheld_drop(directory: Path, current: dict | None, dropped: frozenset[int]) -> str:
+    """Why `--drop` is refused on a run that holds no attempt: only the release of a held attempt consumes it, so anywhere else it
+    would be ignored. A paused or undecided attempt's rerun numbers its own notes; a released hold recorded its drops already."""
+    numbers = ",".join(map(str, sorted(dropped)))
+    if current is None or current["status"] == "paused":
+        what = f"design challenge attempt {current['attempt']} paused this run" if current else "no design challenge attempt was decided"
+        return f"--drop {numbers}: {what}, and the rerun numbers its own notes. Resume --launch without --drop"
+    if current["status"] == "accepted":
+        return f"--drop {numbers}: design challenge attempt {current['attempt']} was accepted, and nothing holds it. Resume --launch without --drop"
+    found = load_hold(directory) or {}
+    kept = found.get("dropped") or [] if found.get("attempt") == current["attempt"] else []
+    earlier = f", with note {', '.join(map(str, kept))} dropped" if kept else ", with no note dropped"
+    return (f"--drop {numbers}: the hold of design challenge attempt {current['attempt']} was released already{earlier}; the workers "
+            "launch with those notes. Resume --launch without --drop")
+
+
 def held_refusal(directory: Path, record: dict, herdr: bool = False) -> str:
     """What `resume` says on a held run when nothing changed since its attempt, and to `--accept-challenge` on a held run."""
     plan = read_json(directory / "plan.json")
@@ -1344,6 +1360,8 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
         if dropped:
             raise ValueError(f"--drop numbers the notes of design challenge attempt {current['attempt']}, but feature files changed since it "
                              "read them: the rerun numbers its own. Resume --launch without --drop, or revert the edits")
+    elif dropped:
+        raise ValueError(unheld_drop(directory, current, dropped))
     elif current is not None and current["status"] in {"passed", "accepted"}:
         action_event(runtime.event, actor, "resume", f"design challenge attempt {current['attempt']} {current['status']}; launching the workers")
         return current

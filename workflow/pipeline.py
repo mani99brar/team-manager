@@ -1096,6 +1096,9 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             return f"{held}, and its source checkout {plan['repository']} could not be read ({error}): resume needs it"
         if edits:
+            refusal = resume_refusal(plan)  # As for a pause: never send the operator to a command that refuses.
+            if refusal:
+                return f"{held}, and feature files changed since it read them, but resume refuses: {refusal}"
             return (f"{held}, and feature files changed since it read them: {resume_command(directory, launch=True)} commits them, reruns "
                     f"the challenge and launches the workers unless it finds a P0/P1; {resume_command(directory)} reruns it and holds "
                     f"again ({HERDR_HINT})")

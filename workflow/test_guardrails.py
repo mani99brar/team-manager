@@ -1459,6 +1459,70 @@ class ChallengeHold(GuardedFeature):
         self.assertEqual(code, 0, output)
         self.assertEqual(self.launches(other), ["challenge", "challenge", "adapter", "ui"])
 
+    def test_drop_is_refused_wherever_no_held_attempt_would_consume_it(self):
+        # --drop numbers the notes of the held attempt it releases. A paused attempt's rerun numbers its own notes, and a released
+        # hold recorded its drops already: on those paths the flag would be ignored, so it is refused and nothing changes.
+        paused = self.prepare("drop-paused-001", hold=True)
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(paused), "--live"])
+        self.assertEqual((code, read_json(paused / "challenge.json")["status"]), (0, "paused"), output)
+        base = git(self.repo, "rev-parse", "HEAD")
+        self.edit_task()
+        self.challenge_says([concern("P2", "Naming is loose"), concern("P2", "One test is slow")])
+        output, code = self.cli(resume_main, [str(paused), "--launch", "--drop", "2"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 2: design challenge attempt 1 paused this run, and the rerun numbers its own notes", output)
+        self.assertEqual((git(self.repo, "rev-parse", "HEAD"), len(self.challenge_calls())), (base, 1))
+        # A released hold whose launch failed: resume --launch launches again, never with other drops.
+        directory = self.held("drop-released-001")
+        with patch("workflow.pipeline.start_workers", side_effect=RuntimeError("Claude launch exited 1")):
+            output, code = self.cli(resume_main, [str(directory), "--launch", "--drop", "2"])
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(directory / "challenge-hold.json")["dropped"], [2])
+        output, code = self.cli(resume_main, [str(directory), "--launch", "--drop", "1"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--drop 1: the hold of design challenge attempt 1 was released already, with note 2 dropped", output)
+        self.assertEqual(read_json(directory / "challenge-hold.json")["dropped"], [2])
+        self.assertEqual(self.launches(directory), ["challenge"])
+        output, code = self.cli(resume_main, [str(directory), "--launch"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+        for lane in LANES:
+            self.assertNotIn("One test is slow", self.given[lane]["prompt"])
+
+    def test_a_held_next_step_after_an_edit_names_the_rerun_or_the_refusal_resume_would_give(self):
+        directory = self.held("held-step-001")
+        self.edit_task()
+        status, _ = pipeline.run_status(directory)
+        self.assertIn("held for the operator; no worker launched, and feature files changed since it read them: "
+                      f"{PY} -m workflow resume {directory} --by operator --launch commits them, reruns the challenge and launches the "
+                      "workers unless it finds a P0/P1", status["next_step"])
+        # Never a command that refuses: with another change in the source checkout, the step names resume's refusal instead.
+        (self.repo / "other.txt").write_text("stray\n")
+        status, _ = pipeline.run_status(directory)
+        self.assertIn("held for the operator; no worker launched, and feature files changed since it read them, but resume refuses: ",
+                      status["next_step"])
+        self.assertIn("other.txt", status["next_step"])
+        self.assertNotIn("commits them", status["next_step"])
+        output, code = self.cli(resume_main, [str(directory), "--launch"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("other.txt", output)
+
+    def test_a_maintainer_resume_on_a_held_run_is_refused_with_or_without_an_edit(self):
+        # Decision 2a: releasing a hold or rerunning it on the operator's edit is the operator's decision.
+        directory = self.held("held-maintainer-001")
+        for edited in (False, True):
+            if edited:
+                self.edit_task()
+            with self.subTest(edited=edited):
+                head, plan = git(self.repo, "rev-parse", "HEAD"), (directory / "plan.json").read_bytes()
+                output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+                self.assertEqual(code, 1, output)
+                self.assertIn("--by maintainer is refused", output)
+                self.assertIn(f"The operator runs: {PY} -m workflow resume {directory} --by operator --launch", output)
+                self.assertEqual((git(self.repo, "rev-parse", "HEAD"), (directory / "plan.json").read_bytes()), (head, plan))
+                self.assertEqual((len(self.challenge_calls()), self.launches(directory)), (1, ["challenge"]))
+
     def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):
         directory = self.held("edit-hold-001")
         self.edit_task()
