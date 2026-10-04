@@ -1409,6 +1409,8 @@ def resume_main(argv=None):
     directory = args.directory.resolve()
     try:
         actor = require_actor(args, "accept-challenge" if args.accept_challenge is not None else "resume")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)
     except ValueError as error:
         parser.exit(1, f"Blocked: {error}\nNothing was changed.\n")
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -1478,6 +1480,8 @@ def answer_main(argv=None):
     entry = delivered = None
     try:
         actor = require_actor(args, "answer")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)
         plan = read_json(directory / "plan.json")
         if args.node not in plan_workers(plan):
             raise ValueError(f"{args.node} is not a lane of this run ({', '.join(plan_workers(plan))})")

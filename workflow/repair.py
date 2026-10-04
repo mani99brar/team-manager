@@ -579,6 +579,8 @@ def repair_main(argv=None):
     directory = args.directory.resolve()
     try:
         actor = require_actor(args, "repair")
+        from .abandon import refuse_abandoned
+        refuse_abandoned(directory)
         if bool(args.commit) == args.workspace:
             raise ValueError("Give exactly one of --commit <sha> (apply a fix) and --workspace (make a worktree to commit one in)")
         if args.commit and not (args.reason or "").strip():

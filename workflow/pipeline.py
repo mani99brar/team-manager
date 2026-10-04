@@ -288,6 +288,15 @@ def action_event(event, actor: str, action: str, detail: str = "") -> None:
     event("controller", "note", f"{action.capitalize()} by {actor_text(actor)}" + (f": {detail}" if detail else ""))
 
 
+CANDIDATE_REF = "candidate"
+
+
+def run_ref(directory: Path, name: str) -> str:
+    """`refs/workflow/<run hash>/<name>`: a lane's snapshot (freeze) or the run's candidate (`candidate`), so each stays
+    reachable after the run's worktrees are cleaned up; `brief` restores from them."""
+    return f"refs/workflow/{hashlib.sha256(str(Path(directory).resolve()).encode()).hexdigest()[:16]}/{name}"
+
+
 def merge_lanes(left: dict | None, right: dict | None) -> dict:
     """Parallel lane nodes each write their own key; the channel keeps every lane."""
     return {**(left or {}), **(right or {})}
@@ -321,8 +330,13 @@ def lane_positions(workers: list[str]) -> tuple[dict, list, int, int]:
 
 
 class Pipeline:
-    def __init__(self, directory: Path, sessions=None):
+    def __init__(self, directory: Path, sessions=None, abandoned_ok: bool = False):
+        """`abandoned_ok` is `abandon`'s own: every other command that builds a Pipeline changes the run, so an abandoned run is
+        refused here (status, export and brief never build one)."""
         self.directory = directory.resolve()
+        if not abandoned_ok:
+            from .abandon import refuse_abandoned
+            refuse_abandoned(self.directory)
         self.plan = read_json(self.directory / "plan.json")
         if "automatic" in self.plan:
             from .automatic import validate_automatic
@@ -550,8 +564,7 @@ class Pipeline:
             if changed:
                 commit = subprocess.check_output(["git", "-C", str(cwd), "-c", "commit.gpgsign=false", "commit-tree", tree,
                                                   "-p", self.plan["base_commit"], "-m", f"Workflow {self.plan['run_id']}: {node}"], env=env, text=True).strip()
-            ref = f"refs/workflow/{hashlib.sha256(str(self.directory).encode()).hexdigest()[:16]}/{node}"
-            subprocess.run(["git", "-C", str(cwd), "update-ref", ref, commit], check=True)
+            subprocess.run(["git", "-C", str(cwd), "update-ref", run_ref(self.directory, node), commit], check=True)
             receipt = read_json(self.directory / f"{node}.interactive.json")
             snapshots[node] = {"commit": commit, "changed_files": changed, "session_id": receipt["session_id"], **handoffs[node]}
         save_json(record, snapshots)
@@ -637,6 +650,8 @@ class Pipeline:
                     subprocess.run(["git", "-C", str(cwd), "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "cherry-pick", commit], env=commit_env(), check=True, capture_output=True)
             candidate = {"commit": git(cwd, "rev-parse", "HEAD"), "worktree": str(cwd)}
             save_json(saved, candidate)
+        # The latest generation's commit, also when a controller stopped before it was written: update-ref is idempotent.
+        subprocess.run(["git", "-C", self.plan["repository"], "update-ref", run_ref(self.directory, CANDIDATE_REF), candidate["commit"]], check=True)
         expected_tree = repairs[-1]["expected_candidate_tree"] if repairs else None
         if expected_tree and git(Path(self.plan["repository"]), "rev-parse", f"{candidate['commit']}^{{tree}}") != expected_tree:
             raise ValueError(f"Candidate {candidate['commit']} differs from the repaired tree of repair {repairs[-1]['n']}; inspect")
@@ -1094,6 +1109,15 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
     return f"{steps}: running now, or stopped mid-step (no step recorded an error). If no workflow command is running on this run, {recovery}"
 
 
+def abandoned_step(directory: Path, record: dict) -> str:
+    """`status`'s next step of an abandoned run: nothing goes on in it; its brief feeds a follow-up run."""
+    run = shlex.quote(str(directory))
+    by = f" by the {record['by']}" if record.get("by") else ""
+    return (f"none: the run was abandoned{by} ({record.get('reason')}), and every command that would change it refuses. For a follow-up: "
+            f"{sys.executable} -m workflow brief {run}, then {sys.executable} -m workflow launch <feature> --run-id <feature>-00N --follows {run} "
+            f"--live --automatic {BY_OPERATOR}")
+
+
 def complete_events(directory: Path) -> list[dict]:
     """events.jsonl as a reader beside a running controller sees it: a line counts once its newline is written."""
     path = directory / "events.jsonl"
@@ -1130,7 +1154,11 @@ def run_status(directory: Path) -> tuple[dict, str]:
     workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
     if workspaces:
         status["repair_workspaces"] = workspaces  # Cleanup is the operator's decision.
-    status["next_step"] = next_step(directory, plan, exported)
+    from .abandon import abandoned
+    record = abandoned(directory)
+    if record is not None:
+        status["abandoned"] = {key: record.get(key) for key in ("reason", "by", "abandoned_at", "stopped", "not_running")}
+    status["next_step"] = abandoned_step(directory, record) if record is not None else next_step(directory, plan, exported)
     events = complete_events(directory)
     shared_git = [event["message"] for event in events if str(event.get("message", "")).startswith("Shared .git ")]
     if shared_git:
@@ -1146,8 +1174,8 @@ def main():
     controller_git_config(os.environ)  # As `python -m workflow` does, for `python -m workflow.pipeline`; added once only.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
-                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar) and repair have their own "
-             "options: python -m workflow resume|answer|sidecar-pass|repair --help")
+                        help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar), repair, note, brief and "
+             "abandon have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
@@ -1176,12 +1204,19 @@ def main():
                                                          "into plan.sidecar")
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
+    parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
+                                                                   "{run_id, verdict, candidate_commit}")
     add_actor_argument(parser)
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
         actor = require_actor(args, args.action) if args.action in GATE_ACTIONS else None
+        if args.follows and args.action != "prepare":
+            parser.error("--follows applies to prepare only")
+        if args.action not in {"preflight", "prepare", "status", "export"}:
+            from .abandon import refuse_abandoned
+            refuse_abandoned(directory)  # Before `automatic` records its action: an abandoned run changes no more.
         if args.action == "preflight":
             if not args.policy:
                 parser.error("preflight requires --policy")
@@ -1255,7 +1290,11 @@ def main():
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
+            from .brief import follows_record
+            follows = follows_record(args.follows) if args.follows else None  # Refused before the run directory is made.
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
+            if follows:
+                plan["follows"] = follows
             if reviewers:
                 plan["reviewers"] = reviewers
             drill = policy.get("failure_drill")

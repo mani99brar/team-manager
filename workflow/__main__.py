@@ -1,4 +1,4 @@
-"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair` and `check-report`."""
+"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `abandon` and `check-report`."""
 import os
 import sys
 
@@ -28,6 +28,12 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "repair":
         from .repair import repair_main
         repair_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "brief":
+        from .brief import brief_main
+        brief_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "abandon":
+        from .abandon import abandon_main
+        abandon_main(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "check-report":
         from .checks import check_report_main
         check_report_main(sys.argv[2:])

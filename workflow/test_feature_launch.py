@@ -362,6 +362,55 @@ class FeatureLaunchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 launch_commands(self.repo, "project-workflows", run_id, Path("/tmp/workflow-launch-tests"))
 
+    def followed(self, name: str, **files) -> Path:
+        """A finished run's directory: plan.json plus the given files ({name: JSON value})."""
+        directory = self.root / "runs" / name
+        directory.mkdir(parents=True)
+        save_json(directory / "plan.json", {"run_id": name, "base_commit": "a" * 40})
+        for file, value in files.items():
+            save_json(directory / file.replace("_", "-").replace("-json", ".json"), value)
+        return directory
+
+    def test_follows_reaches_prepare_and_a_run_without_plan_json_is_refused_before_any_git_action(self):
+        """C30: a follow-up is a new run of the same feature; --follows names the run it follows (a directory, or a run id under the run root)."""
+        old = self.followed("project-workflows-001")
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", follows=str(old))
+        self.assertEqual(commands[2][commands[2].index("--follows") + 1], str(old))
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", follows="project-workflows-001")
+        self.assertEqual(commands[2][commands[2].index("--follows") + 1], str(old.resolve()))
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs")
+        self.assertNotIn("--follows", commands[2])
+        (self.root / "runs" / "empty").mkdir()
+        for value in (str(self.root / "runs" / "empty"), "missing-001"):
+            with self.subTest(follows=value), patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
+                with self.assertRaises(SystemExit):
+                    main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--run-id", "project-workflows-002",
+                          "--run-root", str(self.root / "runs"), "--follows", value])
+                command.assert_not_called()
+                self.assertIn("has no plan.json", errors.getvalue())
+
+    def test_prepare_pins_what_the_run_follows(self):
+        from .test_pipeline import pipeline_cli
+        folder = self.repo / "features" / "project-workflows"
+        tasks = ["--task", f"ui={folder / 'ui-task.md'}", "--task", f"adapter={folder / 'adapter-task.md'}"]
+        blocked = self.followed("blocked-001", review_json={"verdict": "blocked", "candidate_commit": "c" * 40})
+        limited = self.followed("limited-001", candidate_json={"commit": "d" * 40, "worktree": "/gone"})
+        bare = self.followed("bare-001")
+        for followed, expected in ((blocked, {"run_id": "blocked-001", "verdict": "blocked", "candidate_commit": "c" * 40}),
+                                   (limited, {"run_id": "limited-001", "verdict": None, "candidate_commit": "d" * 40}),
+                                   (bare, {"run_id": "bare-001", "verdict": None, "candidate_commit": None})):
+            with self.subTest(followed=followed.name):
+                run = self.root / "follow-ups" / followed.name
+                code, out, err = pipeline_cli("prepare", str(run), "--repo", str(self.repo), "--policy", str(folder / "policy.json"), *tasks,
+                                              "--follows", str(followed))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads((run / "plan.json").read_text())["follows"], expected)
+        code, _, err = pipeline_cli("prepare", str(self.root / "follow-ups" / "refused"), "--repo", str(self.repo), "--policy", str(folder / "policy.json"),
+                                    *tasks, "--follows", str(self.root / "runs" / "nothing-here"))
+        self.assertEqual(code, 1)
+        self.assertIn("has no plan.json", err)
+        self.assertFalse((self.root / "follow-ups" / "refused" / "plan.json").exists())
+
     def test_export_is_stable_until_state_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
