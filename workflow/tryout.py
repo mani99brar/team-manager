@@ -4,8 +4,10 @@ A user-facing feature (feature.json 2.4.0 `tryout: true`) asks the operator to t
 launch passes `--tryout` to prepare, which pins `plan.tryout`. `python -m workflow tryout <run> --result
 works|broken|skipped [--note "<text>"] --by operator` appends {result, note, at, by} to `<run>/tryout.json`, writes one
 plain record on the timeline and exports the run again, so the viewer drops its Untried chip. It refuses an abandoned run, a
-run whose plan does not ask for a tryout, a run with no candidate yet, and the maintainer (actor.OPERATOR_ONLY). The record is advisory:
-the controller never merges main, so nothing waits on it but the operator and the limit below.
+run whose plan does not ask for a tryout, a run with no candidate yet, a run a controller holds, a tryout.json it cannot
+read, or one with no verdicts list (fix or move it; the history is never replaced), and the maintainer
+(actor.OPERATOR_ONLY). The record is advisory: the controller never merges main, so nothing waits on it but the operator
+and the limit below.
 
 The limit (C29): a feature is untried when its latest integrated run has `tryout: true` and no verdict. A new tryout launch
 stops, before any Git action (launch, its dry run included, and preflight), when 3 other features are untried, counted
@@ -53,7 +55,7 @@ def record_verdict(directory: Path, plan: dict, result: str, note: str | None, a
         except (OSError, ValueError):
             record = None
         if not isinstance(record, dict) or not isinstance(record.get("verdicts"), list):
-            raise ValueError(f"{TRYOUT} cannot be read: fix or move it; nothing was recorded ({path})")
+            raise ValueError(f"{TRYOUT} cannot be read ({path}): fix or move it")
     entry = {"result": result, "note": note, "at": now(), **actor_record(actor)}
     save_json(Path(directory) / TRYOUT, {"version": TRYOUT_VERSION, "run_id": plan["run_id"], "verdicts": [*verdicts(directory), entry]})
     return entry

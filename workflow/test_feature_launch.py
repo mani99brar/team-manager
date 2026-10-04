@@ -992,8 +992,11 @@ class TryoutFlag(unittest.TestCase):
         git(self.repo, "commit", "-qm", "feature.json 2.4.0")
         _, commands, notes = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs", herdr=False)
         [note] = [note for note in notes if "tryout" in note]
-        self.assertIn("ui has a browser check", note)
-        self.assertIn('"tryout": true', note)
+        # At 2.4.0 the note asks for the key itself: no migration hint for a feature already there.
+        self.assertEqual(note, 'Lane ui has a browser check, and feature.json says nothing of a tryout: set "tryout": true '
+                               '(feature.json 2.4.0) when you should try each run before the merge to main, or false when it is '
+                               'not user-facing.')
+        self.assertNotIn("move feature.json", note)
         self.assertNotIn("--tryout", commands[2])
         # A lane subset without the browser check gets none.
         _, _, notes = launch_commands(self.repo, "project-workflows", "project-workflows-002", self.root / "runs", herdr=False, workers="adapter")

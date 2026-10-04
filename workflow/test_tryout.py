@@ -129,7 +129,10 @@ class TryoutTests(unittest.TestCase):
                 (run / "tryout.json").write_text(text)
                 code, output = tryout_cli(str(run), "--result", "works", "--by", "operator")
                 self.assertEqual(code, 1, output)
-                self.assertIn("tryout.json cannot be read: fix or move it; nothing was recorded", output)
+                self.assertIn("tryout.json cannot be read", output)
+                self.assertIn("fix or move it", output)
+                # tryout_main adds "Nothing was recorded." after every refusal: the message does not say it twice.
+                self.assertEqual(output.lower().count("nothing was recorded"), 1, output)
                 self.assertEqual((run / "tryout.json").read_text(), text)
                 self.assertFalse((run / "events.jsonl").exists() and "Tryout recorded" in (run / "events.jsonl").read_text())
 
