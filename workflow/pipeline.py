@@ -1294,7 +1294,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["preflight", "prepare", "start", "automatic", "automatic-step", "attach", "freeze", "retry", "reconcile", "review", "approve", "status", "export"],
                         help="resume and answer (feature.json 2.2.0 runs), sidecar-pass (2.3.0 runs with a review sidecar), repair, note, brief, "
-             "abandon, clean and ledger have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon|clean|ledger --help")
+             "abandon, clean, ledger and tryout have their own options: python -m workflow resume|answer|sidecar-pass|repair|note|brief|abandon|clean|ledger|tryout --help")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path)
