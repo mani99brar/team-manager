@@ -283,7 +283,10 @@ const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (
 const ABANDONED_ROW = /^Abandoned by the (?:operator|maintainer)\b/
 /** pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches. */
 const LAUNCH_NOTES = /^Launch notes: /
-/** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
+/**
+ * Node-less rows that are no block: the controller's running rows, and C17's action rows (raw status note, served with no status).
+ * Any other node-less row without a status was `blocked` (before B1).
+ */
 const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT, LAUNCH_NOTES]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
 const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS, LAUNCH_NOTES]
