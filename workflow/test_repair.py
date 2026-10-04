@@ -503,6 +503,13 @@ class OneLaneRepair(RepairFixture):
         self.block_at_candidate()
         blocked = read_json(self.directory / "verification/candidate/ui/1/packet.json")
         self.assertEqual((blocked["reused_from"]["path"], blocked["gate"]["status"]), ("verification/worker/ui/1/packet.json", "blocked"))
+        # The reused packet's folder holds only packet.json: the brief lists the worker packet's logs.
+        code, _, err = self.cli("ui", "--workspace")
+        self.assertEqual(code, 0, err)
+        brief = (self.directory / "repair-workspace-1.brief.md").read_text()
+        for expected in ("ui-build: exit 1", str(self.directory / "verification/candidate/ui/1/packet.json"),
+                         str(self.directory / "verification/worker/ui/1/packet.json"), str(self.directory / "verification/worker/ui/1/check-0.log")):
+            self.assertIn(expected, brief)
         fix = self.commit_on(self.snapshot("ui"), {"ui.txt": "after"})
         code, _, err = self.cli("ui", "--commit", fix, "--reason", REASON)
         self.assertEqual(code, 0, err)

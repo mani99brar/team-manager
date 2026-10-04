@@ -284,6 +284,26 @@ class ThreeLaneRun(LaneRun):
         self.assertTrue((self.directory / "verification/candidate/ui/2/worktree").is_dir())
         self.assertEqual(second["result"]["checks"][0]["exit_code"], 1)
 
+    def test_two_lanes_run_the_candidate_checks_even_when_one_lane_changes_nothing(self):
+        # docs/docs.md is in the base and the docs worker rewrites it unchanged: its snapshot is the base, so the --ff
+        # candidate is the ui snapshot. Several lanes still run every candidate check (C28 reuses only for one lane).
+        (self.repo / "docs/docs.md").write_text("# docs\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "Docs page"], check=True)
+        self.prepare(["ui", "docs"])
+        self.sessions.edits["docs"] = ("docs/docs.md", "# docs\n")
+        with SqliteSaver.from_conn_string(str(self.directory / "pipeline.sqlite")) as saver:
+            graph = build_pipeline(saver, self.runtime)
+            graph.invoke({"run_id": self.plan["run_id"]}, self.config)
+            verified = graph.invoke(Command(resume={"freeze": True}), self.config)
+            self.assertEqual(verified["__interrupt__"][0].value["kind"], "independent_review")
+        snapshots = read_json(self.directory / "snapshots.json")
+        self.assertEqual(snapshots["docs"]["commit"], self.plan["base_commit"])
+        self.assertEqual(read_json(self.directory / "candidate.json")["commit"], snapshots["ui"]["commit"])
+        for node in ("ui", "docs"):
+            self.assertNotIn("reused_from", read_json(self.directory / f"verification/candidate/{node}/1/packet.json"))
+            self.assertTrue((self.directory / f"verification/candidate/{node}/1/worktree").is_dir(), node)
+
     def test_report_positions_follow_the_lane_count(self):
         positions, edges, width, height = lane_positions(LANES)
         self.assertEqual([positions[f"launch_{node}"] for node in LANES], [(90, 70), (90, 210), (90, 350)])

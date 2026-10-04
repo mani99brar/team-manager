@@ -1109,6 +1109,15 @@ describe('deriveFocus, humanizeEvent, attemptResultUris, laneLines', () => {
       'gate blocked on attempt 2: Executed check failed: npm test; unit: exit 1')
     assert.equal(humanizeEvent({ message: '[adapter] Candidate gate passed on attempt 3 after attempt 2 failed' }), 'gate passed on attempt 3 after attempt 2 failed')
     assert.equal(humanizeEvent({ message: '[ui] Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae' }), 'combined revision 1ab6b95', 'the verdict reads as before')
+    // C28's reuse note and C27's slow note follow the controller's text, each split out as a note.
+    assert.equal(humanizeEvent({ message: '[adapter] Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae; worker checks reused from verification/worker/adapter/1/packet.json (one lane, no browser check, the candidate is its snapshot)' }),
+      'combined revision 1ab6b95 · worker checks reused from verification/worker/adapter/1/packet.json (one lane, no browser check, the candidate is its snapshot)')
+    assert.equal(humanizeEvent({ message: '[ui] Combined revision 1ab6b9505a4269f5b6f68195fc4915446a5944ae; slow: browser took 420 s of its 600 s timeout (70%)' }),
+      'combined revision 1ab6b95 · slow: browser took 420 s of its 600 s timeout (70%)')
+    assert.equal(humanizeEvent({ message: `${recorded}build (exit 0); slow: browser took 420 s of its 600 s timeout (70%)` }),
+      'passed · build (exit 0) gated at the candidate · slow: browser took 420 s of its 600 s timeout (70%)')
+    assert.equal(humanizeEvent({ message: `${recorded}build (exit 1); passed on attempt 2 after attempt 1 failed; slow: unit took 210 s of its 300 s timeout (70%)` }),
+      'passed · build (exit 1) gated at the candidate · passed on attempt 2 after attempt 1 failed · slow: unit took 210 s of its 300 s timeout (70%)')
   })
 
   it('lists attempt result URIs per lane, oldest first', () => {
