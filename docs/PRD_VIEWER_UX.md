@@ -295,7 +295,7 @@ ACTIVITY  oldest first · [Newest first]  [ ] Controller log (5)            (run
   - "No action needed: the controller is supervising."
   - An optional `$ "$PY" -m workflow.interactive attach-one "$RUN" --node duel [Copy]` is offered to watch the pane.
   - The running Steps row's bar grows to *now*.
-  - Chip: `● Live · updated 2 s ago · controller running`. With B2 `activity.controller` it reads `not_running` on polls spanning at least 15 s. The chip then turns amber, `▲ controller not running`, and the Now banner switches to rule 5 (Interrupted) with `"$PY" -m workflow automatic "$RUN" --live`.
+  - Chip: `● Live · updated 2 s ago · controller running`. With B2 `activity.controller` it reads `not_running` on polls spanning at least 15 s. The chip then turns amber, `▲ controller not running`, and the Now banner switches to rule 5 (Interrupted) with `"$PY" -m workflow automatic "$RUN" --live --by operator`.
 - **Interrupted** (Ctrl-C, a closed terminal, Claude Code unavailable). The banner reads `‖ Interrupted at <focus step> · <time>: the controller stopped; sessions keep running`, with the same `automatic --live` command. The interruption can be recorded in three places, and 6.2 rule 5 lists them: a run-level controller row, the review node itself, or the freeze on the handoff node.
 - **Blocked before freeze** (a worker deadline, a `status: blocked` completion, a fourth question, a rejected completion file, a vanished session). The banner reads `✗ Blocked before freeze at Freeze worker handoffs · Worker game deadline exhausted; no automatic relaunch`. The next step is a new run (6.2 rule 6); `repair` refuses these runs.
 
@@ -667,7 +667,7 @@ It never matches older `[Errno …]`, `KeyboardInterrupt` or `blocked` rows. Gua
   - `RESUME_NOTE`: Ctrl-C while waiting on the workers (automatic.py:1116, emitted at :1272).
   - `UNAVAILABLE_NOTE`: Claude Code was unavailable (:1121, emitted at :1278 and :1316).
   - With B1 these rows are served as `status: 'paused'`. `projectSnapshot` already shows the handoff as `paused` from them (server/projects.ts:1116, :1133-1137).
-  - `resumable_stop`: drive stopped before any step, because the run's source checkout (its own worktree since per-run checkouts; the target checkout for older runs) is off the run's source branch, or at a start that did not complete, and stopped or relaunched nothing. Its row names what comes before the resume, and the next step offers that first: switching the checkout back to the run's `source_branch` (RUNBOOK "Source feature branch changed"), or `reconcile "$RUN"`, or `start "$RUN" --live` for a run that was never started (RUNBOOK "Ambiguous startup"); then `automatic "$RUN" --live`.
+  - `resumable_stop`: drive stopped before any step, because the run's source checkout (its own worktree since per-run checkouts; the target checkout for older runs) is off the run's source branch, or at a start that did not complete, and stopped or relaunched nothing. Its row names what comes before the resume, and the next step offers that first: switching the checkout back to the run's `source_branch`, after `status "$RUN"`, which prints that checkout's path (RUNBOOK "Source feature branch changed"), or `reconcile "$RUN" --by operator`, or `start "$RUN" --live --by operator` for a run that was never started (RUNBOOK "Ambiguous startup"); then `automatic "$RUN" --live --by operator`.
 - **(b) Recorded on the focus node itself.** The focus node is `paused`, its latest status event is the last event for that node, and the message contains `interrupted` or `resume with: python -m workflow automatic`. The redacted `<path>` keeps that substring. This covers two notes:
   - `REVIEW_RESUME_NOTE`, recorded on `review` at automatic.py:624, :738, :804 and :811.
   - `FREEZE_RESUME_NOTE`, recorded on the freeze, which is aliased to `handoff`, at :1314.
@@ -975,16 +975,16 @@ The total is about 4,000 LOC including tests.
 | Case | Input | Expected |
 |---|---|---|
 | `review_blocked` | skeleton-001 | The three-step `init` → fill and commit → `launch` template with `<fixes-feature>` and `<target repo>` placeholders; no concrete feature name or run id |
-| `blocked_identical` | guardrails | `repair "$RUN" ui --workspace` … `automatic "$RUN" --live`, **without** a diagnosis event, and **not** "interrupted" or "Claude Code unavailable" despite the four stale Errno rows |
+| `blocked_identical` | guardrails | `repair "$RUN" ui --workspace --by operator` … `automatic "$RUN" --live --by operator`, **without** a diagnosis event, and **not** "interrupted" or "Claude Code unavailable" despite the four stale Errno rows |
 | `succeeded` | skeleton-fixes-001 | No command |
 | `question` | synthetic | Both `answer` forms naming the lane; the `--no-herdr` form present |
 | `pane_attention` | synthetic `interactive` "needs attention in its pane" on `launch_game`, with no later event | `attach-one "$RUN" --node game`. A later event for that node clears it. |
-| `interrupted` (a) | a run-level `Supervisor interrupted … resume with: python -m workflow automatic <path> --live` row after the latest launch event | `automatic "$RUN" --live`; headline "Interrupted" |
-| `interrupted` (b), review | review `paused` whose latest event is `Controller interrupted while waiting for the reviewers …` (REVIEW_RESUME_NOTE), with **no** controller row | `automatic "$RUN" --live`; the status word is `‖ Interrupted`, never `✗ Failed` |
-| `interrupted` (b), freeze | handoff `paused` whose latest event is `<error>. The freeze was stopping the workers … resume with: python -m workflow automatic <path> --live` (FREEZE_RESUME_NOTE) | `automatic "$RUN" --live` |
-| `interrupted` (c) | run `running`, `activity.controller: 'not_running'` on two polls 20 s apart | `automatic "$RUN" --live`. A single poll does **not** match. |
-| `interrupted` (d) | `verify_game` paused with `Repair 1 by the operator … Continue with python -m workflow automatic <path> --live` | `automatic "$RUN" --live`. With `… workflow retry <path>` (a manual run): `retry "$RUN"`. |
-| `blocked_before_freeze` | handoff failed plus a node-less controller row `Worker game deadline exhausted; no automatic relaunch` | Reason quotes the row. Next step is a new run (`launch <feature> --repo <target repo> --run-id <new run id> --live --automatic`); **no** `repair` command |
+| `interrupted` (a) | a run-level `Supervisor interrupted … resume with: python -m workflow automatic <path> --live` row after the latest launch event | `automatic "$RUN" --live --by operator`; headline "Interrupted" |
+| `interrupted` (b), review | review `paused` whose latest event is `Controller interrupted while waiting for the reviewers …` (REVIEW_RESUME_NOTE), with **no** controller row | `automatic "$RUN" --live --by operator`; the status word is `‖ Interrupted`, never `✗ Failed` |
+| `interrupted` (b), freeze | handoff `paused` whose latest event is `<error>. The freeze was stopping the workers … resume with: python -m workflow automatic <path> --live` (FREEZE_RESUME_NOTE) | `automatic "$RUN" --live --by operator` |
+| `interrupted` (c) | run `running`, `activity.controller: 'not_running'` on two polls 20 s apart | `automatic "$RUN" --live --by operator`. A single poll does **not** match. |
+| `interrupted` (d) | `verify_game` paused with `Repair 1 by the operator … Continue with python -m workflow automatic <path> --live` | `automatic "$RUN" --live --by operator`. With `… workflow retry <path>` (a manual run): `retry "$RUN" --by operator`. |
+| `blocked_before_freeze` | handoff failed plus a node-less controller row `Worker game deadline exhausted; no automatic relaunch` | Reason quotes the row. Next step is a new run (`launch <feature> --repo <target repo> --run-id <new run id> --live --automatic --by operator`); **no** `repair` command |
 | `blocked_before_freeze` | `completion.status: 'blocked'` with a summary | Reason is `game reported blocked: <summary>` |
 | `blocked_before_freeze` | a fourth-question controller row | Reason quotes the question |
 | `blocked_before_freeze` | an in-scope `Could not confirm worker stop` row | The stop-sessions step comes first |
