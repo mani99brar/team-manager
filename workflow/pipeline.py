@@ -1258,6 +1258,9 @@ def main():
             if not args.live:
                 parser.error("automatic requires --live because it can launch an independent reviewer")
             from .automatic import supervise
+            from .guardrails import LAUNCH_NOTE_ENV, run_finished_note
+            # Launch's word to this process only, so removed before supervise: steps, checks, workers and reviewers inherit os.environ.
+            launch_prints_note = os.environ.pop(LAUNCH_NOTE_ENV, None) == "1"
             try:
                 supervise(directory)
             except TransientInfraError as error:
@@ -1265,9 +1268,8 @@ def main():
                 warning = stale_claude_warning()
                 parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
-            from .guardrails import LAUNCH_NOTE_ENV, run_finished_note
             note = run_finished_note(directory, read_json(directory / "plan.json"))
-            if note and os.environ.get(LAUNCH_NOTE_ENV) != "1":
+            if note and not launch_prints_note:
                 print(note)
             return
         if args.action == "export":

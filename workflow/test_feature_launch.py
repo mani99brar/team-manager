@@ -152,25 +152,39 @@ class FeatureLaunchTests(unittest.TestCase):
         shutil.copytree(self.repo / "features/project-workflows", self.repo / "features/hidden")
         (self.repo / ".git/info/exclude").write_text("features/hidden/\n")
         self.assertEqual(self.git("status", "--porcelain"), "")
-        with self.assertRaisesRegex(ValueError, r"features/hidden/policy\.json is not committed at HEAD: an ignored or excluded file never "
-                                                r"reaches the run's worktree\. Commit it"):
+        # One refusal names every file, as new, ignored or excluded.
+        with self.assertRaisesRegex(ValueError, r"^Not committed at HEAD \(new, ignored or excluded\): features/hidden/policy\.json, "
+                                                r"features/hidden/[a-z-]+\.md, .*\. The run's worktree holds only committed files; commit them "
+                                                r"\(git add -f for an ignored file\), then launch again\.$"):
             launch_commands(self.repo, "hidden", "hidden-001", self.root / "runs")
         runs = self.root / "runs"
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
             with self.assertRaises(SystemExit):
                 main(["hidden", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
         command.assert_not_called()
-        self.assertIn("features/hidden/policy.json is not committed at HEAD", errors.getvalue())
+        self.assertIn("Not committed at HEAD (new, ignored or excluded): features/hidden/policy.json", errors.getvalue())
         self.assertEqual(self.git("branch", "--list", "feature/*"), "")
         # One excluded, untracked task file among committed ones is named the same way.
         (self.repo / ".git/info/exclude").write_text("")
         self.git("add", "features/hidden/policy.json", "features/hidden/feature.json", "features/hidden/ui-task.md")
         self.git("commit", "-qm", "Partial")
         (self.repo / ".git/info/exclude").write_text("features/hidden/adapter-task.md\n")
-        with self.assertRaisesRegex(ValueError, r"features/hidden/adapter-task\.md is not committed at HEAD"):
+        with self.assertRaisesRegex(ValueError, r"\(new, ignored or excluded\): features/hidden/adapter-task\.md\. The run's"):
+            launch_commands(self.repo, "hidden", "hidden-001", self.root / "runs")
+        # A new file, never added, is named the same way.
+        (self.repo / ".git/info/exclude").write_text("")
+        self.assertIn("adapter-task.md", self.git("status", "--porcelain"))
+        with self.assertRaisesRegex(ValueError, r"\(new, ignored or excluded\): features/hidden/adapter-task\.md\. The run's"):
             launch_commands(self.repo, "hidden", "hidden-001", self.root / "runs")
 
-    def test_a_leftover_source_checkout_names_its_branch_too_when_no_run_used_it(self):
+    def test_a_repository_without_a_commit_gets_a_readable_refusal(self):
+        empty = self.root / "empty"
+        shutil.copytree(self.repo / "features", empty / "features")
+        subprocess.run(["git", "init", "-q", str(empty)], check=True)
+        with self.assertRaisesRegex(ValueError, r"^The repository has no commit yet: .*empty\. Commit the feature, then launch again\.$"):
+            launch_commands(empty, "project-workflows", "project-workflows-001", self.root / "runs")
+
+    def test_a_leftover_source_checkout_names_its_branch_for_deletion_only_when_your_head_holds_it(self):
         runs = self.root / "runs"
         branch = "feature/project-workflows/project-workflows-001"
         source = (runs / "project-workflows-001.source").resolve()
@@ -179,9 +193,21 @@ class FeatureLaunchTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
         command.assert_not_called()
+        # -d, which refuses a branch that is not merged: the branch is named for deletion only while your HEAD holds its tip.
         self.assertIn(f"Source checkout already exists: {source}. A run's worktree is never reused; remove it (git -C {self.repo} worktree "
-                      f"remove {source}) and its branch, which no run used (git -C {self.repo} branch -D {branch}), or launch with "
-                      "another --run-id.", errors.getvalue())
+                      f"remove {source}) and its branch, which holds no commit of its own (git -C {self.repo} branch -d {branch}), or launch "
+                      "with another --run-id.", errors.getvalue())
+        # A branch with its own commits (a challenge revision, an integrated run not merged yet) is never suggested for deletion.
+        (source / "revision.md").write_text("revised\n")
+        subprocess.run(["git", "-C", str(source), "add", "revision.md"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "Revision"], check=True)
+        with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit):
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+        self.assertNotIn("branch -d", errors.getvalue())
+        self.assertNotIn("branch -D", errors.getvalue())
+        self.assertIn(f"remove it (git -C {self.repo} worktree remove {source}) or launch with another --run-id. Its branch {branch} has "
+                      f"commits your HEAD does not: inspect them (git -C {self.repo} log HEAD..{branch}) before you delete it.", errors.getvalue())
         # Without the branch, the refusal names the worktree only.
         self.git("worktree", "remove", str(source))
         self.git("branch", "-D", branch)

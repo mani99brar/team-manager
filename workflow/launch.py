@@ -83,6 +83,8 @@ def untracked(repo: Path, paths: list[Path]) -> list[str]:
     would be missing from the run's worktree.
     """
     names = list(dict.fromkeys(path.relative_to(repo).as_posix() for path in paths))
+    if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"], capture_output=True).returncode != 0:
+        raise ValueError(f"The repository has no commit yet: {repo}. Commit the feature, then launch again.")
     listed = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD", "--", *names],
                             capture_output=True, text=True, check=True).stdout
     held = set(listed.split("\0"))
@@ -268,8 +270,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             rerooted.append(sidecar_brief)
     missing = untracked(repo, rerooted)
     if missing:
-        raise ValueError("\n  ".join(f"{name} is not committed at HEAD: an ignored or excluded file never reaches the run's worktree. "
-                                     "Commit it (git add -f for an ignored file), then launch again" for name in missing))
+        raise ValueError(f"Not committed at HEAD (new, ignored or excluded): {', '.join(missing)}. The run's worktree holds only committed "
+                         "files; commit them (git add -f for an ignored file), then launch again.")
 
     base = [sys.executable, "-m", "workflow"]
     preflight = [*base, "preflight", str(run), "--repo", str(repo), "--policy", str(policy_path)]
@@ -384,13 +386,18 @@ def main(argv=None):
         source = source_checkout(run)
         branch = commands[1][commands[1].index("-b") + 1]
         if source.exists() or source.is_symlink():
-            # The run directory does not exist, so no prepare ran: a branch of the run's name is a failed launch's leftover.
+            # A missing run directory does not mean the branch is unused: a run abandoned by deleting its directory keeps its revisions
+            # there. So the branch is named for deletion (with -d, which refuses unmerged work) only while your HEAD holds its tip.
             leftover = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
                                       capture_output=True).returncode == 0
+            merged = leftover and subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", f"refs/heads/{branch}", "HEAD"],
+                                                 capture_output=True).returncode == 0
             raise ValueError(f"Source checkout already exists: {source}. A run's worktree is never reused; remove it "
                              f"(git -C {repo} worktree remove {source})"
-                             + (f" and its branch, which no run used (git -C {repo} branch -D {branch})," if leftover else "")
-                             + " or launch with another --run-id.")
+                             + (f" and its branch, which holds no commit of its own (git -C {repo} branch -d {branch})," if merged else "")
+                             + " or launch with another --run-id."
+                             + (f" Its branch {branch} has commits your HEAD does not: inspect them (git -C {repo} log HEAD..{branch}) "
+                                "before you delete it." if leftover and not merged else ""))
         # A malformed registry blocks the launch here, before any Git action; it is never rewritten.
         merge_registry(read_registry(registry), entry)
         for note in notes + ([migration] if migration else []):
