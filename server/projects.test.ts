@@ -2715,3 +2715,33 @@ test('[roles] a 1.7.0 export serves the pinned roles, the controller record and 
     assertError(await get(app, url('alpha', 'main', 'bad-roles', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
   })
 })
+
+// ---- Tryouts (C7, C29): export 1.7.0 ----
+
+test('[tryout] a 1.7.0 export serves the tryout, its verdicts redacted and the override; older runs serve null', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const verdicts = [
+      { result: 'broken', note: `The list is empty after a reload of ${root}/x`, at: '2026-10-04T11:00:00+02:00', by: 'operator', via: 'claude-code' },
+      { result: 'works', note: null, at: '2026-10-04T10:00:00Z', by: 'operator' },
+    ]
+    const override = { reason: 'The demo is tomorrow', by: 'operator', at: '2026-10-04T08:00:00Z' }
+    await writeRun(root, { runId: 'tried', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...inputsSection(), tryout: { required: true, verdicts, allow_untried: override } } })
+    await writeRun(root, { runId: 'untried', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...inputsSection(), tryout: { required: true, verdicts: [] } } })
+    await writeRun(root, { runId: 'before', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2), inputs: inputsSection() })
+    const served = validateRunInputs((await get(app, url('alpha', 'main', 'tried', '/inputs'))).json())
+    assert.deepEqual(served.tryout, {
+      required: true, allow_untried: override,
+      verdicts: [{ result: 'broken', note: 'The list is empty after a reload of <path>', at: '2026-10-04T09:00:00.000Z', by: 'operator' },
+        { result: 'works', note: null, at: '2026-10-04T10:00:00Z', by: 'operator' }],
+    })
+    assert.deepEqual(validateRunInputs((await get(app, url('alpha', 'main', 'untried', '/inputs'))).json()).tryout, { required: true, verdicts: [], allow_untried: null })
+    assert.equal(validateRunInputs((await get(app, url('alpha', 'main', 'before', '/inputs'))).json()).tryout, null)
+    // An unknown result is invalid storage, as any other inputs field is.
+    await writeRun(root, { runId: 'bad-tryout', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...inputsSection(), tryout: { required: true, verdicts: [{ result: 'fine', note: null, at: '2026-10-04T10:00:00Z', by: 'operator' }] } } })
+    assertError(await get(app, url('alpha', 'main', 'bad-tryout', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+  })
+})

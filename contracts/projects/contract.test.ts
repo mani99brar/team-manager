@@ -270,6 +270,28 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
   delete prepared.controller
   delete prepared.automatic!.profile
   validateRunInputs(prepared)
+  // Within 1.7.0 (C7, C29): the tryout a run asks for, the operator's verdicts and any launch past the untried limit; null or
+  // absent for a run prepared before it.
+  const tried = structuredClone(examples.runInputs)
+  tried.tryout = { required: true, verdicts: [], allow_untried: null }
+  validateRunInputs(tried)
+  tried.tryout = {
+    required: true, allow_untried: { reason: 'The demo is tomorrow', by: 'operator', at: '2026-10-04T08:00:00.000Z' },
+    verdicts: [{ result: 'broken', note: 'Empty list', by: 'operator', at: '2026-10-04T09:00:00.000Z' }, { result: 'works', note: null, by: 'operator', at: '2026-10-04T10:00:00.000Z' }],
+  }
+  validateRunInputs(tried)
+  tried.tryout = null
+  validateRunInputs(tried)
+  for (const broken of [
+    (inputs: RunInputs) => { inputs.tryout = { required: true, verdicts: [{ result: 'fine' as never, note: null, by: 'operator', at: '2026-10-04T09:00:00.000Z' }], allow_untried: null } },
+    (inputs: RunInputs) => { inputs.tryout = { required: true, verdicts: [{ result: 'works', note: null, by: 'someone' as never, at: '2026-10-04T09:00:00.000Z' }], allow_untried: null } },
+    (inputs: RunInputs) => { inputs.tryout = { required: 'yes' as never, verdicts: [], allow_untried: null } },
+    (inputs: RunInputs) => { inputs.tryout = { required: true, verdicts: [], allow_untried: { reason: '', by: 'operator', at: '2026-10-04T08:00:00.000Z' } } },
+  ]) {
+    const bad = structuredClone(examples.runInputs)
+    broken(bad)
+    assert.throws(() => validateRunInputs(bad))
+  }
   for (const broken of [
     (inputs: RunInputs) => { inputs.automatic!.profile = 'supervised' as never },
     (inputs: RunInputs) => { inputs.roles!.worker.effort = 'extreme' as never },

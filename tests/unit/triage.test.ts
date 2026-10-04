@@ -19,6 +19,7 @@ import {
   deriveNow,
   gateReasonsByCheck,
   humanizeEvent,
+  isUntried,
   laneLines,
   nowResultUris,
   textToString,
@@ -217,6 +218,7 @@ const CLI: Record<string, string> = {
   repair: body(PYTHON('repair.py'), 'def repair_main('),
   brief: body(PYTHON('brief.py'), 'def brief_main('),
   abandon: body(PYTHON('abandon.py'), 'def abandon_main('),
+  tryout: body(PYTHON('tryout.py'), 'def tryout_main('),
   'attach-one': body(PYTHON('interactive.py'), 'def main('),
 }
 
@@ -234,7 +236,7 @@ function assertRealCli(now: Now) {
     for (const flag of tokens.filter(token => token.startsWith('--'))) {
       assert.ok(parser.includes(flag === '--by' ? 'add_actor_argument(parser)' : `add_argument("${flag}"`), `${verb} takes ${flag} (${command})`)
     }
-    if (['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'launch', 'abandon'].includes(verb)) {
+    if (['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'launch', 'abandon', 'tryout'].includes(verb)) {
       assert.ok(command.endsWith(' --by operator') || command.includes(' --by operator '), `a gate command names the operator (${command})`)
     }
     // launch's positional is the feature; there "$RUN" is the run it follows (--follows, C30).
@@ -591,6 +593,40 @@ describe('deriveNow', () => {
     assert.match(now.next.label, /Merging or pushing is your decision/)
     assert.equal(textToString(now.headline, T0),
       '✓ Integrated ee74298 into feature/skeleton-fixes/skeleton-fixes-001 · no push performed · took 31m50s · review approved by general and coverage · 2 open P2')
+  })
+
+  it('succeeded, untried (C7): the try-this lines and the tryout command until one verdict is recorded', () => {
+    const tryout = (verdicts: NonNullable<RunInputs['tryout']>['verdicts']) => {
+      const run = runData(fixes)
+      const inputs = structuredClone(run.inputs!)
+      inputs.workers[0].task = { text: '# Game\n\n## Goal\n\nPrivate matches\nstay private.\n\n## Acceptance\n\nA test.\n', truncated: false }
+      inputs.tryout = { required: true, verdicts, allow_untried: null }
+      return { ...run, inputs: validateRunInputs(inputs) }
+    }
+    const untried = tryout([])
+    assert.equal(isUntried(untried), true)
+    const now = checked(untried)
+    assert.equal(now.situation, 'succeeded')
+    assert.equal(now.next.action, 'required')
+    assert.match(now.next.label, /^Try the candidate/)
+    assert.match(textToString(now.headline, T0), / · untried$/)
+    const lines = now.next.steps.filter(step => step.kind === 'text').map(step => step.text)
+    assert.deepEqual(lines.slice(0, 2), ['game: Private matches stay private.', `game, verify yourself: ${fixes.inputs.workers[0].completion!.verify_yourself}`])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow tryout "$RUN" --result <works|broken|skipped> --note "<what you tried>" --by operator'])
+    assert.deepEqual(now.next.runbook.map(ref => ref.topic), ['Try it'])
+    // One recorded verdict, whatever it says, clears it: the run reads as before, with the verdict named.
+    const tried = tryout([{ result: 'broken', note: 'Empty list', by: 'operator', at: t(0) }])
+    assert.equal(isUntried(tried), false)
+    const after = checked(tried)
+    assert.equal(after.next.action, 'none')
+    assert.deepEqual(after.next.steps, [])
+    assert.match(textToString(after.headline, T0), / · tried: broken$/)
+    // A run that asks for no tryout, or one prepared before it, is never untried.
+    const plain = runData(fixes)
+    assert.equal(isUntried(plain), false)
+    assert.equal(isUntried({ ...plain, inputs: validateRunInputs({ ...structuredClone(plain.inputs!), tryout: { required: false, verdicts: [], allow_untried: null } }) }), false)
+    // A tryout run that has not succeeded is not untried yet.
+    assert.equal(isUntried({ ...untried, detail: { ...untried.detail, snapshot: { ...untried.detail.snapshot, status: 'running' } } }), false)
   })
 
   it('question', () => {

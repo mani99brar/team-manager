@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  RUN_PROFILES, runControllerSchema, runRolesSchema, sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
   type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
@@ -264,6 +264,14 @@ const inputsSectionSchema = z.strictObject({
   /** Export 1.7.0: plan.roles and plan.controller as prepare pinned them; absent for runs prepared before them. */
   roles: runRolesSchema.nullable().optional(),
   controller: runControllerSchema.nullable().optional(),
+  /** Export 1.7.0 (C7, C29): plan.tryout, tryout.json's verdicts and plan.allow_untried; absent for runs prepared before them. */
+  tryout: z.strictObject({
+    required: z.boolean(),
+    verdicts: z.array(z.strictObject({
+      result: z.enum(TRYOUT_RESULTS), note: z.string().nullable(), at: zonedTimestamp, by: z.enum(['operator', 'maintainer']), via: z.literal('claude-code').optional(),
+    })),
+    allow_untried: z.strictObject({ reason: z.string().min(1), at: zonedTimestamp, by: z.enum(['operator', 'maintainer']), via: z.literal('claude-code').optional() }).optional(),
+  }).optional(),
 })
 
 const exportSchema = z.object({
@@ -750,6 +758,13 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
     // Export 1.7.0; runs prepared before the pins, and older exports, serve null.
     roles: section.roles == null ? null : { worker: { ...section.roles.worker }, judges: { ...section.roles.judges } },
     controller: section.controller == null ? null : { ...section.controller },
+    // Export 1.7.0 (C7, C29); runs prepared before the tryout, and older exports, serve null. `via` is evidence the viewer does not show.
+    tryout: section.tryout === undefined ? null : {
+      required: section.tryout.required,
+      verdicts: section.tryout.verdicts.map(verdict => ({ result: verdict.result, note: optionalText(verdict.note), at: utcTimestamp(verdict.at), by: verdict.by })),
+      allow_untried: section.tryout.allow_untried === undefined ? null
+        : { reason: redactPaths(section.tryout.allow_untried.reason), by: section.tryout.allow_untried.by, at: utcTimestamp(section.tryout.allow_untried.at) },
+    },
   }
 }
 

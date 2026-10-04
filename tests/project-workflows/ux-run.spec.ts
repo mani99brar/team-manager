@@ -7,7 +7,8 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import {
-  BUNDLE_SHA256, GUARDED_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, RUN_GUARDED, RUN_GUARDED_ASKING, RUN_REVIEWER_BLOCKED, RUN_SUCCEEDED, laneGraphNodes,
+  BUNDLE_SHA256, GUARDED_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, RUN_GUARDED, RUN_GUARDED_ASKING, RUN_REVIEWER_BLOCKED, RUN_SUCCEEDED, apiRunPath, laneGraphNodes,
+  runInputs,
 } from './fixtures.ts'
 import {
   APPROVAL_BUNDLE, DEADLINE_MESSAGE, RUN_AWAITING_APPROVAL, RUN_CONTROLLER_INTERRUPTED, RUN_DEADLINE, RUN_FREEZE_INTERRUPTED, RUN_IDENTICAL, RUN_PANE,
@@ -371,4 +372,32 @@ test(`[scenario:question-attention] A waiting question or a pane that needs atte
   await expect(page).not.toHaveTitle(/^\?/)
   await expect(page.locator('[data-attention]')).toHaveCount(0)
   await expectNoExecutionControls(page)
+})
+
+test(`[scenario:tryout-untried] A succeeded run that asks for a tryout carries the Untried chip and the try-this step until one verdict is recorded (${phase})`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  // The run's inputs as a 1.7.0 export of a tryout run serves them (C7): the worker phase's fixture, or the seeded run's own.
+  const path = `${apiRunPath(RUN_SUCCEEDED)}/inputs`
+  let verdicts: object[] = []
+  await page.route(url => url.pathname === path, async route => {
+    const inputs = phase === 'worker' ? structuredClone(runInputs[RUN_SUCCEEDED]) : await (await route.fetch()).json()
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...inputs, tryout: { required: true, verdicts, allow_untried: null } }) })
+  })
+  const banner = await openRun(page, runUrl(RUN_SUCCEEDED), 'succeeded')
+  const chip = page.getByTestId('untried-chip')
+  await expect(chip).toHaveText('Untried')
+  await expect(page.getByTestId('run-status')).toContainText('Untried')
+  await expect(banner).toContainText('· untried')
+  await expect(banner).toContainText(/try the candidate before you merge it, then record what you found/i)
+  await expect(commands(page)).toHaveText(['"$PY" -m workflow tryout "$RUN" --result <works|broken|skipped> --note "<what you tried>" --by operator'])
+  await expect(banner).toContainText('Each check row keeps its screenshots.')
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'tryout-untried')
+  // One recorded verdict clears the chip and the step; the banner names the verdict.
+  verdicts = [{ result: 'works', note: 'Reload keeps the list.', by: 'operator', at: '2026-10-04T10:00:00.000Z' }]
+  await page.reload()
+  await expect(now(page)).toHaveAttribute('data-situation', 'succeeded')
+  await expect(now(page)).toContainText('· tried: works')
+  await expect(chip).toHaveCount(0)
+  await expect(commands(page)).toHaveCount(0)
 })

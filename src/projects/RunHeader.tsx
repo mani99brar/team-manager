@@ -1,4 +1,4 @@
-import type { Now, Timeline } from '../../contracts/projects/triage.ts'
+import { isUntried, type Now, type Timeline } from '../../contracts/projects/triage.ts'
 import type { RunDetail, RunInputs, WorkflowDefinition } from './api.ts'
 import { INPUTS_NONE_SENTENCE } from './Assignment.tsx'
 import { LiveStatus } from './LiveStatus.tsx'
@@ -39,7 +39,8 @@ function RunSpan({ detail, timeline, clock }: { detail: RunDetail; timeline: Tim
 
 /**
  * The run header (docs/PRD_VIEWER_UX.md 4.2), a card with a top rule in the run's tone (docs/PRD_VIEWER_REVAMP.md 5.3): line 1
- * names the run (its feature, else the workflow's title), its status in a few words, its span and how fresh the page is, with
+ * names the run (its feature, else the workflow's title), its status in a few words (with an Untried chip while a succeeded run
+ * waits for your tryout, C7), its span and how fresh the page is, with
  * the Local/UTC switch; line 2 is the pinned inputs as one facts line (`run-inputs-facts`), whether the definition changed
  * since, and every other fact behind `Details`.
  */
@@ -87,6 +88,10 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
         <h2 id="run-summary-title"><span className="run-title" title={title}>{title}</span> <span className="run-id">{summary.run_id}</span></h2>
         <p className="run-status-line" data-testid="run-status">
           <StatusBadge status={summary.status} /> <span className="run-status-meaning" data-testid="run-status-meaning">{RUN_STATUS_SHORT[summary.status]}</span>
+          {isUntried({ detail, inputs: data }) && (
+            <> <span className={`ui-chip ${toneClass('warn')} run-untried`} data-testid="untried-chip"
+              title="This run asks for your tryout (feature.json tryout: true) and has no verdict yet; the Now banner says what to try and how to record it.">Untried</span></>
+          )}
         </p>
         <p className="run-span" data-testid="run-span"><RunSpan detail={detail} timeline={timeline} clock={clock} /></p>
         <div className="run-freshness">

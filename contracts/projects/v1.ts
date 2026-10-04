@@ -8,8 +8,8 @@ const version = z.literal('1.0.0')
  * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
- * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, and the
- * challenge's optional `hold` (C8).
+ * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
+ * challenge's optional `hold` (C8) and the optional `tryout` (C7, C29).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -333,6 +333,25 @@ export const runControllerSchema = z.strictObject({
   claude_version: z.string().min(1).nullable(),
 })
 
+/** The verdicts `python -m workflow tryout` records (C7). */
+export const TRYOUT_RESULTS = ['works', 'broken', 'skipped'] as const
+
+/**
+ * The tryout a run asks for (1.7.0, C7 and C29): `required` is plan.tryout, `verdicts` the operator's records in
+ * `tryout.json`, oldest first, and `allow_untried` the reason a launch went past the untried-feature limit (null when it did
+ * not). A succeeded run with `required` and no verdict is untried.
+ */
+export const runTryoutSchema = z.strictObject({
+  required: z.boolean(),
+  verdicts: z.array(z.strictObject({
+    result: z.enum(TRYOUT_RESULTS),
+    note: z.string().min(1).nullable(),
+    by: z.enum(['operator', 'maintainer']),
+    at: timestamp,
+  })),
+  allow_untried: z.strictObject({ reason: z.string().min(1), by: z.enum(['operator', 'maintainer']), at: timestamp }).nullable(),
+})
+
 /** What a run was asked to do, served at `.../runs/{run_id}/inputs`; pinned from the run's own files. */
 export const runInputsSchema = z.strictObject({
   contract_version: version140,
@@ -366,6 +385,8 @@ export const runInputsSchema = z.strictObject({
   roles: runRolesSchema.nullable().optional(),
   /** 1.7.0: the controller that prepared the run; null (or absent) for runs prepared before the record. */
   controller: runControllerSchema.nullable().optional(),
+  /** 1.7.0: the run's tryout (C7); null (or absent) for runs prepared before it. */
+  tryout: runTryoutSchema.nullable().optional(),
 })
 
 // ---- Review sidecar ledger (1.6.0) ------------------------------------------------------------------------------
@@ -514,6 +535,7 @@ export type ReviewResult = z.infer<typeof reviewResultSchema>
 export type RunInputWorker = z.infer<typeof runInputWorkerSchema>
 export type WorkerQuestion = z.infer<typeof workerQuestionSchema>
 export type RunChallenge = z.infer<typeof runChallengeSchema>
+export type RunTryout = z.infer<typeof runTryoutSchema>
 export type RunInputs = z.infer<typeof runInputsSchema>
 export type SidecarLedgerFile = z.infer<typeof sidecarLedgerFileSchema>
 export type SidecarLedger = z.infer<typeof sidecarLedgerSchema>

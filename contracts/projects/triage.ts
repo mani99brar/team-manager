@@ -201,7 +201,7 @@ export const CONTROLLER_DEBOUNCE_MS = 15_000
 export const GAP_MS = 120_000
 
 /** The gate actions (workflow/actor.py, C17): each requires `--by`, and the commands the viewer offers are the operator's. */
-const GATES: ReadonlySet<string> = new Set(['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair'])
+const GATES: ReadonlySet<string> = new Set(['start', 'automatic', 'retry', 'reconcile', 'approve', 'resume', 'answer', 'repair', 'tryout'])
 export const BY_OPERATOR = '--by operator'
 const workflow = (verb: string, ...args: string[]) => ['"$PY" -m workflow', verb, '"$RUN"', ...args, ...(GATES.has(verb) ? [BY_OPERATOR] : [])].join(' ')
 const command = (text: string, caption?: string): Step => caption ? { kind: 'command', text, caption } : { kind: 'command', text }
@@ -228,6 +228,7 @@ const RUNBOOK = {
   sourceBranch: { section: 'Status, failures and recovery', topic: 'Source feature branch changed' },
   ambiguousStartup: { section: 'Status, failures and recovery', topic: 'Ambiguous startup' },
   repair: { section: 'Blocked after freeze: repair a lane', topic: null },
+  tryout: { section: 'Tryouts and the untried-feature limit (feature.json 2.4.0 `tryout`)', topic: 'Try it' },
 } satisfies Record<string, RunbookRef>
 
 // ---- Controller message patterns (workflow/*.py) --------------------------------------------------------------------
@@ -1560,6 +1561,28 @@ function workerDeadline(inputs: RunInputs, worker: RunInputWorker): string | 'pa
   return new Date(ms(start) + inputs.automatic.worker_timeout_seconds * 1000 + waited).toISOString()
 }
 
+/** C7: a succeeded run whose plan asks for a tryout (feature.json 2.4.0 `tryout: true`) and holds no verdict yet. */
+export function isUntried(run: Pick<RunData, 'detail' | 'inputs'>): boolean {
+  const tryout = run.inputs?.tryout
+  return run.detail.snapshot.status === 'succeeded' && tryout?.required === true && tryout.verdicts.length === 0
+}
+
+/** The first paragraph of a pinned task's `## Goal` section, on one line; null when the task has none (or was cut before it). */
+function taskGoal(text: string): string | null {
+  const section = /^##[ \t]+Goal[ \t]*$([\s\S]*?)(?=^#{1,2}[ \t]|(?![\s\S]))/m.exec(text)?.[1] ?? ''
+  const paragraph = section.trim().split(/\n\s*\n/)[0]?.replace(/\s+/g, ' ').trim()
+  return paragraph || null
+}
+
+/** The try-this lines of an untried run (C7): each lane's task Goal and its worker's `verify_yourself`, from the inputs the viewer has. */
+function tryThisLines(inputs: RunInputs): Step[] {
+  return inputs.workers.flatMap(worker => {
+    const goal = taskGoal(worker.task.text)
+    const verify = worker.completion?.verify_yourself ?? null
+    return [...goal ? [prose(`${worker.node_id}: ${goal}`)] : [], ...verify ? [prose(`${worker.node_id}, verify yourself: ${verify}`)] : []]
+  })
+}
+
 function succeededNow(context: Context): Draft | null {
   if (context.status !== 'succeeded') return null
   const integrated = lastMessage(context, 'integrate')
@@ -1574,6 +1597,20 @@ function succeededNow(context: Context): Draft | null {
     const openP2 = review.findings.filter(finding => finding.severity === 'P2' && finding.disposition === 'open').length
     headline.push(` · review approved${approvers.length ? ` by ${approvers.join(' and ')}` : ''}${openP2 ? ` · ${openP2} open P2` : ''}`)
   }
+  const tryout = context.run.inputs?.tryout
+  if (context.run.inputs && isUntried(context.run)) {
+    // C7: the operator tries the candidate and records the verdict; the record is advisory, since nothing merges main.
+    headline.push(' · untried')
+    return {
+      situation: 'succeeded', tone: 'succeeded', glyph: '✓', since: runEnd?.at ?? null, headline,
+      next: {
+        action: 'required', label: 'Try the candidate before you merge it, then record what you found', runbook: [RUNBOOK.tryout],
+        steps: [...tryThisLines(context.run.inputs), command(workflow('tryout', '--result', '<works|broken|skipped>', '--note', '"<what you tried>"'))],
+        caveat: 'Each check row keeps its screenshots. Merging or pushing is still your decision.',
+      },
+    }
+  }
+  if (tryout?.required && tryout.verdicts.length) headline.push(` · tried: ${tryout.verdicts.at(-1)!.result}`)
   return {
     situation: 'succeeded', tone: 'succeeded', glyph: '✓', since: runEnd?.at ?? null, headline,
     next: { action: 'none', label: 'Nothing required by the workflow. Merging or pushing is your decision.', runbook: [RUNBOOK.approve], steps: [], caveat: null },
