@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .guardrails import conventions_block, decisions_block, reading_rule
+from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, plan_digest, read_json, review_node,
                        review_nodes, run_claude, save_json, worker_effort)
@@ -300,14 +300,15 @@ def setup_note(directory: Path) -> str:
 
 def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
     """What a native worker session receives: the rules (with the policy's setup, which has not run in its worktree), its
-    pinned task, the project's conventions (CLAUDE.md), the run's decisions.md, a manual run's reading rule, a note on the
-    review sidecar when the plan has one, and in automatic mode the completion protocol, whose deadline counts from
-    `launched_at` (the launch time the receipt records), else from the receipt on disk."""
+    pinned task, the project's conventions (CLAUDE.md), the run's decisions.md, the design challenge's advisory notes (never
+    the reviewers'), a manual run's reading rule, a note on the review sidecar when the plan has one, and in automatic mode
+    the completion protocol, whose deadline counts from `launched_at` (the launch time the receipt records), else from the
+    receipt on disk."""
     prompt = ("You are a workflow worker in your own worktree. A human can type directly into this terminal. "
               "Do not launch agents, commit, merge, push or modify shared contracts. Stay within this worktree. "
               "Report changed files, checks actually executed, and open assumptions. "
               "Completion of a turn is not workflow approval." + setup_note(directory) + "\n\n" + plan["nodes"][node]["task"]
-              + conventions_block(plan) + decisions_block(plan))
+              + conventions_block(plan) + decisions_block(plan) + challenge_block(directory, plan))
     reading = "" if plan.get("automatic") else reading_rule(plan)  # An automatic run's completion protocol carries its own.
     if reading:
         prompt += f"\n\n{reading}\n"

@@ -15,7 +15,8 @@
   before any worker session exists, and it pauses and resumes on its own); the export shows it as the first node.
   A P0 or P1 concern pauses the run; `resume` commits the edited feature files on the run's branch, moves the run to
   that commit, re-pins them and reruns it, `resume --accept-challenge <reason>` records an override. A `resume` with
-  nothing edited since the paused attempt is refused: it would only re-roll the same challenge.
+  nothing edited since the paused attempt is refused: it would only re-roll the same challenge. The final record's
+  concerns reach every worker prompt as advisory notes (challenge_block), never a reviewer's.
 - Completion 1.1.0 and questions: a worker may end its turn with status `question`; its deadline pauses (persisted
   in `<node>.deadline.json`) until `answer` records the reply and types it into the worker's pane, only while that pane
   shows the worker's session. A delivery that fails leaves the answer recorded but undelivered; rerunning `answer`
@@ -431,7 +432,9 @@ def changed_since(directory: Path, plan: dict, record: dict) -> list[str]:
 def challenge_prompt(directory: Path, plan: dict) -> str:
     """The job's prompt. A rerun after a paused attempt (attempt 2 on) also gets that attempt's P0/P1 concerns and the
     feature files changed since, and is asked to raise each concern again unless the change resolves it. What decisions.md
-    settles follows decisions_block: with `## Operator decisions` only those, otherwise all of it."""
+    settles follows decisions_block: with `## Operator decisions` only those, otherwise all of it. Each concern's message ends
+    with its recommendation and who acts on it, which challenge_block shows the workers (C10: text only, the schema stays
+    1.0.0 and the pause rule as it was)."""
     prd = plan.get("prd")
     settled = ("reopen an Operator decision of decisions.md (the operator's own answer) only by showing it cannot hold, and then as a "
                "P1; the rest of decisions.md is open to challenge, like the tasks" if has_operator_decisions(decisions_text(plan) or "")
@@ -444,7 +447,12 @@ def challenge_prompt(directory: Path, plan: dict) -> str:
              "cannot work as written, P1 when it is likely to produce the wrong result or major rework and must be settled before "
              "any worker starts, P2 when it is worth recording and the run can continue. A P0 or P1 pauses the run for the "
              f"operator, so raise one only for a consequence you can name; {settled}. kind is assumption, failure_mode, complexity "
-             "or other. Return the requested JSON schema: concerns (possibly empty), simpler_alternative and cheap_experiment."]
+             "or other. End each concern's message with two lines: \"Recommendation: <one action and its done-condition>\" and "
+             "\"Acts: operator | worker | note\" (operator: a decision only the operator can make; worker: a lane acts on it; note: "
+             "nobody needs to act). A recommendation never offers a fallback such as \"or at least\": when two options remain, the "
+             "concern is a decision for the operator (Acts: operator), with the recommended option first. Each P0 and P1 message "
+             "cites the file:line it rests on, or says \"no file evidence\". Return the requested JSON schema: concerns (possibly "
+             "empty), simpler_alternative and cheap_experiment."]
     if prd:
         parts.append(f"\n\nThe PRD this feature implements: {directory / prd['copy']} (read it).")
     else:
@@ -654,6 +662,33 @@ def paused_message(directory: Path, herdr: bool = False) -> str:
     lines.append("Edit the task files, decisions.md or the PRD, then rerun the challenge:\n  " + resume_command(directory, herdr))
     lines.append("Or record an override and launch the workers:\n  " + resume_command(directory, herdr, accept=True))
     return "\n".join(lines)
+
+
+def challenge_block(directory: Path, plan: dict, dropped: set[int] | frozenset[int] = frozenset()) -> str:
+    """The final design challenge as advisory notes for the worker prompt only, after decisions_block (C9, decision 11):
+    reviewers never get it, and it is never pinned into a lane's task. A passed or accepted challenge.json's concerns keep its
+    numbering, each with severity, kind, message and consequence; the simpler alternative and the cheap experiment are left
+    out. An accepted record lists the P0/P1s the operator overrode apart, with the reason, as context only. Nothing for a
+    disabled, paused or absent record, nor for a note whose number is in `dropped` (slice 3's --drop at a hold release)."""
+    record = load_challenge(directory)
+    if record is None or record["status"] not in {"passed", "accepted"}:
+        return ""
+    numbered = [(number, concern) for number, concern in enumerate(record["concerns"], 1) if number not in dropped]
+    if not numbered:
+        return ""
+    accepted = record["status"] == "accepted"
+    notes = [(number, concern) for number, concern in numbered if not (accepted and concern["severity"] in BLOCKING)]
+    overridden = [(number, concern) for number, concern in numbered if accepted and concern["severity"] in BLOCKING]
+    ask = "write the completion file with status question" if isinstance(plan.get("automatic"), dict) else "ask in this pane"
+    item = lambda number, concern: f"{number}. {concern['severity']} [{concern['kind']}] {concern['message']}\n   Consequence: {concern['consequence']}"
+    lines = [f"\n\nDesign challenge notes (advisory, attempt {record['attempt']})\nDo each note's recommendation, or say in your completion "
+             "why not; a fallback such as \"or at least\" is not the recommendation. A note marked \"Acts: operator\" is the operator's "
+             f"decision: if your work depends on it, {ask} instead of choosing.", *(item(*note) for note in notes)]
+    if overridden:
+        lines.append("Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
+                     f"it with the reason: {record['accepted_reason']}")
+        lines += [item(*concern) for concern in overridden]
+    return "\n".join(lines) + "\n"
 
 
 def refuse_placeholders(path: Path, text: str) -> None:

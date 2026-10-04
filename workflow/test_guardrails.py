@@ -27,7 +27,7 @@ from .automatic import DEFAULTS, read_completion, read_signal, review_prompt, wa
 from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
 from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, iso, pinned_task, repin, resume_main, stop_rule
-from .interactive import worker_prompt
+from .interactive import worker_prompt, write_private
 from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
@@ -90,14 +90,17 @@ def concern(severity: str, message: str = "A concern") -> dict:
 
 
 class RecordingSessions(FakeSessions):
-    """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends."""
+    """FakeSessions that keep what each worker launch was given: its session's plan digest and the prompt a native launch sends,
+    which they also keep as `<lane>.prompt.txt`, as InteractiveSessions.run does (the viewer shows it)."""
 
     def __init__(self, directory, plan, given: dict):
         super().__init__(directory, plan)
         self.given = given
 
     def run(self, node):
-        self.given[node] = {"plan_digest": plan_digest(self.plan), "prompt": worker_prompt(self.directory, self.plan, node)}
+        prompt = worker_prompt(self.directory, self.plan, node)
+        self.given[node] = {"plan_digest": plan_digest(self.plan), "prompt": prompt}
+        write_private(self.directory / f"{node}.prompt.txt", prompt)
         return super().run(node)
 
 
@@ -139,7 +142,8 @@ assert '--print' in args and '--bg' not in args and '--dangerously-skip-permissi
 prompt = sys.stdin.read()
 add_dirs = [args[index + 1] for index, item in enumerate(args) if item == '--add-dir']
 with open({str(self.calls)!r}, 'a') as handle:
-    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs}}) + '\\n')
+    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs,
+                              "schema": json.loads(args[args.index('--json-schema') + 1])}}) + '\\n')
 with (Path.cwd().parent / 'fake-launches.log').open('a') as log:  # The worker fake logs its launches to the same file.
     log.write('challenge\\n')
 print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
@@ -856,6 +860,95 @@ class ChallengePasses(GuardedFeature):
         self.assertEqual((disabled["status"], disabled["attempt"], disabled["session_id"], disabled["concerns"]), ("disabled", 0, None, []))
         self.assertEqual(self.launches(off), ["adapter", "ui"])
         self.assertEqual(len(self.challenge_calls()), 1)
+        # A disabled challenge gives the workers no notes (C9).
+        self.assertEqual(guardrails.challenge_block(off, read_json(off / "plan.json")), "")
+        self.assertFalse(any("Design challenge notes" in self.given[lane]["prompt"] for lane in LANES))
+
+    # What a passed attempt's P2 concerns become in every worker prompt (C9, decision 11): numbered as in challenge.json, with
+    # severity, kind, message and consequence, under one header line; for a manual run the operator is asked in the pane.
+    NOTES = ("\n\nDesign challenge notes (advisory, attempt 1)\nDo each note's recommendation, or say in your completion why not; a "
+             "fallback such as \"or at least\" is not the recommendation. A note marked \"Acts: operator\" is the operator's decision: if "
+             "your work depends on it, ask in this pane instead of choosing.\n"
+             "1. P2 [assumption] Naming is loose\n   Consequence: Naming is loose breaks the run\n"
+             "2. P2 [assumption] One test is slow\n   Consequence: One test is slow breaks the run\n")
+
+    def test_the_workers_get_the_final_challenge_as_numbered_advisory_notes_and_the_reviewers_never_do(self):
+        from .automatic import completion_protocol_prompt, print_review_prompt
+        directory = self.prepare("notes-001")
+        self.challenge_says([concern("P2", "Naming is loose"), concern("P2", "One test is slow")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        plan = read_json(directory / "plan.json")
+        self.assertEqual(guardrails.challenge_block(directory, plan), self.NOTES)
+        for lane in LANES:
+            for prompt in (self.given[lane]["prompt"], (directory / f"{lane}.prompt.txt").read_text()):
+                with self.subTest(lane=lane):
+                    self.assertEqual(prompt.count(self.NOTES), 1)
+                    self.assertLess(prompt.index(guardrails.decisions_block(plan)), prompt.index(self.NOTES))  # Right after decisions.md.
+                    for left_out in ("One lane instead of two", "Prototype the ui change first"):  # The alternative and the experiment.
+                        self.assertNotIn(left_out, prompt)
+            self.assertNotIn("Naming is loose", plan["nodes"][lane]["task"])  # Never pinned into the task.
+        # An automatic worker asks with a question.
+        automatic = worker_prompt(directory, {**plan, "automatic": dict(DEFAULTS)}, "ui")
+        self.assertIn(self.NOTES.replace("ask in this pane", "write the completion file with status question"), automatic)
+        # Reviewers never get the notes, in either transport (decision 11).
+        runtime = SimpleNamespace(directory=directory, plan=plan, workers=LANES)
+        for reviewer in [None, *plan["reviewers"]]:
+            native = review_prompt(runtime, directory / "review.diff", reviewer) + completion_protocol_prompt(runtime, "token", "0" * 64, "c" * 40)
+            for prompt in (print_review_prompt(runtime, directory / "review.diff", reviewer), native):
+                self.assertNotIn("Design challenge notes", prompt)
+                self.assertNotIn("Naming is loose", prompt)
+        # The seam for slice 3's --drop at a hold release: a dropped note is left out, its neighbours keep their numbers.
+        self.assertEqual(guardrails.challenge_block(directory, plan, {1}),
+                         self.NOTES.replace("1. P2 [assumption] Naming is loose\n   Consequence: Naming is loose breaks the run\n", ""))
+        self.assertEqual(guardrails.challenge_block(directory, plan, {1, 2}), "")
+
+    def test_an_accepted_challenge_lists_the_overridden_p0_p1_apart_as_context_only(self):
+        directory = self.prepare("accepted-notes-001")
+        self.challenge_says([concern("P1", "The lanes overlap"), concern("P2", "Minor")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, read_json(directory / "challenge.json")["status"]), (0, "paused"), output)
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Ownership is checked at freeze"])
+        self.assertEqual(code, 0, output)
+        expected = ("\n\nDesign challenge notes (advisory, attempt 1)\n"
+                    "Do each note's recommendation, or say in your completion why not; a fallback such as \"or at least\" is not the "
+                    "recommendation. A note marked \"Acts: operator\" is the operator's decision: if your work depends on it, ask in this "
+                    "pane instead of choosing.\n"
+                    "2. P2 [assumption] Minor\n   Consequence: Minor breaks the run\n"
+                    "Accepted by the operator: context only, do not act. These P0/P1 concerns paused the run, and the operator launched "
+                    "it with the reason: Ownership is checked at freeze\n"
+                    "1. P1 [assumption] The lanes overlap\n   Consequence: The lanes overlap breaks the run\n")
+        for lane in LANES:
+            self.assertIn(expected, self.given[lane]["prompt"])
+            self.assertIn(expected, (directory / f"{lane}.prompt.txt").read_text())
+
+    def test_the_challenge_asks_for_a_recommendation_its_actor_and_file_evidence_and_its_schema_is_unchanged(self):
+        # C10, prompt only: each concern's message ends with a recommendation and who acts on it; the severity sentence and the
+        # pause rule stay, and the job gets the same schema (challenge 1.0.0), so an operator's P2 pauses nothing.
+        directory = self.prepare("acts-001")
+        message = "The adapter's interface is unsettled.\nRecommendation: keep VALUE an integer; done when the unit check passes.\nActs: operator"
+        self.challenge_says([concern("P2", message)])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(read_json(directory / "challenge.json")["status"], "passed")
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+        [call] = self.challenge_calls()
+        prompt = " ".join(call["prompt"].split())
+        for asked in ("End each concern's message with two lines: \"Recommendation: <one action and its done-condition>\" and \"Acts: "
+                      "operator | worker | note\"", "A recommendation never offers a fallback such as \"or at least\": when two options "
+                      "remain, the concern is a decision for the operator (Acts: operator), with the recommended option first.",
+                      "Each P0 and P1 message cites the file:line it rests on, or says \"no file evidence\".",
+                      "A P0 or P1 pauses the run for the operator, so raise one only for a consequence you can name;",
+                      "P0 when the plan cannot work as written, P1 when it is likely to produce the wrong result or major rework and must "
+                      "be settled before any worker starts, P2 when it is worth recording and the run can continue."):
+            self.assertIn(asked, prompt)
+        schema = call["schema"]
+        self.assertEqual(schema, guardrails.output_schema())
+        self.assertEqual((schema["required"], schema["additionalProperties"]), (["concerns", "simpler_alternative", "cheap_experiment"], False))
+        item = schema["properties"]["concerns"]["items"]
+        self.assertEqual((item["required"], item["additionalProperties"]), (["severity", "kind", "message", "consequence"], False))
+        self.assertEqual(guardrails.challenge_schema()["properties"]["version"], {"const": "1.0.0"})
+        self.assertIn(f"1. P2 [assumption] {message}\n   Consequence: ", self.given["ui"]["prompt"])
 
 
 class ClaudeUpdateAroundTheChallenge(GuardedFeature):
