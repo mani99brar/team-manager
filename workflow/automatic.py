@@ -1910,8 +1910,9 @@ def stop_error(runtime, message: str, *, bare: bool = False) -> RuntimeError:
 
 
 def resumable_stop(runtime, message: str) -> RuntimeError:
-    """A stop drive makes before any step that the operator can resume (C44 review): the target checkout is off the run's source
-    branch while the run can continue (source_branch_note; final_stop decides), or the start did not complete (start_note).
+    """A stop drive makes before any step that the operator can resume (C44 review): the run's source checkout (its own
+    worktree since per-run checkouts; the target checkout for older runs) is off the run's source branch while the run can
+    continue (source_branch_note; final_stop decides), or the start did not complete (start_note).
     Nothing is stopped or relaunched. It is said on the timeline first as a `controller` `interrupted` event that names what
     comes before `automatic --live`, never `Controller blocked:`, so the viewer offers that resume rather than a new run. Once
     per controller process and run, as record_blocked. The error to raise."""
@@ -1927,8 +1928,8 @@ def resume_note(runtime) -> str:
 
 
 def source_branch_note(runtime, branch: str) -> str:
-    """The target checkout is on `branch`, not the run's source branch (which integration fast-forwards): switching it back
-    continues the run."""
+    """The run's source checkout, plan.repository (its own worktree since per-run checkouts; the target checkout for older
+    runs), is on `branch`, not the run's source branch (which integration fast-forwards): switching it back continues the run."""
     repository, source = shlex.quote(runtime.plan["repository"]), runtime.plan["source_branch"]
     return (f"Source feature branch changed: {repository} is on {branch}, not {source}. Nothing was stopped or relaunched: switch it "
             f"back with: git -C {repository} switch {source}, {resume_note(runtime)}")
@@ -1960,9 +1961,10 @@ def final_stop(runtime, state) -> tuple[str, bool] | None:
     """Why drive would stop at `state` for good and how it says it, `(reason, bare)`, or None while the run can continue: drive's
     own classification, read only (no check retried, no review re-entered, nothing written). `bare` is a stop the source branch
     says as the reason alone (the failed wait in drive, advance_or_block); every other one record_blocked says as
-    `Controller blocked: <reason>`. drive asks it when the target checkout is off the source branch (P's review): a run that
-    already stopped for good keeps its block's framing, word for word, since the resumable interruption would hide the block
-    from the viewer, switching back would only stop at it again, and another text would page the operator again for one stop."""
+    `Controller blocked: <reason>`. drive asks it when the run's source checkout (its own worktree since per-run checkouts;
+    the target checkout for older runs) is off the source branch (P's review): a run that already stopped for good keeps its
+    block's framing, word for word, since the resumable interruption would hide the block from the viewer, switching back
+    would only stop at it again, and another text would page the operator again for one stop."""
     if not state.values or any(name.startswith("launch_") for name in state.next):
         return None  # A start that did not complete: reconciled or started, the run goes on.
     frozen = freeze_failure(state)

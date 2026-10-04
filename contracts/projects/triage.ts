@@ -253,7 +253,8 @@ const NODE_RESUME_NOTE = /interrupted|resume with: python -m workflow automatic/
 const FREEZE_NOTE = /The freeze was stopping the workers/
 /**
  * automatic.py resumable_stop: drive stops before any step, stops and relaunches nothing, and records a `controller`
- * `interrupted` row naming what comes before `automatic --live`: the target checkout switched back to the run's source branch
+ * `interrupted` row naming what comes before `automatic --live`: the run's source checkout (its own worktree since per-run
+ * checkouts; the target checkout for older runs) switched back to the run's source branch
  * (source_branch_note), or a start that did not complete reconciled, or started when the run never was (start_note).
  */
 const BRANCH_CHANGED = /^Source feature branch changed\b/
