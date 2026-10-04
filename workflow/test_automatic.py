@@ -602,7 +602,7 @@ class ReviewCompletionTests(unittest.TestCase):
 
     def test_every_coverage_brief_blocks_only_in_its_four_cases(self):
         # Decision 4 (C34): a coverage gap is P1 only for a failure shown on the candidate, a contradicted quoted line, a quoted worker
-        # disclosure, or a line it could not check because its test source or packet was unreadable, each case listed; every other
+        # disclosure, or a line it could not check because its test source, packet or screenshot was unreadable, each case listed; every other
         # gap, a missing or weak test that an Acceptance line names included, is a P2 row. Every md-manager feature's coverage brief
         # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test".
         tool = Path(__file__).resolve().parents[1]
@@ -615,10 +615,53 @@ class ReviewCompletionTests(unittest.TestCase):
                     self.assertNotIn(absent, text)
                 for value in ("A gap is P1 only in these four cases: (1) a failure you show on the candidate: the inputs, the expected behaviour quoted, "
                               "the actual behaviour, and path:line; (2) a candidate behaviour that contradicts a quoted line of a task, of a document a "
-                              "task cites, or of decisions.md", "(3) a worker's disclosure, quoted, that something fails; (4) a line you could not check "
-                              "because its test source", "was unreadable: name the line and say why", "Every other gap is one P2 finding per",
+                              "task cites, or of decisions.md", "(3) a worker's disclosure, quoted, that something fails", "(4) a line you could not check "
+                              "because its test source, packet or screenshot was unreadable: name the line and say why", "Every other gap is one P2 finding per",
                               "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)
+
+    def test_every_coverage_brief_applies_its_cases_the_same_way(self):
+        # The replay (C34 follow-up) found cases (2) and (3) applied unevenly. (2): revamp-004 never rated a second useNow P1 because it
+        # was already at the base, and one sample excused it as unchanged; the candidate is what merges. (3): revamp-006 blocked once and
+        # rated P2 twice on a failure the worker disclosed in open_assumptions in its own words. A PRD line that conflicts with a task line
+        # the worker followed and disclosed (sidecar-001 blocked 3/3 where sidecar-002 approved) is one P2 for the operator, while a
+        # contradicted task line or Operator decision stays P1. The map gains ## Goal and ## Constraints rows (okiya's Normal depth,
+        # absent 3/3) and a row per Operator decision, and a gap on any row is at least a P2.
+        tool = Path(__file__).resolve().parents[1]
+        for path in [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]:
+            text = " ".join(path.read_text().split())
+            with self.subTest(brief=str(path.relative_to(tool))):
+                for value in ("(contradictions are yours to report, not the general reviewer's), anywhere in the candidate, code the diff did not "
+                              "change included: the candidate is what merges, so \"unchanged\" never excuses it;",
+                              "in any completion field (summary, open_assumptions, untested, verify_yourself, the Proof table) or in the worker's own words",
+                              "an item that is only untested is a P2 finding, not a disclosed failure",
+                              "A line of the PRD, or of another cited document, that conflicts with a task line the worker followed and disclosed is not "
+                              "a P1: it is one P2 finding that quotes both lines and ends, after its Consequence, with \"Acts: operator\", because the "
+                              "operator settles conflicts between their own documents.",
+                              "A contradiction of a task line (## Goal, ## Acceptance, ## Constraints, ## Design (settled)) or of an Operator decision "
+                              "stays case (2), P1.",
+                              "Your tested/untested map has one row per line under ## Goal, ## Acceptance, ## Constraints and ## Design (settled) in "
+                              "each worker's task, per line under ## Design (settled) in the documents the tasks cite",
+                              "per Operator decision in decisions.md (in a file without an ## Operator decisions heading, each decision under ## "
+                              "Decisions is one); a gap on any row is at least a P2 finding."):
+                    self.assertIn(value, text)
+
+    def test_every_feature_coverage_brief_carries_the_bundled_case_paragraph(self):
+        # The case paragraph is the bundled brief's, word for word, in every features/*/reviewers/coverage.md, so the cases cannot drift
+        # between briefs again; what a feature adds (its proofs, its scenario ids, its P2 examples) stays in the other paragraphs.
+        tool = Path(__file__).resolve().parents[1]
+
+        def cases(path):
+            paragraphs = (" ".join(paragraph.split()) for paragraph in path.read_text().split("\n\n"))
+            return [paragraph for paragraph in paragraphs if paragraph.startswith("A gap is P1 only in these four cases")]
+        bundled = cases(tool / "workflow/prompts/reviewers/coverage.md")
+        self.assertEqual(len(bundled), 1)
+        self.assertTrue(bundled[0].endswith("stays case (2), P1."), bundled[0][-200:])
+        features = sorted(tool.glob("features/*/reviewers/coverage.md"))
+        self.assertEqual(len(features), 7)
+        for path in features:
+            with self.subTest(brief=str(path.relative_to(tool))):
+                self.assertEqual(cases(path), bundled)
 
     def test_only_coverage_holds_its_p1_to_a_failure_shown_on_the_candidate(self):
         # The shared rubric's P1, for every reviewer: a defect or a contradicted requirement to fix before merge, with the inputs, the
