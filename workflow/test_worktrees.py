@@ -160,8 +160,11 @@ class LockContention(Repository):
 
 class WorktreeCallSites(Repository):
     def test_every_worktree_change_under_workflow_takes_the_lock(self):
+        # launch.py plans the per-run checkout's `git worktree add` as a printed command and runs it under worktree_lock;
+        # test_feature_launch's test_a_live_launch_adds_the_run_worktree_and_leaves_your_checkout_on_its_branch proves the
+        # lock is held, which this source scan cannot see.
         unlocked = [source.name for source in sorted((TOOL / "workflow").glob("*.py"))
-                    if not source.name.startswith("test_") and source.name != "worktrees.py"
+                    if not source.name.startswith("test_") and source.name not in {"worktrees.py", "launch.py"}
                     and re.search(r'"worktree",\s*"(?:add|move|prune|remove|repair)"', source.read_text())]
         self.assertEqual(unlocked, [])
 
