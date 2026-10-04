@@ -1,0 +1,154 @@
+{
+  "version": "1.2.0",
+  "feature": "Attack pass: opt-in report-only attacker, re-run and skeptic in the review step; the run page's Attack pass section",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "docs/handoff/attack-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts/projects",
+        "src/projects",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/handoff/attack-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "attack-section",
+              "description": "A run whose export carries the Appendix A record shows an Attack pass section on its run page: a report-only line saying it never changes the run's verdict; a headline with the pass status and the finding, reproduced and verified counts; one card per verified finding with the skeptic's severity, title, threat, requirement, test file path and its label (or Unlabelled with the attack-label command); the not-reproduced, refuted and unjudged findings folded below; the attackers with status and cost; the out-of-reach notes. A pending run says the pass runs at the review step; a failed or refused pass shows its error; a run with attack null has no section; the graph's attack node opens the same section; at 390 px no horizontal overflow"
+            },
+            {
+              "id": "attack-live",
+              "description": "Candidate phase against the real API: a seeded run whose live attack.json is newer than its export shows the live record (source live) and a run without one shows the export's; worker phase: a mocked record moving from running to succeeded shows the new counts within one poll without a reload (page.clock)"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

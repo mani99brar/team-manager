@@ -1,10 +1,10 @@
 # PRD: Attack pass (red-team worker), pilot
 
-Status: Proposed 2026-10-04, from the operator's grill of the brief "Red-team worker for the agent workflow" (source idea: `~/dev/agent-workflow/ideas.md`, "Hidden attacker worker for md-manager runs"). Builds on the review sidecar ([PRD_REVIEW_SIDECAR.md](PRD_REVIEW_SIDECAR.md)), the parallel reviewers ([PRD_PARALLEL_REVIEWERS.md](PRD_PARALLEL_REVIEWERS.md)) and the workflow improvements ([HANDOFF_WORKFLOW_IMPROVEMENTS.md](HANDOFF_WORKFLOW_IMPROVEMENTS.md): C14 guards, C44 attention, C47 cleanup, C49 cost). Pilot project: pine-claims.
+Status: Proposed 2026-10-04, from the operator's grill of the brief "Red-team worker for the agent workflow" (source idea: `~/dev/agent-workflow/ideas.md`, "Hidden attacker worker for md-manager runs"). Builds on the review sidecar ([PRD_REVIEW_SIDECAR.md](PRD_REVIEW_SIDECAR.md)), the parallel reviewers ([PRD_PARALLEL_REVIEWERS.md](PRD_PARALLEL_REVIEWERS.md)) and the workflow improvements ([HANDOFF_WORKFLOW_IMPROVEMENTS.md](HANDOFF_WORKFLOW_IMPROVEMENTS.md): C14 guards, C44 attention, C47 cleanup, C49 cost). Pilot project: pine-claims. Revised 2026-10-04 for the build run (`features/attack-pass`): the optional `requirements` key (section 3); the attacker narrowed to a requirement check per angle (sections 1 and 4.3: the bundled briefs ask for one failing test per stated requirement that does not hold); the pass's deadlines beside the reviewers' (4.1); and Appendix A, which pins the record, the export section, the event texts and the graph node that both lanes build to.
 
 ## 1. Goal
 
-A feature can opt in to an **attack pass**: after the candidate gate, an independent attacker tries to break the frozen candidate on one chosen angle, and proves each break with a failing exploit test. The controller re-runs every test on a clean copy of the candidate, and a skeptic argues against every finding. Only findings that survive both count as verified.
+A feature can opt in to an **attack pass**: after the candidate gate, an independent attacker checks the frozen candidate against the project's stated requirements of one chosen angle, and proves each requirement that does not hold with a failing test. The controller re-runs every test on a clean copy of the candidate, and a skeptic argues against every finding. Only findings that survive both count as verified.
 
 The pilot is report-only. Verified findings go to the attack's own record, an attention record and the run's page. They never block, and reviewers never see them. That keeps one clean comparison: what did the attacker find that the review missed?
 
@@ -47,12 +47,15 @@ feature.json 2.5.0 adds the optional `attack` (2.4.0 and earlier launch unchange
     "timeout_minutes": 60,
     "skeptic_budget_usd": 5,
     "skeptic_timeout_minutes": 20,
-    "max_findings": 8
+    "max_findings": 8,
+    "requirements": ["docs/security/requirements.md"]
   }
 }
 ```
 
 - `angles`: 1 to 3 distinct values from `inputs-state`, `permissions-files`, `auth-funds`. One attacker runs per angle. The pilot uses one.
+- `requirements`: optional, 0 to 10 distinct repository-relative paths of the project's requirements documents, default none. Launch refuses a path that is not committed at HEAD, as it does for the PRD. Prepare pins their copies; the attacker and the skeptic get them beside the PRD (section 2, Inputs).
+- Budgets are passed to each job as `--max-budget-usd`; the timeouts stop the job's process group.
 - Bounds: `budget_usd` 1..50, `timeout_minutes` 5..180, `skeptic_budget_usd` 1..20, `skeptic_timeout_minutes` 5..60, `max_findings` 1..20.
 - `blocking` is not a key yet. It arrives with promotion (section 7).
 - policy.json 1.3.0 (`contracts/workflow/verification.schema.json`) adds the optional `attack_check`, the command that runs one exploit test file: `{"argv": ["pnpm", "--filter", "@pine/api", "exec", "vitest", "run", "{file}"], "timeout_seconds": 600}`. `{file}` must appear exactly once. A feature with `attack` and no `attack_check` is refused at launch.
@@ -81,6 +84,8 @@ The attack pass is not a LangGraph node, as the sidecar and the design challenge
 
 It never raises into the run. Every step runs under one guard like the sidecar's: a failure is recorded `failed` with its error in `attack.json` and one event, and the review step continues. A run with a failed attack pass integrates exactly as one without.
 
+**Deadlines.** The pass keeps its own bounds: each attacker's `timeout_minutes`, each re-run's `attack_check` timeout, each skeptic's `skeptic_timeout_minutes`, and one overall bound fixed when the pass starts (those bounds, the policy setup timeouts and 10 minutes; the formula is recorded in the engine handoff), past which the controller stops the pass and records it `failed`. The reviewer deadline never stops the pass, and the pass never extends the reviewer deadline. The review step ends when the review has decided (every reviewer done, or its deadline) and the pass has ended or passed its overall bound.
+
 ### 4.2 Launch guard
 
 `launch`, dry runs included, and pipeline preflight refuse a feature with `attack` while any path on the secret-file list exists: "Blocked: an attack pass needs <path> off this host: move it, then launch again". The list defaults to `~/.config/vps-wallet.env` and is extended by `WORKFLOW_ATTACK_SECRET_FILES` (colon-separated), read once at prepare and pinned. The review step checks again before the attacker starts, and records the pass `refused` instead of running when a listed file reappeared.
@@ -89,7 +94,7 @@ It never raises into the run. Every step runs under one guard like the sidecar's
 
 - **Worktree.** `<run>/attack-worktree`, a detached worktree of the candidate commit under the worktree lock (C47's `clean` removes it). The policy's `setup` runs there first, as for verification. The attacker gets this worktree only.
 - **Job.** One `claude --print` job per angle, started like a print reviewer (`print_command`, `popen_claude`, `role_flags(plan, "judges")`), with tools `Read,Glob,Grep,Edit,Write,Bash`, the C14 worker settings (deny rules on credential files, no `git push` or `git commit`, no `pkill`/`killall`), and an environment with the verifier's secret names dropped (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `GH_*`, `GITHUB_*`). Its working directory is the attack worktree; `--add-dir` gives it only that directory.
-- **Prompt.** The angle brief (`workflow/prompts/attack/<angle>.md`), then the project conventions (C15), then the inputs (section 2), then the protocol: work offline (no outbound network, no live servers; the harness's in-process app only); write each exploit test under `attack-tests/` in the worktree; a test asserts the secure behaviour and must fail on this candidate; run it with the `attack_check` command before reporting it; at most `max_findings` findings; "no finding" is a valid result.
+- **Prompt.** The angle brief (`workflow/prompts/attack/<angle>.md`), then the project conventions (C15), then the inputs (section 2), then the protocol: work offline (no outbound network, no live servers; the harness's in-process app only); write each test under `attack-tests/` in the worktree; a test asserts a stated requirement and must fail on this candidate; run it with the `attack_check` command before reporting it; at most `max_findings` findings; "no finding" is a valid result. The bundled angle briefs are requirement checks (revised 2026-10-04 for the build run): each lists the stated requirements of its angle that the changed code is subject to, writes one test per requirement and reports the ones whose test fails. A wider brief is the operator's to write after the pilot's calibration.
 - **Output.** Structured output (`contracts/workflow/attack.schema.json`, `$defs.output`): per finding `id`, `severity` (P0/P1/P2, by the C41 severity rule), `title`, `threat` (who does what, and what they gain), `requirement` (a quoted SEC-*, PRD or task line, or null), `test_file`, `expected` and `observed`. The controller copies each test file to `<run>/attack/<attacker>/<id>.test.*` the moment the job ends.
 - **Budget.** The job is stopped at `timeout_minutes`. Its cost comes from its `stdout.json` (C49) under a new role `attack`. Findings returned before a timeout are kept only if the job wrote its output; a stopped job counts as `failed`.
 
@@ -181,3 +186,74 @@ Eligible after 3 pilot runs with at least one verified finding labelled `real` t
 
 1. Should the calibration step (5.0) also run on project-B's theft-window candidate, as a second known bug with a different angle?
 2. Should `attack-tally` mark a finding as "review also found" automatically, by matching files and requirement ids, with the operator's label overriding?
+
+## Appendix A: the record (`contracts/workflow/attack.schema.json` 1.0.0) and the export section
+
+Pinned here because both lanes build to it: the engine writes `<run>/attack.json`, the viewer's fixtures copy it. Any deviation found necessary is recorded in the lane's handoff, and the other lane's fixtures follow the engine's committed schema at integration.
+
+```json
+{
+  "version": "1.0.0",
+  "run_id": "claims-007",
+  "candidate_commit": "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+  "settings": {"angles": ["auth-funds"], "budget_usd": 15, "timeout_minutes": 60, "skeptic_budget_usd": 5, "skeptic_timeout_minutes": 20, "max_findings": 8, "requirements": ["docs/security/requirements.md"], "secret_files": ["/home/agentops/.config/vps-wallet.env"]},
+  "status": "succeeded",
+  "started_at": "2026-10-05T10:00:00Z",
+  "finished_at": "2026-10-05T10:58:10Z",
+  "error": null,
+  "attackers": [
+    {
+      "id": "auth-funds", "angle": "auth-funds", "status": "succeeded",
+      "started_at": "2026-10-05T10:01:30Z", "finished_at": "2026-10-05T10:41:02Z", "error": null,
+      "session_id": "0f2b3c6e-4a4d-4b8e-9d1a-6b2f1c0a9e11", "cost_usd": 7.42,
+      "summary": "Two requirements of the claims module fail on this candidate; one could not be expressed offline.",
+      "out_of_reach": ["SEC-TX-02 needs a real chain reorganisation; the in-process harness has none."],
+      "skeptic": {"status": "succeeded", "started_at": "2026-10-05T10:46:00Z", "finished_at": "2026-10-05T10:57:40Z", "error": null, "session_id": "7c1d2e3f-5b6a-4c7d-8e9f-0a1b2c3d4e5f", "cost_usd": 1.10}
+    }
+  ],
+  "findings": [
+    {
+      "id": "A-1", "ref": "f1", "attacker": "auth-funds", "severity": "P1",
+      "title": "A claim's provenance can name another account",
+      "threat": "A signed-in user files a claim whose provenance names another account; reviewers then trust the claim as that account's.",
+      "requirement": "SEC-CLAIM-03: the server derives a claim's author from the session, never from the request body.",
+      "test_file": "attack/auth-funds/A-1.test.ts",
+      "expected": "403 and no claim row", "observed": "201 and a claim row authored by the other account",
+      "rerun": {"status": "reproduced", "reason": null, "exit_code": 1, "duration_seconds": 14.2, "output_tail": "FAIL attack-tests/A-1.test.ts > rejects a body author\nAssertionError: expected 201 to be 403", "at": "2026-10-05T10:44:10Z"},
+      "skeptic": {"verdict": "verified", "reason": "SEC-CLAIM-03 states it; the assertion that fails is the status check of the request under test.", "severity": "P1"},
+      "status": "verified",
+      "labels": [{"label": "real", "review_found": "no", "note": null, "by": "operator", "at": "2026-10-05T12:00:00Z"}]
+    },
+    {
+      "id": "A-2", "ref": "f2", "attacker": "auth-funds", "severity": "P2",
+      "title": "A withdrawn claim keeps its evidence link",
+      "threat": "A withdrawn claim's evidence stays readable to its former reviewers.",
+      "requirement": null,
+      "test_file": "attack/auth-funds/A-2.test.ts",
+      "expected": "404 after withdrawal", "observed": "200",
+      "rerun": {"status": "not_reproduced", "reason": "passed", "exit_code": 0, "duration_seconds": 9.8, "output_tail": "1 passed", "at": "2026-10-05T10:45:01Z"},
+      "skeptic": null,
+      "status": "not_reproduced",
+      "labels": []
+    }
+  ]
+}
+```
+
+Enums: pass `status` `running|succeeded|failed|refused` (the export adds `pending`, below); attacker `status` `running|succeeded|failed|refused|timed_out`; skeptic `status` `not_run|running|succeeded|failed|timed_out` (`not_run` when its attacker did not succeed or no finding reproduced); finding `severity` and skeptic `severity` `P0|P1|P2`; `rerun.status` `reproduced|not_reproduced`; `rerun.reason` `null|passed|no_test|setup_failed|timed_out|error` (null exactly when reproduced); skeptic `verdict` `verified|refuted`; finding `status` `not_reproduced|unjudged|verified|refuted` (`unjudged`: reproduced, but the skeptic failed, timed out or returned no verdict for it); label `label` `real|false|out-of-scope`; `review_found` `yes|no|null`; `by` `operator`.
+
+Field rules both validators share: ids, the commit and `session_id` are non-empty strings with no format check; the only nullable fields are `candidate_commit`, every `started_at`, `finished_at` and `error`, `session_id`, `cost_usd`, an attacker's `summary`, a finding's `requirement`, `rerun` and `skeptic`, `rerun.reason`, `rerun.exit_code`, a label's `note` and `review_found` (an attacker's `skeptic` object is never null); a skeptic's `severity` is never above its finding's `severity`; a finding's `test_file` is relative to the run directory; `output_tail` holds at most the last 200 lines; arrays may be empty; no referential check (a finding's `attacker` is not resolved by the schema). The latest entry of `labels` is the current label. A verified finding shows the skeptic's severity.
+
+`$defs.output` is what an attacker job returns: `{summary, findings: [{id, severity, title, threat, requirement, test_file, expected, observed}], out_of_reach: [string]}`, where `id` is the attacker's own (it becomes `ref`) and `test_file` is a path under `attack-tests/` in the attack worktree; at most `max_findings` findings. `$defs.skeptic_output` is what the skeptic returns: `{verdicts: [{id, verdict, reason, severity}]}`, keyed by the global id.
+
+**Export 1.8.0** adds the top-level `attack`:
+- `null` when the plan has no `attack` (every older run, every run without the key);
+- the `attack.json` object as read, when it exists and validates;
+- while the plan has `attack` and no `attack.json` exists, a `pending` record: `{"version": "1.0.0", "run_id": <run>, "candidate_commit": null, "settings": <plan.attack>, "status": "pending", "started_at": null, "finished_at": null, "error": null, "attackers": [], "findings": []}`;
+- when `attack.json` exists and does not validate, the same record with `"status": "failed"` and `"error": "attack.json is not valid: <reason>"`.
+
+**Attention record** kind `attack`: written once, when a pass ends with at least one verified finding: `Attack pass (report-only): <v> verified finding(s) to label: python -m workflow attack-label <run> <id> --label real|false|out-of-scope --by operator`.
+
+**Events** on the node `attack`, written by the controller with counts, ids and angles only: `running` `Attack pass started (<angles, comma-separated>)`; `interactive` `Attack pass attacker <angle> <failed|timed_out>: see attack/<angle>.stderr.log`, `Attack pass skeptic for <angle> <failed|timed_out>: see attack/<angle>.skeptic.stderr.log`, `Attack pass refused: <path> exists on this host` and `Attack pass failed: <error class>`; then exactly one closing `succeeded` event for every pass: `Attack pass: <n> finding(s), <r> reproduced, <v> verified` for a pass that reached its end, `Attack pass ended: refused` or `Attack pass ended: failed` otherwise. The node never gets `failed` or `blocked` and is never left `running` once the review step ends, so the run's state is the review's (the viewer maps `blocked` to failed, and a node left running reads as a paused run).
+
+**Graph.** For a plan with `attack`, the exported definition (and the registry entry a launch writes) has the node `attack` ("Attack pass", kind `review`) right after `review`, with the same `depends_on` as `review`; `approval` then depends on both. Every other graph is unchanged.

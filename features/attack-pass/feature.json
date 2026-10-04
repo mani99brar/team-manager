@@ -1,0 +1,35 @@
+{
+  "version": "2.4.0",
+  "name": "Attack pass (PRD_ATTACK_PASS): an opt-in, report-only attacker that proves breaks of stated requirements with failing tests on the frozen candidate, re-run by the controller and judged by a skeptic, with its record on the run page",
+  "branch_prefix": "feature/attack-pass-runs",
+  "policy": "policy.json",
+  "prd": "docs/PRD_ATTACK_PASS.md",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ],
+  "sidecar": {
+    "prompt": "builtin:senior-review",
+    "cadence_seconds": 900,
+    "pass_timeout_seconds": 600,
+    "max_passes": 12,
+    "max_messages_per_lane": 4
+  },
+  "tryout": false
+}
