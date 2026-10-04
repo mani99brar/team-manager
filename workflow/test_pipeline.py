@@ -1212,6 +1212,18 @@ class RecordTests(unittest.TestCase):
         self.assertIn(f"Report: {f.directory / 'report.html'}", out)
         self.assertIn("<h1>Workflow report</h1>", (f.directory / "report.html").read_text())
 
+    def test_report_html_starts_with_the_outcome_block(self):
+        # C43: the outcome block from the run record, at the top of report.html; nothing before a review is recorded.
+        f = self.fixture
+        self.pin()
+        with self.graph() as graph:
+            decision = self.review_gate(graph)
+            self.assertNotIn("<h2>Outcome</h2>", (f.directory / "report.html").read_text())
+            graph.invoke(Command(resume=decision), f.config)
+            report(f.runtime, graph.get_state(f.config))
+        page = (f.directory / "report.html").read_text()
+        self.assertIn("<h1>Workflow report</h1><h2>Outcome</h2><pre>Outcome: approved by review; nothing open.</pre>", page)
+
     def test_prepare_pins_the_worker_authority_and_the_report_shows_it(self):
         # C14 slice 1: no sandbox on this host; every launch runs as the operator's account, and the run records it with the
         # digest of the exact --settings its workers get (sessions.worker_settings), in plan.json and report.html.

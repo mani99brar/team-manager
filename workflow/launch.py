@@ -355,6 +355,8 @@ def main(argv=None):
                             f"resume with:  {sys.executable} -m workflow automatic {run} --live\n")
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
+            from .pipeline import outcome_lines
+            print(outcome_lines(run), end="")
             return
         print(f"\nRun: {run}\nWorkers ({', '.join(selected)}) are in their dedicated Herdr tab (unless --no-herdr).")
         print("Watch/answer permission prompts. When every worker finishes, return to Pi for handoffs and freeze.")

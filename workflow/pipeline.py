@@ -30,6 +30,7 @@ from langgraph.types import Command, interrupt
 from .attention import attention
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
+from .outcome import outcome_block
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
                        run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_authority, worker_effort)
@@ -919,7 +920,7 @@ def report(runtime: Pipeline, state) -> Path:
     flow = ("Launch workers → completion signals → isolated checks → combined checks → independent review → verified feature branch (no main merge or push)"
             if runtime.plan.get("automatic") else "Launch workers → human handoff → isolated checks → combined checks → independent review → approval → integration")
     parts = ['<!doctype html><meta charset="utf-8"><title>Workflow report</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto;background:#151820;color:#eee}pre{white-space:pre-wrap}a{color:#8dcaff}img{max-width:100%}section{border:1px solid #555;padding:16px;margin:16px 0}</style>',
-             '<h1>Workflow report</h1><p>' + html.escape(flow) + '</p>',
+             '<h1>Workflow report</h1>' + outcome_html(runtime.directory) + '<p>' + html.escape(flow) + '</p>',
              '<h2>Current state</h2><pre>' + html.escape(json.dumps({"next": state.next, "interrupts": [str(task.interrupts) for task in state.tasks if task.interrupts], "errors": [str(task.error) for task in state.tasks if task.error], "integrated_commit": state.values.get("integrated_commit")}, indent=2)) + '</pre>',
              '<h2>Timeline</h2><pre>' + html.escape(json.dumps(events, indent=2)) + '</pre>']
     authority = runtime.plan.get("worker_authority")  # Pinned at prepare; runs prepared before have none.
@@ -959,6 +960,18 @@ def report(runtime: Pipeline, state) -> Path:
     destination = runtime.directory / "report.html"
     destination.write_text("\n".join(parts))
     return destination
+
+
+def outcome_html(directory: Path) -> str:
+    """The outcome block at the top of report.html (C43); nothing while the run records no outcome yet."""
+    block = outcome_block(directory)
+    return f'<h2>Outcome</h2><pre>{html.escape(block)}</pre>' if block else ""
+
+
+def outcome_lines(directory: Path) -> str:
+    """The outcome block on its own lines after a success or Blocked line; empty while the run records no outcome yet."""
+    block = outcome_block(directory)
+    return f"{block}\n" if block else ""
 
 
 def finish_policy(automatic: dict | None, branch: str) -> str:
@@ -1282,6 +1295,7 @@ def main():
             print(json.dumps(status, indent=2))
             print(f"Report: {directory / 'report.html'}")
             print(note)
+            print(outcome_lines(directory), end="")  # Last: what precedes `Report:` stays one JSON document.
             return
         with run_lock(directory):
             runtime = Pipeline(directory)
@@ -1296,6 +1310,7 @@ def main():
                 if commit is None:
                     parser.exit(75, "Checkpoint persisted; continuing in a new controller process.\n")
                 print(f"Verified feature branch: {runtime.plan['source_branch']} at {commit}. No main merge or push.")
+                print(outcome_lines(directory), end="")
                 return
             if args.action == "attach":
                 print(json.dumps(attach_panels(runtime.sessions), indent=2)); return
@@ -1427,7 +1442,9 @@ def main():
                 if args.action == "start" and args.herdr:
                     print(json.dumps(attach_panels(runtime.sessions), indent=2))
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
+        # The supervisor's own Blocked line says only that a step exited 1: the outcome block says what the record holds.
+        outcome = outcome_lines(directory) if args.action == "automatic" else ""
+        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n{outcome}")
 
 
 if __name__ == "__main__":

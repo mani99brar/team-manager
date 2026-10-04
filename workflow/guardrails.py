@@ -1320,7 +1320,7 @@ def resume_main(argv=None):
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
     from langgraph.checkpoint.sqlite import SqliteSaver
-    from .pipeline import Pipeline, build_pipeline, graph_config, report, start_workers
+    from .pipeline import Pipeline, build_pipeline, graph_config, outcome_lines, report, start_workers
     warning = stale_claude_warning()
     if warning:
         print(warning, file=sys.stderr)
@@ -1359,8 +1359,9 @@ def resume_main(argv=None):
             except TransientInfraError as error:
                 parser.exit(75, f"Interrupted: {error}\n")  # Resumable, like `automatic --live`.
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
+            print(outcome_lines(directory), end="")
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n")
+        parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}. No automatic fallback or push.\n{outcome_lines(directory)}")
 
 
 def answer_command(directory: Path, node: str, text: str, herdr: bool = True) -> str:
