@@ -565,14 +565,17 @@ class ReviewCompletionTests(unittest.TestCase):
     def test_every_reviewer_gets_the_rubric_after_its_brief_in_both_transports(self):
         # C34: one rubric for every reviewer and both transports, right after the brief. It says what each severity means
         # (a contradicted requirement is P1 at least), asks for the consequence, lets a brief name further blocking items and
-        # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own.
+        # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own. Of
+        # decisions.md only what binds counts (C4, decision 8): its Operator decisions, or all of a file without that heading.
         from .automatic import PRINT_REVIEW_SUFFIX, REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_brief, review_prompt
         for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3", "A candidate behaviour that contradicts a quoted requirement, a line of a "
-                      "task, of a document a task cites or of decisions.md included, is P1 at least", "a failure a worker's completion discloses",
+                      "task, of a document a task cites or of an Operator decision in decisions.md (all of decisions.md when it has no Operator "
+                      "decisions heading) included, is P1 at least", "a failure a worker's completion discloses",
                       'A worker\'s disclosure, the literal wording of a task or "not a regression" never lowers a severity.',
                       'End each P1 and P2 message with "Consequence: "', "Your brief may name further items that block",
                       "The controller derives your verdict from your findings", "a blocked verdict blocks on its own only when it lists no finding"):
             self.assertIn(value, REVIEW_RUBRIC)
+        self.assertNotIn("or of decisions.md included", REVIEW_RUBRIC)
         for reviewer in [None, *self.runtime.plan.get("reviewers", [])]:
             brief = review_brief(reviewer)
             with self.subTest(reviewer=(reviewer or {}).get("reviewer_id", "review")):
@@ -606,7 +609,9 @@ class ReviewCompletionTests(unittest.TestCase):
         # gap, a missing or weak test that an Acceptance line names included, is a P2 row. Every md-manager feature's coverage brief
         # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test". The cases are
         # the bundled brief's, which names no md-manager specifics (scenario builtin-briefs), so case (4) names no screenshot: a brief
-        # whose proofs include browser scenarios says in its first paragraph that a scenario's screenshot is part of its packet.
+        # whose proofs include browser scenarios says in its first paragraph that a scenario's screenshot is part of its packet. Case (2)
+        # follows decisions.md's precedence (C4, decision 8): with the Operator decisions heading only those count, so a grill default
+        # is not a line case (2) holds the candidate to; a file without the heading counts as a whole.
         tool = Path(__file__).resolve().parents[1]
         briefs = [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]
         self.assertEqual(len(briefs), 8)
@@ -614,11 +619,14 @@ class ReviewCompletionTests(unittest.TestCase):
             text = " ".join(path.read_text().split())
             first = " ".join(path.read_text().split("\n\n")[0].split())
             with self.subTest(brief=str(path.relative_to(tool))):
-                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things"):
+                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things",
+                               "or of decisions.md (contradictions"):
                     self.assertNotIn(absent, text)
                 for value in ("A gap is P1 only in these four cases: (1) a failure you show on the candidate: the inputs, the expected behaviour quoted, "
                               "the actual behaviour, and path:line; (2) a candidate behaviour that contradicts a quoted line of a task, of a document a "
-                              "task cites, or of", "(3) a worker's disclosure, quoted, that something fails", "(4) a line you could not check "
+                              "task cites, or of an Operator decision in decisions.md, all of decisions.md when it has no Operator decisions heading "
+                              "(contradictions are yours to report, not the general reviewer's)", "(3) a worker's disclosure, quoted, that something fails",
+                              "(4) a line you could not check "
                               "because its test source or packet was unreadable: name the line and say why", "Every other gap is one P2 finding per",
                               "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)

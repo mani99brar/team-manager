@@ -462,7 +462,8 @@ def review_brief(reviewer: dict | None) -> str:
 # called itself "the same for every reviewer" took over the security brief's scale (P0 for forged claims, P1 for a missing required
 # control) and SEC-GH gaps went to P2 because no task cited SEC-GH. Decision 4's stricter bar (a gap is P1 only when shown on the
 # candidate, or in the brief's other cases) is coverage's, in its brief: a general or security reviewer that cannot state the
-# inputs of a defect it read in the code still rates it P1.
+# inputs of a defect it read in the code still rates it P1. Of decisions.md only what binds counts (C4): its Operator decisions, or
+# all of a file without that heading.
 REVIEW_RUBRIC = ("Severity. Your brief defines severity for its own subject, in both directions: where it defines a P0, P1 or P2, or "
                  "limits what is P1, its definition wins over the generic scale below, whether it rates a finding higher or lower (for "
                  "example a security brief's P0 for forged claims or unverified integrity and its P1 for a missing required control, "
@@ -471,9 +472,10 @@ REVIEW_RUBRIC = ("Severity. Your brief defines severity for its own subject, in 
                  "a requirement whether or not a task cites it. P0: the candidate must not merge at all: a security hole, data loss, or a "
                  "required path that fails for everyone. P1: a defect or a contradicted requirement to fix before merge; give the inputs, "
                  "the expected behaviour (quoted when a requirement states it), the actual behaviour and path:line when you can. A "
-                 "candidate behaviour that contradicts a quoted requirement, a line of a task, of a document a task cites or of "
-                 "decisions.md included, is P1 at least, and so is a failure a worker's completion discloses (quote it). P2: anything "
-                 "else worth recording, such as a missing or weak test for behaviour that works; P2 is the lowest, there is no P3. A "
+                 "candidate behaviour that contradicts a quoted requirement, a line of a task, of a document a task cites or of an "
+                 "Operator decision in decisions.md (all of decisions.md when it has no Operator decisions heading) included, is P1 at "
+                 "least, and so is a failure a worker's completion discloses (quote it). P2: anything else worth recording, such as a "
+                 "missing or weak test for behaviour that works; P2 is the lowest, there is no P3. A "
                  "worker's disclosure, the literal wording of a task or \"not a regression\" never lowers a severity. End each P1 and P2 "
                  "message with \"Consequence: \" and what goes wrong, for whom. Your brief may name further items that block: rate those "
                  "P1. The controller derives your verdict from your findings: an open or accepted P0 or P1 blocks the candidate, P2 "
