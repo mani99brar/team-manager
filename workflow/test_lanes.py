@@ -41,6 +41,8 @@ REPO = Path(__file__).resolve().parents[1]
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 PY = sys.executable
 LANES = ["ui", "adapter", "docs"]
+# policy_lint's information note (C27) on the ui lane, which runs a build check and no tests.
+UI_NO_TESTS = "Lane ui requires no test kind (unit, integration, contract or browser), only build. That is allowed when tests were declined; for information only."
 
 
 def setUpModule():
@@ -301,7 +303,7 @@ class SubsetSelection(LaneRun):
         self.assertEqual(prepare_command[prepare_command.index("--workers") + 1], "ui,docs")  # Declared order, whatever was typed.
         tasks = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--task"]
         self.assertEqual([task.split("=", 1)[0] for task in tasks], ["ui", "docs"])
-        self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs)."])
+        self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs).", UI_NO_TESTS])
         # Run the real prepare command: no agent launches, the selection is pinned, only the selected worktrees exist.
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -324,7 +326,7 @@ class SubsetSelection(LaneRun):
         _, commands, notes = launch_commands(self.repo, "lanes", "lanes-002", self.run_root, herdr=False)
         self.assertNotIn("--workers", commands[2])
         self.assertEqual([item.split("=", 1)[0] for item in commands[2][commands[2].index("--task") + 1::2] if "=" in item], LANES)
-        self.assertEqual(notes, [])
+        self.assertEqual(notes, [UI_NO_TESTS])
 
     def test_selected_lane_touching_an_excluded_lanes_path_blocks_at_freeze(self):
         self.prepare(["ui", "docs"])
@@ -408,7 +410,7 @@ class DeclaredReviewers(LaneRun):
         briefs = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--reviewer"]
         self.assertEqual([item.split("=", 1)[0] for item in briefs], ["general", "coverage"])
         self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))
-        self.assertEqual(notes, [])
+        self.assertEqual(notes, [UI_NO_TESTS])
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Reviewers: general, coverage", result.stdout)

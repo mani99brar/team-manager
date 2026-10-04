@@ -2037,6 +2037,22 @@ test('[B1] on a lane named controller, a Controller blocked row belongs to the r
   })
 })
 
+test('[B1] on a lane named controller, prepare\'s launch notes belong to the run, never starting the lane', async () => {
+  // pipeline.py prepare records the launch's notes (C23, C27) as one `controller` row, before any lane launches.
+  const notes = 'Launch notes: Lane controller requires fewer checks than the policy of lane-000: required kind contract removed.'
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [{ sequence: 1, time: T0, node: 'controller', status: 'running', message: notes }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [[1, null, 'running', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'pending', 'the launch notes never start the lane')
+  })
+})
+
 test('[B1] on a lane named controller, the stops said bare off the source branch belong to the run, never failing the lane', async () => {
   // automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
   // failed are said as drive says them, without `Controller blocked: `. On a lane named `controller` each row would otherwise land on

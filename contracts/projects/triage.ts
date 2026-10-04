@@ -268,9 +268,11 @@ const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed a
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
   /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
+/** pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches. */
+const LAUNCH_NOTES = /^Launch notes: /
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, LAUNCH_NOTES]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ...BARE_STOPS, LAUNCH_NOTES]
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/

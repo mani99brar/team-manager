@@ -33,7 +33,7 @@ from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
 from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
                        run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_authority, worker_effort)
-from .verification import owns, policy_digest, safe_path, validate_policy
+from .verification import owns, policy_digest, safe_path, slow_checks, validate_policy
 from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
@@ -579,10 +579,15 @@ class Pipeline:
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
         save_json(path, packet)
         retried = attempt if failed_before(self.directory, "worker", node, attempt, snap["commit"]) else None
-        self.event(f"verify_{node}", packet["gate"]["status"], "; ".join(packet["gate"]["reasons"]) or passed_message(packet, retried))
+        self.event(f"verify_{node}", packet["gate"]["status"], ("; ".join(packet["gate"]["reasons"]) or passed_message(packet, retried)) + self.slow_note(node, packet))
         if packet["gate"]["status"] != "passed":
             raise RuntimeError(f"{node} verification blocked; see {path}. Retry explicitly or start a revised run.")
         return str(path)
+
+    def slow_note(self, node: str, packet: dict) -> str:
+        """`; slow: <check> took <s> s of its <t> s timeout (<p>%)` for each check over SLOW_SHARE of its timeout (C27), else ""."""
+        slow = slow_checks(self.worker_policy(node), packet["result"], packet["evidence"])
+        return f"; slow: {', '.join(slow)}" if slow else ""
 
     def reusable_packet(self, node: str, attempt: int, commit: str, state: PipelineState, repaired: bool) -> Path | None:
         """The worker packet the candidate gate of `node` reuses (C28), or None when its checks run again.
@@ -639,7 +644,7 @@ class Pipeline:
                 packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
                                          changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
                                          state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
-                note = ""
+                note = self.slow_note(node, packet)
             path = self.directory / "verification" / "candidate" / node / str(attempt) / "packet.json"
             self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}{note}")
             # A second event says why, or that this attempt passed after the one before failed; the first stays as the viewer reads it.
@@ -1242,6 +1247,8 @@ def main():
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
+            from .launch import launch_notes
+            notes = launch_notes(args.repo.resolve(), policy, selected, directory)  # As the launch printed them, before this run exists.
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if reviewers:
                 plan["reviewers"] = reviewers
@@ -1270,6 +1277,8 @@ def main():
             runtime = Pipeline(directory)
             if drill_skipped:
                 runtime.event("controller", "running", f"Failure drill skipped: its lane {drill['node_id']} is not selected for this run")
+            if notes:
+                runtime.event("controller", "running", "Launch notes: " + " ".join(notes))
             export_state(runtime, SimpleNamespace(values={}, next=tuple(f"launch_{node}" for node in selected), tasks=[]))
             print(f"Prepared {directory}; no agents launched. Pin: {plan['base_commit']}. Lanes: {', '.join(selected)}"
                   + (f" (excluded: {', '.join(plan['excluded_workers'])})" if plan["excluded_workers"] else "")

@@ -17,10 +17,10 @@ from pathlib import Path
 from .guardrails import (DECISIONS, LEGACY_DECISIONS_NOTE, PLACEHOLDER, conventions_summary, has_operator_decisions, is_guarded, migration_note,
                          prd_path, refusals, resume_command)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
-from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
+from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
 from . import sidecar
-from .verification import validate_schema
+from .verification import policy_lint, validate_schema
 from .worktrees import controller_git_config
 
 # The repository this tool lives in: the fallback target, and the working directory of every
@@ -246,7 +246,22 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     drill = policy.get("failure_drill")
     if drill and drill["node_id"] not in selected:
         notes.append(f"Failure drill skipped: its lane {drill['node_id']} is not selected (selected: {', '.join(selected)}).")
+    notes.extend(launch_notes(repo, policy, selected, run))
     return run, commands, notes
+
+
+def launch_notes(repo: Path, policy: dict, selected: list[str], run: Path) -> list[str]:
+    """The notes on the selected lanes that prepare records as one run event; never a refusal. policy_lint's (C27: a lane
+    with no test kind, kinds and checks removed since the feature's previous run in this runs root), then overlap_notes'
+    (C23: owned paths a recent run of another feature on this repository also owns, its work not in HEAD)."""
+    lanes = [worker for worker in policy["workers"] if worker["node_id"] in selected]
+    previous = previous_policy(run.parent, run)
+    notes = policy_lint({**policy, "workers": lanes}, previous[1] if previous else None, since=previous[0] if previous else None)
+    code, base = read_git(repo, "rev-parse", "HEAD")
+    try:
+        return notes + (overlap_notes(repo, lanes, run.parent, base) if code == 0 else [])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return notes  # Another run's files this controller cannot read: no note rather than a refused launch.
 
 
 def challenge_paused(run: Path) -> bool:

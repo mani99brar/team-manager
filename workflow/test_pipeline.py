@@ -977,6 +977,18 @@ class RecordTests(unittest.TestCase):
                                                                 ("passed", "Candidate gate passed on attempt 2 after attempt 1 failed")])
         self.assertEqual(self.events("candidate_ui"), [("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step; not a retry.
 
+    def test_a_check_over_sixty_percent_of_its_timeout_is_named_in_its_verify_and_candidate_events(self):
+        f = self.fixture
+        # About 70% of a 4 s timeout; ui's quick build is not named.
+        f.policy["workers"][1]["checks"][0].update(timeout_seconds=4, argv=["python", "-c", "import time; time.sleep(2.8); print('Ran 1 test in 2.8s\\n\\nOK')"])
+        self.pin()
+        with self.graph() as graph:
+            self.review_gate(graph)
+        slow = r"; slow: unit took \d s of its 4 s timeout \((6[1-9]|[7-9]\d)%\)$"
+        self.assertRegex(self.events("verify_adapter")[-1][1], r"^Required tests and artifacts passed" + slow)
+        self.assertRegex(self.events("candidate_adapter")[-1][1], r"^Combined revision [0-9a-f]{40}" + slow)
+        self.assertEqual(self.events("verify_ui")[-1], ("passed", "Required tests and artifacts passed; recorded for the candidate gate: build (exit 0)"))
+
     def test_the_verify_message_keeps_the_viewers_prefix_and_puts_the_retry_last(self):
         from .pipeline import passed_message
         packet = {"gate": {"deferred_checks": ["build", "browser", "lint"]},

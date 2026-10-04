@@ -419,7 +419,9 @@ const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Cod
   // read_signal's refusals (`Invalid completion` covers `Invalid completion file for`).
   /^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion\b/,
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
-  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
+  /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/,
+  // pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches.
+  /^Launch notes: /]
 const FINISHED_STATUSES: ReadonlySet<RunSnapshot['status']> = new Set(['succeeded', 'failed', 'cancelled'])
 /** A lane's live question record is read up to this size; a larger one is not read (the export's copy stands). */
 const QUESTIONS_BYTE_LIMIT = 256 * 1024

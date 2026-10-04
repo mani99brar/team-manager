@@ -9,7 +9,9 @@ from pathlib import Path
 
 from jsonschema.exceptions import ValidationError
 
-from .verification import CONTRACTS, evaluate_worker, policy_digest, validate_policy
+from .verification import CONTRACTS, evaluate_worker, policy_digest, policy_lint, slow_checks, validate_policy
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 class VerificationTests(unittest.TestCase):
@@ -207,6 +209,62 @@ class VerificationTests(unittest.TestCase):
     def test_malformed_payload_blocks(self):
         del self.result["open_assumptions"]
         self.assertEqual(self.evaluate()["status"], "blocked")
+
+
+class PolicyLintTests(unittest.TestCase):
+    """C27: notes at launch, never a refusal. Rules (a) and (c); (e) is slow_checks, named in the verify events."""
+
+    def policy(self) -> dict:
+        return {"version": "1.2.0", "feature": "Lint", "independent_review": True, "integration_approval": True, "workers": [
+            {"node_id": "api", "role": "backend", "required_check_kinds": ["unit", "build"], "owned_paths": ["api"], "checks": [
+                {"id": "api-unit", "kind": "unit", "argv": ["npm", "test"], "timeout_seconds": 300, "scenarios": []},
+                {"id": "api-build", "kind": "build", "argv": ["npm", "run", "build"], "timeout_seconds": 300, "scenarios": []}]},
+            {"node_id": "docs", "role": "writer", "required_check_kinds": ["build"], "owned_paths": ["docs"], "checks": [
+                {"id": "docs-build", "kind": "build", "argv": ["npm", "run", "docs"], "timeout_seconds": 60, "scenarios": []}]}]}
+
+    def test_a_lane_without_a_test_kind_is_named_for_information(self):
+        self.assertEqual(policy_lint(validate_policy(self.policy()), None),
+                         ["Lane docs requires no test kind (unit, integration, contract or browser), only build. "
+                          "That is allowed when tests were declined; for information only."])
+
+    def test_kinds_and_check_ids_removed_since_the_previous_policy_are_named(self):
+        previous = self.policy()
+        current = copy.deepcopy(previous)
+        api = current["workers"][0]
+        api["required_check_kinds"] = ["build"]
+        api["checks"] = [check for check in api["checks"] if check["id"] != "api-unit"]
+        api["checks"].append({"id": "api-lint", "kind": "build", "argv": ["npm", "run", "lint"], "timeout_seconds": 60, "scenarios": []})
+        notes = policy_lint(validate_policy(current), validate_policy(previous), since="lint-002")
+        self.assertIn("Lane api requires fewer checks than the policy of lint-002: required kind unit removed; check api-unit removed.", notes)
+        self.assertIn("Lane api requires no test kind (unit, integration, contract or browser), only build. "
+                      "That is allowed when tests were declined; for information only.", notes)
+        # Added checks, changed owned paths and a lane the previous policy did not have are not removals.
+        grown = self.policy()
+        grown["workers"][1]["owned_paths"] = ["docs", "guides"]
+        grown["workers"].append({"node_id": "web", "role": "frontend", "required_check_kinds": ["unit"], "owned_paths": ["web"], "checks": [
+            {"id": "web-unit", "kind": "unit", "argv": ["npm", "run", "web"], "timeout_seconds": 60, "scenarios": []}]})
+        self.assertEqual([note for note in policy_lint(validate_policy(grown), previous) if "fewer" in note], [])
+        # A previous policy of 1.0.0 derives its kinds from the role: a lane that kept them reports nothing.
+        legacy = {**self.policy(), "version": "1.0.0"}
+        for worker in legacy["workers"]:
+            worker.pop("required_check_kinds")
+        self.assertEqual([note for note in policy_lint(validate_policy(self.policy()), legacy, since="old") if "fewer" in note], [])
+
+    def test_md_managers_own_policies_get_no_test_kind_note(self):
+        policies = sorted((REPO / "features").glob("*/policy.json"))
+        self.assertEqual(len(policies), 8)
+        for path in policies:
+            with self.subTest(policy=path.parent.name):
+                self.assertEqual([note for note in policy_lint(validate_policy(json.loads(path.read_text())), None) if "no test kind" in note], [])
+
+    def test_a_check_over_sixty_percent_of_its_timeout_is_named(self):
+        worker = self.policy()["workers"][0]
+        def execution(command, seconds):
+            return {"command": command, "started_at": "2026-10-04T10:00:00+00:00", "finished_at": f"2026-10-04T10:{seconds // 60:02d}:{seconds % 60:02d}+00:00"}
+        result = {"checks": [execution("npm test", 210), execution("npm run build", 180)]}
+        evidence = {"checks": [{"id": "api-unit", "worker_check_index": 0}, {"id": "api-build", "worker_check_index": 1}]}
+        self.assertEqual(slow_checks(worker, result, evidence), ["api-unit took 210 s of its 300 s timeout (70%)"])
+        self.assertEqual(slow_checks(worker, {"checks": []}, {"checks": []}), [])
 
 
 if __name__ == "__main__":
