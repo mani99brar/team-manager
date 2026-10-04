@@ -1011,17 +1011,27 @@ def refuse_maintainer(directory: Path, plan: dict, current: dict | None, actor: 
     (the workers' launch), or an interrupted rerun newer than the paused record. A paused challenge itself, with or without
     edits, waits on the operator: a rerun of edits is theirs to commit, a bare rerun re-rolls their challenge. So does a
     pinned file edited after the interrupted rerun: that rerun committed its own edits before its re-pin and its job (an
-    interrupted commit lists them in REVISION_INTENT), so any other is a later edit, perhaps half-written."""
-    if actor != "maintainer" or current is None or current["status"] != "paused":
+    interrupted commit lists them in REVISION_INTENT), so any other is a later edit, perhaps half-written. With no record
+    yet (an interrupted first attempt), a dirty pinned file is such a later edit too."""
+    if actor != "maintainer" or current is not None and current["status"] != "paused":
         return
-    if interrupted_rerun(directory, plan, current):
+
+    def refuse_later_edits(after: str) -> None:
         intent = directory / REVISION_INTENT
         committing = set(read_json(intent)["paths"]) if intent.exists() else set()
         later = [path for path in dirty_paths(Path(plan["repository"])) if path in pinned_paths(plan) and path not in committing]
-        if not later:
-            return
-        raise ValueError(f"Feature files were edited after the interrupted rerun ({', '.join(later)}): committing them is the operator's "
-                         f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
+        if later:
+            raise ValueError(f"Feature files were edited after {after} ({', '.join(later)}): committing them is the operator's "
+                             f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
+
+    if current is None:
+        running = directory / "challenge.running.json"
+        refuse_later_edits(f"design challenge attempt {read_json(running).get('attempt', 1)} was interrupted" if running.exists()
+                           else "the run was prepared")
+        return
+    if interrupted_rerun(directory, plan, current):
+        refuse_later_edits("the interrupted rerun")
+        return
     raise ValueError(f"Design challenge attempt {current['attempt']} paused this run: rerunning or accepting it is the operator's "
                      f"decision, so resume --by maintainer is refused. The operator runs: {resume_command(directory)}")
 

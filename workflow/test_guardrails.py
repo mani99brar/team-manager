@@ -750,6 +750,28 @@ class ChallengeHeartbeat(FailingChallenge):
         self.assertEqual((read_json(directory / "challenge.json")["status"], read_json(directory / "challenge.json")["attempt"]), ("passed", 2))
         self.assertIn(("controller", "note", "Resume by the maintainer: rerunning the design challenge as attempt 2"), self.events(directory))
 
+    def test_the_maintainer_never_commits_an_edit_made_after_an_interrupted_first_attempt(self):
+        """C17: with no challenge record, a pinned feature file dirty now is an operator edit made after the interruption,
+        perhaps half-written: committing it is the operator's decision, as after an interrupted rerun."""
+        directory = self.prepare("norecord-001")
+        save_json(directory / "challenge.running.json", {"attempt": 1, "session_id": "00000000-0000-4000-8000-000000000001", "started_at": now()})
+        plan = read_json(directory / "plan.json")
+        task = Path(plan["task_files"]["ui"])
+        task.write_text(task.read_text() + "\nHalf-written edit.\n")
+        edited = task.relative_to(plan["repository"]).as_posix()
+        head = git(Path(plan["repository"]), "rev-parse", "HEAD")
+        files = lambda: {name: (directory / name).read_bytes() if (directory / name).exists() else None for name in ("plan.json", "events.jsonl")}
+        before = files()
+        self.mode.write_text("pass")
+        output, code = self.cli(resume_main, [str(directory), "--by", "maintainer"])
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"Blocked: Feature files were edited after design challenge attempt 1 was interrupted ({edited}): committing them is the "
+                      f"operator's decision, so resume --by maintainer is refused. The operator runs: {PY} -m workflow resume {directory} --by operator\n",
+                      output)
+        self.assertEqual((git(Path(plan["repository"]), "rev-parse", "HEAD"), (directory / "challenge.json").exists()), (head, False))
+        self.assertEqual(files(), before)
+        self.assertFalse(any(directory.glob("*.interactive.json")))
+
     def test_ctrl_c_during_a_launchs_challenge_names_resume_not_the_supervisor(self):
         runs = []
 
