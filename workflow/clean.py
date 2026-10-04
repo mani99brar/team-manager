@@ -235,15 +235,17 @@ def remembered_gitdir(path: Path) -> Path | None:
 def leftover_refusal(path: Path) -> str | None:
     """Why remove_leftover refuses a worktree's folder when no checkout of the repository is left to ask Git with, said of
     "Git cannot read <path>", or None when Git forgot it: no `.git` at all, or a `.git` file naming a gitdir that is gone.
-    Anything else is no evidence of that: a `.git` symlink, a `.git` file that cannot be read or names no gitdir, and one
-    naming a gitdir that exists (Git cannot run here). A `.git` directory is refused by remove_leftover itself."""
+    Anything else is no evidence of that: a `.git` symlink, a `.git` that is no file (a FIFO), a `.git` file that cannot be
+    read or names no gitdir, and one naming a gitdir that exists (Git cannot run here). A `.git` directory is refused by remove_leftover itself."""
     if not path.is_dir() or path.is_symlink():
         return None
     marker = path / ".git"
     if marker.is_symlink():
         return "and its .git is a symlink"
-    if not marker.is_file():
+    if not marker.exists():
         return None
+    if not marker.is_file():  # A FIFO or socket: no file to read a gitdir from, and no evidence Git forgot the folder.
+        return "and its .git file names no gitdir it can check"
     try:
         text = marker.read_text(errors="replace")
     except OSError:
@@ -365,7 +367,8 @@ def clean_main(argv=None):
                 except Exception as error:  # Reported with the removals that failed, never in their place.
                     errors.append(f"git worktree prune: {error}")
             if errors:
-                header = "some removals failed, the rest are done" if removed else "nothing was removed"
+                # The counter knows only which removals finished: a failed one may have deleted part of its folder first.
+                header = "some removals failed, the rest are done" if removed else "no removal completed"
                 raise RuntimeError(f"{header}; rerun clean once fixed:\n" + "\n".join(errors))
     except (ValueError, RuntimeError, OSError, KeyError, json.JSONDecodeError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nEvidence retained at {directory}.\n")

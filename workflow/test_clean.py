@@ -231,19 +231,32 @@ class CleanTests(unittest.TestCase):
         (lane / "work.txt").write_text("the worker's only copy\n")
         marker = lane / ".git"
         original = marker.read_text()
-        for case, damage in (("unreadable", lambda: marker.chmod(0)), ("empty", lambda: marker.write_text("")),
-                             ("overwritten", lambda: marker.write_text("not a gitdir line\n"))):
+        no_gitdir, symlink = "and its .git file names no gitdir it can check", "and its .git is a symlink"
+
+        def replace(make):
+            marker.unlink()
+            make()
+
+        for case, damage, refusal in (
+                ("unreadable", lambda: marker.chmod(0), no_gitdir), ("empty", lambda: marker.write_text(""), no_gitdir),
+                ("overwritten", lambda: marker.write_text("not a gitdir line\n"), no_gitdir),
+                # A .git that exists but is no file (a FIFO) is no evidence either; a symlink is refused with its own words.
+                ("fifo", lambda: replace(lambda: os.mkfifo(marker)), no_gitdir),
+                ("symlink", lambda: replace(lambda: marker.symlink_to(self.run / "elsewhere.git")), symlink)):
             with self.subTest(case=case):
                 damage()
                 try:
                     with patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1"}):
                         code, _, err = self.clean("--by", "operator")
                 finally:
-                    marker.chmod(0o644)
+                    if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+                        marker.unlink()
+                    if marker.exists():
+                        marker.chmod(0o644)
                     marker.write_text(original)
                 self.assertEqual(code, 1, err)
-                self.assertIn(f"Git cannot read {lane} and its .git file names no gitdir it can check", err)
-                self.assertIn("nothing was removed", err)
+                self.assertIn(f"Git cannot read {lane} {refusal}", err)
+                self.assertIn("no removal completed", err)
                 self.assertTrue((lane / "work.txt").exists())
                 self.untouched()
                 self.assertIn(str(lane), self.listed())
