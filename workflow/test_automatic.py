@@ -2973,6 +2973,11 @@ class ControllerStopTests(GraphFixture):
             ("a review that ended blocked", review,
              lambda: save_json(f.directory / "automatic-review.json", {"transport": "native", "status": "blocked", "reviewers": ["review"]}),
              "the review step failed: Reviewer review deadline exhausted; not retried, inspect retained evidence", False),
+            # C51: a run whose finish is "approval" waits at the approval gate; switched back, `automatic` repeats the stop and approve goes on.
+            ("a run waiting for the operator's approval", at(("approval",), task("approval", None, "integration_approval")),
+             lambda: f.runtime.plan["automatic"].update(finish="approval"), None, False),
+            ("an approval gate the default finish never waits at", at(("approval",), task("approval", None, "integration_approval")),
+             lambda: f.runtime.plan["automatic"].update(finish="verified-feature-branch"), "Unexpected manual gate in automatic run; inspect state", False),
             ("a check drive retries", verify, lambda: packet(1), None, False),
             ("a check that failed identically", verify, lambda: (packet(2), save_json(f.directory / "attempts.json", {"worker:ui": 2})),
              f"worker/ui failed identically on attempts 1 and 2; not transient, inspect {packets / '2' / 'packet.json'}. Before review a code "
@@ -3998,8 +4003,11 @@ class ApprovalStopTests(GraphFixture):
         self.assertEqual(code, 0, err)
         self.assertIn(approve, json.loads(out.split("\nReport:")[0])["next_step"])
         # The operator's approval integrates as a manual approve does, and the next controller finds the verified branch.
+        self.assertIn(("awaiting_approval", "approval"), [(item["kind"], item["node"]) for item in read_json(f.directory / "attention.json")["states"]])
         code, out, err = self.main(["approve", str(f.directory), "--bundle-sha256", digest])
         self.assertEqual(code, 0, err)
+        # The approval forgets the waiting state, so a later stop for approval would be recorded again.
+        self.assertNotIn(("awaiting_approval", "approval"), [(item["kind"], item["node"]) for item in read_json(f.directory / "attention.json")["states"]])
         commit = git(f.repo, "rev-parse", "HEAD")
         self.assertNotEqual(commit, f.plan["base_commit"])
         self.assertEqual(drive(f.runtime), commit)
