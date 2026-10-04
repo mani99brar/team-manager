@@ -1199,13 +1199,13 @@ function resumableStopNext(context: Context, raw: string): NextStep | null {
   const resume = command(workflow('automatic', '--live'))
   if (BRANCH_CHANGED.test(raw)) {
     const branch = context.run.inputs?.source_branch ?? '<source branch>'
-    // The stop names the checkout (automatic.py source_branch_note), but the server redacts every path in a message, so the step
-    // says where to find it: the run's own worktree since C56, the target checkout before. Text, not a command step: those are
-    // the workflow CLI's own.
-    const where = "In the run's source checkout, the path status prints as source_checkout (the run directory's path plus .source, for runs launched since per-run checkouts):"
+    // The stop names the checkout (automatic.py source_branch_note), but the server redacts every path in a message, so the
+    // first step is the command that prints it: the run's own worktree since C56, the target checkout before. The switch is
+    // text, not a command step: those are the workflow CLI's own.
+    const find = command(workflow('status'), "Find the run's source checkout: status prints its path as source_checkout (for runs launched since per-run checkouts, the run directory's path plus .source):")
     return {
       action: 'required', label: `Switch the run's source checkout back to ${branch}, then resume the controller: it relaunches nothing`,
-      runbook: [RUNBOOK.sourceBranch], steps: [prose(where), prose(`git -C <source checkout> switch ${branch}`), resume], caveat: null,
+      runbook: [RUNBOOK.sourceBranch], steps: [find, prose(`git -C <source checkout> switch ${branch}`), resume], caveat: null,
     }
   }
   if (!START_INCOMPLETE.test(raw)) return null

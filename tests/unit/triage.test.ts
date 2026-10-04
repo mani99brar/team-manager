@@ -672,9 +672,10 @@ describe('deriveNow', () => {
     assert.match(textToString(now.headline, T0), /^‖ Interrupted at Freeze worker handoffs · 10:30: the controller stopped; sessions keep running/)
     assert.equal(now.next.label, "Switch the run's source checkout back to feature/skeleton/skeleton-001, then resume the controller: it relaunches nothing")
     // The run's source checkout (its own worktree since C56), never the operator's own: switching that one fails or moves it. The
-    // server redacts the stop's path to <path>, so the step says where to find it instead of copying the placeholder.
+    // server redacts the stop's path to <path>, so the first step is the command that prints it, instead of copying the placeholder.
     assert.deepEqual(now.next.steps, [
-      { kind: 'text', text: "In the run's source checkout, the path status prints as source_checkout (the run directory's path plus .source, for runs launched since per-run checkouts):" },
+      { kind: 'command', text: '"$PY" -m workflow status "$RUN"',
+        caption: "Find the run's source checkout: status prints its path as source_checkout (for runs launched since per-run checkouts, the run directory's path plus .source):" },
       { kind: 'text', text: 'git -C <source checkout> switch feature/skeleton/skeleton-001' },
       { kind: 'command', text: '"$PY" -m workflow automatic "$RUN" --live --by operator' }])
     assert.deepEqual(now.next.runbook, [{ section: 'Status, failures and recovery', topic: 'Source feature branch changed' }])
@@ -725,7 +726,7 @@ describe('deriveNow', () => {
     }))
     assert.equal(now.situation, 'interrupted')
     assert.equal(now.interruption, 'a')
-    assert.deepEqual(commands(now), ['"$PY" -m workflow automatic "$RUN" --live --by operator'])
+    assert.deepEqual(commands(now), ['"$PY" -m workflow status "$RUN"', '"$PY" -m workflow automatic "$RUN" --live --by operator'])
     assert.ok(now.next.steps.some(step => step.text === 'git -C <source checkout> switch feature/workflow-guardrails/workflow-guardrails-001'))
     assert.match(now.next.label, /^Switch the run's source checkout back to feature\/workflow-guardrails\/workflow-guardrails-001,/)
   })
