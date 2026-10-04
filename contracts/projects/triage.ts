@@ -258,10 +258,15 @@ const START_INCOMPLETE = /^Automatic supervision requires a completed start\b/
 const NEVER_STARTED = /\bthe run was never started\b/
 /** automatic.py record_blocked: the reason drive gives before a stop it does not retry. */
 const CONTROLLER_BLOCKED = /^Controller blocked: /
+/**
+ * automatic.py final_stop: off the source branch, a check that reached its attempt limit and workers stopped when their wait
+ * failed are said bare, without CONTROLLER_BLOCKED's prefix, as advance_or_block and the failed wait say them.
+ */
+const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed after stop intent\b/, /^Invalid completion file for /]
 /** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
 const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ...BARE_STOPS]
 /** automatic.py:281 (workers) and :556 (reviewers). */
 const PANE = /needs attention in its pane( \([^)]*\))?/
 const PANE_REVIEWER = /^Reviewer (\S+) needs attention in its pane/

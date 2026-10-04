@@ -975,6 +975,21 @@ describe('deriveNow', () => {
     assert.match(textToString(now.reason, T0), /Controller blocked: Freeze failed: Stop failed for ui/)
   })
 
+  it('blocked_before_freeze: on a lane named controller, a stop said bare off the source branch is the run\'s, as source 0', () => {
+    // automatic.py final_stop says workers stopped when their wait failed without `Controller blocked: ` off the source branch, as
+    // drive says them; a server before the fix serves such a row aliased onto launch_controller.
+    for (const stop of ['Handoff changed after stop intent', 'Invalid completion file for ui']) {
+      const now = checked(synthetic({
+        base: guardrails, status: 'failed', nodes: { launch_controller: 'succeeded', launch_ui: 'succeeded', handoff: 'failed' },
+        events: [[0, 'launch_controller', 'running', 'Launching or reconciling the exact native session'], [0, 'launch_ui', 'running', 'Launching or reconciling the exact native session'],
+          [5, 'launch_controller', 'running', 'Automatic checkpoint controller PID 5151'], [3600, 'launch_controller', 'failed', stop]],
+      }))
+      assert.equal(now.situation, 'blocked_before_freeze', stop)
+      assert.equal(now.reasonSource, 0, stop)
+      assert.match(textToString(now.reason, T0), new RegExp(stop), stop)
+    }
+  })
+
   it('scope: a stale [Errno 2] row before the focus attempt is ignored', () => {
     const run = (second: number) => synthetic({
       status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'succeeded', approval: 'succeeded', integrate: 'failed' },
