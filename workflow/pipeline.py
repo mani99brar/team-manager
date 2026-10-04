@@ -1133,7 +1133,7 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
     not record whether its `start` was given --herdr, so the commands come with the hint to add it.
     """
     from .guardrails import (HERDR_HINT, REVISION_INTENT, edited_in, is_held, load_challenge, resume_command, resume_refusal, stale_pins,
-                             unused_edits)
+                             unchanged_since, unused_edits)
     record = load_challenge(directory)
     running = directory / "challenge.running.json"
     started = read_json(running).get("attempt", 0) if running.exists() else 0
@@ -1145,11 +1145,11 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
         return f"design challenge attempt {started} was started and not decided: {rerun}"
     if is_held(directory, plan, record):
         held = f"design challenge attempt {record['attempt']} passed and is held for the operator; no worker launched"
-        try:
-            edits = unused_edits(directory, plan)
+        try:  # As resume (held_refusal): an edit, or a re-pin a failed rerun left, both count as changed since the attempt.
+            changed = not unchanged_since(directory, plan, record)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             return f"{held}, and its source checkout {plan['repository']} could not be read ({error}): resume needs it"
-        if edits:
+        if changed:
             refusal = resume_refusal(plan)  # As for a pause: never send the operator to a command that refuses.
             if refusal:
                 return f"{held}, and feature files changed since it read them, but resume refuses: {refusal}"

@@ -172,16 +172,17 @@ def open_items(directory: Path, plan: dict, findings: list, open_p2: bool = Fals
 
 def held_line(directory: Path, plan: dict) -> str | None:
     """A run held after a passing design challenge (C8): what holds it and the command that releases it; None otherwise. As
-    challenge_step's held branch: with feature files edited since the attempt and resume's read-only checks failing, resume's
-    refusal instead of a release that refuses too."""
-    from .guardrails import is_held, load_challenge, resume_command, resume_refusal, unused_edits
+    challenge_step's held branch and resume (held_refusal): with anything changed since the attempt (unchanged_since: an
+    edit, a re-pin a failed rerun left, a newer attempt started) and resume's read-only checks failing, resume's refusal
+    instead of a release that refuses too. A source checkout it cannot read still leaves the held fact."""
+    from .guardrails import is_held, load_challenge, resume_command, resume_refusal, unchanged_since
     record = load_challenge(directory)
     if not is_held(directory, plan, record):
         return None
     held = f"Outcome: held at design challenge attempt {record['attempt']} (passed, {len(record['concerns'])} P2 concern(s)); no worker launched"
     try:
-        refusal = unused_edits(directory, plan) and resume_refusal(plan)
-    except subprocess.SubprocessError as error:  # outcome_block catches the rest.
+        refusal = not unchanged_since(directory, plan, record) and resume_refusal(plan)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:  # As challenge_step: the block never loses the held fact.
         return f"{held}, and its source checkout {plan['repository']} could not be read ({error}): resume needs it"
     if refusal:
         return f"{held}, and feature files changed since it read them, but resume refuses: {refusal}"

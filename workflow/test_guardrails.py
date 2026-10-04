@@ -1622,6 +1622,50 @@ class ChallengeHold(GuardedFeature):
         self.assertNotIn("release it:", output)
         self.assertEqual(len(self.challenge_calls()), 1)
 
+    def test_a_held_rerun_that_failed_after_its_re_pin_names_resume_s_refusal_not_the_release(self):
+        # The edit is committed and re-pinned, so no edit waits (unused_edits is None), but attempt 1 read other files than
+        # the plan pins (unchanged_since is false): with resume refusing, the outcome line and the next step name its refusal.
+        directory = self.held("held-repin-001")
+        self.edit_task()
+        with patch("workflow.guardrails.challenge_worktree", side_effect=RuntimeError("Challenge worktree could not be created")):
+            output, code = self.cli(resume_main, [str(directory)])
+        self.assertEqual(code, 1, output)
+        self.assertEqual(read_json(directory / "challenge.json")["attempt"], 1)
+        (self.repo / "other.txt").write_text("stray\n")
+        output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "fine", "--by", "operator"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("but resume refuses: ", output)
+        self.assertIn("Outcome: held at design challenge attempt 1 (passed, 2 P2 concern(s)); no worker launched, and feature files "
+                      "changed since it read them, but resume refuses: The source checkout has changes resume does not re-pin: other.txt",
+                      output)
+        self.assertNotIn("release it:", output)
+        step = pipeline.challenge_step(directory, read_json(directory / "plan.json"))
+        self.assertIn("but resume refuses: The source checkout has changes resume does not re-pin: other.txt", step)
+        self.assertNotIn("--launch", step)
+
+    def test_a_held_run_whose_source_checkout_cannot_be_read_still_says_it_is_held(self):
+        directory = self.held("held-unreadable-001")
+        # No warning about this machine's other Claude Code processes before the Blocked line.
+        with patch("workflow.guardrails.dirty_paths", side_effect=subprocess.CalledProcessError(128, ["git", "status"])), \
+                patch("workflow.guardrails.stale_claude_warning", return_value=""):
+            lines = pipeline.outcome_lines(directory)
+            output, code = self.cli(resume_main, [str(directory), "--by", "operator", "--launch"])
+        self.assertIn("Outcome: held at design challenge attempt 1 (passed, 2 P2 concern(s)); no worker launched, and its source checkout ", lines)
+        self.assertIn("could not be read", lines)
+        self.assertEqual(code, 1, output)
+        self.assertTrue(output.startswith("Blocked:"), output)
+        self.assertNotIn("Traceback", output)
+        # A pinned file it cannot read (or decode) leaves the held fact too, as the next step does.
+        task = self.folder / "ui-task.md"
+        task.chmod(0)
+        try:
+            lines = pipeline.outcome_lines(directory)
+        finally:
+            task.chmod(0o644)
+        self.assertIn("Outcome: held at design challenge attempt 1 (passed, 2 P2 concern(s)); no worker launched, and its source checkout ", lines)
+        self.assertIn("could not be read", lines)
+        self.assertNotIn("Outcome: unavailable", lines)
+
     def test_an_edited_hold_with_a_plain_resume_reruns_and_holds_again(self):
         directory = self.held("edit-hold-001")
         self.edit_task()
