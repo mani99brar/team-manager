@@ -1254,13 +1254,18 @@ class ChallengeRevision(GuardedFeature):
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 1, output)
         self.assertIn(f"The source checkout is not on the run's branch {branch} (its HEAD is detached)", output)
+        step = pipeline.challenge_step(directory, read_json(directory / "plan.json"))  # status runs resume's read-only checks first.
+        self.assertIn(f"but resume refuses: The source checkout is not on the run's branch {branch} (its HEAD is detached)", step)
         git(self.repo, "checkout", "-q", branch)
+        self.assertIn("commits them and reruns the design challenge", pipeline.challenge_step(directory, read_json(directory / "plan.json")))
         self.assertEqual((git(self.repo, "rev-parse", "HEAD"), git(self.repo, "diff", "--name-only")), (base, f"features/{FEATURE}/ui-task.md"))
         (self.repo / "backend.py").write_text("VALUE = 3\n")
         (self.repo / "notes.txt").write_text("scratch\n")
         output, code = self.cli(resume_main, [str(directory)])
         self.assertEqual(code, 1, output)
         self.assertIn("changes resume does not re-pin: backend.py, notes.txt", output)
+        self.assertIn("but resume refuses: The source checkout has changes resume does not re-pin: backend.py, notes.txt",
+                      pipeline.challenge_step(directory, read_json(directory / "plan.json")))
         # Nothing was committed or moved, the challenge did not rerun and the edits stay in the checkout.
         self.assertEqual((git(self.repo, "rev-parse", "HEAD"), read_json(directory / "plan.json")["base_commit"]), (base, base))
         self.assertEqual(len(self.challenge_calls()), 1)
@@ -1281,6 +1286,7 @@ class ChallengeRevision(GuardedFeature):
         self.assertEqual(code, 1, output)
         self.assertIn("commits resume did not make", output)
         self.assertIn(f"git reset --soft {base}", output)
+        self.assertIn("resume refuses: ", pipeline.challenge_step(directory, read_json(directory / "plan.json")))
         self.assertEqual((read_json(directory / "plan.json")["base_commit"], len(self.challenge_calls())), (base, 1))
         git(self.repo, "reset", "--soft", base)
         self.challenge_says([concern("P1", "The lanes still overlap")])
@@ -1310,6 +1316,15 @@ class ChallengeRevision(GuardedFeature):
             self.assertFalse((directory / guardrails.REVISION_INTENT).exists())
             self.assertEqual(len(self.challenge_calls()), 1)
             self.assertIn(line, path.read_text())
+            # The override and status name the refusal instead of promising that resume commits the edit (C5 makes such a line
+            # a designed output of a re-grill during a pause).
+            output, code = self.cli(resume_main, [str(directory), "--accept-challenge", "Fine as it is"])
+            self.assertEqual(code, 1, output)
+            self.assertIn(f"the override would launch the workers without them. resume refuses: {path.resolve()}:{number}: {line.strip()}", output)
+            self.assertNotIn("to commit them and rerun the challenge", output)
+            step = pipeline.challenge_step(directory, read_json(directory / "plan.json"))
+            self.assertIn(f"feature files changed since it read them, but resume refuses: {path.resolve()}:{number}: {line.strip()}", step)
+            self.assertNotIn("commits them", step)
 
         decisions = self.folder / "decisions.md"
         decisions.write_text(SPLIT_DECISIONS.replace("## Grill defaults", "TODO: Q2 Who owns contracts/?\n\n## Grill defaults"))

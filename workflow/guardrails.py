@@ -781,16 +781,10 @@ def is_revision(repo: Path, commit: str, plan: dict) -> bool:
             and set(filter(None, paths.split("\0"))) <= pinned_paths(plan))
 
 
-def commit_revision(runtime, answered: int) -> None:
-    """`resume` after an edit: commit the edited feature files on the run's branch, then move the run's worktrees to that commit.
-
-    Only the paths `repin` reads may be changed and every run worktree must be a clean checkout of the base; anything
-    else is refused before anything is written. Then `challenge-revision.json` records the move until `repin` has
-    pinned its result: while it exists `start` and `--accept-challenge` refuse, so no worker launches on a half-moved
-    run, and a rerun continues from the revisions the branch already carries without a second commit.
-    """
-    from .pipeline import commit_env
-    directory, plan = runtime.directory, runtime.plan
+def revision_checks(plan: dict) -> tuple[list[str], list[str]]:
+    """commit_revision's read-only checks, which refuse before anything is written: the source checkout is on the run's
+    branch, nothing but the pinned feature files changed in it, and the branch holds only revision commits after the base.
+    The dirty paths and those revision commits; ValueError otherwise."""
     repo, base, branch = Path(plan["repository"]), plan["base_commit"], plan["source_branch"]
     head = subprocess.run(["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     if head != branch:
@@ -804,6 +798,32 @@ def commit_revision(runtime, answered: int) -> None:
     if earlier is None or not all(is_revision(repo, commit, plan) for commit in earlier):
         raise ValueError(f"The branch {branch} moved past the run's base {base} with commits resume did not make; resume commits the "
                          f"revised feature files itself. Reset the branch to the base (git reset --soft {base}) and rerun resume")
+    return dirty, earlier
+
+
+def resume_refusal(plan: dict) -> str | None:
+    """Why `resume` would refuse to commit the edited feature files, from its read-only checks (read_pinned, then
+    revision_checks), or None. `status` and the override's refusal run it before they promise that resume commits them."""
+    try:
+        read_pinned(plan)
+        revision_checks(plan)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return str(error)
+    return None
+
+
+def commit_revision(runtime, answered: int) -> None:
+    """`resume` after an edit: commit the edited feature files on the run's branch, then move the run's worktrees to that commit.
+
+    Only the paths `repin` reads may be changed and every run worktree must be a clean checkout of the base; anything
+    else is refused before anything is written. Then `challenge-revision.json` records the move until `repin` has
+    pinned its result: while it exists `start` and `--accept-challenge` refuse, so no worker launches on a half-moved
+    run, and a rerun continues from the revisions the branch already carries without a second commit.
+    """
+    from .pipeline import commit_env
+    directory, plan = runtime.directory, runtime.plan
+    repo, base, branch = Path(plan["repository"]), plan["base_commit"], plan["source_branch"]
+    dirty, earlier = revision_checks(plan)
     check_run_worktrees(runtime, {base, *earlier})  # Before the commit: a refusal leaves the branch and the edits as they were.
     intent = directory / REVISION_INTENT
     previous = read_json(intent) if intent.exists() else {"base_commit": base, "paths": []}
@@ -904,8 +924,11 @@ def unused_edits(directory: Path, plan: dict) -> str | None:
     edited = {path for path in dirty_paths(repo) if path in pinned_paths(plan)}
     edited |= {path.relative_to(repo).as_posix() if path.is_relative_to(repo) else str(path) for path in changed_pins(plan)}
     if edited:
-        return (f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers "
-                "without them. Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them")
+        changed = f"Feature files changed since they were pinned ({', '.join(sorted(edited))}); the override would launch the workers without them."
+        refusal = resume_refusal(plan)
+        if refusal:
+            return f"{changed} resume refuses: {refusal}. Fix that and rerun resume without --accept-challenge, or revert them"
+        return f"{changed} Rerun resume without --accept-challenge to commit them and rerun the challenge, or revert them"
     return None
 
 

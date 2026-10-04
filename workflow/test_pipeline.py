@@ -901,7 +901,7 @@ class RecordTests(unittest.TestCase):
         folder.mkdir(parents=True)
         tasks = {worker["node_id"]: folder / f"{worker['node_id']}-task.md" for worker in f.policy["workers"]}
         for worker in f.policy["workers"]:
-            tasks[worker["node_id"]].write_text(f"## Goal\n\nChange {worker['node_id']}.\n")
+            tasks[worker["node_id"]].write_text(f"## Goal\n\nChange {worker['node_id']}.\n\n## Acceptance\n\nIt changed.\n\n## Stop\n\nWhen it changed.\n")
             f.plan["nodes"][worker["node_id"]]["task"] = pinned_task(tasks[worker["node_id"]].read_text(), worker)
         (folder / "decisions.md").write_text("# Decisions\n\n- Keep the lanes apart.\n")
         git(f.repo, "add", "features")
@@ -1186,6 +1186,12 @@ class RecordTests(unittest.TestCase):
             f"reruns the design challenge ({hint}); --accept-challenge is refused until the changes are reverted. Then: "), printed["next_step"])
         with self.assertRaisesRegex(ValueError, r"^Feature files changed since they were pinned \(features/record/decisions\.md\)"):
             refuse_unused_edits(f.directory, f.plan)  # What `resume --accept-challenge` does now.
+        # An edit resume would refuse (a re-grill's unanswered question): status names the refusal, never the commit.
+        decisions.write_text(pinned + "TODO: Q2 Who owns contracts/?\n")
+        step = self.status()[0]["next_step"]
+        self.assertIn(f"feature files changed since it read them, but resume refuses: {decisions}:4: TODO: Q2 Who owns contracts/? "
+                      "(launch refuses it too", step)
+        self.assertNotIn("commits them", step)
         decisions.write_text(pinned)
         self.assertIn(offered, self.status()[0]["next_step"])
         # A source checkout that cannot be read (moved, or git fails in it): resume needs it too, so status offers nothing.

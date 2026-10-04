@@ -990,12 +990,13 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
     """What the design challenge waits for before any worker starts, as `resume` acts on it; None when it waits for nothing.
 
     The override is offered only for a paused attempt that read what the plan pins, with no edit waiting: `resume`
-    refuses it otherwise (guardrails.refuse_unused_edits). A bare `resume` reruns the challenge on the edits, or with no
+    refuses it otherwise (guardrails.refuse_unused_edits). A bare `resume` is promised to commit the edits only when its
+    read-only checks pass (guardrails.resume_refusal); otherwise the step names its refusal. A bare `resume` reruns the challenge on the edits, or with no
     edit after a rerun that failed before its job decided (guardrails.unchanged_since). A job still running under `start`
     or `resume` looks the same as one a Ctrl-C or a kill left undecided, so the step says when it applies. The run does
     not record whether its `start` was given --herdr, so the commands come with the hint to add it.
     """
-    from .guardrails import HERDR_HINT, REVISION_INTENT, load_challenge, resume_command, stale_pins, unused_edits
+    from .guardrails import HERDR_HINT, REVISION_INTENT, load_challenge, resume_command, resume_refusal, stale_pins, unused_edits
     record = load_challenge(directory)
     running = directory / "challenge.running.json"
     started = read_json(running).get("attempt", 0) if running.exists() else 0
@@ -1015,6 +1016,10 @@ def challenge_step(directory: Path, plan: dict) -> str | None:
         return (f"design challenge attempt {record['attempt']} paused the run, and its source checkout {plan['repository']} could not "
                 f"be read ({error}): resume needs it")
     if edits:
+        refusal = resume_refusal(plan)  # resume's read-only checks first: never send the operator to a command that refuses.
+        if refusal:
+            return (f"design challenge attempt {record['attempt']} paused the run, and feature files changed since it read them, but "
+                    f"resume refuses: {refusal}; --accept-challenge is refused until the changes are reverted")
         return (f"design challenge attempt {record['attempt']} paused the run, and feature files changed since it read them: "
                 f"{resume_command(directory)} commits them and reruns the design challenge ({HERDR_HINT}); --accept-challenge is "
                 "refused until the changes are reverted")
