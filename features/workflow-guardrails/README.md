@@ -7,5 +7,5 @@ This feature is itself 2.1.0, because the launcher that runs it predates 2.2.0; 
 Launch from md-manager's main checkout, in a new Herdr tab:
 
 ```
-ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch workflow-guardrails --live --by operator --automatic --reviewer-transport print --worker-timeout-seconds 7200 --review-timeout-seconds 3600
+.venv/bin/python -m workflow launch workflow-guardrails --live --by operator --automatic --reviewer-transport print --worker-timeout-seconds 7200 --review-timeout-seconds 3600 --worker-model claude-opus-5-5 --judge-model claude-opus-5-5
 ```

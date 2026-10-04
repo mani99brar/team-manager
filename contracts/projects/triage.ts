@@ -272,12 +272,17 @@ const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed a
   /^Worker \S+ (deadline exhausted|explicitly blocked|asked a question that is not recorded yet)\b/, /^Native worker missing\b/,
   /^Worker \S+ asked question \d+; at most \d+ are answered\b/,
   /^Malformed completion signal\b/, /^Stale or foreign worker completion signal\b/, /^Completion version \S+ refused\b/]
-/** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
+/**
+ * automatic.py note_controller_drift: a `controller` `warning` row before the PID row when a step runs another controller commit
+ * than prepare pinned. `warning` is no event status, so it is served without one: a note, never a block.
+ */
+const CONTROLLER_DRIFT = /^Controller commit [0-9a-f]+ runs this step\b/
 /** pipeline.py action_event: who ran a gate action (C17), a log line. */
 const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW]
+/** Node-less rows the controller writes as `running`; any other node-less row without a status was `blocked` (before B1). */
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, ...BARE_STOPS]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ...BARE_STOPS]
 /** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
 const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */

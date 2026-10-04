@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
+import type { RunInputs } from './v1.js'
 import { validateWorkerResult } from '../workflow/v1.js'
 import {
   ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateDefinition, validateReviewResult,
@@ -259,6 +260,27 @@ test('run inputs: manual runs, absent receipts and truncated text are valid; con
   older.workers[0].checks[0].id = 'test:unit'
   older.workers[0].checks[1].scenarios[0].id = 'review verdict / narrow'
   validateRunInputs(older)
+  // 1.7.0: roles, controller and profile are null for a run prepared before them, and absent from a server before 1.7.0.
+  const prepared = structuredClone(examples.runInputs)
+  prepared.roles = null
+  prepared.controller = { commit: null, dirty: null, claude_version: null }
+  prepared.automatic!.profile = null
+  validateRunInputs(prepared)
+  delete prepared.roles
+  delete prepared.controller
+  delete prepared.automatic!.profile
+  validateRunInputs(prepared)
+  for (const broken of [
+    (inputs: RunInputs) => { inputs.automatic!.profile = 'supervised' as never },
+    (inputs: RunInputs) => { inputs.roles!.worker.effort = 'extreme' as never },
+    (inputs: RunInputs) => { inputs.roles!.judges.model = '' },
+    (inputs: RunInputs) => { (inputs.roles as Record<string, unknown>).reviewer = { model: null, effort: null } },
+    (inputs: RunInputs) => { inputs.controller!.commit = 'abc' },
+  ]) {
+    const bad = structuredClone(examples.runInputs)
+    broken(bad)
+    assert.throws(() => validateRunInputs(bad))
+  }
   // Any number of lanes with free role labels and their own required kinds; one lane is a valid run.
   const three = structuredClone(examples.runInputs)
   three.selected_workers = ['ui', 'adapter', 'docs']

@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -308,19 +309,183 @@ WORKER_EFFORT_ENV = "WORKFLOW_WORKER_EFFORT"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
-def worker_effort(env=None) -> list[str]:
-    """`--effort <level>` for worker sessions only, from WORKFLOW_WORKER_EFFORT in the controller's environment.
-
-    Unset or empty leaves the effort to Claude Code's settings. The challenge and the reviewers never take it: the
-    operator chooses a cheaper effort for implementation without weakening the checks on it. An unknown level is
-    refused (preflight calls this too, so a typo fails before any agent starts).
-    """
+def env_effort(env=None) -> str | None:
+    """WORKFLOW_WORKER_EFFORT in `env` (default: this process's): None when unset or empty, an unknown level refused."""
     level = (os.environ if env is None else env).get(WORKER_EFFORT_ENV, "").strip()
     if not level:
-        return []
+        return None
     if level not in EFFORT_LEVELS:
         raise ValueError(f"{WORKER_EFFORT_ENV}={level!r} is not one of {', '.join(EFFORT_LEVELS)}")
-    return ["--effort", level]
+    return level
+
+
+def worker_effort(env=None, plan: dict | None = None) -> list[str]:
+    """`--effort <level>` for worker sessions only: the plan's pinned worker effort when it has `roles` (C52), else
+    WORKFLOW_WORKER_EFFORT in the controller's environment, as for every plan pinned before roles.
+
+    Unset or empty leaves the effort to Claude Code's settings. The judges never take it: the operator chooses a cheaper
+    effort for implementation without weakening the checks on it. An unknown level is refused (preflight calls this too,
+    so a typo fails before any agent starts).
+    """
+    if plan is not None and plan.get("roles") is not None:
+        level = plan_roles(plan)["worker"]["effort"]
+    else:
+        level = env_effort(env)
+    return ["--effort", level] if level else []
+
+
+# Run roles (C52): prepare pins the model and effort of the workers and of the judges (the design challenge, every reviewer
+# of either transport and the review sidecar) as plan.roles, and nothing changes them after. A model left unset means Claude
+# Code's default, and no --model is passed. The judges default to high effort, the workers to WORKFLOW_WORKER_EFFORT read
+# once at prepare. Plans pinned before roles keep today's behaviour: the variable for workers, nothing for the judges.
+ROLES = ("worker", "judges")
+JUDGE_EFFORT = "high"
+MODEL_PATTERN = re.compile(r"[A-Za-z0-9]\S{0,127}")
+
+
+def role_pin(model, effort, flag: str) -> dict:
+    if model is not None and (not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model)):
+        raise ValueError(f"{flag}-model must be a model name without spaces: {model!r}")
+    if effort is not None and effort not in EFFORT_LEVELS:
+        raise ValueError(f"{flag}-effort {effort!r} is not one of {', '.join(EFFORT_LEVELS)}")
+    return {"model": model, "effort": effort}
+
+
+def pin_roles(worker_model: str | None = None, worker_effort: str | None = None, judge_model: str | None = None,
+              judge_effort: str | None = None, env=None) -> dict:
+    """plan.roles from prepare's flags: the worker effort defaults to WORKFLOW_WORKER_EFFORT in `env`, the judges' to high."""
+    return {"worker": role_pin(worker_model, env_effort(env) if worker_effort is None else worker_effort, "--worker"),
+            "judges": role_pin(judge_model, JUDGE_EFFORT if judge_effort is None else judge_effort, "--judge")}
+
+
+def plan_roles(plan: dict) -> dict | None:
+    """The plan's pinned roles, validated; None for a plan pinned before them."""
+    roles = plan.get("roles")
+    if roles is None:
+        return None
+    if not isinstance(roles, dict) or set(roles) != set(ROLES) or not all(
+            isinstance(roles[role], dict) and set(roles[role]) == {"model", "effort"} for role in ROLES):
+        raise ValueError("Malformed plan roles: expected worker and judges, each with model and effort")
+    for role, flag in (("worker", "--worker"), ("judges", "--judge")):
+        role_pin(roles[role]["model"], roles[role]["effort"], flag)
+    return roles
+
+
+def requested_pins(plan: dict, role: str) -> dict:
+    """What a role's sessions are asked for, `{model, effort}`: both None for a plan pinned before roles."""
+    roles = plan_roles(plan)
+    return dict(roles[role]) if roles else {"model": None, "effort": None}
+
+
+def role_flags(plan: dict, role: str, env=None) -> list[str]:
+    """`--model <m>` (when pinned) and `--effort <e>` for one role's claude argv. For a plan pinned before roles the worker
+    takes WORKFLOW_WORKER_EFFORT (worker_effort) and the judges nothing."""
+    if role not in ROLES:
+        raise ValueError(f"Unknown role {role!r}")
+    roles = plan_roles(plan)
+    if roles is None:
+        return worker_effort(env) if role == "worker" else []
+    pins = roles[role]
+    return [*(["--model", pins["model"]] if pins["model"] else []), *(["--effort", pins["effort"]] if pins["effort"] else [])]
+
+
+def observed_models(stdout: Path) -> list[str]:
+    """The models a print job reported: the keys of `modelUsage` in its JSON result, sorted; [] when it cannot be read."""
+    try:
+        usage = read_json(stdout).get("modelUsage")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return sorted(usage) if isinstance(usage, dict) else []
+
+
+def record_role(directory: Path, stem: str, plan: dict, role: str, stdout: Path | None = None) -> None:
+    """`<stem>.role.json` beside a print job's files (a challenge attempt, a print reviewer, a sidecar pass): the pins it was
+    asked for and, once its output is read (`stdout`), the models it reported; `observed_models` is null until then. A
+    side file, because challenge.json and the sidecar ledger have closed schemas. The CLI may clamp an effort per model."""
+    save_json(directory / f"{stem}.role.json", {"requested": requested_pins(plan, role),
+                                                "observed_models": None if stdout is None else observed_models(stdout)})
+
+
+def note_role(directory: Path, stem: str, plan: dict, role: str, stdout: Path | None = None) -> None:
+    """record_role for a job that runs or ran: the role file is a record, so a write that fails (a full disk) is said on
+    stderr and never fails the job, its verdict or its pass."""
+    try:
+        record_role(directory, stem, plan, role, stdout)
+    except (OSError, ValueError) as error:
+        print(f"Warning: {stem}.role.json not written: {error}", file=sys.stderr, flush=True)
+
+
+# What a Claude Code session exports to its children, and the model and effort overrides the CLI reads: a print job, the --bg
+# helper or a check started by a controller that itself runs inside a session must not inherit them, or a job would run as
+# part of that session, or with its model or effort instead of the pinned ones. An explicit denylist, to update when the CLI
+# adds an override: the config, auth and provider variables (CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN,
+# CLAUDE_CODE_USE_BEDROCK/VERTEX, ANTHROPIC_BASE_URL, ...) stay. Hygiene, not a boundary: same-account processes can read
+# each other's environment in /proc.
+SCRUBBED_ENV = frozenset({"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_PID",
+                          "CLAUDE_EFFORT", "CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"})
+SCRUBBED_PATTERN = re.compile(r"CLAUDE_CODE_MESSAGING_.*|ANTHROPIC_DEFAULT_.+_MODEL")
+
+
+def scrub_env(env) -> dict:
+    """A copy of `env` without SCRUBBED_ENV and the CLAUDE_CODE_MESSAGING_* and ANTHROPIC_DEFAULT_*_MODEL names."""
+    return {key: value for key, value in env.items() if key not in SCRUBBED_ENV and not SCRUBBED_PATTERN.fullmatch(key)}
+
+
+def override_note(env, worker_model=None, worker_effort=None, judge_model=None, judge_effort=None) -> str | None:
+    """What prepare (and a launch dry run) says when `env` sets a model or effort override that scrub_env keeps from the
+    run's sessions and no role flag pins in its place: launch lines written before C52 relied on ANTHROPIC_MODEL."""
+    models = [key for key in sorted(env) if env[key] and (key in {"ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} or re.fullmatch(r"ANTHROPIC_DEFAULT_.+_MODEL", key))]
+    efforts = [key for key in ("CLAUDE_CODE_EFFORT_LEVEL",) if env.get(key)]
+    model_flags = [flag for flag, value in (("--worker-model", worker_model), ("--judge-model", judge_model)) if not value] if models else []
+    effort_flags = [flag for flag, value in (("--worker-effort", worker_effort), ("--judge-effort", judge_effort)) if not value] if efforts else []
+    names = (models if model_flags else []) + (efforts if effort_flags else [])
+    if not names:
+        return None
+    flags = model_flags + effort_flags
+    joined = flags[0] if len(flags) == 1 else f"{', '.join(flags[:-1])} and {flags[-1]}"
+    one = len(names) == 1
+    unpinned = (["a session runs Claude Code's default model"] if model_flags else []) + (
+        ["the workers take WORKFLOW_WORKER_EFFORT and the judges high effort"] if effort_flags else [])
+    return (f"{', '.join(names)} {'is' if one else 'are'} set here but never {'reaches' if one else 'reach'} the run's sessions, which the "
+            f"workflow starts without {'it' if one else 'them'}: pin {'it' if one else 'them'} with {joined}; unpinned, {', '.join(unpinned)}.")
+
+
+def job_env() -> dict:
+    """The environment of a print job and of the --bg helper: this process's, scrubbed (scrub_env) and without the Herdr
+    variables, so a job never targets the controller's pane."""
+    return scrub_env({key: value for key, value in os.environ.items() if not key.startswith("HERDR_")})
+
+
+# The checkout this package runs from: `automatic --live` re-executes it at every checkpoint, so prepare records which commit
+# that was (C52), and a step that runs another warns once (automatic.note_controller_drift).
+CONTROLLER = Path(__file__).resolve().parents[1]
+
+
+def controller_commit(tool: Path = CONTROLLER) -> tuple[str | None, bool | None]:
+    """The controller checkout's HEAD and whether a tracked file differs from it (untracked files do not count); (None, None)
+    when the package does not run from a Git checkout."""
+    try:
+        commit = git(tool, "rev-parse", "HEAD")
+        dirty = bool(git(tool, "status", "--porcelain", "--untracked-files=no"))
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    return commit, dirty
+
+
+def claude_version(executable: str = "claude") -> str | None:
+    """`claude --version`'s first line, or None when it cannot be read; never waits out an update (preflight checked the CLI)."""
+    try:
+        result = run_claude([executable, "--version"], grace=0, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError, TransientInfraError):
+        return None
+    lines = result.stdout.strip().splitlines() if result.returncode == 0 else []
+    return lines[0].strip() if lines and lines[0].strip() else None
+
+
+def controller_record(tool: Path = CONTROLLER, executable: str = "claude") -> dict:
+    """What prepare pins as plan.controller: `{commit, dirty, claude_version}`, each null when it cannot be read."""
+    commit, dirty = controller_commit(tool)
+    return {"commit": commit, "dirty": dirty, "claude_version": claude_version(executable)}
 
 
 def wait_out_update(start, grace: float, sleep=None, retry_output=None):

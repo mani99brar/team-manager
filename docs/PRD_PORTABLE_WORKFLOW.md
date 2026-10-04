@@ -232,13 +232,13 @@ Listed in its own feature directory once the spec PDF is in place.
 Slice 2, from md-manager's main checkout after slice 1 is on main, in a new Herdr tab:
 
 ```
-ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch workflow-guardrails --live --automatic --reviewer-transport print --worker-timeout-seconds 7200 --review-timeout-seconds 3600
+.venv/bin/python -m workflow launch workflow-guardrails --live --by operator --automatic --reviewer-transport print --worker-timeout-seconds 7200 --review-timeout-seconds 3600 --worker-model claude-opus-5-5 --judge-model claude-opus-5-5
 ```
 
 Slice 1, from md-manager's main checkout in a new Herdr tab, with two print reviewers (this run is also the live smoke test of the print transport, which no run has exercised yet):
 
 ```
-ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch portable-workflow --live --automatic --reviewer-transport print --worker-timeout-seconds 5400 --review-timeout-seconds 3600
+.venv/bin/python -m workflow launch portable-workflow --live --by operator --automatic --reviewer-transport print --worker-timeout-seconds 5400 --review-timeout-seconds 3600 --worker-model claude-opus-5-5 --judge-model claude-opus-5-5
 ```
 
 On integration, fast-forward main to the feature branch. Then write the slice 2 feature against the new code, and slice 3 once the spec PDF is in place.

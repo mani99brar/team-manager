@@ -8,7 +8,7 @@ const version = z.literal('1.0.0')
  * worker lanes) and 1.4.0: the review result's `reviewers` (parallel reviewers) and the run inputs' guardrails
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
- * sidecar's ledger (`sidecarLedger`).
+ * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`.
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -300,6 +300,27 @@ export const runInputWorkerSchema = z.strictObject({
   questions: z.array(workerQuestionSchema),
 })
 
+/** How hard a role's sessions think: Claude Code's `--effort` levels. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+/** The profile of an automatic run (1.7.0): unattended when the launch named none. */
+export const RUN_PROFILES = ['attended', 'unattended'] as const
+
+/** One role's pins: a model (null: Claude Code's default, no `--model` passed) and an effort (null: none passed). */
+const rolePinSchema = z.strictObject({ model: z.string().min(1).nullable(), effort: z.enum(EFFORT_LEVELS).nullable() })
+
+/**
+ * The roles a run pinned at prepare (1.7.0): the workers, and the judges (the design challenge, every reviewer and the review
+ * sidecar). Null for runs prepared before roles, which passed the workers WORKFLOW_WORKER_EFFORT and the judges nothing.
+ */
+export const runRolesSchema = z.strictObject({ worker: rolePinSchema, judges: rolePinSchema })
+
+/** The controller that prepared the run (1.7.0): its checkout's commit and dirty flag and `claude --version`; each null when unreadable. */
+export const runControllerSchema = z.strictObject({
+  commit: commit.nullable(),
+  dirty: z.boolean().nullable(),
+  claude_version: z.string().min(1).nullable(),
+})
+
 /** What a run was asked to do, served at `.../runs/{run_id}/inputs`; pinned from the run's own files. */
 export const runInputsSchema = z.strictObject({
   contract_version: version140,
@@ -315,6 +336,8 @@ export const runInputsSchema = z.strictObject({
     review_timeout_seconds: z.number().int().positive(),
     /** Null for runs pinned before the setting existed and never reviewed; otherwise the transport the run pinned or actually used. */
     reviewer_transport: z.enum(['native', 'print']).nullable(),
+    /** 1.7.0: the profile the run pinned; null (or absent, from a server before 1.7.0) for runs pinned before profiles. */
+    profile: z.enum(RUN_PROFILES).nullable().optional(),
   }).nullable(),
   setup: z.array(z.strictObject({ command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
@@ -327,6 +350,10 @@ export const runInputsSchema = z.strictObject({
   decisions: z.string().nullable(),
   /** The design challenge; null for runs without one (feature.json before 2.2.0). */
   challenge: runChallengeSchema.nullable(),
+  /** 1.7.0: the roles' pinned models and efforts; null (or absent, from a server before 1.7.0) for runs prepared before roles. */
+  roles: runRolesSchema.nullable().optional(),
+  /** 1.7.0: the controller that prepared the run; null (or absent) for runs prepared before the record. */
+  controller: runControllerSchema.nullable().optional(),
 })
 
 // ---- Review sidecar ledger (1.6.0) ------------------------------------------------------------------------------

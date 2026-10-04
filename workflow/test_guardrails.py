@@ -32,7 +32,7 @@ from .launch import TOOL, launch_commands
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry, stub_claude_cli
 from .test_portable import Isolated, commit_all, git
 from .verification import validate_schema
 
@@ -53,6 +53,7 @@ OPERATOR_NOTES = "\n\n- Workers run targeted tests only: OPERATOR-NOTE-3.\n"
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 def two_lane_policy() -> dict:
@@ -152,12 +153,12 @@ assert '--print' in args and '--bg' not in args and '--dangerously-skip-permissi
 prompt = sys.stdin.read()
 add_dirs = [args[index + 1] for index, item in enumerate(args) if item == '--add-dir']
 with open({str(self.calls)!r}, 'a') as handle:
-    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs,
+    handle.write(json.dumps({{"cwd": os.getcwd(), "prompt": prompt, "add_dirs": add_dirs, "argv": args[1:],
                               "schema": json.loads(args[args.index('--json-schema') + 1])}}) + '\\n')
 with (Path.cwd().parent / 'fake-launches.log').open('a') as log:  # The worker fake logs its launches to the same file.
     log.write('challenge\\n')
 print(json.dumps({{"session_id": args[args.index('--session-id') + 1], "is_error": False, "subtype": "success",
-                  "structured_output": json.loads(Path({str(self.output)!r}).read_text())}}))
+                  "modelUsage": {{"claude-opus-5-5": {{}}}}, "structured_output": json.loads(Path({str(self.output)!r}).read_text())}}))
 ''')
         self.executable.chmod(0o700)
         self.given = {}  # Per lane, what its launch was given (RecordingSessions).
@@ -1052,6 +1053,47 @@ class ClaudeUpdateAroundTheChallenge(GuardedFeature):
             with self.assertRaisesRegex(RuntimeError, "did not succeed"):
                 run_challenge(self.runtime(directory), 2)
         self.assertEqual((len(environments), len(self.challenge_calls()), waits), (1, 2, []))
+
+    def test_the_challenge_job_takes_the_judges_pins_in_a_scrubbed_env_and_records_them_beside_its_output(self):
+        # C52: --effort high (the judges' default) and the pinned model; none of a surrounding session's overrides; and
+        # challenge-<n>.role.json, since challenge.json's schema is closed.
+        from .guardrails import run_challenge
+        directory = self.prepare("pins-001")
+        plan = read_json(directory / "plan.json")
+        self.assertEqual(plan["roles"]["judges"], {"model": None, "effort": "high"})
+        popen, environments = self.popen([])
+        with patch.dict(os.environ, {"CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "CLAUDECODE": "1"}), \
+                patch("workflow.sessions.subprocess.Popen", side_effect=popen):
+            run_challenge(self.runtime(directory), 1)
+            plan["roles"]["judges"]["model"] = "claude-opus-5-5"
+            save_json(directory / "plan.json", plan)
+            record = run_challenge(self.runtime(directory), 2)
+        first, second = (call["argv"] for call in self.challenge_calls())
+        self.assertEqual((first[first.index("--effort") + 1], "--model" in first), ("high", False))
+        self.assertEqual((second[second.index("--effort") + 1], second[second.index("--model") + 1]), ("high", "claude-opus-5-5"))
+        for environment in environments:
+            self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE"} & set(environment))
+        self.assertEqual(read_json(directory / "challenge-1.role.json"), {"requested": {"model": None, "effort": "high"}, "observed_models": ["claude-opus-5-5"]})
+        self.assertEqual(read_json(directory / "challenge-2.role.json")["requested"], {"model": "claude-opus-5-5", "effort": "high"})
+        self.assertNotIn("requested", record)  # challenge.json keeps its closed schema.
+
+    def test_malformed_roles_or_a_failed_role_file_write_block_the_challenge_never_leaving_it_running(self):
+        # The pins and the first role file come after the `running` event, inside the guard that says `blocked`.
+        from .guardrails import run_challenge
+        directory = self.prepare("roles-001")
+        def last():
+            events = directory / "events.jsonl"
+            statuses = [event["status"] for event in map(json.loads, events.read_text().splitlines()) if event["node"] == "challenge"] if events.exists() else []
+            return statuses[-1] if statuses else None
+        runtime = self.runtime(directory)
+        runtime.plan["roles"] = {"worker": {"model": None, "effort": None}}  # Hand-edited.
+        with self.assertRaisesRegex(ValueError, "Malformed plan roles"):
+            run_challenge(runtime, 1)
+        self.assertEqual(last(), "blocked")
+        with patch("workflow.guardrails.record_role", side_effect=OSError(28, "No space left on device")), self.assertRaises(OSError):
+            run_challenge(self.runtime(directory), 2)
+        self.assertEqual(last(), "blocked")
+        self.assertEqual(self.challenge_calls(), [])  # No job ran.
 
     def test_start_and_resume_name_stale_claude_sessions_and_resume_exits_75_when_claude_code_is_unavailable(self):
         from .sessions import TransientInfraError
@@ -2762,7 +2804,7 @@ class ExportSeam(unittest.TestCase):
             directory = legacy_run(Path(root))
             before = export_run(ExportRuntime(directory))
             self.assertEqual(before["version"], EXPORT_VERSION)
-            self.assertEqual(EXPORT_VERSION, "1.6.0")
+            self.assertEqual(EXPORT_VERSION, "1.7.0")
             self.assertIsNone(before["sidecar"])  # A run prepared without a sidecar (every run before 1.6.0).
             self.assertEqual((before["inputs"]["decisions"], before["inputs"]["challenge"]), (None, None))
             self.assertEqual([worker["questions"] for worker in before["inputs"]["workers"].values()], [[], []])

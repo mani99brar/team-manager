@@ -194,6 +194,17 @@ class FileCaptureTests(unittest.TestCase):
             forged["result"]["files_not_captured"] = entries
             self.assertEqual(recheck_packet(forged, policy, self.run_dir)["gate"]["status"], "blocked", entries)
 
+    def test_checks_never_inherit_a_surrounding_claude_sessions_variables_or_its_model_and_effort_overrides(self):
+        # C52 hygiene (sessions.scrub_env): a check's own `claude` call runs as no part of the controller's session. The scrubbed
+        # names are not secrets, so the packet does not list them; the config and provider variables stay.
+        from .checks import check_environment
+        env, dropped = check_environment({"PATH": "/usr/bin", "CLAUDE_CONFIG_DIR": "/home/operator/.claude", "CLAUDE_CODE_USE_BEDROCK": "1",
+                                          "CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "cli", "CLAUDE_CODE_EFFORT_LEVEL": "low",
+                                          "ANTHROPIC_MODEL": "claude-haiku", "HERDR_PANE_ID": "w1:p1", "GH_TOKEN": "ghp_fake"})
+        self.assertEqual(env, {"PATH": "/usr/bin", "CLAUDE_CONFIG_DIR": "/home/operator/.claude", "CLAUDE_CODE_USE_BEDROCK": "1",
+                               "HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"})
+        self.assertEqual(dropped, ["GH_TOKEN"])
+
     def test_checks_run_without_secret_like_names_and_the_packet_names_them(self):
         """C14 slice 1: names ending in _KEY, _TOKEN, _SECRET or _PASSWORD, and GH_* and GITHUB_* names, never reach a check;
         *_URL names do (pine-chain's fork check reads GNOSIS_RPC_URL). Hooks and Git prompts are off. The packet lists the

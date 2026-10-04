@@ -2,7 +2,7 @@ import { Markdown } from '../document/Markdown.tsx'
 import type { RunInputs, RunScope } from './api.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { runPathname } from './routes.ts'
-import { deadlinesLabel, formatDuration, shortRevision } from './status.ts'
+import { deadlinesLabel, formatDuration, rolesLabel, shortRevision } from './status.ts'
 import type { Resource } from './useResource.ts'
 
 type Props = {
@@ -33,6 +33,7 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
           <div><dt>Source branch</dt><dd>{data.source_branch === null ? 'None recorded' : <code>{data.source_branch}</code>}</dd></div>
           <div><dt>Base commit</dt><dd><code title={data.base_commit}>{shortRevision(data.base_commit)}</code></dd></div>
           <div><dt>Mode</dt><dd>{data.mode}</dd></div>
+          <div><dt>Profile and roles</dt><dd data-testid="assignment-roles">{rolesLabel(data)}</dd></div>
           {data.automatic && (
             <>
               <div><dt>Deadlines</dt><dd>{deadlinesLabel(data.automatic)}</dd></div>

@@ -33,7 +33,7 @@ from .launch import LEGACY_FEATURE_MESSAGE, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, check_review, digest_file, export_run, graph_config, lane_positions, parse_lane_selection, report, validate_pipeline_policy
 from .sessions import git, plan_digest, prepare, read_json, save_json, validate_node_id
 from .test_export import legacy_run
-from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry, stub_claude_cli
 from .verification import CONTRACTS, policy_digest, required_kinds, validate_policy
 
 REPO = Path(__file__).resolve().parents[1]
@@ -45,6 +45,7 @@ LANES = ["ui", "adapter", "docs"]
 
 def setUpModule():
     isolate_registry()  # Attention records go beside a temporary registry, never the operator's.
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 def three_lane_policy(fail_marker: Path | None = None, drill: dict | None = None) -> dict:
@@ -185,7 +186,7 @@ class ThreeLaneRun(LaneRun):
         bundle = read_json(self.directory / "review-bundle.json")
         self.assertEqual(list(bundle["snapshots"]), LANES)
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]],
                          ["launch_ui", "launch_adapter", "launch_docs", "handoff", "verify_ui", "verify_adapter", "verify_docs", "candidate", "review", "approval", "integrate"])
         self.assertEqual(exported["definition"]["nodes"][2]["label"], "Launch docs worker")
@@ -815,7 +816,7 @@ class LegacyFeatureAndRun(LaneRun):
         runtime = ExportRuntime(directory)
         self.assertEqual((runtime.workers, runtime.excluded), (["ui", "adapter"], []))
         exported = export_run(runtime)
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual(exported["definition"], {"name": "Feature implementation", "nodes": old_nodes})  # Stored labels kept.
         self.assertEqual(exported["values"]["lanes"], {"ui": {"session_id": "ui-native"}, "adapter": {"session_id": "adapter-native"}})
         self.assertEqual(exported["values"]["packets"], {"ui": "/x", "adapter": "/y"})

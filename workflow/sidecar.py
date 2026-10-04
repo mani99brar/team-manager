@@ -42,7 +42,7 @@ from pathlib import Path
 
 from .attention import attention
 from .guardrails import epoch, input_shown, iso, pane_attachment, went_on, waiting_question
-from .sessions import plan_reviewers, plan_workers, popen_claude, read_json, save_json, terminate
+from .sessions import job_env, note_role, plan_reviewers, plan_workers, popen_claude, read_json, role_flags, save_json, terminate
 from .verification import CONTRACTS, validate_schema
 
 SIDECAR = "sidecar"
@@ -803,8 +803,10 @@ class Pass:
         os.chmod(prompt, 0o600)
         from .automatic import print_command
         worktrees = [self.plan["nodes"][lane]["worktree"] for lane in plan_workers(self.plan)]
-        command = print_command(self.runtime.sessions.executable, self.session_id, output_schema(), [str(inputs), *worktrees])
-        env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+        command = print_command(self.runtime.sessions.executable, self.session_id, output_schema(), [str(inputs), *worktrees],
+                                role_flags(self.plan, "judges"))
+        env = job_env()
+        note_role(self.directory, f"sidecar-{self.n}", self.plan, "judges")  # The pins it asks for; the ledger's schema is closed.
         with prompt.open() as stdin, (self.directory / f"sidecar-{self.n}.stdout.json").open("w") as output, self.log.open("w") as errors:
             self.process = popen_claude(command, cwd=inputs, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
         save_json(self.directory / RUNNING, {"pass": self.n, "pid": self.process.pid, "session_id": self.session_id,
@@ -864,6 +866,8 @@ class Pass:
 
     def settle(self, status: str) -> None:
         """The job ended (`exited`) or was stopped (`timed_out`): record it, merging and delivering a valid output."""
+        if status == "exited":
+            note_role(self.directory, f"sidecar-{self.n}", self.plan, "judges", self.directory / f"sidecar-{self.n}.stdout.json")
         if status == "timed_out":
             self.record("timed_out")
             self.event("interactive", f"{self.label} timed out after {self.plan['sidecar']['pass_timeout_seconds']}s; its job was stopped "

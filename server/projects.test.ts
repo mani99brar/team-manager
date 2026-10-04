@@ -1305,7 +1305,9 @@ test('run inputs are projected in policy order with redaction, truncation, Z tim
     assert.ok(!response.body.includes(root), 'no absolute path leaves the server')
     const inputs = validateRunInputs(response.json())
     assert.deepEqual([inputs.contract_version, inputs.run_id, inputs.feature, inputs.base_commit, inputs.source_branch, inputs.mode], ['1.4.0', 'inputs', 'Review verdict and findings in the viewer', BASE, 'feature/synthetic', 'automatic'])
-    assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native' })
+    // A 1.2.0 export: no roles, controller record or profile (export 1.7.0); served as null.
+    assert.deepEqual([inputs.roles, inputs.controller], [null, null])
+    assert.deepEqual(inputs.automatic, { finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 3600, review_timeout_seconds: 1800, reviewer_transport: 'native', profile: null })
     assert.deepEqual(inputs.setup, [{ command: 'npm ci', timeout_seconds: 600 }])
     assert.equal(inputs.max_verification_attempts, 3)
     assert.ok(!('failure_drill' in inputs) && !('policy_version' in inputs))
@@ -1449,7 +1451,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.7.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.8.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -2014,6 +2016,30 @@ test('[B1] on a lane named controller, a Controller blocked row belongs to the r
     assert.equal(served[3].message, blocked)
     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
     assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the controller\'s stop never fails the lane')
+  })
+})
+
+test('[C52] the controller drift warning is a node-less log row, on a lane named controller too, never failing or moving the lane', async () => {
+  // automatic.py note_controller_drift writes a `controller` `warning` row before the step's PID row. `warning` is no event status,
+  // so it is served without one; on a lane named `controller` it would otherwise land on that lane's launch node.
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['controller', 'ui']
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: lanes, excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const drift = `Controller commit ${'b'.repeat(12)} runs this step, not ${'a'.repeat(12)} pinned at prepare: the controller checkout moved during the run`
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 3, time: T1, node: 'controller', status: 'warning', message: drift },
+      { sequence: 4, time: T1, node: 'controller', status: 'running', message: 'Automatic checkpoint controller PID 2088885' },
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane', version: '1.3.0', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) }, next: ['launch_controller', 'launch_ui'], events, inputs })
+    const served = ((await get(app, url('alpha', 'main', 'lane', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(served.map(event => [event.sequence, event.node_id, event.status, event.type]), [
+      [1, 'launch_controller', 'running', 'status_changed'], [2, 'launch_ui', 'running', 'status_changed'],
+      [3, null, null, 'log'], [4, null, 'running', 'log']])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running')
   })
 })
 
@@ -2588,4 +2614,28 @@ test('[sidecar] a seeded run with a sidecar has the activity of its twin without
     assert.ok(order.filter(id => id.startsWith('launch_')).every(id => order.indexOf(id) > order.indexOf('sidecar')))
     assert.equal(nodes[key(without)].includes('sidecar'), false)
   }
+})
+
+// ---- Run roles, the controller record and the profile (C52): export 1.7.0 ----
+
+test('[roles] a 1.7.0 export serves the pinned roles, the controller record and the profile; a 1.6.0 export serves them as null', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const roles = { worker: { model: 'claude-sonnet-5', effort: 'low' }, judges: { model: null, effort: 'high' } }
+    const controller = { commit: 'f'.repeat(40), dirty: true, claude_version: '2.1.288 (Claude Code)' }
+    const pinned = inputsSection({ automatic: { ...inputsSection().automatic!, profile: 'attended' } as InputsSection['automatic'] })
+    await writeRun(root, { runId: 'pinned', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...pinned, roles, controller } })
+    await writeRun(root, { runId: 'before', version: '1.6.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2), inputs: inputsSection() })
+    const served = validateRunInputs((await get(app, url('alpha', 'main', 'pinned', '/inputs'))).json())
+    assert.deepEqual([served.roles, served.controller, served.automatic?.profile], [roles, controller, 'attended'])
+    const before = validateRunInputs((await get(app, url('alpha', 'main', 'before', '/inputs'))).json())
+    assert.deepEqual([before.roles, before.controller, before.automatic?.profile], [null, null, null])
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(list.runs.map(run => run.run_id).sort(), ['before', 'pinned'])
+    // A malformed record is invalid storage, as any other inputs field is.
+    await writeRun(root, { runId: 'bad-roles', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      inputs: { ...inputsSection(), roles: { worker: { model: null, effort: 'extreme' }, judges: roles.judges } } })
+    assertError(await get(app, url('alpha', 'main', 'bad-roles', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+  })
 })

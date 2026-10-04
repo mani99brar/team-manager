@@ -33,8 +33,9 @@ from .attention import attention
 from .checks import now, recheck_packet, verify_revision
 from .export_state import export_state
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, plan_excluded, run_claude, plan_workers, prepare, read_json, review_node, reviewer_ids,
-                       run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id, worker_authority, worker_effort)
+from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, override_note, pin_roles, plan_excluded, run_claude, plan_workers,
+                       prepare, read_json, review_node, reviewer_ids, run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id,
+                       worker_authority, worker_effort)
 from .verification import owns, policy_digest, safe_path, validate_policy
 from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
@@ -1161,6 +1162,11 @@ def main():
     parser.add_argument("--worker-timeout-seconds", type=int, help="Automatic mode: deadline per worker from launch until its completion signal (default 4h)")
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
+    parser.add_argument("--profile", choices=["attended", "unattended"], help="prepare --automatic: the run's profile (default unattended), pinned")
+    parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: Claude Code's default; no --model is passed)")
+    parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="prepare: the workers' effort, pinned (default: WORKFLOW_WORKER_EFFORT, read now)")
+    parser.add_argument("--judge-model", help="prepare: the model of the design challenge, the reviewers and the review sidecar, pinned (default: Claude Code's default)")
+    parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="prepare: their effort, pinned (default high)")
     parser.add_argument("--herdr", action="store_true")
     parser.add_argument("--handoff", action="append", metavar="LANE=PATH", help="freeze: handoff file for one selected lane; repeat once per lane")
     parser.add_argument("--review-file", type=Path)
@@ -1198,8 +1204,9 @@ def main():
                 # Workers: --dangerously-skip-permissions. Native reviewer: --add-dir and --allowedTools.
                 # Print-mode reviewer (--reviewer-transport print): --json-schema, --print, --permission-prompts.
                 required_flags += ["--dangerously-skip-permissions", "--add-dir", "--allowedTools", "--json-schema", "--print", "--permission-prompts"]
-            if worker_effort():
-                required_flags.append("--effort")
+            # The judges always pass --effort (high unless --judge-effort says otherwise); WORKFLOW_WORKER_EFFORT is validated here too.
+            worker_effort()
+            required_flags.append("--effort")
             if not all(flag in help_text for flag in required_flags):
                 raise ValueError("Installed Claude CLI lacks required flags")
             auth = json.loads(run_claude(["claude", "auth", "status"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout)
@@ -1255,6 +1262,13 @@ def main():
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
+            # C52: the roles' models and efforts, refused before anything is written; WORKFLOW_WORKER_EFFORT is read here, once.
+            roles = pin_roles(args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
+            note = override_note(os.environ, args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
+            if note:
+                print(f"Note: {note}", file=sys.stderr, flush=True)
+            if args.profile and not args.automatic:
+                parser.error("--profile applies to --automatic runs only")
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
             if reviewers:
                 plan["reviewers"] = reviewers
@@ -1263,7 +1277,8 @@ def main():
             # Every launch runs as the operator's account, with no sandbox (C14 slice 1): the run records it with the digest of
             # the workers' --settings. There is no per-launch choice.
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
-                        failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory))
+                        failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory),
+                        roles=roles, controller=controller_record())
             if args.guardrails:
                 pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
             if args.sidecar_brief:
@@ -1271,7 +1286,7 @@ def main():
                 pin(plan, args.sidecar_brief, sidecar_settings)
             if args.automatic:
                 from .automatic import automatic_settings
-                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport)
+                plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile)
             elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
             save_json(directory / "policy.json", policy)

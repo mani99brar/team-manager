@@ -7,7 +7,7 @@ This feature does not use a sidecar itself (it does not exist yet). After integr
 Launch from md-manager's main checkout on `feature/viewer-ux` (clean), in a Herdr pane:
 
 ```
-WORKFLOW_WORKER_EFFORT=medium DISABLE_AUTOUPDATER=1 ANTHROPIC_MODEL=claude-opus-5-5 .venv/bin/python -m workflow launch review-sidecar --live --by operator --automatic --worker-timeout-seconds 14400 --review-timeout-seconds 3600
+WORKFLOW_WORKER_EFFORT=medium DISABLE_AUTOUPDATER=1 .venv/bin/python -m workflow launch review-sidecar --live --by operator --automatic --worker-timeout-seconds 14400 --review-timeout-seconds 3600 --worker-model claude-opus-5-5 --judge-model claude-opus-5-5
 ```
 
 Approval fast-forwards `feature/viewer-ux`.

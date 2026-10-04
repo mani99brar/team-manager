@@ -294,7 +294,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -323,7 +323,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.6.0")
+        self.assertEqual(exported["version"], "1.7.0")
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -344,7 +344,7 @@ class ExportRunTests(unittest.TestCase):
         from .test_sidecar import appendix_b
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual((exported["version"], exported["sidecar"]), ("1.6.0", None))
+        self.assertEqual((exported["version"], exported["sidecar"]), ("1.7.0", None))
         self.assertNotIn("sidecar", [node["node_id"] for node in exported["definition"]["nodes"]])
         plan = read_json(directory / "plan.json")
         plan["sidecar"] = {"prompt": "Brief", "cadence_seconds": 900, "pass_timeout_seconds": 600, "max_passes": 16, "max_messages_per_lane": 6}
@@ -363,6 +363,25 @@ class ExportRunTests(unittest.TestCase):
         self.assertEqual((directory / "run-state.json").read_bytes(), written)
         (directory / "sidecar.ledger.json").write_text('{"version": "1.0.0"}')
         self.assertIsNone(export_run(ExportRuntime(directory))["sidecar"])  # A ledger that fails its schema is null, never guessed.
+
+    def test_export_1_7_0_carries_the_roles_the_controller_and_the_profile_and_old_runs_export_without_them(self):
+        """Export 1.7.0 (C52), additive: inputs.roles, inputs.controller and inputs.automatic.profile as prepare pinned them."""
+        directory = legacy_run(self.root)
+        exported = export_run(ExportRuntime(directory))
+        self.assertEqual(exported["version"], "1.7.0")
+        self.assertFalse({"roles", "controller"} & set(exported["inputs"]))
+        self.assertNotIn("profile", exported["inputs"]["automatic"])
+        plan = read_json(directory / "plan.json")
+        roles = {"worker": {"model": "claude-sonnet-5", "effort": "low"}, "judges": {"model": None, "effort": "high"}}
+        controller = {"commit": "e" * 40, "dirty": True, "claude_version": "2.1.288 (Claude Code)"}
+        plan.update(roles=roles, controller=controller)
+        plan["automatic"]["profile"] = "attended"
+        save_json(directory / "plan.json", plan)
+        exported = export_run(ExportRuntime(directory))
+        self.assertEqual((exported["inputs"]["roles"], exported["inputs"]["controller"], exported["inputs"]["automatic"]["profile"]),
+                         (roles, controller, "attended"))
+        del plan["automatic"]
+        self.assertNotIn("profile", str(inputs_section(directory, plan, read_json(directory / "policy.json"))["automatic"]))  # A manual run: none.
 
     def test_prepared_run_without_checkpoint_exports_the_prepare_shape(self):
         directory = legacy_run(self.root)
@@ -414,10 +433,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.6.0", result.stdout)
+        self.assertIn("version 1.7.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.6.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.7.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")

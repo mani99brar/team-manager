@@ -16,6 +16,7 @@ from .guardrails import LAUNCH_NOTE_ENV
 from .launch import launch_commands, main
 from .sessions import save_json
 from .worktrees import LOCK_NAME
+from .test_pipeline import stub_claude_cli
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -27,6 +28,10 @@ def fixture_target(root: Path) -> Path:
     for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["add", "."], ["commit", "-qm", "Feature"]):
         subprocess.run(["git", "-C", str(repo), *args], check=True)
     return repo
+
+
+def setUpModule():
+    stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
 class FeatureLaunchTests(unittest.TestCase):
@@ -335,8 +340,56 @@ class FeatureLaunchTests(unittest.TestCase):
                 main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", run_id, "--run-root", str(self.root / "runs"),
                       *(["--automatic"] if automatic else [])])
                 run = (self.root / "runs" / run_id).resolve()
+                profile = " (profile unattended)" if automatic else ""
                 self.assertEqual(output.getvalue().splitlines()[0],
-                                 f"Run {run}: {finish.format(branch=f'feature/project-workflows/{run_id}')}.")
+                                 f"Run {run}{profile}: {finish.format(branch=f'feature/project-workflows/{run_id}')}.")
+
+    def test_an_omitted_profile_pins_unattended_the_first_line_names_it_and_an_unknown_one_is_refused(self):
+        # C52, decisions 1 and 3. The role pins reach prepare only when given: the worker effort's default is read there, once.
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)
+        prepare = commands[2]
+        self.assertEqual(prepare[prepare.index("--profile") + 1], "unattended")
+        self.assertFalse({"--worker-model", "--worker-effort", "--judge-model", "--judge-effort"} & set(prepare))
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, profile="attended",
+                                         roles={"worker_model": "claude-sonnet-5", "worker_effort": "low", "judge_model": None, "judge_effort": "max"})
+        prepare = commands[2]
+        self.assertEqual([prepare[prepare.index(flag) + 1] for flag in ("--profile", "--worker-model", "--worker-effort", "--judge-effort")],
+                         ["attended", "claude-sonnet-5", "low", "max"])
+        self.assertNotIn("--judge-model", prepare)
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "manual-test", Path("/tmp/workflow-launch-tests"), roles={"judge_effort": "max"})
+        self.assertNotIn("--profile", commands[2])  # A manual run has no profile; its roles are pinned all the same.
+        self.assertEqual(commands[2][commands[2].index("--judge-effort") + 1], "max")
+        with self.assertRaisesRegex(ValueError, "profile"):
+            launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True, profile="supervised")
+        with self.assertRaisesRegex(ValueError, "automatic runs only"):
+            launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), profile="attended")
+        with self.assertRaisesRegex(ValueError, "judge-effort"):
+            launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), roles={"judge_effort": "extreme"})
+        for argv in (["--automatic", "--profile", "supervised"], ["--automatic", "--worker-effort", "med"]):
+            with self.subTest(argv), patch("workflow.launch.run_command") as command, contextlib.redirect_stderr(io.StringIO()) as errors, \
+                    self.assertRaises(SystemExit) as refused:
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--run-root", str(self.root / "runs"), *argv])
+            self.assertEqual(refused.exception.code, 2)
+            self.assertIn("invalid choice", errors.getvalue())
+            command.assert_not_called()
+        with patch("workflow.launch.run_command"), contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", "attended", "--run-root", str(self.root / "runs"),
+                  "--automatic", "--profile", "attended"])
+        self.assertTrue(output.getvalue().splitlines()[0].startswith(f"Run {(self.root / 'runs' / 'attended').resolve()} (profile attended): automatic"))
+
+    def test_a_dry_run_says_when_a_scrubbed_model_override_would_have_chosen_the_model(self):
+        # A live launch leaves the note to prepare, whose output it shows; a dry run runs no prepare, so it says it itself.
+        with patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": ""}), patch("workflow.launch.run_command"), \
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--worker-model", "claude-opus-5-5"])
+        note = ("ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: pin it with "
+                "--judge-model; unpinned, a session runs Claude Code's default model.")
+        self.assertIn(note, json.loads(output.getvalue())["notes"])
+        self.assertIn(f"Note: {note}", errors.getvalue())
+        with patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-opus-5-5"}), patch("workflow.launch.run_command"), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--no-herdr", "--run-id", "noted", "--run-root", str(self.root / "runs")])
+        self.assertNotIn("ANTHROPIC_MODEL", errors.getvalue())
 
     def test_dry_run_does_not_execute_anything(self):
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()):

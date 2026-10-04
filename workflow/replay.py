@@ -44,7 +44,7 @@ from .automatic import derived_verdict, first_sentence, print_command, print_rev
 from .checks import now
 from .launch import BUILTIN_PREFIX, reviewer_brief
 from .pipeline import ExportRuntime
-from .sessions import git, popen_claude, read_json, review_node, review_nodes, save_json, terminate
+from .sessions import git, job_env, popen_claude, read_json, review_node, review_nodes, role_flags, save_json, terminate
 
 MAX_JOBS = 2  # Print jobs at once: each is a Claude Code process of up to half a gigabyte on a shared host.
 MIN_AVAILABLE_MB = 1536  # No job starts while the host's available memory (`free -m`) is under this.
@@ -233,8 +233,8 @@ def launch(job: dict, executable: str) -> dict:
     folder = job["folder"] / "samples" / str(job["n"])
     folder.mkdir(parents=True, exist_ok=True)
     session_id = str(uuid.uuid4())
-    command = print_command(executable, session_id, review_schema(runtime), [str(runtime.directory)])
-    env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
+    command = print_command(executable, session_id, review_schema(runtime), [str(runtime.directory)], role_flags(runtime.plan, "judges"))
+    env = job_env()
     output = folder / f"{job['node']}.stdout.json"
     with job["prompt"].open() as stdin, output.open("w") as stdout, (folder / f"{job['node']}.stderr.log").open("w") as stderr:
         process = popen_claude(command, cwd=job["tree"], env=env, stdin=stdin, stdout=stdout, stderr=stderr, text=True, start_new_session=True)

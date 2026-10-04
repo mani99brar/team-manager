@@ -29,6 +29,9 @@ from .verification import CONTRACTS, policy_digest
 LANE_EDITS = {"ui": ("ui.txt", "after"), "adapter": ("backend.py", "VALUE = 2\n")}
 
 
+CLAUDE_VERSION_STUB = "2.1.288 (Claude Code)"
+
+
 def isolate_registry() -> None:
     """setUpModule of every test module whose runs can record attention (an integration, a paused design challenge, the
     automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
@@ -42,8 +45,28 @@ def isolate_registry() -> None:
     unittest.addModuleCleanup(environment.stop)
 
 
+def stub_claude_cli() -> None:
+    """setUpModule of every test module that prepares a run: until the module's last test, a stand-in `claude` comes first on
+    PATH, so prepare's `claude --version` (sessions.controller_record) never runs the operator's CLI, in process or in a
+    child. It answers --version with CLAUDE_VERSION_STUB and fails anything else; a test that sets PATH itself still wins.
+    The model and effort overrides the sessions never see (scrub_env) are unset too, so an operator's shell that sets
+    ANTHROPIC_MODEL adds no override note (override_note) to what prepare or a dry run prints."""
+    from .sessions import scrub_env
+    temp = tempfile.TemporaryDirectory()
+    stub = Path(temp.name) / "claude"
+    stub.write_text(f"#!/bin/sh\n[ \"$1\" = --version ] || exit 2\necho '{CLAUDE_VERSION_STUB}'\n")
+    stub.chmod(0o755)
+    environment = patch.dict(os.environ, {"PATH": f"{temp.name}{os.pathsep}{os.environ.get('PATH', '')}"})
+    environment.start()
+    for key in set(os.environ) - set(scrub_env(os.environ)):  # Restored with the rest of the environment.
+        del os.environ[key]
+    unittest.addModuleCleanup(temp.cleanup)
+    unittest.addModuleCleanup(environment.stop)
+
+
 def setUpModule():
     isolate_registry()
+    stub_claude_cli()
 
 
 GATES = frozenset({"start", "automatic", "retry", "reconcile", "approve"})
@@ -298,7 +321,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.6.0")
+            self.assertEqual(exported["version"], "1.7.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -1256,6 +1279,113 @@ class RecordTests(unittest.TestCase):
         self.pin()
         report(f.runtime, SimpleNamespace(values={}, next=(), tasks=[]))
         self.assertNotIn("Worker authority", (f.directory / "report.html").read_text())
+
+    def prepare_cli(self, name: str, *flags: str, env: dict | None = None) -> tuple[Path, int, str]:
+        f = self.fixture
+        policy = f.root / "policy.json"
+        save_json(policy, f.policy)
+        tasks = []
+        for node in ("ui", "adapter"):
+            (f.root / f"{node}-task.md").write_text(f"Change {node}.\n")
+            tasks += ["--task", f"{node}={f.root / f'{node}-task.md'}"]
+        run = f.root / name
+        with patch.dict(os.environ, env or {}), patch("workflow.sessions.claude_version", return_value="2.1.288 (Claude Code)"):
+            code, _, err = pipeline_cli("prepare", str(run), "--repo", str(f.repo), "--policy", str(policy), *tasks, *flags)
+        return run, code, err
+
+    def test_prepare_pins_the_roles_the_controller_and_the_cli_version_and_nothing_changes_them_later(self):
+        # C52: the roles from prepare's flags (the worker effort from WORKFLOW_WORKER_EFFORT, read once; the judges at high), the
+        # controller checkout's commit and dirty flag, and `claude --version`.
+        from .guardrails import resume_main
+        from .sessions import CONTROLLER, role_flags, worker_effort
+        run, code, err = self.prepare_cli("pinned-run", env={"WORKFLOW_WORKER_EFFORT": "medium"})
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["roles"], {"worker": {"model": None, "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["controller"], {"commit": git(CONTROLLER, "rev-parse", "HEAD"),
+                                              "dirty": bool(git(CONTROLLER, "status", "--porcelain", "--untracked-files=no")),
+                                              "claude_version": "2.1.288 (Claude Code)"})
+        run, code, err = self.prepare_cli("flagged-run", "--worker-model", "claude-sonnet-5", "--worker-effort", "low",
+                                          "--judge-model", "claude-opus-5-5", "--judge-effort", "max", env={"WORKFLOW_WORKER_EFFORT": "medium"})
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-sonnet-5", "effort": "low"}, "judges": {"model": "claude-opus-5-5", "effort": "max"}})
+        # Later commands read the pins, never the variable again; resume takes no role flag.
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": "xhigh"}):
+            self.assertEqual(worker_effort(plan=plan), ["--effort", "low"])
+            self.assertEqual(role_flags(plan, "worker"), ["--model", "claude-sonnet-5", "--effort", "low"])
+        for flag in ("--worker-model", "--worker-effort", "--judge-model", "--judge-effort", "--profile"):
+            with self.subTest(flag), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+                resume_main([str(run), flag, "low"])
+            self.assertEqual(refused.exception.code, 2)
+        self.assertEqual(read_json(run / "plan.json"), plan)
+        # A bad level or model is refused before anything is written.
+        for flags in (["--worker-effort", "med"], ["--judge-model", "--effort"], ["--profile", "attended"]):
+            with self.subTest(flags):
+                run, code, err = self.prepare_cli("refused-run", *flags)
+                self.assertNotEqual(code, 0)
+                self.assertFalse(run.exists(), err)
+        _, code, err = self.prepare_cli("refused-run", env={"WORKFLOW_WORKER_EFFORT": "med"})
+        self.assertIn("not one of low, medium, high, xhigh, max", err)
+
+    def test_prepare_says_when_a_scrubbed_model_or_effort_override_would_have_chosen_the_model(self):
+        # The sessions' environment drops ANTHROPIC_MODEL and the CLI's other overrides (scrub_env): a launch line that relied on
+        # one is told which flags pin it now. A role pinned by its flag needs no note.
+        overrides = {"ANTHROPIC_MODEL": "claude-opus-5-5", "CLAUDE_CODE_EFFORT_LEVEL": "", "CLAUDE_CODE_SUBAGENT_MODEL": ""}
+        _, code, err = self.prepare_cli("model-run", env=overrides)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Note: ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: "
+                      "pin it with --worker-model and --judge-model; unpinned, a session runs Claude Code's default model.", err)
+        _, code, err = self.prepare_cli("pinned-model-run", "--worker-model", "claude-opus-5-5", env={**overrides, "CLAUDE_CODE_EFFORT_LEVEL": "low"})
+        self.assertIn("Note: ANTHROPIC_MODEL, CLAUDE_CODE_EFFORT_LEVEL are set here but never reach the run's sessions, which the workflow starts "
+                      "without them: pin them with --judge-model, --worker-effort and --judge-effort; unpinned, a session runs Claude Code's "
+                      "default model, the workers take WORKFLOW_WORKER_EFFORT and the judges high effort.", err)
+        _, code, err = self.prepare_cli("all-pinned-run", "--worker-model", "a", "--judge-model", "b", env=overrides)
+        self.assertNotIn("never reach", err)
+
+    def test_prepare_in_this_suite_reads_the_stand_in_cli_never_the_operators(self):
+        # setUpModule puts a stand-in `claude` first on PATH (stub_claude_cli), for prepare in process and in a child.
+        from .sessions import controller_record
+        self.assertEqual(controller_record()["claude_version"], CLAUDE_VERSION_STUB)
+        child = subprocess.run([sys.executable, "-c", "from workflow.sessions import claude_version; print(claude_version())"],
+                               capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parents[1])
+        self.assertEqual(child.stdout.strip(), CLAUDE_VERSION_STUB)
+
+    def test_a_run_prepared_before_roles_and_the_controller_record_loads_and_launches_as_before(self):
+        from .sessions import role_flags
+        f = self.fixture
+        self.pin()
+        self.assertNotIn("roles", f.plan)
+        runtime = Pipeline(f.directory, f.sessions)
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": "medium"}):
+            self.assertEqual((role_flags(runtime.plan, "worker"), role_flags(runtime.plan, "judges")), (["--effort", "medium"], []))
+        self.pin(automatic=automatic_settings(), source_branch="feature/test")
+        del f.plan["automatic"]["profile"]
+        self.pin()
+        Pipeline(f.directory, f.sessions)  # An automatic plan without profile validates.
+
+    def test_a_step_on_another_controller_commit_than_the_pinned_one_writes_one_warning(self):
+        from .automatic import note_controller_drift
+        f = self.fixture
+        events = lambda: [event for event in map(json.loads, (f.directory / "events.jsonl").read_text().splitlines()) if event["status"] == "warning"] \
+            if (f.directory / "events.jsonl").exists() else []
+        note_controller_drift(f.runtime, "b" * 40)  # A plan pinned before the record compares nothing.
+        self.pin(controller={"commit": "a" * 40, "dirty": False, "claude_version": "2.1.288 (Claude Code)"})
+        note_controller_drift(f.runtime, "a" * 40)
+        self.assertEqual(events(), [])
+        for _ in range(3):  # Every checkpoint runs a new automatic-step: the same drift is said once.
+            note_controller_drift(f.runtime, "b" * 40)
+        [warning] = events()
+        self.assertEqual((warning["node"], warning["message"]),
+                         ("controller", f"Controller commit {'b' * 12} runs this step, not {'a' * 12} pinned at prepare: the controller checkout "
+                                        "moved during the run"))
+        note_controller_drift(f.runtime, "c" * 40)
+        self.assertEqual(len(events()), 2)
+        # A malformed line in the log (the tolerant reader, as the shared .git check uses) never stops the step.
+        path = f.directory / "events.jsonl"
+        path.write_text("{not json\n" + path.read_text())
+        note_controller_drift(f.runtime, "c" * 40)
+        self.assertEqual(len([line for line in path.read_text().splitlines() if '"warning"' in line]), 2)
 
     def test_a_changed_shared_git_is_a_warning_at_freeze_review_and_integrate_never_a_refusal(self):
         # C25: prepare recorded a digest of what in the shared .git can make a Git command run something. Freeze (after the

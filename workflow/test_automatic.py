@@ -78,7 +78,7 @@ class CompletionTests(unittest.TestCase):
         # C16 step 1: before building on a reading of a task line that departs from its plain words (its own, or one an advisory
         # note or a sidecar message suggests), the worker of an attended run writes a question, that of an unattended run records
         # an open assumption starting "reading:" and goes on, and a manual run's worker asks in its pane. Untestable behaviour
-        # stays in untested. Slice 3 pins the profile (plan.automatic.profile); until then an automatic run is unattended. A
+        # stays in untested. `launch --automatic --profile` pins plan.automatic.profile; a plan without it is unattended. A
         # 1.0.0 run (a 2.0.0 or 2.1.0 feature, still launchable) has no question status and no untested field: its automatic
         # worker records the reading in open_assumptions, which 1.0.0 has, whatever the profile, and its manual worker asks in
         # its pane.
@@ -384,6 +384,25 @@ class CompletionTests(unittest.TestCase):
         self.plan["automatic"] = dict(DEFAULTS, extra=True)
         with self.assertRaises(ValueError):
             validate_automatic(self.plan)
+
+    def test_the_profile_defaults_to_unattended_and_plans_pinned_before_it_still_validate(self):
+        # C52, decisions 1 and 3: an omitted profile is unattended; plan.automatic.profile is optional, as reviewer_transport is.
+        from .automatic import profile
+        self.assertEqual(automatic_settings()["profile"], "unattended")
+        self.assertEqual(automatic_settings(profile="attended")["profile"], "attended")
+        with self.assertRaisesRegex(ValueError, "profile"):
+            automatic_settings(profile="supervised")
+        legacy = {"run_id": "test", "source_branch": "feature/test", "automatic": {key: value for key, value in DEFAULTS.items() if key != "profile"}}
+        validate_automatic(legacy)
+        self.assertEqual(profile(legacy), "unattended")
+        self.plan["automatic"]["profile"] = "attended"
+        validate_automatic(self.plan)
+        self.assertEqual(profile(self.plan), "attended")
+        for bad in ("supervised", None, 1):
+            self.plan["automatic"]["profile"] = bad
+            with self.assertRaises(ValueError):
+                validate_automatic(self.plan)
+        self.assertEqual(profile({"run_id": "manual"}), "unattended")  # A manual run has no automatic settings.
 
     def test_main_and_unbounded_authority_rejected(self):
         self.plan["source_branch"] = "main"
@@ -1985,6 +2004,32 @@ sys.exit({exit_code})
         self.assertRegex(str(error), "did not succeed.*No automatic retry")
         self.assertEqual((execs, waits, self.starts()), (["1"], [], ["1", "1"]))
 
+    def test_a_print_reviewer_takes_the_judges_pins_in_a_scrubbed_env_and_records_them_beside_its_output(self):
+        # C52: the judges' model and effort in its argv, none of a surrounding session's overrides in its environment, and
+        # `review.role.json` with the pins it asked for and the models its output reports.
+        from .sessions import pin_roles
+        self.runtime.plan["roles"] = pin_roles(judge_model="claude-opus-5-5", env={})
+        seen = self.root / "seen.json"
+        self.executable.write_text(f'''#!/usr/bin/env python3
+import json, os, sys
+json.dump({{"argv": sys.argv[1:], "env": sorted(os.environ)}}, open({str(seen)!r}, "w"))
+sys.stdin.read()
+print(json.dumps({{"session_id": sys.argv[sys.argv.index("--session-id") + 1], "is_error": False, "subtype": "success",
+                  "modelUsage": {{"claude-opus-5-5": {{}}}}, "structured_output": {{"verdict": "approved", "findings": []}}}}))
+''')
+        with patch.dict(os.environ, {"CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "CLAUDECODE": "1", "HERDR_PANE_ID": "w1:p1"}):
+            review, _, _ = self.review([])
+        self.assertEqual(review["verdict"], "approved")
+        job = read_json(seen)
+        self.assertEqual((job["argv"][job["argv"].index("--effort") + 1], job["argv"][job["argv"].index("--model") + 1]), ("high", "claude-opus-5-5"))
+        self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE", "HERDR_PANE_ID"} & set(job["env"]))
+        self.assertEqual(read_json(self.root / "review.role.json"),
+                         {"requested": {"model": "claude-opus-5-5", "effort": "high"}, "observed_models": ["claude-opus-5-5"]})
+        # A plan pinned before roles passes neither flag, as before.
+        del self.runtime.plan["roles"]
+        self.review([])
+        self.assertFalse({"--effort", "--model"} & set(read_json(seen)["argv"]))
+
     def test_a_corrupt_worker_completion_is_one_line_of_the_prompt_and_the_print_job_still_runs(self):
         # C35: a 1.1.0 run inlines each lane's claims; a file the controller cannot read adds one line and never fails the review.
         self.runtime.plan.update(completion_version="1.1.0", nodes={node: {"session_id": f"{node}-token", "task": "## Goal\n\nWork.\n"} for node in ("ui", "adapter")})
@@ -2154,6 +2199,16 @@ class PrintCollectionTests(unittest.TestCase):
             ("review", "note", "Reviewer coverage's late verdict recorded: approved, 1 open P0"),
             ("review", "note", "Reviewer coverage wrote approved, which counts as blocked: 1 open P0"),
             ("review", "note", "Reviewer security gave no verdict and ends superseded: its deadline passed")])
+
+    def test_a_role_file_that_cannot_be_written_never_fails_the_review(self):
+        # A role file is a record: a write that fails (a full disk; here its path is a directory) is said on stderr, and the
+        # job's verdict is read as before.
+        (self.root / f"{review_node('general')}.role.json").mkdir()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            state = self.collect({"general": (60, {"verdict": "approved", "findings": []})})
+        self.assertEqual((state.decisions["general"]["verdict"], state.statuses["general"]["status"]), ("approved", "accepted"))
+        self.assertIn(f"{review_node('general')}.role.json not written", errors.getvalue())
 
     def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
         # C34: derived from its findings, general's block counts as approved: no grace starts, each job is read in time as
@@ -2799,6 +2854,21 @@ class ControllerStopTests(GraphFixture):
     def said(self, status="blocked") -> list:
         return [event["message"] for event in self.events() if (event["node"], event["status"]) == ("controller", status)]
 
+    def test_a_step_on_another_controller_commit_writes_one_drift_warning_before_its_pid_row(self):
+        # C52: drive compares the controller checkout it runs from (the real HEAD of this package's checkout, read through
+        # controller_commit's default path) with plan.controller.commit. One warning, before the PID row, however many steps run it.
+        f = self.fixture
+        current = git(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
+        f.runtime.plan["controller"] = {"commit": "0" * 40, "dirty": False, "claude_version": None}
+        drift = f"Controller commit {current[:12]} runs this step, not {'0' * 12} pinned at prepare: the controller checkout moved during the run"
+        for _ in range(2):
+            with patch("workflow.automatic.BLOCKED_RUNS", set()), patch("workflow.automatic.wait_handoffs", side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                drive(f.runtime)
+        rows = [(event["status"], re.sub(r"PID \d+$", "PID n", event["message"])) for event in self.events()
+                if event["node"] == "controller" and event["status"] != "interrupted"]  # Not the Ctrl-C rows.
+        self.assertEqual(rows, [("warning", drift), ("running", "Automatic checkpoint controller PID n"), ("running", "Automatic checkpoint controller PID n")])
+
     def test_a_changed_source_branch_is_an_interruption_that_names_the_switch_back_and_the_resume(self):
         import shlex
         f = self.fixture
@@ -3135,6 +3205,19 @@ class PrintGraceScenarios(GraphFixture):
 
 class NativeReviewerTests:
     """The native completion protocol, with one and with two reviewers."""
+
+    def test_each_native_reviewers_status_records_the_judges_pins_it_was_launched_with(self):
+        # C52: automatic-review[-<id>].json has no contract; a plan pinned before roles records nothing new.
+        from .sessions import pin_roles
+        f = self.fixture
+        f.plan["roles"] = pin_roles(judge_model="claude-opus-5-5", env={})
+        save_json(f.directory / "plan.json", f.plan)
+        f.sessions = fixtures.FakeSessions(f.directory, f.plan)
+        f.runtime = fixtures.OfflinePipeline(f.directory, f.sessions)
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(f.runtime)
+        for reviewer_id in self.ids:
+            self.assertEqual(self.status(reviewer_id)["requested"], {"model": "claude-opus-5-5", "effort": "high"})
 
     def test_native_reviewer_session_findings_and_stop_are_recorded(self):
         from .automatic import REVIEW_RUBRIC, review_brief

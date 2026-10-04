@@ -188,6 +188,11 @@ const LAUNCHED: EventSpec[] = [
   [5, null, null, 'Automatic checkpoint controller PID 4242'],
 ]
 const WORKING = { challenge: 'succeeded', launch_game: 'running' } as const
+/**
+ * automatic.py note_controller_drift: a step on another controller commit than prepare pinned writes a `controller` `warning`
+ * row before its PID row. The server serves it node-less without a status (`warning` is no event status): a note, never a block.
+ */
+const DRIFT = `Controller commit ${'b'.repeat(12)} runs this step, not ${'a'.repeat(12)} pinned at prepare: the controller checkout moved during the run`
 
 // ---- Assertions shared by every deriveNow case ------------------------------------------------------------------
 
@@ -447,6 +452,13 @@ describe('buildTimeline', () => {
       const markers = buildTimeline(rows(status)).markers.filter(marker => / by the (operator|maintainer)/.test(marker.raw))
       assert.deepEqual(markers.map(marker => [marker.kind, marker.blocked]), [['log', false], ['log', false]], `status ${status}`)
     }
+  })
+
+  it('reads the controller drift warning as a log row, never a controller block', () => {
+    const markers = buildTimeline(synthetic({
+      status: 'running', nodes: WORKING, events: [LAUNCHED[0], LAUNCHED[1], [4, null, null, DRIFT], LAUNCHED[2]],
+    })).markers
+    assert.deepEqual(markers.filter(marker => marker.raw === DRIFT).map(marker => [marker.kind, marker.blocked]), [['log', false]])
   })
 
   it('keeps a retried attempt running while the export still serves its node failed; a later controller start ends it', () => {
@@ -857,6 +869,19 @@ describe('deriveNow', () => {
       assert.match(textToString(now.reason, T0), /^game reported blocked: The package registry is unreachable from the worktree\./)
     })
 
+    it('names the worker\'s own blocked completion when a drift warning precedes the PID row', () => {
+      const now = checked(synthetic({
+        status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'running', handoff: 'failed' },
+        events: [LAUNCHED[0], LAUNCHED[1], [4, null, null, DRIFT], LAUNCHED[2]],
+        inputs: inputs => {
+          inputs.workers[0].completion = { ...skeleton.inputs.workers[0].completion!, status: 'blocked', summary: 'The package registry is unreachable from the worktree.' }
+        },
+      }))
+      assert.equal(now.situation, 'blocked_before_freeze')
+      assert.equal(now.reasonSource, 3)
+      assert.match(textToString(now.reason, T0), /^game reported blocked: The package registry is unreachable from the worktree\./)
+    })
+
     it('quotes a fourth question', () => {
       const now = blocked([[3000, null, null, 'Worker game asked question 4; at most 3 are answered, so it is treated as blocked: Should the HUD show ping?']])
       assert.match(textToString(now.headline, T0), /game asked a fourth question: Should the HUD show ping\?/)
@@ -931,6 +956,16 @@ describe('deriveNow', () => {
     assert.deepEqual(now.missing, [], 'results/game/2 does not exist until attempt 2 ends')
     assert.deepEqual(nowResultUris(retrying.detail, retrying.events), [GAME_1])
     assert.deepEqual(nowResultUris(skeletonFailedOnce().detail, skeletonFailedOnce().events), [GAME_1])
+  })
+
+  it('check_failed: a drift warning before the retry\'s PID row keeps the retry banner', () => {
+    const drift = laterEvent(skeleton, 15, 15, '2026-09-24T09:20:23.100000Z', { message: DRIFT })
+    const now = checked(servedAt(skeleton, 14, 'failed', { ...BEFORE_VERIFY, verify_game: 'failed' },
+      { results: { [GAME_1]: skeletonGame1 }, events: [drift, laterEvent(skeleton, 15, 16, '2026-09-24T09:20:23.135227Z')] }))
+    assert.equal(now.situation, 'check_failed')
+    assert.equal(now.reasonSource, 2)
+    assert.match(now.next.label, /the supervisor retries by itself/)
+    assert.deepEqual(commands(now), [])
   })
 
   it('check_failed: a candidate lane retry (guardrails #28 to #31)', () => {
