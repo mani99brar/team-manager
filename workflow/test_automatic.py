@@ -2180,6 +2180,16 @@ class PrintCollectionTests(unittest.TestCase):
             ("review", "note", "Reviewer coverage wrote approved, which counts as blocked: 1 open P0"),
             ("review", "note", "Reviewer security gave no verdict and ends superseded: its deadline passed")])
 
+    def test_a_role_file_that_cannot_be_written_never_fails_the_review(self):
+        # A role file is a record: a write that fails (a full disk; here its path is a directory) is said on stderr, and the
+        # job's verdict is read as before.
+        (self.root / f"{review_node('general')}.role.json").mkdir()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            state = self.collect({"general": (60, {"verdict": "approved", "findings": []})})
+        self.assertEqual((state.decisions["general"]["verdict"], state.statuses["general"]["status"]), ("approved", "accepted"))
+        self.assertIn(f"{review_node('general')}.role.json not written", errors.getvalue())
+
     def test_a_blocked_verdict_whose_findings_are_all_p2_counts_as_approved(self):
         # C34: derived from its findings, general's block counts as approved: no grace starts, each job is read in time as
         # before, and one note names the override.

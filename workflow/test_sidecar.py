@@ -502,6 +502,20 @@ class PassPins(SidecarRun):
                          {"requested": {"model": "claude-opus-5-5", "effort": "high"}, "observed_models": ["claude-opus-5-5"]})
         self.assertFalse(any("requested" in item or "observed_models" in item for item in self.ledger()["passes"]))
 
+    def test_a_role_file_that_cannot_be_written_is_said_and_never_fails_the_pass(self):
+        # A role file is a record: a write that fails (a full disk) is said on stderr and never fails the job's outcome.
+        from . import sessions
+        real = sessions.save_json
+
+        def save_json(path, value):
+            if Path(path).name.endswith(".role.json"):
+                raise OSError(28, "No space left on device")
+            real(path, value)
+        errors = io.StringIO()
+        with patch("workflow.sessions.save_json", side_effect=save_json), contextlib.redirect_stderr(errors):
+            self.assertEqual(self.run_pass()["status"], "completed")
+        self.assertEqual(errors.getvalue().count("sidecar-1.role.json not written: [Errno 28] No space left on device"), 2)
+
 
 # ---- ledger-merge ----------------------------------------------------------------------------------------------------
 

@@ -14,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -403,6 +404,15 @@ def record_role(directory: Path, stem: str, plan: dict, role: str, stdout: Path 
     side file, because challenge.json and the sidecar ledger have closed schemas. The CLI may clamp an effort per model."""
     save_json(directory / f"{stem}.role.json", {"requested": requested_pins(plan, role),
                                                 "observed_models": None if stdout is None else observed_models(stdout)})
+
+
+def note_role(directory: Path, stem: str, plan: dict, role: str, stdout: Path | None = None) -> None:
+    """record_role for a job that runs or ran: the role file is a record, so a write that fails (a full disk) is said on
+    stderr and never fails the job, its verdict or its pass."""
+    try:
+        record_role(directory, stem, plan, role, stdout)
+    except (OSError, ValueError) as error:
+        print(f"Warning: {stem}.role.json not written: {error}", file=sys.stderr, flush=True)
 
 
 # What a Claude Code session exports to its children, and the model and effort overrides the CLI reads: a print job, the --bg

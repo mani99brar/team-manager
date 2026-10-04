@@ -25,7 +25,7 @@ from . import attention as attention_record  # Not `attention`: the waits keep s
 from .checks import now
 from .guardrails import conventions_block, decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
-from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, job_env, plan_reviewers, plan_roles, plan_workers, popen_claude, read_json, record_role,
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, job_env, plan_reviewers, plan_roles, plan_workers, note_role, popen_claude, read_json, record_role,
                        requested_pins, review_node, reviewer_ids, role_flags, run_lock, save_json, terminate)
 from .verification import CONTRACTS
 from .worktrees import git_worktree
@@ -1439,7 +1439,7 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
             status = state.statuses[reviewer_id]
             pending.remove(reviewer_id)
             node = review_node(reviewer_id)
-            record_role(runtime.directory, node, runtime.plan, "judges", runtime.directory / f"{node}.stdout.json")  # The models it used.
+            note_role(runtime.directory, node, runtime.plan, "judges", runtime.directory / f"{node}.stdout.json")  # The models it used.
             if blocked:
                 try:
                     decision = print_verdict(runtime, reviewer_id, process, status)

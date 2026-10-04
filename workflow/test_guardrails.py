@@ -1052,6 +1052,24 @@ class ClaudeUpdateAroundTheChallenge(GuardedFeature):
         self.assertEqual(read_json(directory / "challenge-2.role.json")["requested"], {"model": "claude-opus-5-5", "effort": "high"})
         self.assertNotIn("requested", record)  # challenge.json keeps its closed schema.
 
+    def test_malformed_roles_or_a_failed_role_file_write_block_the_challenge_never_leaving_it_running(self):
+        # The pins and the first role file come after the `running` event, inside the guard that says `blocked`.
+        from .guardrails import run_challenge
+        directory = self.prepare("roles-001")
+        def last():
+            events = directory / "events.jsonl"
+            statuses = [event["status"] for event in map(json.loads, events.read_text().splitlines()) if event["node"] == "challenge"] if events.exists() else []
+            return statuses[-1] if statuses else None
+        runtime = self.runtime(directory)
+        runtime.plan["roles"] = {"worker": {"model": None, "effort": None}}  # Hand-edited.
+        with self.assertRaisesRegex(ValueError, "Malformed plan roles"):
+            run_challenge(runtime, 1)
+        self.assertEqual(last(), "blocked")
+        with patch("workflow.guardrails.record_role", side_effect=OSError(28, "No space left on device")), self.assertRaises(OSError):
+            run_challenge(self.runtime(directory), 2)
+        self.assertEqual(last(), "blocked")
+        self.assertEqual(self.challenge_calls(), [])  # No job ran.
+
     def test_start_and_resume_name_stale_claude_sessions_and_resume_exits_75_when_claude_code_is_unavailable(self):
         from .sessions import TransientInfraError
         stale = "Warning: 1 running Claude Code process(es) still run an executable that an update deleted.\n  pid 7 in /work: claude"

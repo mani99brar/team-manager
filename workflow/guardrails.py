@@ -46,7 +46,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .checks import now
-from .sessions import (TransientInfraError, git, job_env, plan_workers, popen_claude, read_json, record_role, role_flags, run_lock, save_json,
+from .sessions import (TransientInfraError, git, job_env, plan_workers, note_role, popen_claude, read_json, record_role, role_flags, run_lock, save_json,
                        stale_claude_warning, terminate)
 from .verification import CONTRACTS, validate_schema
 from .worktrees import git_worktree
@@ -567,12 +567,13 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
     prompt_path.write_text(challenge_prompt(directory, plan))
     os.chmod(prompt_path, 0o600)
     add_dirs = [str(directory / "challenge-inputs")] if plan.get("prd") else []
-    command = print_command(runtime.sessions.executable, session_id, output_schema(), add_dirs, role_flags(plan, "judges"))
     runtime.event(CHALLENGE, "running", f"Design challenge attempt {attempt}: one print job, session {session_id}")
-    env = job_env()
     stdout = directory / f"challenge-{attempt}.stdout.json"
-    record_role(directory, f"challenge-{attempt}", plan, "judges")  # The pins it asks for; challenge.json's schema is closed.
     try:
+        # Inside the guard: malformed plan roles or a role file that cannot be written block the node, never leave it `running`.
+        command = print_command(runtime.sessions.executable, session_id, output_schema(), add_dirs, role_flags(plan, "judges"))
+        env = job_env()
+        record_role(directory, f"challenge-{attempt}", plan, "judges")  # The pins it asks for; challenge.json's schema is closed.
         with prompt_path.open() as stdin, stdout.open("w") as output, (directory / f"challenge-{attempt}.stderr.log").open("w") as errors:
             process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
         try:
@@ -590,7 +591,7 @@ def run_challenge(runtime, attempt: int, herdr: bool = False) -> dict:
         except BaseException:
             terminate(process)
             raise
-        record_role(directory, f"challenge-{attempt}", plan, "judges", stdout)  # And the models its output reports.
+        note_role(directory, f"challenge-{attempt}", plan, "judges", stdout)  # And the models its output reports, never failing it.
         try:
             result = read_json(stdout)
         except ValueError:
