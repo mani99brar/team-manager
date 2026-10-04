@@ -1493,6 +1493,33 @@ class ChallengeHold(GuardedFeature):
         self.assertEqual(code, 1, output)
         self.assertIn("--launch applies to a run that holds", output)
 
+    def test_an_attended_run_holds_at_the_challenge_and_then_stops_for_approval_after_review(self):
+        # C8 and C51 in one run: profile attended pins the hold and finish "approval"; the operator releases the hold, the workers
+        # launch, and the supervisor stops at the approval gate with the approve command, never the finished line.
+        from .automatic import AWAITING_APPROVAL
+        directory = self.prepare("attended-both-001", automatic=True, profile="attended")
+        plan = read_json(directory / "plan.json")
+        self.assertEqual((plan["holds"], plan["automatic"]["finish"]), ({"challenge": True}, "approval"))
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual((code, self.launches(directory)), (0, ["challenge"]), output)
+        self.assertIn("is held for the operator", output)
+        digest = "a" * 64
+
+        def stop_for_approval(run):
+            # The controller exports the approval gate before it stops (await_approval's report).
+            exported = read_json(run / "run-state.json")
+            save_json(run / "run-state.json", {**exported, "tasks": [{"interrupts": [{"kind": "integration_approval", "bundle_sha256": digest}]}]})
+            return AWAITING_APPROVAL
+
+        with patch("workflow.automatic.supervise", side_effect=stop_for_approval):
+            output, code = self.cli(resume_main, [str(directory), "--launch"])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.launches(directory), ["challenge", "adapter", "ui"])
+        self.assertIn("Automatic run awaiting your approval", output)
+        self.assertIn(f"-m workflow approve {directory} --bundle-sha256 {digest} --by operator", output)
+        self.assertNotIn("reached a verified feature branch", output)
+        self.assertEqual(read_json(directory / "challenge-hold.json")["released_by"], "operator")
+
 
 class ChallengeRevision(GuardedFeature):
     """`resume` after an edit commits the re-pinned feature files on the run's branch and moves the run to that commit."""
