@@ -1,7 +1,8 @@
 """`workflow init <feature> [--repo X]`: write a feature directory to fill in; never overwrite a file.
 
-The scaffold is a 2.3.0 `feature.json` with one lane, the bundled reviewers and a `prd` to name (its README shows
-the optional review `sidecar` key, which the feature file leaves out), a 1.2.0
+The scaffold is a 2.4.0 `feature.json` with one lane, the bundled reviewers, a `prd` to name and `critical: false`
+(the workflow-grill skill sets it to true when the operator confirms the code is critical; its README shows the optional
+review `sidecar` key, which the feature file leaves out), a 1.2.0
 `policy.json` with a placeholder check, the lane's task in outcome-brief form (with the browser scenario rules
 and the Playwright report command, to delete for a lane without browser checks), a `decisions.md` for the
 workflow-grill skill to fill in and a `README.md`, plus a starter `CLAUDE.md` in the target root when it
@@ -24,10 +25,11 @@ LANE = "main"
 
 def feature_files(feature: str) -> dict[str, str]:
     """The feature directory's files by relative path."""
-    manifest = {"version": "2.3.0", "name": f"TODO: one line saying what {feature} delivers", "branch_prefix": f"feature/{feature}",
+    manifest = {"version": "2.4.0", "name": f"TODO: one line saying what {feature} delivers", "branch_prefix": f"feature/{feature}",
                 "prd": "TODO: the specification the design challenge reads, relative to the repository root (or delete this key)",
                 "policy": "policy.json", "workers": [{"node_id": LANE, "task": f"{LANE}-task.md"}],
-                "reviewers": [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}]}
+                "reviewers": [{"reviewer_id": "general", "prompt": "builtin:general"}, {"reviewer_id": "coverage", "prompt": "builtin:coverage"}],
+                "critical": False}
     policy = {"version": "1.2.0", "feature": "TODO: the feature's name", "independent_review": True, "integration_approval": True,
               "max_verification_attempts": 3,
               "workers": [{"node_id": LANE, "role": "TODO: a short role label, for example backend",
@@ -64,7 +66,8 @@ def feature_files(feature: str) -> dict[str, str]:
     readme = (f"# {feature}\n\n"
               "TODO: why this feature exists and where its specification lives.\n\n"
               "- `feature.json`: the lanes, their task files, the reviewers (`builtin:<id>` names a bundled brief), the `prd` the design "
-              "challenge reads and `challenge` (default true).\n"
+              "challenge reads, `challenge` (default true) and `critical` (false; the workflow-grill skill sets it to true when you "
+              "confirm the feature's code is critical, and an automatic run then stops after review for your `approve`).\n"
               "- Optional `sidecar` in `feature.json`: a review sidecar, an independent reviewer that reads the lanes' diffs and panes "
               "while they work and may message them through the controller (the workflow tool's README, section Review sidecar). Add it as "
               "`\"sidecar\": {\"prompt\": \"builtin:senior-review\"}`, optionally with `cadence_seconds` (default 900), "
@@ -89,8 +92,9 @@ STARTER_CLAUDE = f"""# Project conventions
 
 {OPERATOR_NOTES}
 
-- Keep this file short and specific. Workflow sessions start with --safe-mode, which does not load it: for a feature at feature.json 2.2.0 or 2.3.0 the controller pins what is above this heading, as the run's base commit holds it, and puts it in every worker, design challenge and reviewer prompt. No session gets this section.
+- Keep this file short and specific. Workflow sessions start with --safe-mode, which does not load it: for a feature at feature.json 2.2.0 or later the controller pins what is above this heading, as the run's base commit holds it, and puts it in every worker, design challenge and reviewer prompt. No session gets this section.
 - Notes for you and the orchestrator about running workflows in this repository.
+- Critical paths: none. List here the paths whose code is critical (one per line); the workflow-grill skill asks, before any other question, whether AI workers may write a listed path a lane owns.
 """
 
 

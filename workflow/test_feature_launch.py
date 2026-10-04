@@ -341,6 +341,19 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertEqual(len(lines), index + 4)  # The finished note, last.
         self.assertEqual(output.getvalue().count("Outcome:"), 1)
 
+    def test_an_attended_launch_stopped_for_approval_says_so_instead_of_finished(self):
+        # C51: `automatic` exits 0 at the approval stop, as `start` does at a challenge pause; launch reads the run's state.
+        stop = "Automatic run awaiting your approval: ...\nApprove with: python -m workflow approve run --bundle-sha256 abc --by operator\nOpen items: none recorded.\n"
+        with patch("workflow.launch.run_command"), patch("workflow.pipeline.approval_stop", return_value=stop), \
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--by", "operator", "--automatic", "--profile", "attended",
+                  "--no-herdr", "--run-id", "approval-001", "--run-root", str(self.root / "runs")])
+        printed = output.getvalue()
+        self.assertIn("automatic, finish approval (the attended profile): once every reviewer approves, the run stops for your approval", printed)
+        self.assertIn("Launch stopped for your approval; nothing was fast-forwarded.", printed)
+        self.assertIn("--bundle-sha256 abc --by operator", printed)
+        self.assertNotIn("Automatic run finished", printed)
+
     def test_a_live_launch_first_says_how_the_run_finishes(self):
         # From the automatic settings prepare pins (plan.automatic), not from plan.mode, which is "interactive" for every run.
         finishes = {True: "automatic, finish verified-feature-branch: once every reviewer approves, the controller fast-forwards {branch} "

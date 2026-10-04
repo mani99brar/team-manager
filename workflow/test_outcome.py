@@ -135,6 +135,16 @@ class OutcomeBlock(OutcomeRun):
         self.assertEqual(outcome_block(self.directory, open_items_only=True).splitlines(),
                          ["Lane ui:", "  verify yourself: Open the page and see the new heading."])
 
+    def test_the_approval_stop_lists_the_open_p2s_below_the_block_threshold(self):
+        # C51: the stop lists the findings below the block threshold too; the outcome line still only counts them.
+        nit = finding("P2", "The label wraps at 320 px. It reads fine otherwise.", reviewer="general")
+        self.review("approved", [("general", "approved"), ("coverage", "approved")], [nit])
+        for reviewer in REVIEWERS:
+            self.status(reviewer, status="succeeded", accepted_decision=self.decision("approved", [nit] if reviewer == "general" else []), derived=True)
+        self.assertEqual(outcome_block(self.directory), "Outcome: approved by general and coverage; no open P0/P1 (1 open P2 in review.json).")
+        self.assertEqual(outcome_block(self.directory, open_items_only=True).splitlines(),
+                         ["Open P2 (below the block threshold):", "  [P2 general] The label wraps at 320 px."])
+
     def test_an_approval_with_lane_items_is_no_longer_one_line_and_a_run_without_a_record_has_no_block(self):
         self.assertEqual(outcome_block(self.directory), "")
         self.assertEqual(outcome_block(self.directory.parent / "missing"), "")

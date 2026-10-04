@@ -123,9 +123,10 @@ def reviews(directory: Path, plan: dict) -> tuple[str | None, list[str], dict, l
     return None, list(ids), derived, findings
 
 
-def open_items(directory: Path, plan: dict, findings: list) -> tuple[list[str], bool]:
-    """The sections that need the operator: open P0/P1, known limits, each lane's evidence, the sidecar's unresolved list; and
-    whether any of them is more than a lane's verify_yourself line (which every completed 1.1.0 lane carries)."""
+def open_items(directory: Path, plan: dict, findings: list, open_p2: bool = False) -> tuple[list[str], bool]:
+    """The sections that need the operator: open P0/P1, with `open_p2` the open P2s (below the block threshold: the approval
+    stop lists them, C51), known limits, each lane's evidence, the sidecar's unresolved list; and whether any of them is more
+    than a lane's verify_yourself line (which every completed 1.1.0 lane carries). The open P2s never make it more."""
     from .automatic import first_sentence
     from .pipeline import blocking_findings
     lines, open_ = [], False
@@ -133,6 +134,10 @@ def open_items(directory: Path, plan: dict, findings: list) -> tuple[list[str], 
     if blocking:
         lines.append("Open P0/P1:")
         lines += [f"  [{item['severity']} {item.get('reviewer')}] {first_sentence(item['message'])}" for item in blocking]
+    below = [item for item in findings if item.get("severity") == "P2" and item.get("disposition") == "open"] if open_p2 else []
+    if below:
+        lines.append("Open P2 (below the block threshold):")
+        lines += [f"  [P2 {item.get('reviewer')}] {first_sentence(item['message'])}" for item in below]
     limits = [item for item in findings if item.get("severity") == "P2" and item.get("disposition") == "accepted"]
     if limits:
         lines.append("Known limits (accepted P2):")
@@ -167,8 +172,8 @@ def held_line(directory: Path, plan: dict) -> str | None:
 def outcome_block(directory: Path, open_items_only: bool = False) -> str:
     """The run's outcome as text; "" when the run records nothing to report yet (no review, no lane evidence, no sidecar list).
 
-    `open_items_only`: just the sections that need the operator (open P0/P1, known limits, lane items, the sidecar's
-    unresolved list), without the outcome line and the reviewers' verdicts, for a stop that lists its open items.
+    `open_items_only`: just the sections that need the operator (open P0/P1, the open P2s, known limits, lane items, the
+    sidecar's unresolved list), without the outcome line and the reviewers' verdicts, for the approval stop (C51).
     """
     directory = Path(directory)
     try:  # It never raises: the Blocked handlers print it inside their `except`.
@@ -176,7 +181,7 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         if not isinstance(plan, dict):
             return ""
         verdict, ids, derived, findings = reviews(directory, plan)
-        items, open_ = open_items(directory, plan, findings)
+        items, open_ = open_items(directory, plan, findings, open_p2=open_items_only)
         if open_items_only:
             return "\n".join(items)
         if not ids:

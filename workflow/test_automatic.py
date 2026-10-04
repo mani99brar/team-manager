@@ -3906,6 +3906,125 @@ class ParallelReviewerScenarios(GraphFixture):
         self.assertFalse((f.directory / "review.json").exists())
 
 
+class ApprovalStopTests(GraphFixture):
+    """C51 step 1, decision 3: an attended run, or one whose feature is marked critical, stops after review for the operator's
+    approval; every other automatic run finishes as before."""
+
+    def pin(self, settings: dict) -> None:
+        f = self.fixture
+        f.plan["automatic"] = settings
+        save_json(f.directory / "plan.json", f.plan)
+        f.runtime = fixtures.OfflinePipeline(f.directory, f.sessions)
+
+    def pending(self) -> list:
+        f = self.fixture
+        with SqliteSaver.from_conn_string(str(f.directory / "pipeline.sqlite")) as saver:
+            state = build_pipeline(saver, f.runtime).get_state(f.config)
+        return [item.value.get("kind") for task in state.tasks for item in task.interrupts]
+
+    def main(self, argv) -> tuple[int, str, str]:
+        """`python -m workflow <argv>` in process with the fake sessions: (exit code, stdout, stderr)."""
+        from . import pipeline
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda directory, timeout: self.fixture.sessions), \
+                patch("sys.argv", ["workflow", *fixtures.by_operator(argv)]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                pipeline.main()
+            except SystemExit as exited:
+                code = exited.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_finish_is_approval_for_an_attended_profile_or_a_critical_feature_and_older_plans_still_validate(self):
+        self.assertEqual(automatic_settings()["finish"], "verified-feature-branch")
+        self.assertEqual(automatic_settings(profile="unattended", critical=False)["finish"], "verified-feature-branch")
+        self.assertEqual(automatic_settings(profile="attended")["finish"], "approval")
+        self.assertEqual(automatic_settings(critical=True)["finish"], "approval")
+        self.assertEqual(automatic_settings(critical=True)["profile"], "unattended")
+        # A plan pinned before profiles, or with an approval finish and no profile key, still validates; any other finish is refused.
+        legacy = {"run_id": "test", "source_branch": "feature/test", "automatic": {key: value for key, value in DEFAULTS.items() if key != "profile"}}
+        validate_automatic(legacy)
+        legacy["automatic"]["finish"] = "approval"
+        validate_automatic(legacy)
+        legacy["automatic"]["finish"] = "merge-main"
+        with self.assertRaisesRegex(ValueError, "Unsupported automatic authority"):
+            validate_automatic(legacy)
+
+    def test_an_attended_run_stops_after_review_with_the_awaiting_code_and_no_integrate_event(self):
+        from .automatic import AWAITING_APPROVAL, AWAITING_APPROVAL_EXIT, UNAVAILABLE_EXIT
+        f = self.fixture
+        self.pin(automatic_settings(reviewer_transport=self.transport, profile="attended"))
+        with patch("workflow.automatic.wait_handoffs"):
+            self.assertEqual(drive(f.runtime), AWAITING_APPROVAL)
+        self.assertEqual(self.pending(), ["integration_approval"])
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+        self.assertFalse([event for event in self.events() if event["node"] == "integrate"])
+        self.assertEqual(self.reviewer_launches(), len(self.ids))
+        self.assertEqual(read_json(f.directory / "review.json")["verdict"], "approved")
+        _, digest = f.runtime.validate_bundle()
+        approve = f"-m workflow approve {f.directory} --bundle-sha256 {digest} --by operator"
+        # One attention line of its own kind (never `finished`: nothing was fast-forwarded), and one note on the approval node.
+        [(kind, node, text)] = [line for line in self.attention_lines() if line[0] in ("awaiting_approval", "finished")]
+        self.assertEqual((kind, node), ("awaiting_approval", "approval"))
+        self.assertTrue(text.startswith("Awaiting your approval: "), text)
+        self.assertIn(approve, text)
+        notes = [event for event in self.events() if event["node"] == "approval"]
+        self.assertEqual([(event["status"], approve in event["message"]) for event in notes], [("note", True)])
+        exported = read_json(f.directory / "run-state.json")
+        self.assertEqual([item["kind"] for task in exported["tasks"] for item in task["interrupts"]], ["integration_approval"])
+        # A controller started again stops at once: nothing relaunched, nothing said twice.
+        with patch("workflow.automatic.wait_handoffs"):
+            self.assertEqual(drive(f.runtime, single_step=True), AWAITING_APPROVAL)
+        self.assertEqual(self.reviewer_launches(), len(self.ids))
+        self.assertEqual(len([event for event in self.events() if event["node"] == "approval"]), 1)
+        self.assertEqual(len([line for line in self.attention_lines() if line[0] == "awaiting_approval"]), 1)
+        # The step exits with its own code, and the supervisor stops on it rather than restarting or calling it blocked.
+        code, _, _ = self.main(["automatic-step", str(f.directory), "--live"])
+        self.assertEqual(code, AWAITING_APPROVAL_EXIT)
+        self.assertNotIn(AWAITING_APPROVAL_EXIT, (0, 1, 75, UNAVAILABLE_EXIT))
+        with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], AWAITING_APPROVAL_EXIT)) as step:
+            self.assertEqual(supervise(f.directory), AWAITING_APPROVAL)
+        self.assertEqual(step.call_count, 1)
+        # `automatic` exits 0, prints the approve command with --by operator and the open items, never the finished line.
+        with patch("workflow.automatic.subprocess.run", return_value=subprocess.CompletedProcess([], AWAITING_APPROVAL_EXIT)):
+            code, out, err = self.main(["automatic", str(f.directory), "--live"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Automatic run awaiting your approval", out)
+        self.assertIn(approve, out)
+        self.assertIn("Open items:", out)
+        self.assertNotIn("reached a verified feature branch", out)
+        # status names the same command.
+        code, out, err = self.main(["status", str(f.directory)])
+        self.assertEqual(code, 0, err)
+        self.assertIn(approve, json.loads(out.split("\nReport:")[0])["next_step"])
+        # The operator's approval integrates as a manual approve does, and the next controller finds the verified branch.
+        code, out, err = self.main(["approve", str(f.directory), "--bundle-sha256", digest])
+        self.assertEqual(code, 0, err)
+        commit = git(f.repo, "rev-parse", "HEAD")
+        self.assertNotEqual(commit, f.plan["base_commit"])
+        self.assertEqual(drive(f.runtime), commit)
+        self.assertEqual([line[0] for line in self.attention_lines() if line[0] in ("awaiting_approval", "finished")], ["awaiting_approval", "finished"])
+
+    def test_a_critical_feature_stops_under_the_unattended_profile(self):
+        from .automatic import AWAITING_APPROVAL, profile
+        f = self.fixture
+        self.pin(automatic_settings(reviewer_transport=self.transport, critical=True))
+        self.assertEqual(profile(f.plan), "unattended")
+        with patch("workflow.automatic.wait_handoffs"):
+            self.assertEqual(drive(f.runtime), AWAITING_APPROVAL)
+        self.assertEqual(self.pending(), ["integration_approval"])
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), f.plan["base_commit"])
+
+    def test_the_default_finish_integrates_without_stopping(self):
+        f = self.fixture
+        self.assertEqual(f.plan["automatic"]["finish"], "verified-feature-branch")
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(f.runtime)
+        self.assertEqual(git(f.repo, "rev-parse", "HEAD"), commit)
+        self.assertFalse([event for event in self.events() if event["node"] == "approval"])
+        self.assertFalse([line for line in self.attention_lines() if line[0] == "awaiting_approval"])
+
+
 class FinishNote(unittest.TestCase):
     def test_automatic_live_says_how_a_run_on_its_own_worktree_merges_and_launch_says_it_once(self):
         from .guardrails import LAUNCH_NOTE_ENV

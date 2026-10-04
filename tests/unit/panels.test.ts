@@ -109,6 +109,16 @@ test('an approval without an event is inferred at the integration and says so; t
   assert.deepEqual(approvalLine([span('approval', 1, '2026-03-05T10:00:00Z', '2026-03-05T10:00:00Z')], recorded, { mode: 'manual', automatic: null } as RunInputs),
     { at: '2026-03-05T10:00:00Z', inferred: false, how: 'approved by the operator', recorded: true })
   assert.equal(approvalLine([], [], inputs), null)
+  // C51: an automatic run with finish "approval" stopped for the operator; the line names who approved, as the approval row records it.
+  const attended = { mode: 'automatic', automatic: { finish: 'approval' } } as RunInputs
+  const approvedRow = [
+    event('approval', 7, '2026-03-05T10:00:00Z', null, 'Awaiting your approval (finish approval): python -m workflow approve run --bundle-sha256 abc --by operator'),
+    event('approval', 9, '2026-03-05T10:05:00Z', 'succeeded', 'Approved by the operator (via a Claude Code session): the fast-forward of bundle c28c4f00a133'),
+  ]
+  assert.deepEqual(approvalLine([span('approval', 1, '2026-03-05T10:05:00Z', '2026-03-05T10:05:00Z')], approvedRow, attended),
+    { at: '2026-03-05T10:05:00Z', inferred: false, how: 'approved by the operator (via a Claude Code session); finish approval', recorded: true })
+  assert.deepEqual(approvalLine(inferred, [], attended),
+    { at: '2026-03-05T09:43:52Z', inferred: true, how: 'approved under finish approval; who approved is not recorded', recorded: false })
 })
 
 test('the integrated commit is the one the integration row names, else the reviewed candidate; the last status row dates a wait', () => {

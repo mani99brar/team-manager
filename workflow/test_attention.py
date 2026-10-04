@@ -115,7 +115,7 @@ class AttentionRecord(unittest.TestCase):
         self.assertIsNotNone(self.record("question", "Worker adapter asked question 1 of 3: A or B?", "adapter", at=NOON + 1000))
 
     def test_kinds_are_fixed_and_the_reserved_ones_write_nothing_yet(self):
-        self.assertEqual(KINDS, frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar"}))
+        self.assertEqual(KINDS, frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar", "awaiting_approval"}))
         self.assertEqual(RESERVED_KINDS, frozenset({"usage_limit"}))
         self.assertFalse(KINDS & RESERVED_KINDS)
         for kind in ("usage_limit", "blocked", ""):

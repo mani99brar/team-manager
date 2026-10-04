@@ -62,8 +62,9 @@ from .verification import CONTRACTS, safe_path, validate_schema
 from .worktrees import git_worktree
 
 GUARDED_VERSION = "2.2.0"
-# 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py).
-GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0"})
+# 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py); 2.4.0 adds the optional `critical`
+# (C51), keeping both.
+GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0", "2.4.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
 # The one default line init's Acceptance template keeps (C16 step 8). It says how a lane runs its checks, not what the lane
 # delivers, so a section that holds nothing else is empty (brief_problems), as it was before the line existed (1943ea8).
@@ -1737,11 +1738,15 @@ def resume_main(argv=None):
             start_workers(runtime, attach=args.herdr)
         print(f"Design challenge {record['status']} (attempt {record['attempt']}); workers launched: {', '.join(runtime.workers)}")
         if runtime.plan.get("automatic"):
-            from .automatic import supervise
+            from .automatic import AWAITING_APPROVAL, supervise
+            from .pipeline import approval_stop
             try:
-                supervise(directory)
+                stopped = supervise(directory)
             except TransientInfraError as error:
                 parser.exit(75, f"Interrupted: {error}\n")  # Resumable, like `automatic --live`.
+            if stopped == AWAITING_APPROVAL:  # Finish "approval" (C51): the approve command and the open items.
+                print(approval_stop(directory), end="")
+                return
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
             print(outcome_lines(directory), end="")
             note = run_finished_note(directory, runtime.plan)

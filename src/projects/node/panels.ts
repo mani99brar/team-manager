@@ -137,10 +137,14 @@ export function handoffWait(workers: RunInputs['workers'], freezeAt: string | nu
   return Number.isNaN(wait) || wait < 0 ? null : { ms: wait, from: latest.at, lane: latest.lane }
 }
 
+/** approve's row on the approval node (workflow/pipeline.py, C51): `Approved by the operator[ (via a Claude Code session)]: ...`. */
+const APPROVED_BY = /^Approved by (the (?:operator|maintainer)(?: \(via a Claude Code session\))?):/
+
 /**
  * The approval's line (4.9): its instant from the timeline (an event, else ≈ the integration), and who approved: the finish
- * policy of an automatic run, else the operator. `recorded` says whether an event of the node recorded it. Null before any
- * instant is known.
+ * policy of an automatic run, else the operator. An automatic run with finish `approval` (C51) stopped for the operator: its
+ * line names the actor approve recorded, or says it is not recorded. `recorded` says whether an event of the node recorded
+ * it. Null before any instant is known.
  */
 export function approvalLine(spans: readonly Span[], events: readonly WorkflowEvent[], inputs: RunInputs | null): ApprovalLine | null {
   const last = spans.at(-1)
@@ -148,6 +152,13 @@ export function approvalLine(spans: readonly Span[], events: readonly WorkflowEv
   if (instant === null) return null
   const recorded = events.some(event => event.status !== null)
   const finish = inputs?.mode === 'automatic' ? inputs.automatic?.finish ?? null : null
+  if (finish === 'approval') {
+    const actor = events.map(event => APPROVED_BY.exec(event.message)?.[1]).filter(Boolean).at(-1)
+    return {
+      at: instant.at, inferred: instant.source === 'inferred', recorded,
+      how: actor ? `approved by ${actor}; finish approval` : 'approved under finish approval; who approved is not recorded',
+    }
+  }
   return {
     at: instant.at, inferred: instant.source === 'inferred', recorded,
     how: finish ? `approved automatically by the finish policy (${finish})` : 'approved by the operator',

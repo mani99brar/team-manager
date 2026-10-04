@@ -31,6 +31,8 @@ TOOL = Path(__file__).resolve().parents[1]
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
 BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+# The feature version that adds `critical` (C51): the operator confirmed at the grill that the feature's code is critical.
+CRITICAL_VERSION = "2.4.0"
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -150,12 +152,13 @@ def placeholders(folder: Path) -> list[str]:
 
 
 def load_feature(folder: Path) -> dict:
-    """The feature file as 2.0.0, 2.1.0, 2.2.0 or 2.3.0; 1.0.0 files are refused.
+    """The feature file as 2.0.0, 2.1.0, 2.2.0, 2.3.0 or 2.4.0; 1.0.0 files are refused.
 
     2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
     A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
     (workflow/guardrails.py) and adds the optional `challenge` and `prd`. 2.3.0 adds the optional review
-    `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them.
+    `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them. 2.4.0 keeps
+    both and adds the optional `critical` (C51): `true` makes an automatic run stop for the operator's approval.
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -170,6 +173,8 @@ def load_feature(folder: Path) -> dict:
         validate_node_id(node)
     if not is_guarded(manifest) and ("challenge" in manifest or "prd" in manifest):
         raise ValueError("feature.json challenge and prd need version 2.2.0")
+    if "critical" in manifest and manifest["version"] != CRITICAL_VERSION:
+        raise ValueError(f"feature.json critical needs version {CRITICAL_VERSION} (this file is {manifest['version']})")
     reviewers = manifest.get("reviewers")
     if reviewers is not None:
         if manifest["version"] == "2.0.0":
@@ -332,6 +337,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
                             "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
                             "--reviewer-transport", settings["reviewer_transport"], "--profile", settings["profile"]])
+        if manifest.get("critical") is True:
+            commands[2].append("--critical")  # Prepare pins finish "approval" (C51); a manual run stops for approval anyway.
         commands.append([*base, "automatic", str(run), "--live", "--repo", str(source), "--by", by])
     elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None or profile is not None:
         raise ValueError("Timeouts, the reviewer transport and the profile apply to --automatic runs only")
@@ -463,8 +470,8 @@ def main(argv=None):
             print(f"Note: {note}", file=sys.stderr)
         # How the run ends, from the automatic settings prepare pins as plan.automatic (validated by launch_commands).
         from .automatic import automatic_settings
-        settings = (automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile)
-                    if args.automatic else None)
+        settings = (automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile,
+                                       critical=manifest.get("critical") is True) if args.automatic else None)
         profile = f" (profile {settings['profile']})" if settings else ""
         print(f"Run {run}{profile}: {finish_policy(settings, branch)}.", flush=True)
         print(f"Source checkout: {source}, the run's own worktree on {branch}; your checkout {repo} stays on its branch. "
@@ -503,8 +510,14 @@ def main(argv=None):
             parser.exit(75, f"Launch interrupted: Claude Code was unavailable; nothing was stopped. Once `claude` works,\n"
                             f"resume with:  {sys.executable} -m workflow automatic {run} --live {BY_OPERATOR}\n")
         if args.automatic:
+            from .pipeline import approval_stop, outcome_lines
+            stop = approval_stop(run)
+            if stop:
+                # `automatic` printed the same and exited 0, as `start` does at a challenge pause: the run waits for approve (C51).
+                print(f"\nLaunch stopped for your approval; nothing was fast-forwarded. Run: {run}\n{stop}", end="")
+                print(f"Once it integrates: {finished_note(source, branch, repo)}")
+                return
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
-            from .pipeline import outcome_lines
             print(outcome_lines(run), end="")
             print(finished_note(source, branch, repo))
             return

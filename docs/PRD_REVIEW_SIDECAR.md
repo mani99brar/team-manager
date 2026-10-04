@@ -22,7 +22,7 @@ The sidecar is an advisor. It never blocks, approves, freezes or integrates anyt
 
 ## 3. Configuration
 
-feature.json 2.3.0 (what `init` writes from now on; 2.2.0 keeps launching unchanged) adds the optional `sidecar`:
+feature.json 2.3.0 (2.2.0 keeps launching unchanged; 2.4.0, what `init` writes now, keeps it) adds the optional `sidecar`:
 
 ```json
 {
