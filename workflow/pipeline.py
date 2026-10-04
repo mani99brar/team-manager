@@ -945,8 +945,13 @@ def report(runtime: Pipeline, state) -> Path:
     events_path = runtime.directory / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
     packets = list((runtime.directory / "verification").glob("*/*/*/packet.json"))
-    flow = ("Launch workers → completion signals → isolated checks → combined checks → independent review → verified feature branch (no main merge or push)"
-            if runtime.plan.get("automatic") else "Launch workers → human handoff → isolated checks → combined checks → independent review → approval → integration")
+    from .automatic import awaits_approval
+    if awaits_approval(runtime.plan):  # C51: finish "approval" stops after review for the operator's `approve`.
+        flow = "Launch workers → completion signals → isolated checks → combined checks → independent review → your approval → integration (no main merge or push)"
+    elif runtime.plan.get("automatic"):
+        flow = "Launch workers → completion signals → isolated checks → combined checks → independent review → verified feature branch (no main merge or push)"
+    else:
+        flow = "Launch workers → human handoff → isolated checks → combined checks → independent review → approval → integration"
     parts = ['<!doctype html><meta charset="utf-8"><title>Workflow report</title><style>body{font:16px system-ui;max-width:1100px;margin:40px auto;background:#151820;color:#eee}pre{white-space:pre-wrap}a{color:#8dcaff}img{max-width:100%}section{border:1px solid #555;padding:16px;margin:16px 0}</style>',
              '<h1>Workflow report</h1>' + outcome_html(runtime.directory) + '<p>' + html.escape(flow) + '</p>',
              '<h2>Current state</h2><pre>' + html.escape(json.dumps({"next": state.next, "interrupts": [str(task.interrupts) for task in state.tasks if task.interrupts], "errors": [str(task.error) for task in state.tasks if task.error], "integrated_commit": state.values.get("integrated_commit")}, indent=2)) + '</pre>',
@@ -1334,7 +1339,7 @@ def main():
                 if args.prd and not args.prd.is_file():
                     raise ValueError(f"PRD does not exist: {args.prd}")
             elif args.decisions or args.prd or args.no_challenge or args.sidecar_brief:
-                parser.error("--decisions, --prd, --no-challenge and --sidecar-brief apply to prepare --guardrails (feature.json 2.2.0 and 2.3.0) only")
+                parser.error("--decisions, --prd, --no-challenge and --sidecar-brief apply to prepare --guardrails (feature.json 2.2.0 and later) only")
             if args.hold_challenge and (not args.guardrails or args.no_challenge):
                 parser.error("--hold-challenge needs the design challenge: prepare --guardrails without --no-challenge")
             if args.sidecar_settings is not None and not args.sidecar_brief:

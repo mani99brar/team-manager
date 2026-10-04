@@ -1,5 +1,6 @@
 """Offline automatic-controller tests: synthetic Claude, real Git/checkpoints/checks."""
 import contextlib
+import html
 import io
 import json
 import os
@@ -3975,6 +3976,11 @@ class ApprovalStopTests(GraphFixture):
         self.assertIn(approve, text)
         notes = [event for event in self.events() if event["node"] == "approval"]
         self.assertEqual([(event["status"], approve in event["message"]) for event in notes], [("note", True)])
+        # The report the stop cites as Evidence shows the stop: its flow ends at your approval, and its timeline holds the note.
+        page = (f.directory / "report.html").read_text()
+        self.assertIn("independent review → your approval → integration (no main merge or push)", page)
+        self.assertNotIn("verified feature branch", page)
+        self.assertIn(html.escape(json.dumps(notes[0]["message"])[1:-1]), page)
         exported = read_json(f.directory / "run-state.json")
         self.assertEqual([item["kind"] for task in exported["tasks"] for item in task["interrupts"]], ["integration_approval"])
         # A controller started again stops at once: nothing relaunched, nothing said twice.

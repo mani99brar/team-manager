@@ -167,7 +167,7 @@ def prd_path(target: Path, value: str) -> Path:
 
 
 def refusals(target: Path, folder: Path, manifest: dict, tasks: dict[str, Path]) -> list[str]:
-    """Every reason a 2.2.0 or 2.3.0 feature may not launch; empty for a feature before 2.2.0."""
+    """Every reason a 2.2.0, 2.3.0 or 2.4.0 feature may not launch; empty for a feature before 2.2.0."""
     if not is_guarded(manifest):
         return []
     found = []

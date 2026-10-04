@@ -33,7 +33,7 @@ The target is `--repo`, else the current directory when it is a Git repository w
 
 ## Use it in another project
 
-1. **Prepare the repository.** It must be a Git repository with at least one commit and a named branch. Sessions start in worktrees of it with `--safe-mode`, which does not load its `CLAUDE.md`. For a 2.2.0 or 2.3.0 feature, prepare pins `CLAUDE.md` as the run's base commit holds it, up to the heading `## Workflow (operator notes; workers skip this section)`, and every worker, design challenge and reviewer prompt gets that text (see "Guardrails"): put the project's conventions above the heading (build and test commands, style, directories a worker must never touch) and your notes about running workflows below it. A 2.0.0 or 2.1.0 feature gets none of it, so each task must state what its lane needs. `init` writes a starter `CLAUDE.md` when there is none; it ends with that heading.
+1. **Prepare the repository.** It must be a Git repository with at least one commit and a named branch. Sessions start in worktrees of it with `--safe-mode`, which does not load its `CLAUDE.md`. For a 2.2.0 or later feature, prepare pins `CLAUDE.md` as the run's base commit holds it, up to the heading `## Workflow (operator notes; workers skip this section)`, and every worker, design challenge and reviewer prompt gets that text (see "Guardrails"): put the project's conventions above the heading (build and test commands, style, directories a worker must never touch) and your notes about running workflows below it. A 2.0.0 or 2.1.0 feature gets none of it, so each task must state what its lane needs. `init` writes a starter `CLAUDE.md` when there is none; it ends with that heading.
 2. **Scaffold the feature.**
 
    ```bash
@@ -60,7 +60,7 @@ A worker runs as your user, with Bash, and in automatic mode with permission che
 
 None of this stops a program the worker runs. A Bash `cat ~/.ssh/id_ed25519` is not a Read tool call, `sh -c "git push"` or `kill $(pgrep -f x)` passes the prefix rules, and the network is open. Until workers run under another user or a sandbox, the only real fix is to move credentials off this account: move the funded deployer key in `~/.config/vps-wallet.env` to another user or a hardware wallet (only you broadcast mainnet transactions), put a passphrase on the SSH key, replace the gh token with a fine-grained one, take API keys such as the DeepSeek key out of `~/.bashrc`, and run the Telegram decision bot as another user.
 
-## Guardrails (feature.json 2.2.0 and 2.3.0)
+## Guardrails (feature.json 2.2.0 and later)
 
 `init` writes 2.4.0, which keeps every 2.2.0 guardrail and the optional review sidecar of 2.3.0 (below) and adds `critical` (below); a 2.2.0 or 2.3.0 feature launches unchanged, and a 2.0.0 or 2.1.0 feature (md-manager's existing ones) still launches exactly as before, with the same commands and graph, and the launch prints a note that no guardrail is enforced and how to migrate: set `"version": "2.2.0"`, give every task the three required sections and write `decisions.md`. Runs prepared before the guardrails keep their commands, exports and 1.0.0 completion files unchanged. For a 2.2.0 or later feature:
 

@@ -2068,18 +2068,19 @@ def note_controller_drift(runtime, current: str | None = None) -> None:
 
 
 def await_approval(runtime, state) -> None:
-    """The stop of a run whose finish is "approval" (C51), once its review approved: the report, one note on the approval node
-    and one `awaiting_approval` attention record, each naming the approve command with the exact bundle and --by operator.
-    A controller started again while the run waits repeats neither."""
+    """The stop of a run whose finish is "approval" (C51), once its review approved: one note on the approval node and one
+    `awaiting_approval` attention record, each naming the approve command with the exact bundle and --by operator, then the
+    report, which the stop cites as its evidence and so shows the note. A controller started again while the run waits repeats
+    neither."""
     from .pipeline import approve_command, complete_events, report
     digest = next(item.value.get("bundle_sha256") for task in state.tasks for item in task.interrupts)
     command = approve_command(runtime.directory, digest)
-    report(runtime, state)
     message = f"Awaiting your approval (finish approval): {command}. Nothing is fast-forwarded or pushed until then"
     if not any(event.get("node") == "approval" and event.get("message") == message for event in complete_events(runtime.directory)):
         runtime.event("approval", "note", message)
     attention_record(runtime.directory, "awaiting_approval", f"Awaiting your approval: {command}. Nothing is fast-forwarded or pushed "
                                                              "until then.", node="approval")
+    report(runtime, state)
 
 
 def drive(runtime, *, single_step=False) -> str | None:
