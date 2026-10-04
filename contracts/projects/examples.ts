@@ -179,6 +179,10 @@ export const runInputs: RunInputs = {
     cheap_experiment: 'Merge the two task texts and count shared paths.',
     accepted_reason: 'The contract is split by file.',
     decided_at: '2026-01-01T11:59:00Z',
+    history: [{
+      attempt: 1, status: 'paused', decided_at: '2026-01-01T11:50:00Z',
+      concerns: [{ severity: 'P1', kind: 'failure_mode', message: 'Both lanes edit the contract.', consequence: 'The candidate merge conflicts.' }],
+    }],
   },
   roles: { worker: { model: null, effort: 'medium' }, judges: { model: 'claude-opus-5-5', effort: 'high' } },
   controller: { commit: 'f'.repeat(40), dirty: false, claude_version: '2.1.288 (Claude Code)' },

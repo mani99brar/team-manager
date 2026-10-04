@@ -33,7 +33,9 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * completions as 1.0.0) and 1.6.0 (the review sidecar: a top-level `sidecar` section holding its ledger, or null, and a
  * `sidecar` graph node after the challenge) and 1.7.0 (C52: `inputs.roles`, `inputs.controller` and `inputs.automatic.profile`,
  * each absent for a run prepared before it and served as null; C8: `inputs.challenge.hold`, absent without a hold and served as
- * null, and a challenge node served paused while its hold waits for `resume --launch`). A section is served only when the
+ * null, and a challenge node served paused while its hold waits for `resume --launch`; C49: `inputs.challenge.history`, the
+ * replaced records with their P0/P1, absent before and served as [], and a top-level `costs` section the viewer does not read
+ * yet). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -229,6 +231,13 @@ const challengeSectionSchema = z.strictObject({
     released_by: z.enum(['operator', 'maintainer']).nullable(),
     dropped: z.array(z.number().int().positive()),
   }).optional(),
+  /** Export 1.7.0 (C49): each record this attempt replaced (challenge-<n>.json) with its P0/P1; absent before. */
+  history: z.array(z.strictObject({
+    attempt: z.number().int().positive(),
+    status: z.enum(CHALLENGE_STATUSES),
+    decided_at: zonedTimestamp,
+    concerns: z.array(z.strictObject({ severity: z.enum(['P0', 'P1']), kind: z.enum(CHALLENGE_CONCERN_KINDS), message: z.string().min(1), consequence: z.string().min(1) })),
+  })).optional(),
 })
 
 /** The export's `inputs` section: what the run was asked to do, pinned from `plan.json`, `policy.json` and receipts. */
@@ -735,6 +744,11 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
         released_at: challenge.hold.released_at === null ? null : utcTimestamp(challenge.hold.released_at),
         dropped: [...challenge.hold.dropped],
       },
+      // Export 1.7.0 (C49); exports before it serve [].
+      history: (challenge.history ?? []).map(entry => ({
+        ...entry, decided_at: utcTimestamp(entry.decided_at),
+        concerns: entry.concerns.map(concern => ({ ...concern, message: redactPaths(concern.message), consequence: redactPaths(concern.consequence) })),
+      })),
     },
     // Export 1.7.0; runs prepared before the pins, and older exports, serve null.
     roles: section.roles == null ? null : { worker: { ...section.roles.worker }, judges: { ...section.roles.judges } },
