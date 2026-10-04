@@ -437,7 +437,9 @@ class SharedGitDigest(Repository):
 
     def test_a_file_is_read_in_chunks_up_to_a_cap(self):
         # Under the cap a file's digest is the one prepare has always recorded (whether it is executable, then its bytes), so
-        # a run prepared before compares as it did. Past the cap its size and modification time stand in for the rest.
+        # a run prepared before compares as it did. Past the cap the rest is not read: its size, modification time and change
+        # time stand in for it. A change time cannot be set back without root, so a same-size rewrite whose modification time
+        # was restored is still a change.
         exclude, hook = self.repo / ".git" / "info" / "exclude", self.repo / ".git" / "hooks" / "post-merge"
         exclude.write_bytes(b"x" * 40)
         hook.write_bytes(b"#!/bin/sh\nexit 0\n")
@@ -446,14 +448,19 @@ class SharedGitDigest(Repository):
         self.assertEqual(entry_digest(hook), hashlib.sha256(b"executable:#!/bin/sh\nexit 0\n").hexdigest())
         with patch("workflow.worktrees.DIGEST_LIMIT", 16), patch("workflow.worktrees.DIGEST_CHUNK", 5):
             self.assertNotEqual(entry_digest(hook), hashlib.sha256(b"executable:#!/bin/sh\nexit 0\n").hexdigest())  # 17 bytes: one past.
+            exclude.write_bytes(b"x" * 16 + b"y" * 24)
             before, times = entry_digest(exclude), exclude.stat()
+            stand_in = f"\0past 16 bytes: size 40, modified {times.st_mtime_ns}, changed {times.st_ctime_ns}".encode()
+            self.assertEqual(before, hashlib.sha256(b"file:" + b"x" * 16 + stand_in).hexdigest())  # The bytes past the cap are not read.
+            self.assertEqual(entry_digest(exclude), before)  # Untouched: the same digest.
 
             def rewrite(data: bytes) -> str:
+                time.sleep(0.05)  # Past a tick of the clock the kernel stamps change times with.
                 exclude.write_bytes(data)
                 os.utime(exclude, ns=(times.st_atime_ns, times.st_mtime_ns))
                 return entry_digest(exclude)
 
-            self.assertEqual(rewrite(b"x" * 16 + b"y" * 24), before)  # The same size and time: bytes past the cap are not read.
+            self.assertNotEqual(rewrite(b"x" * 16 + b"z" * 24), before)  # The same size and modification time: its change time shows it.
             self.assertNotEqual(rewrite(b"x" * 16 + b"y" * 25), before)
             self.assertNotEqual(rewrite(b"x" * 15 + b"z" + b"x" * 24), before)
             self.assertEqual(rewrite(b"x" * 16), hashlib.sha256(b"file:" + b"x" * 16).hexdigest())  # Exactly the cap: read whole.

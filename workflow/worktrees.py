@@ -153,8 +153,9 @@ WATCHED_KEYS = frozenset({"core.hookspath", "core.fsmonitor", "core.sshcommand",
 WATCHED_PREFIXES = ("filter.", "diff.", "merge.", "include", "credential.", "url.")
 USERINFO = re.compile(r"(?<=://)[^/@\s]*@")  # A token in a URL key (url.https://<token>@host/.insteadof) is never named.
 SHARED_GIT_CHANGED = "Shared .git changed during the run: "
-# A file is hashed in chunks up to DIGEST_LIMIT bytes; past it, its size and modification time stand in for the rest.
-# Hooks, attributes and config files are far smaller than the limit, a compiled hook may not be.
+# A file is hashed in chunks up to DIGEST_LIMIT bytes; past it, its size, modification time and change time stand in for the
+# rest. A change time cannot be set back without root, so a rewrite of the same size whose modification time was restored
+# still shows. Hooks, attributes and config files are far smaller than the limit, a compiled hook may not be.
 DIGEST_CHUNK = 1 << 16
 DIGEST_LIMIT = 1 << 20
 KINDS = {stat.S_IFDIR: b"directory", stat.S_IFIFO: b"fifo", stat.S_IFSOCK: b"socket", stat.S_IFCHR: b"character device",
@@ -191,7 +192,7 @@ def entry_digest(path: Path) -> str | None:
                 digest.update(chunk)
                 left -= len(chunk)
             if not left and handle.read(1):
-                digest.update(f"\0past {DIGEST_LIMIT} bytes: size {status.st_size}, modified {status.st_mtime_ns}".encode())
+                digest.update(f"\0past {DIGEST_LIMIT} bytes: size {status.st_size}, modified {status.st_mtime_ns}, changed {status.st_ctime_ns}".encode())
             return digest.hexdigest()
     except OSError:
         return hashlib.sha256(b"unreadable").hexdigest()
