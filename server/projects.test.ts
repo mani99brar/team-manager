@@ -1412,7 +1412,7 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
     const inputs = validateRunInputs(response.json())
     assert.equal(inputs.contract_version, '1.4.0')
     assert.equal(inputs.decisions, '# Decisions\n\n## Decisions\n\n- Serve the fields unchanged; see <path> for the run.\n')
-    assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z', hold: null,
+    assert.deepEqual(inputs.challenge, { ...challengeSection(), decided_at: '2026-03-01T09:59:00.123456Z', hold: null, history: [],
       concerns: [{ ...challengeSection().concerns[0], message: 'Both lanes write <path>' }, challengeSection().concerns[1]] })
     const [ui, adapter] = inputs.workers
     assert.deepEqual(ui.completion, { version: '1.1.0', status: 'completed', summary: 'ui done', open_assumptions: [], untested: ['Narrow screens'], falsifying_check: 'project-workflows-browser', verify_yourself: 'Open <path>', question: null })
@@ -1453,6 +1453,14 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
       { ...release, held_at: '2026-03-01T10:00:00Z' })
     // Every challenge without a hold record serves hold null.
     assert.equal(accepted.challenge!.hold, null)
+    // C49: the records an attempt replaced are served with their P0/P1, redacted and in UTC; an export without them serves [].
+    const history = [{ attempt: 1, status: 'paused', decided_at: '2026-03-01T09:00:00+00:00',
+      concerns: [{ severity: 'P1', kind: 'assumption', message: 'The PRD at /home/op/dev/md-manager/docs/PRD.md is stale', consequence: 'Lanes build the old page.' }] }]
+    await writeRun(rootDir, { runId: 'retried', version: '1.7.0', definition, inputs: inputsSection({ decisions, challenge: challengeSection({ history }) }) })
+    const retried = validateRunInputs((await get(app, url('alpha', 'main', 'retried', '/inputs'))).json())
+    assert.deepEqual(retried.challenge!.history, [{ ...history[0], decided_at: '2026-03-01T09:00:00Z',
+      concerns: [{ ...history[0].concerns[0], message: 'The PRD at <path> is stale' }] }])
+    assert.deepEqual(accepted.challenge!.history, [])
     // A 1.5.0 export of a run before 2.2.0 and a 1.4.0 export both serve nulls and [].
     await writeRun(rootDir, { runId: 'unguarded', version: '1.5.0', inputs: inputsSection({ decisions: null, challenge: null }, { ui: { questions: [] }, adapter: { questions: [] } }) })
     await writeRun(rootDir, { runId: 'older', version: '1.4.0', inputs: inputsSection() })

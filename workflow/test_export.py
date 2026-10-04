@@ -490,5 +490,97 @@ class ExportRunTests(unittest.TestCase):
         self.assertEqual(read_json(directory / "run-state.json"), exported)  # A refused export leaves the previous file untouched.
 
 
+
+def cost_row(start: int | str, cost: float, duration: int, models: list[str]) -> dict:
+    """A Claude Code `cost-state` transcript row: running totals of one process of the session (`startTime`)."""
+    return {"type": "cost-state", "sessionId": "sess", "totalCostUSD": cost, "totalDuration": duration, "startTime": start,
+            "modelUsage": {model: {"costUSD": cost} for model in models}, "hasUnknownModelCost": False}
+
+
+def print_output(cost: float, duration: int, models: tuple = ("claude-opus-5-5",)) -> dict:
+    """A print job's `--output-format json` result, as `<node>.stdout.json` holds it."""
+    return {"type": "result", "is_error": False, "total_cost_usd": cost, "duration_ms": duration,
+            "modelUsage": {model: {"costUSD": cost} for model in models}}
+
+
+def challenge_record(attempt: int, status: str, concerns: list, accepted_reason=None) -> dict:
+    return {"version": "1.0.0", "run_id": "legacy-001", "status": status, "attempt": attempt, "session_id": f"00000000-0000-4000-8000-00000000000{attempt}",
+            "pinned": {"tasks_sha256": "a" * 64, "decisions_sha256": "b" * 64, "prd_sha256": None}, "concerns": concerns,
+            "simpler_alternative": "One lane", "cheap_experiment": "Prototype it", "accepted_reason": accepted_reason,
+            "decided_at": f"2026-10-03T1{attempt}:00:00Z"}
+
+
+def concern(severity: str, message: str) -> dict:
+    return {"severity": severity, "kind": "failure_mode", "message": message, "consequence": f"{message} breaks"}
+
+
+class CostTests(unittest.TestCase):
+    """C49: what each session cost, from the native transcripts' cost-state rows and the print jobs' output."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_a_native_session_counts_the_last_cost_state_row_of_each_start_time_once(self):
+        from .costs import session_cost
+        projects = self.root / "projects"
+        (projects / "-home-x-worktree-ui").mkdir(parents=True)
+        rows = [{"type": "user", "message": "hi"}, cost_row(1000, 1.0, 1000, ["claude-opus-5-5"]), cost_row(1000, 1.5, 2000, ["claude-opus-5-5"]),
+                {"type": "assistant", "totalCostUSD": 99}, cost_row(5000, 0.25, 500, ["claude-sonnet-5"])]
+        (projects / "-home-x-worktree-ui" / "sess.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows) + "{not json\n")
+        self.assertEqual(session_cost("sess", projects), {"cost_usd": 1.75, "duration_ms": 2500, "models": ["claude-opus-5-5", "claude-sonnet-5"]})
+        self.assertIsNone(session_cost("missing", projects))  # No transcript: unknown, never zero.
+        (projects / "-home-x-worktree-ui" / "bare.jsonl").write_text(json.dumps({"type": "user"}) + "\n")
+        self.assertIsNone(session_cost("bare", projects))  # A transcript without cost-state rows: unknown too.
+        # An undocumented row type may change shape: a startTime that is neither a number nor a string skips the row, never raises.
+        (projects / "-home-x-worktree-ui" / "odd.jsonl").write_text("".join(json.dumps(row) + "\n" for row in (
+            {"type": "cost-state", "totalCostUSD": 1.0, "startTime": {"wall": 1}}, {"type": "cost-state", "totalCostUSD": 0.5, "startTime": [1]},
+            cost_row("2026-10-01T10:00:00Z", 0.75, 100, ["claude-opus-5-5"]))))
+        self.assertEqual(session_cost("odd", projects), {"cost_usd": 0.75, "duration_ms": 100, "models": ["claude-opus-5-5"]})
+
+    def test_the_costs_section_sums_native_sessions_and_print_jobs_by_role(self):
+        directory = legacy_run(self.root)
+        exported = export_run(ExportRuntime(directory))["costs"]
+        # The workers stopped before cost was recorded: listed, unknown; nothing known gives no total.
+        self.assertEqual([(item["node"], item["role"], item["transport"], item["cost_usd"]) for item in exported["nodes"]],
+                         [("ui", "workers", "native", None), ("adapter", "workers", "native", None)])
+        self.assertEqual((exported["total_usd"], exported["by_role"]), (None, {"workers": None, "reviewers": None, "sidecar": None, "challenge": None}))
+        save_json(directory / "ui.cost.json", {"session_id": "uuuuuuuu-1111-4111-8111-111111111111", "cost_usd": 3.08, "duration_ms": 600000,
+                                               "models": ["claude-opus-5-5"], "recorded_at": "2026-09-21T15:00:00Z"})
+        save_json(directory / "review.stdout.json", print_output(1.25, 90000))
+        for n, cost in ((1, 0.5), (2, 0.25)):
+            save_json(directory / f"challenge-{n}.stdout.json", print_output(cost, 1000 * n))
+        save_json(directory / "sidecar-1.stdout.json", print_output(0.125, 4000, ("claude-sonnet-5",)))
+        (directory / "sidecar-2.stdout.json").write_text("")  # A pass that wrote nothing: unknown.
+        (directory / "challenge-1.stderr.log").write_text("")
+        exported = export_run(ExportRuntime(directory))["costs"]
+        self.assertEqual([(item["node"], item["role"], item["transport"], item["cost_usd"], item["duration_ms"]) for item in exported["nodes"]],
+                         [("ui", "workers", "native", 3.08, 600000), ("adapter", "workers", "native", None, None),
+                          ("review", "reviewers", "print", 1.25, 90000), ("sidecar-1", "sidecar", "print", 0.125, 4000),
+                          ("sidecar-2", "sidecar", "print", None, None), ("challenge-1", "challenge", "print", 0.5, 1000),
+                          ("challenge-2", "challenge", "print", 0.25, 2000)])
+        self.assertEqual(exported["nodes"][3]["models"], ["claude-sonnet-5"])
+        self.assertEqual(exported["by_role"], {"workers": 3.08, "reviewers": 1.25, "sidecar": 0.125, "challenge": 0.75})
+        self.assertEqual(exported["total_usd"], 5.205)
+        written = (directory / "run-state.json").read_bytes()
+        export_run(ExportRuntime(directory))
+        self.assertEqual((directory / "run-state.json").read_bytes(), written)  # Stable: same files, same export.
+
+    def test_challenge_history_lists_each_archived_attempt_with_its_p0_p1(self):
+        from .export_state import challenge_section
+        directory = legacy_run(self.root)
+        save_json(directory / "challenge.json", challenge_record(3, "passed", [concern("P2", "Naming is loose")]))
+        self.assertNotIn("history", challenge_section(directory))  # No archive: a single attempt exports as before.
+        save_json(directory / "challenge-1.json", challenge_record(1, "paused", [concern("P1", "Both lanes edit the contract"), concern("P2", "Wordy")]))
+        save_json(directory / "challenge-2.json", challenge_record(2, "paused", [concern("P0", "The PRD contradicts the task")]))
+        save_json(directory / "challenge-hold-2.json", {"attempt": 2, "held_at": "2026-10-03T09:00:00Z", "released_at": None, "released_by": None, "dropped": []})
+        save_json(directory / "challenge-9.json", {"status": "paused"})  # Fails the schema: left out, never guessed.
+        history = export_run(ExportRuntime(directory))["inputs"]["challenge"]["history"]
+        self.assertEqual(history, [
+            {"attempt": 1, "status": "paused", "decided_at": "2026-10-03T11:00:00Z", "concerns": [concern("P1", "Both lanes edit the contract")]},
+            {"attempt": 2, "status": "paused", "decided_at": "2026-10-03T12:00:00Z", "concerns": [concern("P0", "The PRD contradicts the task")]}])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ const version = z.literal('1.0.0')
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
  * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
- * challenge's optional `hold` (C8) and the optional `tryout` (C7, C29).
+ * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -254,6 +254,22 @@ export const runChallengeSchema = z.strictObject({
     released_by: z.enum(['operator', 'maintainer']).nullable(),
     dropped: z.array(z.number().int().positive()),
   }).nullable().optional(),
+  /**
+   * 1.7.0 (C49): the records this one replaced, `challenge-<n>.json` in attempt order: each one's status, decision time and
+   * P0/P1 concerns (its P2 notes are left out). An accepted attempt keeps its paused record here under the same attempt
+   * number. Empty for a single attempt (or absent, from a server before it).
+   */
+  history: z.array(z.strictObject({
+    attempt: z.number().int().positive(),
+    status: z.enum(CHALLENGE_STATUSES),
+    decided_at: timestamp,
+    concerns: z.array(z.strictObject({
+      severity: z.enum(['P0', 'P1']),
+      kind: z.enum(CHALLENGE_CONCERN_KINDS),
+      message: z.string().min(1),
+      consequence: z.string().min(1),
+    })),
+  })).optional(),
 })
 
 export const runInputWorkerSchema = z.strictObject({
@@ -673,6 +689,7 @@ export function validateRunInputs(input: unknown): RunInputs {
       if (challenge.status !== 'passed' && !blocking) throw new Error(`A ${challenge.status} challenge has a P0/P1 concern`)
     }
     if (challenge.attempts < challenge.attempt) throw new Error('A challenge cannot decide an attempt it has not run')
+    if ((challenge.history ?? []).some(entry => entry.attempt > challenge.attempt)) throw new Error('A challenge cannot keep a record of an attempt after its own')
   }
   return inputs
 }

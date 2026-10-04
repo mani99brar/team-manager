@@ -52,7 +52,7 @@ export function ChallengeHeadline({ challenge, spans }: { challenge: Challenge; 
 
 /**
  * The record behind the headline, folded: the outcome in words, the attempts, the session and the decision time. Earlier
- * attempts' records stay in the run directory (their concern lists are not served).
+ * attempts' P0/P1 are listed by `ChallengeHistory`; their P2 notes stay in the run directory.
  */
 export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
   return (
@@ -74,7 +74,9 @@ export function ChallengeFacts({ challenge }: { challenge: Challenge }) {
           <dt>Attempts</dt>
           <dd data-testid="challenge-attempts">
             {challenge.attempts} {challenge.attempts === 1 ? 'attempt' : 'attempts'}; this is attempt {challenge.attempt}
-            {challenge.attempts > 1 && <span className="projects-muted"> (earlier attempts are kept in the run directory)</span>}
+            {challenge.attempts > 1 && <span className="projects-muted">{(challenge.history ?? []).length > 0
+              ? " (earlier attempts' P0/P1 are listed below; their full records stay in the run directory)"
+              : ' (earlier attempts are kept in the run directory)'}</span>}
           </dd>
         </div>
         <div><dt>Session</dt><dd>{challenge.session_id ? <code>{challenge.session_id}</code> : 'No session recorded'}</dd></div>
@@ -140,5 +142,33 @@ export function ChallengeAlternative({ challenge }: { challenge: Challenge }) {
         <p>{challenge.cheap_experiment}</p>
       </section>
     </>
+  )
+}
+
+/**
+ * The records the shown attempt replaced (C49), in attempt order: each one's outcome, decision time and P0/P1 concerns. An
+ * accepted attempt keeps its paused record under the same number. Nothing for a single attempt or a server before 1.7.0.
+ */
+export function ChallengeHistory({ challenge }: { challenge: Challenge }) {
+  const history = challenge.history ?? []
+  if (history.length === 0) return null
+  return (
+    <ol className="challenge-history" data-testid="challenge-history">
+      {history.map((entry, index) => (
+        <li key={index} data-testid="challenge-history-attempt" data-attempt={entry.attempt} data-challenge-status={entry.status}>
+          <h5>Attempt {entry.attempt} · {entry.status} · decided <Time iso={entry.decided_at} seconds /></h5>
+          {entry.concerns.length === 0 ? <p className="projects-muted">No P0 or P1 concern.</p> : (
+            <ul className="challenge-concern-list">
+              {entry.concerns.map((concern, position) => (
+                <li key={position} className="challenge-concern" data-testid="challenge-history-concern" data-severity={concern.severity}>
+                  <span className="finding-severity">{concern.severity}</span> <span className="projects-muted">{KIND_WORDING[concern.kind]}</span> — <span className="challenge-concern-message">{concern.message}</span>
+                  <p><strong>Consequence:</strong> {concern.consequence}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ol>
   )
 }

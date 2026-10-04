@@ -515,7 +515,7 @@ Hiding single-value columns is decided over the whole review, not per group, and
 Design challenge                                         [✓ Succeeded] · one print job
 Passed on attempt 3 · 8 P2 notes · decided 08:50:49 · 11m07s over 3 attempts
 Attempts  [#1 ? 08:39 · ended without a record]  [#2 ✗ 08:45 · 46s · interrupted]  [#3 ✓ 08:48 · 2m29s]
-[Concerns 8] [Alternative & experiment] [History 7]
+[Concerns 8] [Alternative & experiment] [Earlier attempts 2] [History 7]
 ── Concerns: P0/P1 open by default; P2 one line each, expandable to message and consequence
 ```
 
@@ -523,7 +523,7 @@ Attempts  [#1 ? 08:39 · ended without a record]  [#2 ✗ 08:45 · 46s · interr
 - edit the feature files, then `"$PY" -m workflow resume "$RUN" --by operator`; or
 - `"$PY" -m workflow resume "$RUN" --accept-challenge "<reason>" --by operator`.
 
-Earlier challenge attempts show only what the events say. The concern lists of earlier attempts are not served (follow-up C8), so their chips have no link.
+Earlier challenge attempts show only what the events say. Their P0/P1 concerns are served as `challenge.history` (export 1.7.0, C49) and listed under "Earlier attempts" on the challenge page; their P2 notes are not served, and their chips have no link.
 
 ### 4.9 Handoff, approval, integrate
 
@@ -870,7 +870,7 @@ Until each lands, the viewer shows the matching value as inferred or "not record
 | C5 | `run-state.json` is not re-exported during `wait_handoffs` | B2 live questions read |
 | C6 | `controller` is not a reserved lane id (PRD_WORKER_LANES reserved list), so controller-process events collide with a lane of that name | B1 message patterns |
 | C7 | No controller heartbeat | B2 `activity.controller` from `/proc` (Linux only; `unknown` elsewhere); a heartbeat file would make it portable and remove the 15 s hand-over debounce |
-| C8 | Earlier challenge attempts (`challenge-<n>.json`) are not served | chips without links |
+| C8 | Earlier challenge attempts (`challenge-<n>.json`) are served with their P0/P1 only (C49) | chips without links |
 | C9 | No per-lane patch artifact at freeze (diff before review) | A/M/D and diff only once a review exists |
 | C10 | Verify packets lack setup start and end, and setup logs are unlabelled | setup = the first check's start minus the attempt start; B5 labels |
 

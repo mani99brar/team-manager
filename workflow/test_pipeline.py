@@ -37,9 +37,12 @@ def isolate_registry() -> None:
     automatic controller's waits): until the module's last test, MD_MANAGER_PROJECTS_CONFIG names a registry in a
     temporary directory, so attention.jsonl never lands beside the operator's registry. Child processes inherit it, and
     a test that sets the variable itself still wins. CLAUDECODE is emptied too: run from a Claude Code session the event texts
-    would name it (actor.actor_text), and the tests that expect the marker set it themselves."""
+    would name it (actor.actor_text), and the tests that expect the marker set it themselves. CLAUDE_CONFIG_DIR names an empty
+    directory there as well, so a confirmed stop's cost record (costs.record_session_cost) never reads the operator's
+    transcripts."""
     temp = tempfile.TemporaryDirectory()
-    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": ""})
+    environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": "",
+                                          "CLAUDE_CONFIG_DIR": str(Path(temp.name) / "claude")})
     environment.start()
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
@@ -500,6 +503,43 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             Pipeline.stop_workers(self.runtime)
             self.assertEqual(command.call_count, 2)
         self.assertTrue(all(read_json(self.directory / f"{node}.stop.json")["stopped"] for node in ("ui", "adapter")))
+
+    def test_a_confirmed_stop_records_the_session_cost_from_its_transcript(self):
+        # C49: the transcript's last cost-state row per startTime, summed; a session without a transcript records null, and a
+        # cost that cannot be written never fails the stop.
+        live = self.native_rows()
+        self.set_native(live)
+        projects = self.directory / "transcripts"
+        (projects / "worktree-ui").mkdir(parents=True)
+        rows = [{"type": "cost-state", "totalCostUSD": cost, "totalDuration": 1000, "startTime": start, "modelUsage": {"claude-opus-5-5": {}}}
+                for start, cost in ((1, 0.5), (1, 2.0), (2, 1.0))]
+        (projects / "worktree-ui" / "session-ui.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        def stop(argv, **_kwargs):
+            live.pop(argv[-1].removeprefix("id-"))
+            return subprocess.CompletedProcess(argv, 0)
+        with patch("workflow.pipeline.subprocess.run", side_effect=stop), patch("workflow.pipeline.pid_alive", return_value=False), \
+                patch("workflow.costs.transcripts_root", return_value=projects):
+            Pipeline.stop_workers(self.runtime)
+        cost = read_json(self.directory / "ui.cost.json")
+        self.assertEqual((cost["session_id"], cost["cost_usd"], cost["duration_ms"], cost["models"]), ("session-ui", 3.0, 2000, ["claude-opus-5-5"]))
+        self.assertEqual({key: read_json(self.directory / "adapter.cost.json")[key] for key in ("session_id", "cost_usd", "duration_ms", "models")},
+                         {"session_id": "session-adapter", "cost_usd": None, "duration_ms": None, "models": None})
+        (self.directory / "ui.cost.json").unlink()
+        with patch("workflow.costs.save_json", side_effect=OSError("disk full")), patch("workflow.costs.transcripts_root", return_value=projects), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.runtime.stop_session("ui")  # A stopped intent without its cost record: recorded now, and a failure only warns.
+        self.assertIn("ui.cost.json not written: disk full", errors.getvalue())
+        with patch("workflow.costs.session_cost", side_effect=TypeError("unhashable type: 'dict'")), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.runtime.stop_session("ui")  # Any failure of the record, not only I/O, leaves the confirmed stop standing.
+        self.assertIn("ui.cost.json not written: unhashable type", errors.getvalue())
+        self.assertTrue(read_json(self.directory / "ui.stop.json")["stopped"])
+
+    def test_stopping_a_fake_session_never_reads_the_operators_transcripts(self):
+        # isolate_registry points CLAUDE_CONFIG_DIR at a temporary directory: every stop records its cost from there.
+        from .costs import transcripts_root
+        self.assertNotEqual(transcripts_root(), Path.home() / ".claude" / "projects")
+        self.assertTrue(str(transcripts_root()).startswith(tempfile.gettempdir()))
 
     def test_completed_stop_intent_is_reconciled_without_another_stop(self):
         for node, row in self.native_rows().items():

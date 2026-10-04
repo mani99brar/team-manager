@@ -396,8 +396,13 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
       hold: { ...hold, dropped: [...hold.dropped] } }
     assert.deepEqual(validateRunInputs(held).challenge!.hold, hold)
   }
+  // C49 (1.7.0): the records an attempt replaced, with their P0/P1; the example's accepted attempt keeps its paused record.
+  assert.deepEqual(validateRunInputs(examples.runInputs).challenge!.history!.map(entry => [entry.attempt, entry.status, entry.concerns.length]), [[1, 'paused', 1]])
+  const before = structuredClone(examples.runInputs)
+  delete before.challenge!.history
+  assert.equal(validateRunInputs(before).challenge!.history, undefined)  // A server before 1.7.0 omits it.
   const disabled = structuredClone(examples.runInputs)
-  disabled.challenge = { ...disabled.challenge!, status: 'disabled', attempt: 0, attempts: 0, session_id: null, concerns: [], simpler_alternative: null, cheap_experiment: null, accepted_reason: null }
+  disabled.challenge = { ...disabled.challenge!, status: 'disabled', attempt: 0, attempts: 0, session_id: null, concerns: [], simpler_alternative: null, cheap_experiment: null, accepted_reason: null, history: [] }
   validateRunInputs(disabled)
   // A question the controller has not recorded yet carries its text; a fourth one is served as blocked, with its text.
   const asking = structuredClone(examples.runInputs)
@@ -425,6 +430,9 @@ test('[scenario:export-seam] inputs 1.4.0 serve decisions, the challenge, comple
     ['hold with an unknown actor', value => { value.challenge!.hold = { held_at: '2026-01-01T12:00:00Z', released_at: '2026-01-01T12:30:00Z', released_by: 'bot' as 'operator', dropped: [] } }],
     ['hold dropping note 0', value => { value.challenge!.hold = { held_at: '2026-01-01T12:00:00Z', released_at: null, released_by: null, dropped: [0] } }],
     ['hold without its time', value => { value.challenge!.hold = { released_at: null, released_by: null, dropped: [] } as never }],
+    ['history with a P2 note', value => { value.challenge!.history![0].concerns[0].severity = 'P2' as 'P1' }],
+    ['history after the attempt shown', value => { value.challenge!.history![0].attempt = 2 }],
+    ['history without its time', value => { delete (value.challenge!.history![0] as Record<string, unknown>).decided_at }],
     ['unknown concern kind', value => { (value.challenge!.concerns[0] as Record<string, unknown>).kind = 'style' }],
     ['concern without consequence', value => { value.challenge!.concerns[0].consequence = '' }],
     ['question numbering', value => { value.workers[0].questions[0].n = 2 }],
