@@ -88,7 +88,8 @@ def stage(source: Path, target: Path) -> None:
     plan = read_json(source / "plan.json")
     nodes = review_nodes(plan)
     names = {str(source), str(source.resolve())} | ({str(recorded)} if (recorded := recorded_directory(plan)) else set())
-    own = re.compile("|".join(re.escape(name) for name in sorted(names, key=len, reverse=True)) + r"(?![\w.-])")
+    # Grouped, so that the lookahead holds for every name: a sibling such as <run>-2 is another directory, not the run's own.
+    own = re.compile("(?:" + "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True)) + r")(?![\w.-])")
     for folder, directories, files in os.walk(source):
         folder = Path(folder)
         relative = folder.relative_to(source)

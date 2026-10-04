@@ -778,14 +778,18 @@ class ReviewCompletionTests(unittest.TestCase):
 
     def test_every_reviewer_gets_the_rubric_after_its_brief_in_both_transports(self):
         # C34: one rubric for every reviewer and both transports, right after the brief. It says what each severity means
-        # (a contradicted task line is P1 at least), asks for the consequence, lets a brief name further blocking items and
-        # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own.
+        # (a contradicted requirement is P1 at least), asks for the consequence, lets a brief name further blocking items and
+        # says how the controller derives the verdict. The native protocol no longer carries a severity rule of its own. Of
+        # decisions.md only what binds counts (C4, decision 8): its Operator decisions, or all of a file without that heading.
         from .automatic import PRINT_REVIEW_SUFFIX, REVIEW_RUBRIC, completion_protocol_prompt, print_review_prompt, review_brief, review_prompt
-        for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3", "contradicts a quoted line of a task, of a document a task cites or of decisions.md",
-                      "a failure a worker's completion discloses", "never lowers a severity", 'End each P1 and P2 message with "Consequence: "',
-                      "Your brief may name further items that block", "The controller derives your verdict from your findings",
-                      "a blocked verdict blocks on its own only when it lists no finding"):
+        for value in ("P0:", "P1:", "P2:", "P2 is the lowest, there is no P3", "A candidate behaviour that contradicts a quoted requirement, a line of a "
+                      "task, of a document a task cites or of an Operator decision in decisions.md (all of decisions.md when it has no Operator "
+                      "decisions heading) included, is P1 at least", "a failure a worker's completion discloses",
+                      'A worker\'s disclosure, the literal wording of a task or "not a regression" never lowers a severity.',
+                      'End each P1 and P2 message with "Consequence: "', "Your brief may name further items that block",
+                      "The controller derives your verdict from your findings", "a blocked verdict blocks on its own only when it lists no finding"):
             self.assertIn(value, REVIEW_RUBRIC)
+        self.assertNotIn("or of decisions.md included", REVIEW_RUBRIC)
         for reviewer in [None, *self.runtime.plan.get("reviewers", [])]:
             brief = review_brief(reviewer)
             with self.subTest(reviewer=(reviewer or {}).get("reviewer_id", "review")):
@@ -796,25 +800,98 @@ class ReviewCompletionTests(unittest.TestCase):
                 for prompt in (printed, native):
                     self.assertTrue(prompt.startswith(f"{brief} {REVIEW_RUBRIC} Diff: "), prompt[:300])
 
+    def test_a_briefs_own_severity_definitions_win_in_both_directions(self):
+        # The replay of pine claims-005 (C34 follow-up): under the rubric's generic P1 the security reviewer approved 3 of 3 and missed
+        # the live run's P1 (forged provenance marked verified), and it rated SEC-GH gaps P2 because no task cited SEC-GH. A brief's own
+        # severity definitions win for its subject, raising a finding as well as lowering it, and the rubric says so before its generic
+        # scale; a requirement in a document the brief or a task says to read counts whether or not a task cites it. Nothing reads as if
+        # the rubric outranked the brief, or as if a brief could only be stricter.
+        from .automatic import REVIEW_RUBRIC
+        for value in ("Your brief defines severity for its own subject, in both directions", "its definition wins over the generic scale below, "
+                      "whether it rates a finding higher or lower", "a security brief's P0 for forged claims or unverified integrity and its P1 for a "
+                      "missing required control", "the generic scale applies only where your brief is silent.", "A requirement in a document your "
+                      "brief or a task tells you to read (a PRD, a security requirements list with ids such as SEC-*) counts as a requirement whether "
+                      "or not a task cites it."):
+            self.assertIn(value, REVIEW_RUBRIC)
+        self.assertLess(REVIEW_RUBRIC.index("in both directions"), REVIEW_RUBRIC.index("P0: the candidate must not merge at all"))
+        for absent in ("the same for every reviewer", "stricter bar", "keep to it"):
+            self.assertNotIn(absent, REVIEW_RUBRIC)
+
     def test_every_coverage_brief_blocks_only_in_its_four_cases(self):
         # Decision 4 (C34): a coverage gap is P1 only for a failure shown on the candidate, a contradicted quoted line, a quoted worker
         # disclosure, or a line it could not check because its test source or packet was unreadable, each case listed; every other
         # gap, a missing or weak test that an Acceptance line names included, is a P2 row. Every md-manager feature's coverage brief
-        # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test".
+        # follows the bundled one: no untested item rated P1, no "approve only when every behaviour has a real test". The cases are
+        # the bundled brief's, which names no md-manager specifics (scenario builtin-briefs), so case (4) names no screenshot: a brief
+        # whose proofs include browser scenarios says in its first paragraph that a scenario's screenshot is part of its packet. Case (2)
+        # follows decisions.md's precedence (C4, decision 8): with the Operator decisions heading only those count, so a grill default
+        # is not a line case (2) holds the candidate to; a file without the heading counts as a whole.
         tool = Path(__file__).resolve().parents[1]
         briefs = [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]
         self.assertEqual(len(briefs), 8)
         for path in briefs:
             text = " ".join(path.read_text().split())
+            first = " ".join(path.read_text().split("\n\n")[0].split())
             with self.subTest(brief=str(path.relative_to(tool))):
-                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things"):
+                for absent in ("Approve only when every required behaviour has a real test", "safety rule of the PRD", "is P1.", "three things",
+                               "or of decisions.md (contradictions"):
                     self.assertNotIn(absent, text)
                 for value in ("A gap is P1 only in these four cases: (1) a failure you show on the candidate: the inputs, the expected behaviour quoted, "
                               "the actual behaviour, and path:line; (2) a candidate behaviour that contradicts a quoted line of a task, of a document a "
-                              "task cites, or of decisions.md", "(3) a worker's disclosure, quoted, that something fails; (4) a line you could not check "
-                              "because its test source", "was unreadable: name the line and say why", "Every other gap is one P2 finding per",
+                              "task cites, or of an Operator decision in decisions.md, all of decisions.md when it has no Operator decisions heading "
+                              "(contradictions are yours to report, not the general reviewer's)", "(3) a worker's disclosure, quoted, that something fails",
+                              "(4) a line you could not check "
+                              "because its test source or packet was unreadable: name the line and say why", "Every other gap is one P2 finding per",
                               "Proof table", "## Design (settled)", "leads, not as the limit of your search"):
                     self.assertIn(value, text)
+                self.assertEqual("A browser scenario's screenshot is part of its verification packet: a line whose screenshot you could not read is one "
+                                 "you could not check." in first, "browser" in first, first)
+
+    def test_every_coverage_brief_applies_its_cases_the_same_way(self):
+        # The replay (C34 follow-up) found cases (2) and (3) applied unevenly. (2): revamp-004 never rated a second useNow P1 because it
+        # was already at the base, and one sample excused it as unchanged; the candidate is what merges. (3): revamp-006 blocked once and
+        # rated P2 twice on a failure the worker disclosed in open_assumptions in its own words. A PRD line that conflicts with a task line
+        # the worker followed (sidecar-001 blocked 3/3 where sidecar-002 approved) is one P2 for the operator, whether or not the worker
+        # disclosed the conflict: a disclosure never lowers a severity (C34 step 3), it moves the decision to the operator, and decision 4
+        # blocks on a contradicted task line, not on a PRD line alone, so two lanes that follow the same task line get the same verdict.
+        # A contradicted task line or Operator decision stays P1. The map gains ## Goal and ## Constraints rows (okiya's Normal depth,
+        # absent 3/3) and a row per Operator decision, and a gap on any row is at least a P2.
+        tool = Path(__file__).resolve().parents[1]
+        for path in [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]:
+            text = " ".join(path.read_text().split())
+            with self.subTest(brief=str(path.relative_to(tool))):
+                self.assertNotIn("followed and disclosed", text)
+                for value in ("(contradictions are yours to report, not the general reviewer's), anywhere in the candidate, code the diff did not "
+                              "change included: the candidate is what merges, so \"unchanged\" never excuses it;",
+                              "in any completion field (summary, open_assumptions, untested, verify_yourself, the Proof table) or in the worker's own words",
+                              "an item that is only untested is a P2 finding, not a disclosed failure",
+                              "A line of the PRD, or of another cited document, that conflicts with a task line the worker followed is not a P1, whether "
+                              "or not the worker disclosed the conflict: it is one P2 finding that quotes both lines and ends, after its Consequence, with "
+                              "\"Acts: operator\", because the operator settles conflicts between their own documents.",
+                              "A contradiction of a task line (## Goal, ## Acceptance, ## Constraints, ## Design (settled)) or of an Operator decision "
+                              "stays case (2), P1.",
+                              "Your tested/untested map has one row per line under ## Goal, ## Acceptance, ## Constraints and ## Design (settled) in "
+                              "each worker's task, per line under ## Design (settled) in the documents the tasks cite",
+                              "per Operator decision in decisions.md (in a file without an ## Operator decisions heading, each decision under ## "
+                              "Decisions is one); a gap on any row is at least a P2 finding."):
+                    self.assertIn(value, text)
+
+    def test_every_feature_coverage_brief_carries_the_bundled_case_paragraph(self):
+        # The case paragraph is the bundled brief's, word for word, in every features/*/reviewers/coverage.md, so the cases cannot drift
+        # between briefs again; what a feature adds (its proofs, its scenario ids, its P2 examples) stays in the other paragraphs.
+        tool = Path(__file__).resolve().parents[1]
+
+        def cases(path):
+            paragraphs = (" ".join(paragraph.split()) for paragraph in path.read_text().split("\n\n"))
+            return [paragraph for paragraph in paragraphs if paragraph.startswith("A gap is P1 only in these four cases")]
+        bundled = cases(tool / "workflow/prompts/reviewers/coverage.md")
+        self.assertEqual(len(bundled), 1)
+        self.assertTrue(bundled[0].endswith("stays case (2), P1."), bundled[0][-200:])
+        features = sorted(tool.glob("features/*/reviewers/coverage.md"))
+        self.assertEqual(len(features), 7)
+        for path in features:
+            with self.subTest(brief=str(path.relative_to(tool))):
+                self.assertEqual(cases(path), bundled)
 
     def test_only_coverage_holds_its_p1_to_a_failure_shown_on_the_candidate(self):
         # The shared rubric's P1, for every reviewer: a defect or a contradicted requirement to fix before merge, with the inputs, the
