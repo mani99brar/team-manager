@@ -291,11 +291,21 @@ def remove_tree(path: Path) -> None:
             os.chmod(name, 0o700)
             remove_tree(Path(name))
             return
+        if function in (os.lstat, os.unlink):
+            # In a directory its owner can list but not search (0o400, 0o600) every entry's lstat and unlink fail with
+            # EACCES, and so would lexists below: search it first.
+            os.chmod(os.path.dirname(name), 0o700)
         if not os.path.lexists(name):
             return  # Removed above, after a failed listing of it.
         os.chmod(os.path.dirname(name), 0o700)
         if os.path.isdir(name) and not os.path.islink(name):
             os.chmod(name, 0o700)
+            if function is os.lstat:  # rmtree skipped the entry it could not stat: remove it whole, as an unlistable one.
+                remove_tree(Path(name))
+                return
+        if function is os.lstat:
+            os.unlink(name)
+            return
         function(name)
     if sys.version_info >= (3, 12):
         shutil.rmtree(path, onexc=writable)

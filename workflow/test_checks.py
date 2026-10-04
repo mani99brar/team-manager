@@ -372,8 +372,10 @@ class PruneTests(unittest.TestCase):
         self.assertTrue((folder / "packet.json").is_file())
 
     def test_an_unreadable_cache_directory_is_removed_too(self):
-        # A check may leave a directory its owner cannot list (mode 0o000) or only enter (0o300); rmtree cannot open either.
-        self.LEAVE = (self.LEAVE + "for name, mode in (('closed', 0o000), ('blind', 0o300)):\n"
+        # A check may leave a directory its owner cannot list (0o000, 0o300), or can list but not search (0o400, 0o600),
+        # where rmtree's lstat and unlink of each entry fail; every mode is removed.
+        self.LEAVE = (self.LEAVE + "for name, mode in (('m000', 0o000), ('m100', 0o100), ('m300', 0o300), ('m400', 0o400), ('m500', 0o500), "
+                      "('m555', 0o555), ('m600', 0o600), ('m700', 0o700)):\n"
                       "    path = pathlib.Path(os.environ['npm_config_cache'], name, 'inner')\n"
                       "    path.mkdir(parents=True); (path / 'entry').write_text('x'); path.parent.chmod(mode)\n")
         packet, _, folder = self.attempt(0)
@@ -405,6 +407,19 @@ class PruneTests(unittest.TestCase):
                 self.assertEqual(checks.prune_attempt(self.repo, folder), [worktree])
                 self.assertFalse(worktree.exists())
                 self.assertNotIn(str(worktree), self.worktrees())
+
+    def test_a_worktree_git_still_lists_is_never_deleted_as_a_leftover(self):
+        # A locked worktree: `git worktree remove --force` refuses it, and Git still lists it, so nothing deletes it.
+        folder = self.run_dir / "locked"
+        worktree = folder / "worktree"
+        git_worktree(self.repo, "add", "--detach", str(worktree), self.base)
+        (worktree / "uncommitted.txt").write_text("keep me\n")
+        git(self.repo, "worktree", "lock", str(worktree))
+        with self.assertRaises(checks.WorktreeError):
+            checks.prune_attempt(self.repo, folder)
+        self.assertEqual((worktree / "uncommitted.txt").read_text(), "keep me\n")
+        self.assertIn(str(worktree), self.worktrees())
+        git(self.repo, "worktree", "unlock", str(worktree))
 
     def test_an_independent_repository_is_never_deleted_as_a_leftover(self):
         folder = self.run_dir / "clone"

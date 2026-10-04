@@ -10,9 +10,9 @@ uncommitted in one), packets, logs, artifacts and every run file.
 It refuses while the run's controller or supervisor lock is held, while a receipt cannot be read, or while `claude agents`
 lists a live session of the run: by a receipt's IDs, by the ID a never-bound receipt's launch log printed, or by one of
 the run's launch names. It lists what it will remove before it removes anything, marking a lane worktree with uncommitted
-changes (before freeze, the worker's only copy of its edits). Only the operator runs it: cleaning a blocked
-run removes the lane worktrees a repair would use, so it is not mechanical recovery (decision 2a), and `--by maintainer`
-is refused.
+changes: before freeze the worker's only copy of its edits; after it, captured in the lane's snapshot (freeze leaves the
+worktree dirty). Only the operator runs it: cleaning a blocked run removes the lane worktrees a repair would use, so it is
+not mechanical recovery (decision 2a), and `--by maintainer` is refused.
 """
 from __future__ import annotations
 
@@ -114,6 +114,21 @@ def uncommitted(path: Path) -> int | None:
         return None
 
 
+def snapshot_commits(directory: Path, plan: dict) -> dict[Path, str]:
+    """Each frozen lane's worktree with its snapshot commit, from snapshots.json; {} before freeze or when it cannot be read."""
+    try:
+        snapshots = read_json(directory / "snapshots.json")
+    except (OSError, ValueError):
+        return {}
+    nodes = plan.get("nodes") or {}
+    frozen = {}
+    for lane, snapshot in (snapshots.items() if isinstance(snapshots, dict) else []):
+        info = nodes.get(lane) if isinstance(nodes, dict) else None
+        if isinstance(info, dict) and info.get("worktree") and isinstance(snapshot, dict) and isinstance(snapshot.get("commit"), str):
+            frozen[Path(info["worktree"])] = snapshot["commit"]
+    return frozen
+
+
 def finished(directory: Path) -> bool:
     """The run fast-forwarded its branch and has no next step, as its exported run-state.json says."""
     try:
@@ -201,10 +216,15 @@ def clean_main(argv=None):
                 print(f"Clean {directory} will remove:")
                 for folder, names in attempts:
                     print(f"  passed attempt {folder.relative_to(directory)}: {', '.join(names)}")
+                frozen = snapshot_commits(directory, plan)
                 for label, path in worktrees:
                     changes = uncommitted(path) if label == "lane worktree" else 0
+                    plural = "s" if changes != 1 else ""
+                    # Freeze commits a lane's edits to its snapshot ref and leaves the worktree dirty: only an unfrozen lane's
+                    # changes are their only copy.
                     note = (" (Git cannot tell whether it holds uncommitted changes)" if changes is None else
-                            f" ({changes} uncommitted change{'s' if changes != 1 else ''}: the lane's only copy of them)" if changes else "")
+                            f" ({changes} uncommitted change{plural}, captured in snapshot {frozen[path][:12]})" if changes and path in frozen else
+                            f" ({changes} uncommitted change{plural}: the lane's only copy of them)" if changes else "")
                     print(f"  {label} {path}{note}")
             for folder in kept_attempts:
                 print(f"Kept: {folder.relative_to(directory)}: an attempt that did not pass, kept whole")
@@ -229,7 +249,10 @@ def clean_main(argv=None):
                 except Exception as error:
                     errors.append(f"{path}: {error}")
             if attempts or worktrees:
-                git_worktree(repository, "prune")
+                try:
+                    git_worktree(repository, "prune")
+                except Exception as error:  # Reported with the removals that failed, never in their place.
+                    errors.append(f"git worktree prune: {error}")
             if errors:
                 raise RuntimeError("some removals failed, the rest are done; rerun clean once fixed:\n" + "\n".join(errors))
     except (ValueError, RuntimeError, OSError, KeyError, json.JSONDecodeError, subprocess.SubprocessError) as error:

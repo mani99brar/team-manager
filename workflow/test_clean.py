@@ -131,6 +131,7 @@ class CleanTests(unittest.TestCase):
                 code, _, err = self.clean("--by", "operator")
                 self.assertEqual(code, 1)
                 self.assertIn("(bg-new) from this run's receipts", err)
+                self.assertNotIn("bg-near", err)  # workflow-feature-0012-ui is another run's launch name.
                 self.untouched()
 
     def test_an_unreadable_receipt_is_refused(self):
@@ -164,6 +165,37 @@ class CleanTests(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"  lane worktree {self.run / 'worktree-ui'} (2 uncommitted changes: the lane's only copy of them)", out)
         self.assertIn(f"  candidate worktree {self.run / 'candidate'}\n", out)
+
+    def test_a_frozen_lane_with_uncommitted_changes_is_not_called_the_only_copy(self):
+        # Freeze snapshots a lane with its own index and never cleans the worktree: its edits stay dirty after freeze.
+        (self.run / "worktree-ui" / "README.md").write_text("# Edited\n")
+        snapshot = "a" * 40
+        save_json(self.run / "snapshots.json", {"ui": {"commit": snapshot, "changed_files": ["README.md"]}})
+        code, out, err = self.clean("--by", "operator", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("only copy", out)
+        self.assertIn(f"  lane worktree {self.run / 'worktree-ui'} (1 uncommitted change, captured in snapshot {snapshot[:12]})", out)
+
+    def test_a_failed_prune_still_reports_the_removals_that_failed(self):
+        from .worktrees import WorktreeError
+        lane = self.run / "worktree-ui"
+        real = clean.remove_worktree
+
+        def remove(repository, path):
+            if path == lane:
+                raise RuntimeError("lane is busy")
+            return real(repository, path)
+        real_git = clean.git_worktree
+
+        def git_worktree(repository, *arguments):
+            if arguments == ("prune",):
+                raise WorktreeError(128, ["git", "worktree", "prune"], "", "fatal: index.lock held after 5 attempts")
+            return real_git(repository, *arguments)
+        with patch.object(clean, "remove_worktree", side_effect=remove), patch.object(clean, "git_worktree", side_effect=git_worktree):
+            code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{lane}: lane is busy", err)
+        self.assertIn("git worktree prune: Command '['git', 'worktree', 'prune']' returned non-zero exit status 128.\nfatal: index.lock held", err)
 
     def test_a_leftover_git_no_longer_lists_is_removed(self):
         review = self.run / "review-worktree"
