@@ -113,7 +113,7 @@ Offline unless marked live.
 | one-lane-run | a run selecting one lane verifies it in both phases and integrates it |
 | subset-pinned | `launch --workers ui,docs` pins `workers` and `excluded_workers`; `prepare` creates two worktrees; `status` and the export list two lanes |
 | excluded-ownership | a selected lane whose snapshot touches a path owned by an excluded lane blocks at freeze with an ownership violation naming both lanes |
-| unknown-worker | `--workers ui,nope` and `--workers ui,ui` are refused before `git switch` |
+| unknown-worker | `--workers ui,nope` and `--workers ui,ui` are refused before any Git action |
 | required-kinds | a policy whose lane lists `browser` in `required_check_kinds` but has no browser check fails validation; a 1.1.0 policy still derives kinds from role |
 | reserved-id | a lane named `review`, `none` or `launch_x` is refused at validation |
 | retry-any-lane | `retry --phase worker --node docs` reruns that lane's failed check and nothing else |

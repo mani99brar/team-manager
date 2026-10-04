@@ -1082,7 +1082,8 @@ def run_status(directory: Path) -> tuple[dict, str]:
     plan = read_json(directory / "plan.json")
     exported = read_json(directory / "run-state.json") if (directory / "run-state.json").exists() else None
     tasks = (exported or {}).get("tasks") or []
-    status = {"workers": plan_workers(plan), "excluded_workers": plan_excluded(plan),
+    # The checkout the run's branch is on, where a paused run's feature files are edited: its own worktree since launch adds one.
+    status = {"source_checkout": plan.get("repository"), "workers": plan_workers(plan), "excluded_workers": plan_excluded(plan),
               "next": exported.get("next") if exported else None,
               "pending": [item.get("kind") if isinstance(item, dict) else None for task in tasks for item in task.get("interrupts") or []] if exported else None,
               "errors": [task["error"] for task in tasks if task.get("error")] if exported else None}
@@ -1261,6 +1262,10 @@ def main():
                 warning = stale_claude_warning()
                 parser.exit(75, f"Interrupted: {error}\n" + (f"{warning}\n" if warning else ""))
             print(f"Automatic run reached a verified feature branch. Evidence: {directory / 'report.html'}. No main merge or push.")
+            from .guardrails import run_finished_note
+            note = run_finished_note(directory, read_json(directory / "plan.json"))
+            if note:
+                print(note)
             return
         if args.action == "export":
             # Re-export an existing run (for example one recorded before a newer export version), and refresh its report.html.

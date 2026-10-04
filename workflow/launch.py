@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .guardrails import DECISIONS, is_guarded, migration_note, prd_path, refusals, resume_command
+from .guardrails import DECISIONS, finished_note, is_guarded, migration_note, prd_path, refusals, resume_command, source_checkout
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import read_json, validate_node_id, validate_reviewer_id
@@ -167,7 +167,13 @@ def reviewer_brief(folder: Path, prompt: str) -> Path:
 def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr: bool = True, automatic: bool = False,
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
-    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here."""
+    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
+
+    The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
+    checkout of a new branch at its HEAD (`source_checkout`, beside the run directory). Every later command gets that
+    worktree as `--repo`, and the feature files it reads are the same committed files at their paths in it; built-in
+    briefs stay in the tool's own folder.
+    """
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         raise ValueError("run-id must be an opaque identifier, not a path")
     repo = repo.resolve()
@@ -206,30 +212,41 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     run = (run_root / run_id).resolve()
     if run == repo or repo in run.parents:
         raise ValueError("Run storage must be outside the repository")
+    source = source_checkout(run)
+    if source == repo or repo in source.parents:
+        raise ValueError(f"Source checkout must be outside the repository: {source}")
+
+    def in_source(path: Path) -> Path:
+        """A feature file at its path in the run's worktree: the same committed file, which preflight's clean check covers."""
+        return source / path.relative_to(repo)
+
     base = [sys.executable, "-m", "workflow"]
     preflight = [*base, "preflight", str(run), "--repo", str(repo), "--policy", str(policy_path)]
-    start = [*base, "start", str(run), "--live"]
+    start = [*base, "start", str(run), "--live", "--repo", str(source)]
     if herdr:
         preflight.append("--herdr")
         start.append("--herdr")
     branch = f"{manifest['branch_prefix']}/{run_id}"
-    prepare = [*base, "prepare", str(run), "--repo", str(repo), "--policy", str(policy_path)]
+    prepare = [*base, "prepare", str(run), "--repo", str(source), "--policy", str(in_source(policy_path))]
     if workers is not None:
         prepare.extend(["--workers", ",".join(selected)])
     for node in selected:
-        prepare.extend(["--task", f"{node}={tasks[node]}"])
+        prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
-        prepare.extend(["--reviewer", f"{reviewer_id}={path}"])
+        builtin = next(item["prompt"] for item in manifest["reviewers"] if item["reviewer_id"] == reviewer_id).startswith(BUILTIN_PREFIX)
+        prepare.extend(["--reviewer", f"{reviewer_id}={path if builtin else in_source(path)}"])
     if is_guarded(manifest):
-        prepare.extend(["--guardrails", "--decisions", str(folder / DECISIONS)])
+        prepare.extend(["--guardrails", "--decisions", str(in_source(folder / DECISIONS))])
         if "prd" in manifest:
-            prepare.extend(["--prd", str(prd_path(repo, manifest["prd"]))])
+            prepare.extend(["--prd", str(in_source(prd_path(repo, manifest["prd"])))])
         if manifest.get("challenge") is False:
             prepare.append("--no-challenge")
         if review_sidecar:
             bounds = {key: value for key, value in review_sidecar.items() if key != "prompt"}
-            prepare.extend(["--sidecar-brief", str(sidecar_brief), "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
-    commands = [preflight, ["git", "switch", "-c", branch], prepare, start]
+            builtin = review_sidecar["prompt"].startswith(BUILTIN_PREFIX)
+            prepare.extend(["--sidecar-brief", str(sidecar_brief if builtin else in_source(sidecar_brief)),
+                            "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
+    commands = [preflight, ["git", "worktree", "add", "-b", branch, str(source), "HEAD"], prepare, start]
     if automatic:
         from .automatic import automatic_settings
         # Reject bad deadlines or an unknown transport before any command runs.
@@ -238,7 +255,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
                             "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
                             "--reviewer-transport", settings["reviewer_transport"]])
-        commands.append([*base, "automatic", str(run), "--live"])
+        commands.append([*base, "automatic", str(run), "--live", "--repo", str(source)])
     elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None:
         raise ValueError("Timeouts and the reviewer transport apply to --automatic runs only")
     drill = policy.get("failure_drill")
@@ -253,7 +270,7 @@ def challenge_paused(run: Path) -> bool:
 
 
 def command_cwd(command: list[str], target: Path, tool: Path = TOOL) -> Path:
-    """`git switch` runs in the target; the `python -m workflow` commands run from the tool's directory."""
+    """`git worktree add` runs in the target; the `python -m workflow` commands run from the tool's directory."""
     return target if command[0] == "git" else tool
 
 
@@ -295,8 +312,8 @@ def main(argv=None):
         # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
         migration = migration_note(manifest)
         if args.dry_run:
-            printed = {"repository": str(repo), "run_directory": str(run), "workers": selected, "reviewers": reviewers, "commands": commands,
-                       "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
+            printed = {"repository": str(repo), "run_directory": str(run), "source_checkout": str(source_checkout(run)), "workers": selected,
+                       "reviewers": reviewers, "commands": commands, "executes": False, "notes": notes, "registry": {"path": str(registry), "entry": entry},
                        "guardrails": {"feature_version": manifest["version"], "enforced": migration is None, "challenge": challenge,
                                       "migration_note": migration}}
             if review_sidecar:
@@ -310,6 +327,10 @@ def main(argv=None):
             parser.error("Use --live to authorize worker usage, or --dry-run to inspect without running anything")
         if run.exists():
             raise ValueError(f"Run already exists: {run}. Inspect it with status; do not launch duplicate workers.")
+        source = source_checkout(run)
+        if source.exists() or source.is_symlink():
+            raise ValueError(f"Source checkout already exists: {source}. A run's worktree is never reused; remove it "
+                             f"(git -C {repo} worktree remove {source}) or launch with another --run-id.")
         # A malformed registry blocks the launch here, before any Git action; it is never rewritten.
         merge_registry(read_registry(registry), entry)
         for note in notes + ([migration] if migration else []):
@@ -317,7 +338,10 @@ def main(argv=None):
         # How the run ends, from the automatic settings prepare pins as plan.automatic (validated by launch_commands).
         from .automatic import automatic_settings
         settings = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport) if args.automatic else None
-        print(f"Run {run}: {finish_policy(settings, commands[1][3])}.", flush=True)
+        branch = commands[1][commands[1].index("-b") + 1]
+        print(f"Run {run}: {finish_policy(settings, branch)}.", flush=True)
+        print(f"Source checkout: {source}, the run's own worktree on {branch}; your checkout {repo} stays on its branch. "
+              "Feature files edited during a design challenge pause are edited there.", flush=True)
         try:
             for index, command in enumerate(commands):
                 subprocess.run(command, cwd=command_cwd(command, repo), check=True)
@@ -329,7 +353,7 @@ def main(argv=None):
                         print(f"Projects registry {registry} not updated: {error}", file=sys.stderr, flush=True)
                 if index == 3 and challenge_paused(run):
                     # `start` printed the concerns and the resume commands; nothing else runs until the operator decides.
-                    print(f"\nLaunch paused at the design challenge; no worker was launched. Run: {run}")
+                    print(f"\nLaunch paused at the design challenge; no worker was launched. Run: {run}\nSource checkout: {source}")
                     return
         except KeyboardInterrupt:
             if (run / "challenge.running.json").is_file() and not any(run.glob("*.interactive.json")):
@@ -348,6 +372,7 @@ def main(argv=None):
                             f"resume with:  {sys.executable} -m workflow automatic {run} --live\n")
         if args.automatic:
             print(f"\nAutomatic run finished. Evidence: {run / 'report.html'}. No main merge or push.")
+            print(finished_note(source, branch, repo))
             return
         print(f"\nRun: {run}\nWorkers ({', '.join(selected)}) are in their dedicated Herdr tab (unless --no-herdr).")
         print("Watch/answer permission prompts. When every worker finishes, return to Pi for handoffs and freeze.")
@@ -361,6 +386,7 @@ def main(argv=None):
                 print(f"The intentional {drill['node_id']} verification drill will block its first attempt; retry that check explicitly after restarting the controller.")
         print(f"Status: {sys.executable} -m workflow status {run}")
         print("Review and integration still require separate explicit approval. Nothing is pushed.")
+        print(f"Once it integrates: {finished_note(source, branch, repo)}")
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Launch blocked: {error}\nNo fallback, reset or cleanup was attempted. Inspect any retained branch/run state.\n")
     except Exception as error:  # jsonschema ValidationError on the feature file

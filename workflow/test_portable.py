@@ -116,14 +116,18 @@ class RepoFlag(Isolated):
         target = make_target(self.root)
         printed = self.dry_run("skeleton", "--repo", str(target), "--no-herdr")
         root = self.home / ".local/state/agent-workflows/project-B/skeleton"
-        self.assertEqual((printed["repository"], printed["run_directory"]), (str(target), str(root / "skeleton-001")))
-        preflight, switch, prepare, start = printed["commands"]
+        source = root / "skeleton-001.source"
+        self.assertEqual((printed["repository"], printed["run_directory"], printed["source_checkout"]), (str(target), str(root / "skeleton-001"), str(source)))
+        preflight, worktree, prepare, start = printed["commands"]
+        # Preflight checks the target is clean; every later command works in the run's own worktree of it.
         self.assertEqual(preflight[preflight.index("--repo") + 1], str(target))
-        self.assertEqual(prepare[prepare.index("--repo") + 1], str(target))
+        self.assertEqual(prepare[prepare.index("--repo") + 1], str(source))
+        self.assertEqual(start[start.index("--repo") + 1], str(source))
         self.assertEqual(preflight[preflight.index("--policy") + 1], str(target / "features/skeleton/policy.json"))
-        self.assertEqual(prepare[prepare.index("--task") + 1], f"app={target / 'features/skeleton/app-task.md'}")
-        self.assertEqual(switch, ["git", "switch", "-c", "feature/skeleton/skeleton-001"])
-        # Live: `git switch` runs in the target; the workflow commands run from the tool's directory.
+        self.assertEqual(prepare[prepare.index("--policy") + 1], str(source / "features/skeleton/policy.json"))
+        self.assertEqual(prepare[prepare.index("--task") + 1], f"app={source / 'features/skeleton/app-task.md'}")
+        self.assertEqual(worktree, ["git", "worktree", "add", "-b", "feature/skeleton/skeleton-001", str(source), "HEAD"])
+        # Live: `git worktree add` runs in the target; the workflow commands run from the tool's directory.
         calls = self.live("skeleton", "--repo", str(target), "--no-herdr")
         self.assertEqual([cwd for _, cwd in calls], [TOOL, target, TOOL, TOOL])
         self.assertEqual([command for command, _ in calls], printed["commands"])
@@ -181,7 +185,7 @@ class FeatureScan(Isolated):
         self.assertIn("viewer-clarity", feature_names(TOOL))
         self.assertIn("portable-workflow", feature_names(TOOL))
         run, commands, _ = launch_commands(TOOL, "viewer-clarity", "scan-001", self.root / "runs")
-        self.assertEqual(commands[1], ["git", "switch", "-c", "feature/viewer-clarity/scan-001"])
+        self.assertEqual(commands[1], ["git", "worktree", "add", "-b", "feature/viewer-clarity/scan-001", str(self.root / "runs/scan-001.source"), "HEAD"])
 
 
 class NoTargetSchema(LaneRun):
@@ -204,14 +208,16 @@ class NoTargetSchema(LaneRun):
         result = subprocess.run(commands[0], cwd=TOOL, env=env, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=TOOL, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         plan = read_json(run / "plan.json")
-        self.assertEqual((plan["repository"], plan["workers"]), (str(self.repo), LANES))
+        source = self.run_root.resolve() / "lanes-001.source"
+        self.assertEqual((plan["repository"], plan["workers"]), (str(source), LANES))
         # Every lane's result is validated (workerResult, verificationEvidence) and passes against the tool's schemas.
         self.attach(run)
         commit = self.manual_run()
-        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(source, "rev-parse", "HEAD"), commit)
         for node in LANES:
             self.assertEqual(read_json(run / f"verification/worker/{node}/1/packet.json")["gate"]["status"], "passed")
         self.assertFalse((self.repo / "contracts").exists())
@@ -246,20 +252,21 @@ class PreflightClaudeFlags(Isolated):
 
 class MdManagerDefaults(Isolated):
     def test_md_manager_defaults_launch_without_repo_builds_the_same_commands_run_root_and_branch(self):
-        """Scenario md-manager-defaults: the commands the launch built before this slice, spelled out."""
+        """Scenario md-manager-defaults: the commands the launch builds, spelled out; since C56 the run gets its own worktree in place of `git switch`."""
         folder = TOOL / "features/viewer-clarity"
         run = self.home / ".local/state/md-manager-workflows/viewer-clarity/viewer-clarity-001"
+        source = run.parent / "viewer-clarity-001.source"
+        copy = source / "features/viewer-clarity"  # The same committed files, in the run's own worktree.
         base = [PY, "-m", "workflow"]
-        policy = str(folder / "policy.json")
         expected = [
-            [*base, "preflight", str(run), "--repo", str(TOOL), "--policy", policy, "--herdr", "--automatic"],
-            ["git", "switch", "-c", "feature/viewer-clarity/viewer-clarity-001"],
-            [*base, "prepare", str(run), "--repo", str(TOOL), "--policy", policy,
-             "--task", f"ui={folder / 'ui-task.md'}", "--task", f"adapter={folder / 'adapter-task.md'}",
-             "--reviewer", f"general={folder / 'reviewers/general.md'}", "--reviewer", f"coverage={folder / 'reviewers/coverage.md'}",
+            [*base, "preflight", str(run), "--repo", str(TOOL), "--policy", str(folder / "policy.json"), "--herdr", "--automatic"],
+            ["git", "worktree", "add", "-b", "feature/viewer-clarity/viewer-clarity-001", str(source), "HEAD"],
+            [*base, "prepare", str(run), "--repo", str(source), "--policy", str(copy / "policy.json"),
+             "--task", f"ui={copy / 'ui-task.md'}", "--task", f"adapter={copy / 'adapter-task.md'}",
+             "--reviewer", f"general={copy / 'reviewers/general.md'}", "--reviewer", f"coverage={copy / 'reviewers/coverage.md'}",
              "--automatic", "--worker-timeout-seconds", "14400", "--review-timeout-seconds", "1800", "--reviewer-transport", "print"],
-            [*base, "start", str(run), "--live", "--herdr"],
-            [*base, "automatic", str(run), "--live"],
+            [*base, "start", str(run), "--live", "--repo", str(source), "--herdr"],
+            [*base, "automatic", str(run), "--live", "--repo", str(source)],
         ]
         with contextlib.chdir(TOOL):
             printed = self.dry_run("viewer-clarity", "--automatic", "--reviewer-transport", "print")

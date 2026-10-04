@@ -40,16 +40,91 @@ class FeatureLaunchTests(unittest.TestCase):
     def test_committed_feature_plans_preflight_branch_prepare_and_start(self):
         run, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", Path("/tmp/workflow-launch-tests"))
         self.assertEqual(run.name, "project-workflows-001")
+        source = run.parent / "project-workflows-001.source"
         self.assertEqual(commands[0][3], "preflight")
-        self.assertEqual(commands[1], ["git", "switch", "-c", "feature/project-workflows/project-workflows-001"])
+        self.assertEqual(commands[0][commands[0].index("--repo") + 1], str(self.repo))  # The clean check runs on your checkout.
+        # The run's own worktree beside the run directory, on the new branch; your checkout is never switched.
+        self.assertEqual(commands[1], ["git", "worktree", "add", "-b", "feature/project-workflows/project-workflows-001", str(source), "HEAD"])
         self.assertEqual(commands[2][3], "prepare")
         self.assertNotIn("--workers", commands[2])  # Every declared lane: the selection is not spelled out.
         tasks = [commands[2][index + 1] for index, item in enumerate(commands[2]) if item == "--task"]
         self.assertEqual([task.split("=", 1)[0] for task in tasks], ["ui", "adapter"])
-        self.assertTrue(all(Path(task.split("=", 1)[1]).is_file() for task in tasks))
+        # The same committed files, read from the run's worktree.
+        folder = "features/project-workflows"
+        self.assertEqual([task.split("=", 1)[1] for task in tasks], [str(source / folder / "ui-task.md"), str(source / folder / "adapter-task.md")])
+        self.assertTrue(all((self.repo / Path(task.split("=", 1)[1]).relative_to(source)).is_file() for task in tasks))
+        self.assertEqual(commands[2][commands[2].index("--policy") + 1], str(source / folder / "policy.json"))
         self.assertEqual(commands[3][3], "start")
         self.assertIn("--live", commands[3])
         self.assertIn("--herdr", commands[3])
+        for command in commands[2:]:
+            self.assertEqual(command[command.index("--repo") + 1], str(source))
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_a_live_launch_adds_the_run_worktree_and_leaves_your_checkout_on_its_branch(self):
+        branch, head = self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD")
+        runs = self.root / "runs"
+        workflow = []
+        real_run = subprocess.run  # The patch replaces the module's attribute.
+
+        def run(command, cwd, check):
+            if command[0] == "git":  # The real Git command; the workflow commands are recorded only.
+                real_run(command, cwd=cwd, check=check, capture_output=True)
+            else:
+                workflow.append(command)
+
+        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()) as output, \
+                contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr", "--run-root", str(runs)])
+        source = (runs / "project-workflows-001.source").resolve()
+        run_branch = "feature/project-workflows/project-workflows-001"
+        self.assertEqual((self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD"), self.git("status", "--porcelain")), (branch, head, ""))
+        self.assertEqual(subprocess.run(["git", "-C", str(source), "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True).stdout.strip(), run_branch)
+        self.assertIn(f"worktree {source}", self.git("worktree", "list", "--porcelain"))
+        self.assertEqual([command[3] for command in workflow], ["preflight", "prepare", "start", "automatic"])
+        printed = output.getvalue()
+        self.assertIn(f"Source checkout: {source}", printed)
+        # The finished message: merge from your checkout without switching, then remove the run's worktree.
+        self.assertIn(f"git -C {self.repo} merge --ff-only {run_branch}", printed)
+        self.assertIn(f"git -C {self.repo} worktree remove {source}", printed)
+        # The registry names your checkout, never the run's worktree.
+        project = json.loads((self.root / "projects.json").read_text())["projects"]
+        self.assertEqual([(item["name"], item["repository"]) for item in project], [("target", str(self.repo))])
+        # A second run from the same checkout gets its own worktree; your checkout still does not move.
+        with patch("workflow.launch.subprocess.run", side_effect=run), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--live", "--automatic", "--no-herdr", "--run-root", str(runs), "--run-id", "second"])
+        self.assertTrue((runs / "second.source").is_dir())
+        self.assertEqual((self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD")), (branch, head))
+        self.assertEqual(len(json.loads((self.root / "projects.json").read_text())["projects"]), 1)
+
+    def test_an_existing_source_checkout_path_is_refused_before_any_command(self):
+        runs = self.root / "runs"
+        (runs / "project-workflows-001.source").mkdir(parents=True)
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as exited:
+                main(["project-workflows", "--repo", str(self.repo), "--live", "--no-herdr", "--run-root", str(runs)])
+        command.assert_not_called()
+        self.assertEqual(exited.exception.code, 1)
+        self.assertIn(f"Source checkout already exists: {(runs / 'project-workflows-001.source').resolve()}", errors.getvalue())
+        self.assertFalse((runs / "project-workflows-001").exists())
+        self.assertFalse((self.root / "projects.json").exists())
+        # A source checkout that would be the repository itself is refused too.
+        named = self.root / "named.source"
+        shutil.copytree(self.repo, named)
+        with self.assertRaisesRegex(ValueError, "Source checkout must be outside the repository"):
+            launch_commands(named, "project-workflows", "named", self.root)
+
+    def test_dry_run_prints_the_worktree_command(self):
+        with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--run-root", str(self.root / "runs")])
+        command.assert_not_called()
+        printed = json.loads(output.getvalue())
+        source = str((self.root / "runs/project-workflows-001.source").resolve())
+        self.assertEqual(printed["commands"][1], ["git", "worktree", "add", "-b", "feature/project-workflows/project-workflows-001", source, "HEAD"])
+        self.assertEqual((printed["repository"], printed["source_checkout"]), (str(self.repo), source))
+        self.assertEqual(printed["registry"]["entry"]["repository"], str(self.repo))
 
     def test_automatic_plan_keeps_launches_in_graph_and_adds_supervision(self):
         _, commands, _ = launch_commands(self.repo, "project-workflows", "auto-test", Path("/tmp/workflow-launch-tests"), automatic=True)

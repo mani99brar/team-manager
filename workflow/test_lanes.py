@@ -248,7 +248,9 @@ class SubsetSelection(LaneRun):
         tasks = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--task"]
         self.assertEqual([task.split("=", 1)[0] for task in tasks], ["ui", "docs"])
         self.assertEqual(notes, ["Failure drill skipped: its lane adapter is not selected (selected: ui, docs)."])
-        # Run the real prepare command: no agent launches, the selection is pinned, only the selected worktrees exist.
+        # Run the real prepare command in the run's own worktree: no agent launches, the selection is pinned, only the
+        # selected worktrees exist.
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Lanes: ui, docs (excluded: adapter)", result.stdout)
@@ -295,7 +297,7 @@ class SubsetSelection(LaneRun):
         self.assertFalse(self.run_root.exists())
         self.assertEqual(parse_lane_selection("docs,ui", LANES), ["ui", "docs"])
         self.assertEqual(parse_lane_selection(None, LANES), LANES)
-        # Through the CLI on the committed feature: nothing runs, not even `git switch`.
+        # Through the CLI on the committed feature: nothing runs, not even `git worktree add`.
         for bad in ("ui,nope", "ui,ui"):
             with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stderr(io.StringIO()) as errors:
                 with self.assertRaises(SystemExit):
@@ -317,6 +319,7 @@ class SubsetSelection(LaneRun):
     def test_drill_naming_an_excluded_lane_is_skipped_and_injects_nothing(self):
         self.feature_dir(drill={"node_id": "adapter", "phase": "worker", "attempt": 1})
         run, commands, notes = launch_commands(self.repo, "lanes", "lanes-001", self.run_root, herdr=False, workers="ui,docs")
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
         result = subprocess.run(commands[2], cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.attach(run)
@@ -326,7 +329,7 @@ class SubsetSelection(LaneRun):
         self.assertEqual([event["message"] for event in events if "drill" in event["message"].lower()],
                          ["Failure drill skipped: its lane adapter is not selected for this run"])
         commit = self.manual_run()
-        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        self.assertEqual(git(self.run_root / "lanes-001.source", "rev-parse", "HEAD"), commit)  # The run's own worktree.
         self.assertFalse((run / "failure-drill.json").exists())
         self.assertFalse((run / "failure-report.json").exists())
         for node in ("ui", "docs"):
@@ -353,8 +356,9 @@ class DeclaredReviewers(LaneRun):
         prepare_command = commands[2]
         briefs = [prepare_command[index + 1] for index, item in enumerate(prepare_command) if item == "--reviewer"]
         self.assertEqual([item.split("=", 1)[0] for item in briefs], ["general", "coverage"])
-        self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))
         self.assertEqual(notes, [])
+        subprocess.run(commands[1], cwd=self.repo, check=True, capture_output=True)
+        self.assertTrue(all(Path(item.split("=", 1)[1]).is_file() for item in briefs))  # In the run's own worktree.
         result = subprocess.run(prepare_command, cwd=REPO, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Reviewers: general, coverage", result.stdout)
@@ -733,7 +737,7 @@ class LegacyFeatureAndRun(LaneRun):
         """Scenario legacy-feature-refused: a 1.0.0 feature.json is refused with a message to use 2.x; nothing runs."""
         self.two_lane_features()
         _, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
-        self.assertEqual((commands_new[1], notes_new), (["git", "switch", "-c", "feature/two/r1"], []))
+        self.assertEqual((commands_new[1], notes_new), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"], []))
         with self.assertRaisesRegex(ValueError, r"version 1\.0\.0 .*no longer supported: rewrite it as version 2\.x"):
             launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
         with patch("workflow.launch.subprocess.run") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:

@@ -62,7 +62,7 @@ Success:
 
 ### 4.1 Slice 1: target selection and scanning
 
-`workflow/launch.py` resolves the target first (flag, then cwd rule, then the tool's own repository), then the feature folder under `<target>/features/`. `argparse` no longer uses `choices`; an unknown feature is refused with the list of feature directories found. The commands it builds already pass `--repo` to `preflight` and `prepare`; they receive the target, and `git switch -c` runs with `cwd=<target>`. The Herdr panes keep using the tool's directory for the `python -m workflow` commands they run, which is correct: it locates the tool, not the target.
+`workflow/launch.py` resolves the target first (flag, then cwd rule, then the tool's own repository), then the feature folder under `<target>/features/`. `argparse` no longer uses `choices`; an unknown feature is refused with the list of feature directories found. The commands it builds already pass `--repo` to `preflight` and `prepare`; they receive the target, and `git switch -c` runs with `cwd=<target>`. (Since C56 that step is `git worktree add` of the run's own checkout, also run in the target; `prepare` and the later commands receive that worktree.) The Herdr panes keep using the tool's directory for the `python -m workflow` commands they run, which is correct: it locates the tool, not the target.
 
 The rule that run storage is outside the repository applies to the target.
 
