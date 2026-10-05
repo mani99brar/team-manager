@@ -58,6 +58,13 @@ Design challenge attempt 2 (2026-10-04), recorded the same way:
 - [L12] Concern 2: `attack-tally` reports per run whether an attacker finished before the review decided (its `finished_at` before the review's acceptance), and the RUNBOOK's Attack pass section says the reviewers can reach the run directory, where `attack.json` lives.
 - [L13] Concern 5: the engine handoff lists as an open follow-up that PRD 5.0's calibration needs a way to give a staged copy of an old run `plan.attack` and an `attack_check` (`attack-pass` refuses a plan without `attack`).
 
+Run attack-pass-003, design challenge attempt 1 (2026-10-05):
+
+- [L14] Concern 1 (P1), settles run 003's fix 5: `attack-pass` holds `automatic-supervisor.lock` and `controller.lock` (non-blocking, as `clean`, `abandon` and `repair` do) for its whole foreground run, so an operator pass can neither slip between automatic steps nor block the automatic run.
+- [L15] Concern 2 (P1), settles run 003's fix 1: no new key or enum value in `attack.json`; `rerun: null` marks a re-run still owed, and a resumed child recovers each finding's test path from the attacker's output on disk.
+- [L16] Run 003 also closes two of run 002's P2 findings: a reported `test_file` is accepted only as a regular file under an `attack-tests` directory in the attack worktree, reached without following a symlink; and preflight decides on an attack pass from `plan.attack`, not from the policy's `attack_check`.
+- [L17] Concern 8 (P2): run 003 is a follow-up of run 002 under O16's plan (carry the build through to integration), so it keeps O16's run-scoped worker pin, `--worker-model claude-opus-4-8`; the judges stay on Opus 5.5. The operator's note of 2026-10-05 for run 003 asked for the same.
+
 ## Deferred
 
 - The OS sandbox (the C14 sudo steps), blocking mode and the `blocking` key (PRD section 7), and attacks on live services.
