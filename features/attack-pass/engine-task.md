@@ -6,6 +6,7 @@ A feature.json 2.5.0 feature can declare `attack`, and its run gets an attack pa
 
 ## Context
 
+- **Run 002.** In run `attack-pass-001` this lane did no work before it stopped (it only copied the bundled briefs); start from the base commit.
 - `docs/PRD_ATTACK_PASS.md` is the specification. Its Appendix A pins `attack.json`, the export section, the attention text and the event texts: the `viewer` lane builds its fixtures from it. `decisions.md` in this feature binds the run; its Grill defaults G5 to G13 settle what the PRD leaves open (the `requirements` key, the bundled briefs, the detached child process, `attack-pass` for manual runs, global finding ids, the `pending` export record, labels, event texts).
 - Bundled briefs: install `features/attack-pass/attack-briefs/auth-funds.md`, `inputs-state.md`, `permissions-files.md` and `skeptic.md` as `workflow/prompts/attack/<same name>` unchanged (G6). They are short on purpose; do not extend them. What the controller adds around a brief (the inputs, the protocol, the severity rule, the output schema) lives in `workflow/attack.py`.
 - Analogs to reuse, not copy:

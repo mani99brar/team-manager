@@ -19,6 +19,7 @@ From the grill session of 2026-10-04 with the operator, held on the brief "Red-t
 - [O13] Launch guard: launch refuses an attack pass while a listed secret file exists on the host. Operator: "Refuse while secrets exist (Recommended)".
 - [O14] Labels: the operator labels each verified finding. Operator: "You confirm each (Recommended)".
 - [O15] 2026-10-04, after the PRD: build the PRD through the workflow in automatic mode, unattended. Operator: "Lets finish the prd @/home/agentops/dev/mdm-attack/docs/PRD_ATTACK_PASS.md using the latest workflow on automatic mode. I am going to sleep and i want you to run it."
+- [O16] 2026-10-05, after run attack-pass-001 (its engine worker was flagged by Opus 5.5's safeguards and the run stopped at the engine deadline): follow-up run attack-pass-002 with `--follows attack-pass-001`, the workers on Opus 4.8 for this run only (`--worker-model claude-opus-4-8`; no account-level preference changed), the judges unchanged, the requirement-check briefs unchanged, the viewer lane's finished 001 work carried forward from commit `2764f65`, then 001 abandoned. Operator: "yes run it".
 
 ## Grill defaults
 
