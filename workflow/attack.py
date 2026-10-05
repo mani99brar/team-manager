@@ -706,9 +706,10 @@ class AttackChild:
         self.attack_dir.mkdir(parents=True, exist_ok=True)
         for path in (self.worktree, self.rerun_worktree):
             path.parent.mkdir(parents=True, exist_ok=True)
+            done = self.attack_dir / f"setup-{path.name}.done"
             if not (path / ".git").exists():
                 git_worktree(repo, "add", "--detach", str(path), commit)
-            done = self.attack_dir / f"setup-{path.name}.done"
+                done.unlink(missing_ok=True)  # A worktree added fresh is un-set-up: a stale marker must not skip its setup.
             if not done.exists():
                 run_setup(self.policy, path, self.attack_dir, env, prefix=f"setup-{path.name}")
                 done.write_text(iso(self.clock()) + "\n")

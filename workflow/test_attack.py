@@ -1059,3 +1059,26 @@ class TerminatedChild(ChildHarness):
         self.assertEqual((record["attackers"][0]["status"], record["attackers"][0]["error"]), ("failed", "interrupted"))
         self.assertEqual(record["status"], "succeeded")
         validate_schema("attack", record)
+
+
+class SetupMarkerAfterWorktreeLoss(SetupInWorktrees):
+    """Hardening: if a worktree is gone but its done-marker survives, a re-added fresh worktree is set up again, never skipped."""
+
+    def test_a_fresh_worktree_whose_marker_survives_is_set_up_again(self):
+        self.build(setup=self.SETUP)
+        self.set_control(attacker={"findings": [ONE_FINDING]}, skeptic={"verdicts": [VERIFIED]})
+        self.assertEqual(self.run_child()["status"], "succeeded")
+        rerun_wt = self.tmp / "attack" / "rerun"
+        self.assertTrue((self.tmp / "attack" / "rerun" / "build" / "out").is_file())
+        # The worktree is removed (its build output with it) but the done marker is left behind.
+        from workflow.worktrees import git_worktree
+        git_worktree(str(self.repo), "remove", "--force", str(rerun_wt))
+        self.assertTrue((self.run / "attack" / "setup-rerun.done").is_file())
+        self.assertFalse(rerun_wt.exists())
+        # Force the pass to resume (not terminal) and run again: the re-added worktree must be set up afresh.
+        record = read_json(self.run / "attack.json")
+        record["status"] = "running"
+        save_json(self.run / "attack.json", record)
+        with mock.patch.dict(os.environ, self.env(), clear=True):
+            attack.AttackChild(self.run).run()
+        self.assertEqual((self.tmp / "attack" / "rerun" / "build" / "out").read_text(), "ready\n")
