@@ -7,8 +7,8 @@ import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
-  type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, validateAttackResult, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  type AttackRecord, type AttackResult, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -35,7 +35,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * each absent for a run prepared before it and served as null; C8: `inputs.challenge.hold`, absent without a hold and served as
  * null, and a challenge node served paused while its hold waits for `resume --launch`; C49: `inputs.challenge.history`, the
  * replaced records with their P0/P1, absent before and served as [], and a top-level `costs` section the viewer does not read
- * yet). A section is served only when the
+ * yet) and 1.8.0 (the attack pass: a top-level `attack` section holding its record, a `pending` record or null, and an `attack`
+ * graph node beside `review`). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -51,6 +52,10 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * `<run>/sidecar.ledger.json` (the export is rewritten only at graph steps) and else from the export's `sidecar` section. The
  * section is never parsed with the export, so no ledger can fail a run or the run list; the sidecar node's status comes from
  * its events like any node's.
+ *
+ * Contract 1.8.0 (docs/PRD_ATTACK_PASS.md 4.6, Appendix A): the attack pass's record is served on its own route the same way,
+ * read live from `<run>/attack.json` (rewritten while the pass runs) and else from the export's `attack` section, which is
+ * never parsed with the export either. The `attack` node is report-only: its rows never speak for the run.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -71,15 +76,15 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
  * Node IDs a lane can never take: the fixed graph tail, the finding attributions, the per-lane node prefixes, and the nodes
- * and files of the design challenge and the review sidecar.
+ * and files of the design challenge, the review sidecar and the attack pass.
  */
-const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'sidecar'])
-const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-', 'challenge-', 'sidecar-']
+const RESERVED_LANE_IDS = new Set(['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'sidecar', 'attack'])
+const RESERVED_LANE_PREFIXES = ['launch_', 'verify_', 'candidate_', 'review-', 'challenge-', 'sidecar-', 'attack-']
 /** Required check kinds the controller derived from the role before policies declared them (verification.py before 1.2.0). */
 const ROLE_REQUIRED_KINDS: Record<string, readonly (typeof CHECK_KINDS)[number][]> = { frontend: ['build', 'browser'], backend: ['unit'] }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -93,6 +98,11 @@ const SIDECAR_NODE = 'sidecar'
 const SIDECAR_LEDGER_FILE = 'sidecar.ledger.json'
 /** The live ledger is read up to the engine's own bound on it (PRD_REVIEW_SIDECAR 4.4), not the questions file's. */
 export const SIDECAR_LEDGER_BYTE_LIMIT = 4 * 1024 * 1024
+/** The attack pass's node (export 1.8.0) and the record the controller rewrites while the pass runs. */
+const ATTACK_NODE = 'attack'
+const ATTACK_FILE = 'attack.json'
+/** The live record is read up to this bound: at most 20 findings per angle, each with at most 200 lines of output. */
+export const ATTACK_BYTE_LIMIT = 4 * 1024 * 1024
 
 /**
  * Absolute filesystem paths in persisted messages are never forwarded to clients. A path starts at the string start
@@ -315,6 +325,11 @@ const exportSchema = z.object({
    * validated only when the sidecar route serves it, so a ledger can never fail the run.
    */
   sidecar: z.unknown().optional(),
+  /**
+   * Export 1.8.0: the attack pass's record, a `pending` record, or null for a run without a pass; absent before. Kept as
+   * unknown data like the sidecar's: validated only when the attack route serves it, so a record can never fail the run.
+   */
+  attack: z.unknown().optional(),
 })
 
 const rawEventSchema = z.object({
@@ -371,6 +386,8 @@ export type LoadedRun = {
   reviewDiff: ReviewDiffRegistration | null
   /** The export's `sidecar` section as written (export 1.6.0), unvalidated; null or undefined when absent. */
   sidecar: unknown
+  /** The export's `attack` section as written (export 1.8.0), unvalidated; undefined when the export predates it. */
+  attack: unknown
 }
 
 export type ArtifactContent = {
@@ -1037,6 +1054,52 @@ export class RunStore {
   }
 
   /**
+   * The attack pass's record (contract 1.8.0): the live `<run>/attack.json` when it is readable and valid, else the export's
+   * `attack` section when it is a valid record (the `pending` and `failed` records included), else 404 `ATTACK_NOT_FOUND` (an
+   * export before 1.8.0, a run without a pass, a record that is unreadable or invalid both live and in the export). A file or
+   * section that fails the contract is skipped with its reason logged, never an error page.
+   */
+  async attackResult(scope: Scope, runId: string): Promise<AttackResult> {
+    const run = await this.loadRun(scope, runId)
+    const notRecorded = () => new ProjectApiError(404, 'ATTACK_NOT_FOUND', 'No attack pass is recorded for this run: it has no attack pass, its record is not readable or its export predates the attack pass.')
+    if (run.attack === undefined) throw notRecorded()
+    if (run.attack === null && !run.detail.definition.nodes.some(node => node.node_id === ATTACK_NODE)) throw notRecorded()
+    const skip = (source: AttackResult['source'], reason: string) => this.options.warn?.('Attack pass record skipped', {
+      project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: runId, source, reason,
+    })
+    const live = await this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) return null
+      try {
+        return await readBounded(directory, [ATTACK_FILE], ATTACK_BYTE_LIMIT)
+      } catch (error) {
+        if (!(error instanceof ProjectApiError)) throw error
+        skip('live', `${ATTACK_FILE} exceeds the ${ATTACK_BYTE_LIMIT} byte read limit`)
+        return null
+      } finally {
+        await directory.close()
+      }
+    })
+    if (live !== null) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(live.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const served = parsed === undefined ? { error: `${ATTACK_FILE} is not valid JSON` } : projectAttack(runId, parsed, 'live')
+      if ('result' in served) return served.result
+      skip('live', served.error)
+    }
+    if (run.attack !== null) {
+      const served = projectAttack(runId, run.attack, 'export')
+      if ('result' in served) return served.result
+      skip('export', served.error)
+    }
+    throw notRecorded()
+  }
+
+  /**
    * Serves one registered artifact: a packet artifact beside its verification packet, or the review diff the
    * export registered at the run root. Both registries are consulted; an ID registered with different hashes,
    * a malformed entry or an untrusted packet is refused, and the content is served only when it still hashes
@@ -1156,7 +1219,7 @@ export class RunStore {
     } catch (error) {
       throw contractFailure('run activity', error)
     }
-    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null }
+    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null, attack: state.attack }
   }
 
   /**
@@ -1546,6 +1609,46 @@ function projectSidecarLedger(runId: string, raw: unknown, source: SidecarLedger
   }
 }
 
+// ---- The attack pass's record (contract 1.8.0) ----------------------------------------------------------------
+
+/**
+ * The record (`<run>/attack.json` or the export's section) onto the contract: Appendix A's shape and rules, this run's id,
+ * path-redacted texts (the secret-file paths included), Z times. Unknown keys are dropped; `settings` must be exactly the
+ * eight keys. Returns the reason instead when it does not conform.
+ */
+function projectAttack(runId: string, raw: unknown, source: AttackResult['source']): { result: AttackResult } | { error: string } {
+  const parsed = attackRecordSchema.safeParse(raw)
+  if (!parsed.success) return { error: `the ${source} record ${issueText(parsed.error)}` }
+  const record: AttackRecord = parsed.data
+  if (record.run_id !== runId) return { error: `the ${source} record names another run` }
+  const text = (value: string) => boundedRedacted(value, 8000)
+  const nullable = (value: string | null) => value === null ? null : text(value)
+  const time = (value: string | null) => value === null ? null : ledgerTime(value)
+  try {
+    const result = validateAttackResult({
+      contract_version: '1.8.0', node_id: ATTACK_NODE, source,
+      version: record.version, run_id: record.run_id, candidate_commit: record.candidate_commit,
+      settings: { ...record.settings, angles: [...record.settings.angles], requirements: [...record.settings.requirements], secret_files: record.settings.secret_files.map(redactPaths) },
+      status: record.status, started_at: time(record.started_at), finished_at: time(record.finished_at), error: nullable(record.error),
+      attackers: record.attackers.map(attacker => ({
+        ...attacker, started_at: time(attacker.started_at), finished_at: time(attacker.finished_at), error: nullable(attacker.error),
+        summary: nullable(attacker.summary), out_of_reach: attacker.out_of_reach.map(text),
+        skeptic: { ...attacker.skeptic, started_at: time(attacker.skeptic.started_at), finished_at: time(attacker.skeptic.finished_at), error: nullable(attacker.skeptic.error) },
+      })),
+      findings: record.findings.map(finding => ({
+        ...finding, title: text(finding.title), threat: text(finding.threat), requirement: nullable(finding.requirement),
+        expected: text(finding.expected), observed: text(finding.observed),
+        rerun: finding.rerun === null ? null : { ...finding.rerun, output_tail: redactPaths(finding.rerun.output_tail.split('\n').slice(-200).join('\n')), at: ledgerTime(finding.rerun.at) },
+        skeptic: finding.skeptic === null ? null : { ...finding.skeptic, reason: text(finding.skeptic.reason) },
+        labels: finding.labels.map(label => ({ ...label, note: nullable(label.note), at: ledgerTime(label.at) })),
+      })),
+    })
+    return { result }
+  } catch (error) {
+    return { error: `the ${source} record violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})` }
+  }
+}
+
 // ---- Run activity (contract 1.5.0) -----------------------------------------------------------------------------
 
 /**
@@ -1567,8 +1670,9 @@ function activityAttention(status: RunSnapshot['status'], attention: RunAttentio
  */
 function activityHeadline(run: RunData, focus: Focus | null, now: Now): string | null {
   const controllerRow = now.reasonSource === 0 ? (now.reason ?? []).filter(part => typeof part === 'string').join('').trim() : ''
-  // The review sidecar's rows never speak for the run (docs/PRD_REVIEW_SIDECAR.md 4.8): a run reads the same without it.
-  const nodeId = focus?.node_id ?? run.events.findLast(event => event.node_id !== null && event.node_id !== SIDECAR_NODE && event.status !== null)?.node_id ?? null
+  // The review sidecar's rows never speak for the run (docs/PRD_REVIEW_SIDECAR.md 4.8), nor the report-only attack pass's
+  // (docs/PRD_ATTACK_PASS.md 4.6): a run reads the same without them.
+  const nodeId = focus?.node_id ?? run.events.findLast(event => event.node_id !== null && event.node_id !== SIDECAR_NODE && event.node_id !== ATTACK_NODE && event.status !== null)?.node_id ?? null
   let message = controllerRow
   if (!message && nodeId !== null) {
     const own = run.events.filter(event => event.node_id === nodeId)

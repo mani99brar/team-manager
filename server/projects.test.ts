@@ -5,13 +5,14 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile 
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+import { schemas as projectSchemas, validateAttackResult, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
+import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
 import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
 import { seedCandidate } from '../tests/project-workflows/seed.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
+import { ATTACK_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
 import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
@@ -102,6 +103,10 @@ type RunSpec = {
   sidecar?: unknown
   /** Content written to the live `<run>/sidecar.ledger.json`. */
   liveLedger?: string
+  /** Export 1.8.0: the `attack` section as persisted (undefined leaves the key out; null is an explicit null). */
+  attack?: unknown
+  /** Content written to the live `<run>/attack.json`. */
+  liveAttack?: string
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -111,6 +116,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
   const runId = spec.exportRunId ?? spec.runId
   if (spec.diffFile !== undefined) await writeFile(join(dir, 'review.diff'), spec.diffFile)
   if (spec.liveLedger !== undefined) await writeFile(join(dir, 'sidecar.ledger.json'), spec.liveLedger)
+  if (spec.liveAttack !== undefined) await writeFile(join(dir, 'attack.json'), spec.liveAttack)
   const registrations: Registration[] = []
   for (const packetSpec of spec.packets ?? []) {
     const phase = packetSpec.phase ?? 'worker'
@@ -171,6 +177,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     verification_packets: spec.registrations ? spec.registrations(registrations) : registrations, updated_at: spec.updated ?? T1,
     ...(spec.review !== undefined ? { review: spec.review } : {}), ...(spec.inputs !== undefined ? { inputs: spec.inputs } : {}),
     ...(spec.sidecar !== undefined ? { sidecar: spec.sidecar } : {}),
+    ...(spec.attack !== undefined ? { attack: spec.attack } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
@@ -1499,7 +1506,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.8.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.9.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -2699,6 +2706,234 @@ test('[sidecar] a seeded run with a sidecar has the activity of its twin without
     assert.equal(order.indexOf('sidecar'), order.indexOf('challenge') + 1)
     assert.ok(order.filter(id => id.startsWith('launch_')).every(id => order.indexOf(id) > order.indexOf('sidecar')))
     assert.equal(nodes[key(without)].includes('sidecar'), false)
+  }
+})
+
+// ---- Attack pass (docs/PRD_ATTACK_PASS.md 4.6 and Appendix A): export 1.8.0, the live record and the node ----------
+
+/** The record of Appendix A, read from the PRD itself: the bytes both lanes build to. */
+async function appendixA(): Promise<string> {
+  const prd = await readFile(new URL('../docs/PRD_ATTACK_PASS.md', import.meta.url), 'utf8')
+  const block = /```json\n([\s\S]*?)\n```/.exec(prd.slice(prd.indexOf('## Appendix A')))
+  assert.ok(block, 'Appendix A holds a JSON block')
+  return block[1]
+}
+const ATTACK_RUN = 'claims-007'
+const attackOf = async (overrides: Record<string, unknown> = {}) => ({ ...JSON.parse(await appendixA()) as Record<string, unknown>, ...overrides })
+/** Appendix A's `pending` record (decisions G10): the plan has `attack`, no `attack.json` exists yet. */
+const pendingOf = async (runId: string) => ({
+  version: '1.0.0', run_id: runId, candidate_commit: null, settings: (await attackOf()).settings, status: 'pending',
+  started_at: null, finished_at: null, error: null, attackers: [], findings: [],
+})
+/** The exported graph of a plan with `attack` (Appendix A): `attack` right after `review` with its `depends_on`; `approval` depends on both. */
+const ATTACK_NODES = [
+  ...GRAPH_NODES.slice(0, 7),
+  { node_id: 'attack', label: 'Attack pass', kind: 'review', depends_on: ['candidate'] },
+  { ...GRAPH_NODES[7], depends_on: ['review', 'attack'] },
+  GRAPH_NODES[8],
+] as typeof GRAPH_NODES
+const ATTACK_DEFINITION = { name: 'Feature implementation', nodes: ATTACK_NODES }
+const attackRow = (sequence: number, status: string, message: string, time = T2): RawEvent => ({ sequence, time, node: 'attack', status, message })
+const reviewingEvents: RawEvent[] = [...reviewedEvents, { sequence: 10, time: T2, node: 'review', status: 'running', message: 'Launching reviewer general over the shared review worktree' }]
+const attackRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
+  runId: ATTACK_RUN, version: '1.8.0', definition: ATTACK_DEFINITION, values: reviewedValues(), next: ['review', 'attack'], packets: reviewedPackets,
+  events: [...reviewingEvents, attackRow(11, 'running', 'Attack pass started (auth-funds)')], sidecar: null, ...spec,
+})
+const attackRoute = (run = ATTACK_RUN) => url('alpha', 'main', run, '/attack')
+
+test('[attack] a 1.8.0 export loads with the Appendix A record, a pending record, null and garbage; an invalid record never fails the run or the run list', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, attackRun({ attack: await attackOf() }))
+    await writeRun(root, attackRun({ runId: 'attack-pending', attack: await pendingOf('attack-pending'), events: reviewingEvents }))
+    // A run without a pass: export 1.8.0 with `attack: null` and the graph every older run has.
+    await writeRun(root, { runId: 'attack-null', version: '1.8.0', attack: null, sidecar: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2) })
+    for (const [runId, garbage] of [['attack-garbage', { findings: 'many', attackers: [{ id: 7 }] }], ['attack-string', 'not a record'], ['attack-array', [1, 2, 3]],
+      ['attack-open-settings', await attackOf({ run_id: 'attack-open-settings', settings: { ...(await attackOf()).settings as object, attack_check: { argv: ['vitest'] } } })]] as const) {
+      await writeRun(root, attackRun({ runId, attack: garbage }))
+    }
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(list.runs.map(run => run.run_id).sort(), [ATTACK_RUN, 'attack-array', 'attack-garbage', 'attack-null', 'attack-open-settings', 'attack-pending', 'attack-string'].sort())
+    for (const run of list.runs) assert.equal((await get(app, url('alpha', 'main', run.run_id))).status, 200, run.run_id)
+    // The export section is served when no live file exists: Appendix A, and the pending record.
+    const served = validateAttackResult((await get(app, attackRoute())).json())
+    assert.deepEqual([served.contract_version, served.node_id, served.source, served.status, served.findings.length], ['1.8.0', 'attack', 'export', 'succeeded', 2])
+    const pending = validateAttackResult((await get(app, attackRoute('attack-pending'))).json())
+    assert.deepEqual([pending.source, pending.status, pending.attackers.length, pending.findings.length, pending.candidate_commit], ['export', 'pending', 0, 0, null])
+    // Null, garbage and a settings object beyond the eight keys (L1): not recorded, never an error page.
+    for (const runId of ['attack-null', 'attack-garbage', 'attack-string', 'attack-array', 'attack-open-settings']) assertError(await get(app, attackRoute(runId)), 404, 'ATTACK_NOT_FOUND')
+  })
+})
+
+test('[attack] a 1.7.0 export, and a 1.8.0 run without a pass, still load and answer ATTACK_NOT_FOUND, even beside a live attack.json', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, { runId: 'export-170', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      liveAttack: JSON.stringify(await attackOf({ run_id: 'export-170' })) })
+    await writeRun(root, { runId: 'no-pass', version: '1.8.0', attack: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
+      liveAttack: JSON.stringify(await attackOf({ run_id: 'no-pass' })) })
+    for (const runId of ['export-170', 'no-pass']) {
+      assert.equal((await get(app, url('alpha', 'main', runId))).status, 200)
+      assertError(await get(app, attackRoute(runId)), 404, 'ATTACK_NOT_FOUND')
+    }
+  })
+})
+
+test('[attack] the live record wins over the export; a malformed, invalid, foreign or oversized live file falls back to the export (pending, failed or the record), with the reason logged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-attack-'))
+  try {
+    const runsRoot = join(root, 'runs')
+    await mkdir(runsRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify({ version: 1, projects: [{ project_id: 'alpha', name: 'Alpha', repository: join(root, 'repo'), workflows: [{ workflow_id: 'main', runs_root: runsRoot, definition: ATTACK_DEFINITION }] }] }), 'test registry')
+    const warnings: string[] = []
+    const store = new RunStore(config, { warn: (message, details) => warnings.push(`${message} ${JSON.stringify(details)}`) })
+    const scope = store.scope('alpha', 'main')
+    // The live record while the pass runs: the attacker finished, the skeptic is running, A-1 reproduced and not judged yet.
+    const live = await attackOf({ status: 'running', finished_at: null })
+    const findings = live.findings as Record<string, unknown>[]
+    Object.assign(findings[0], { skeptic: null, status: 'unjudged', labels: [] })
+    ;(live.attackers as Record<string, unknown>[])[0].skeptic = { status: 'running', started_at: '2026-10-05T10:46:00Z', finished_at: null, error: null, session_id: null, cost_usd: null }
+    // The re-run's output names the worktree's absolute path: served redacted, like the secret-file paths.
+    ;(findings[0].rerun as Record<string, unknown>).output_tail = `FAIL ${join(root, 'claims-007.attack', 'rerun', 'attack-tests', 'A-1.test.ts')} > rejects a body author`
+    const exported = async (runId: string) => ({ ...(await attackOf()), run_id: runId })
+    const failed = async (runId: string) => ({ ...(await pendingOf(runId)), status: 'failed', error: 'attack.json is not valid: findings[0].status' })
+    const cases: [string, string | null, unknown, 'live' | 'export', string][] = [
+      ['live-newer', JSON.stringify(live), exported, 'live', 'running'],
+      ['live-over-pending', JSON.stringify(live), pendingOf, 'live', 'running'],
+      ['live-malformed', '{"version": "1.0.0", "findings": [', exported, 'export', 'succeeded'],
+      ['live-invalid', JSON.stringify({ ...live, findings: [{ id: 'A-1' }] }), exported, 'export', 'succeeded'],
+      ['live-bad-enum', JSON.stringify({ ...live, status: 'timed_out' }), pendingOf, 'export', 'pending'],
+      ['live-skeptic-raised', JSON.stringify({ ...live, findings: [{ ...findings[0], skeptic: { verdict: 'verified', reason: 'r', severity: 'P0' }, status: 'verified' }] }), failed, 'export', 'failed'],
+      ['live-foreign', JSON.stringify({ ...live, run_id: 'another-run' }), exported, 'export', 'succeeded'],
+      ['live-oversized', JSON.stringify({ ...live, padding: 'x'.repeat(4 * 1024 * 1024) }), exported, 'export', 'succeeded'],
+      ['live-absent', null, failed, 'export', 'failed'],
+    ]
+    assert.equal(ATTACK_BYTE_LIMIT, 4 * 1024 * 1024)
+    for (const [runId, file, section, source, status] of cases) {
+      await writeRun(runsRoot, attackRun({ runId, attack: await (section as (run: string) => Promise<unknown>)(runId), ...(file === null ? {} : { liveAttack: file.replace(/"claims-007"/, `"${runId}"`) }) }))
+      warnings.length = 0
+      const result = validateAttackResult(await store.attackResult(scope, runId))
+      assert.deepEqual([result.source, result.status, result.run_id, result.node_id], [source, status, runId, 'attack'], runId)
+      if (source === 'export' && file !== null) assert.ok(warnings.some(warning => warning.includes(runId) && /attack/i.test(warning)), `${runId}: the reason is logged (${warnings.join(' | ')})`)
+      // A record, valid or not, never fails the run.
+      validateRunDetail((await store.loadRun(scope, runId)).detail)
+    }
+    const redacted = validateAttackResult(await store.attackResult(scope, 'live-newer'))
+    assert.equal(redacted.findings[0].rerun!.output_tail, 'FAIL <path> > rejects a body author')
+    assert.deepEqual(redacted.settings.secret_files, ['<path>'])
+    assert.ok(!JSON.stringify(redacted).includes(root) && !JSON.stringify(redacted).includes('/home/'))
+    // Neither readable: not recorded, never an error page or a failed run.
+    await writeRun(runsRoot, attackRun({ runId: 'both-invalid', attack: { broken: true }, liveAttack: 'not json' }))
+    await assert.rejects(store.attackResult(scope, 'both-invalid'), (error: { status: number; code: string }) => error.status === 404 && error.code === 'ATTACK_NOT_FOUND')
+    validateRunDetail((await store.loadRun(scope, 'both-invalid')).detail)
+    assert.equal((await store.listRuns(scope)).length, cases.length + 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[attack] the node\'s status comes from its events only and never decides the run: running and interactive are running, the closing row succeeded', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const started = attackRow(11, 'running', 'Attack pass started (auth-funds)')
+    const cases: [string, RawEvent[], string][] = [
+      ['no-event', reviewingEvents, 'pending'],
+      ['running', [...reviewingEvents, started], 'running'],
+      ['interactive', [...reviewingEvents, started, attackRow(12, 'interactive', 'Attack pass attacker auth-funds timed_out: see attack/auth-funds.stderr.log')], 'running'],
+      ['succeeded', [...reviewingEvents, started, attackRow(12, 'succeeded', 'Attack pass: 2 finding(s), 1 reproduced, 1 verified')], 'succeeded'],
+      ['ended-failed', [...reviewingEvents, started, attackRow(12, 'interactive', 'Attack pass failed: OSError'), attackRow(13, 'succeeded', 'Attack pass ended: failed')], 'succeeded'],
+    ]
+    for (const [runId, events, status] of cases) {
+      // A garbage record never moves the node: its status is its events'.
+      await writeRun(root, attackRun({ runId, events, attack: { status: 'failed' }, liveAttack: '{}' }))
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
+      assert.equal(nodeStatus(detail, 'attack'), status, runId)
+      assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'attack')?.kind, 'review')
+      // The review is the focus and the headline's step whatever the attack node's rows say.
+      assert.equal(detail.summary.activity?.focus?.node_id, 'review', runId)
+      assert.match(detail.summary.activity?.headline ?? '', /^Independent review · /, runId)
+    }
+  })
+})
+
+test('[attack] the attack route is read-only: other methods are 405, HEAD works, nothing is written', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    await writeRun(runsRoot('alpha', 'main'), attackRun({ attack: await pendingOf(ATTACK_RUN), liveAttack: await appendixA() }))
+    const before = await snapshotTree(runsRoot('alpha', 'main'))
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
+      const response = await app.inject({ method, url: attackRoute(), payload: method === 'OPTIONS' ? undefined : { label: 'real' } })
+      assert.equal(response.statusCode, 405, method)
+      assert.equal(response.headers.allow, 'GET, HEAD')
+      assert.equal(response.json().error.code, 'METHOD_NOT_ALLOWED')
+    }
+    assert.equal((await app.inject({ method: 'HEAD', url: attackRoute() })).statusCode, 200)
+    const response = await get(app, attackRoute())
+    assert.equal(response.status, 200)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.deepEqual(await snapshotTree(runsRoot('alpha', 'main')), before)
+  })
+})
+
+test('[attack] the Appendix A example validates verbatim: written live, it is served field for field but for the redacted secret-file path', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const text = await appendixA()
+    await writeRun(runsRoot('alpha', 'main'), attackRun({ attack: await pendingOf(ATTACK_RUN), liveAttack: text }))
+    const served = validateAttackResult((await get(app, attackRoute())).json())
+    const { contract_version, node_id, source, ...record } = served
+    assert.deepEqual([contract_version, node_id, source], ['1.8.0', 'attack', 'live'])
+    const expected = JSON.parse(text) as { settings: { secret_files: string[] } }
+    expected.settings.secret_files = ['<path>']
+    assert.deepEqual(record, expected)
+  })
+})
+
+test('[attack] reserved names: a lane named attack or attack-<x> makes the export contradictory', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    // `attacker` is an ordinary lane name, the control case: only the reserved id and prefix are refused.
+    for (const [lane, status] of [['attack', 500], ['attack-two', 500], ['attacker', 200]] as const) {
+      const inputs = inputsSection()
+      const renamed = { ...inputs, workers: { ui: inputs.workers.ui, [lane]: inputs.workers.adapter } }
+      await writeRun(runsRoot('alpha', 'main'), { runId: `lane-${lane}`, definition: { name: 'Feature implementation', nodes: graphNodes(['ui', lane]) as typeof GRAPH_NODES },
+        values: { ui: receipt('ui') }, next: [`launch_${lane}`], events: launchEvents.slice(0, 1), inputs: renamed })
+      const response = await get(app, url('alpha', 'main', `lane-${lane}`))
+      if (status === 200) assert.equal(response.status, 200, response.body)
+      else assertError(response, 500, 'RUN_STORAGE_INVALID')
+    }
+  })
+})
+
+test('[attack] a seeded run with an attack pass has the activity and status of its twin without one: reviewing, waiting on the pass after the review, blocked and integrated', async () => {
+  const activities: Record<string, unknown> = {}
+  const statuses: Record<string, string> = {}
+  const nodes: Record<string, RunDetail['definition']['nodes']> = {}
+  await eachSeededRun((key, detail) => {
+    activities[key] = detail.summary.activity
+    statuses[key] = detail.summary.status
+    nodes[key] = detail.definition.nodes
+  })
+  assert.ok(ATTACK_TWINS.length >= 4)
+  for (const [withAttack, without] of ATTACK_TWINS) {
+    const key = (run: string) => `ux-attack/${run}`
+    assert.ok(activities[key(withAttack)], withAttack)
+    assert.equal(statuses[key(withAttack)], statuses[key(without)], `${withAttack}: the same status as ${without}`)
+    if (withAttack === RUN_ATTACK_WAITING) {
+      // The review decided (approved) but the report-only pass runs on: the run is still in its review step, so the review
+      // keeps the focus (run 003 P1), while its twin without a pass has nothing running and reads null (between steps). That
+      // one focus field is the only intended difference; every other activity field still reads the same, and the attack
+      // node never takes the focus itself.
+      const asWith = activities[key(withAttack)] as { focus: { node_id: string } | null }
+      const asWithout = activities[key(without)] as { focus: unknown }
+      assert.equal(asWith.focus?.node_id, 'review', `${withAttack}: the review keeps the focus while the pass runs`)
+      assert.equal(asWithout.focus, null, `${without}: no pass and nothing running, so no focus`)
+      assert.deepEqual({ ...asWith, focus: null }, { ...asWithout, focus: null }, `${withAttack} reads like ${without} but for the focus`)
+    } else {
+      assert.deepEqual(activities[key(withAttack)], activities[key(without)], `${withAttack} reads like ${without}`)
+    }
+    // `attack` right after `review` with its depends_on; approval depends on both; the twin has no such node.
+    const graph = nodes[key(withAttack)]
+    const ids = graph.map(node => node.node_id)
+    assert.equal(ids.indexOf('attack'), ids.indexOf('review') + 1)
+    assert.deepEqual(graph.find(node => node.node_id === 'attack')!.depends_on, graph.find(node => node.node_id === 'review')!.depends_on)
+    assert.deepEqual(graph.find(node => node.node_id === 'approval')!.depends_on, ['review', 'attack'])
+    assert.equal(nodes[key(without)].some(node => node.node_id === 'attack'), false)
   }
 })
 

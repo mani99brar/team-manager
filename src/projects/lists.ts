@@ -11,7 +11,7 @@ import {
   controllerNotRunning, deriveNow, type ControllerReading, type ControllerState, type Now, type Situation,
 } from '../../contracts/projects/triage.ts'
 import type { RunActivity, RunDetail, RunSummary } from './api.ts'
-import { GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
+import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
 import { formatSpan, type Zone } from './time.ts'
 import { statusTone, type Tone } from './tone.ts'
 
@@ -99,6 +99,7 @@ export function readsNextPage(runs: readonly Pick<RunSummary, 'updated_at'>[], n
 function who(nodeId: string | null): string {
   if (nodeId === null) return 'a step'
   if (nodeId === SIDECAR_NODE_ID) return 'review sidecar'
+  if (nodeId === ATTACK_NODE_ID) return 'attack pass'
   return nodeId.startsWith('launch_') ? nodeId.slice('launch_'.length) : nodeId
 }
 

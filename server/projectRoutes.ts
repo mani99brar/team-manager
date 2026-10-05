@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
-import { schemas, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
+import { schemas, validateAttackResult, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
 import { eventSchema, workerResultSchema } from '../contracts/workflow/v1.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 import { DEFAULT_RUN_LIMIT, MAX_RUN_LIMIT, ProjectApiError, RunStore, compareRuns, decodeCursor, encodeCursor } from './projects.ts'
@@ -112,6 +112,7 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     review: '/:project_id/workflows/:workflow_id/runs/:run_id/reviews/:attempt',
     inputs: '/:project_id/workflows/:workflow_id/runs/:run_id/inputs',
     sidecar: '/:project_id/workflows/:workflow_id/runs/:run_id/sidecar',
+    attack: '/:project_id/workflows/:workflow_id/runs/:run_id/attack',
   }
   for (const url of Object.values(paths)) {
     scope.route({
@@ -186,6 +187,12 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const params = request.params as Params
     const ledger = await store.sidecarLedger(scopeOf(params), requireId(params.run_id, 'run'))
     return conform(schemas.sidecarLedger, crossChecked(() => validateSidecarLedger(ledger), log), log)
+  })
+
+  scope.get(paths.attack, async request => {
+    const params = request.params as Params
+    const result = await store.attackResult(scopeOf(params), requireId(params.run_id, 'run'))
+    return conform(schemas.attackResult, crossChecked(() => validateAttackResult(result), log), log)
   })
 
   scope.get(paths.artifact, async (request, reply) => {

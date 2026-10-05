@@ -3,16 +3,17 @@ import {
   buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import { fetchEvents, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
+import { fetchAttackResult, fetchEvents, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
+import { AttackPassBody } from './node/AttackSections.tsx'
 import { LanesLine, NowBanner } from './NowBanner.tsx'
 import { boardSplitWidth } from './node/board.ts'
 import { nodePhase } from './node/model.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
-import { isSidecarNode } from './status.ts'
+import { isAttackNode, isSidecarNode } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
 import { Activity, StepsTable } from './StepsTimeline.tsx'
@@ -104,6 +105,11 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const hasSidecar = definition.nodes.some(isSidecarNode)
   const loadSidecar = useCallback((signal: AbortSignal) => orNotRecorded(fetchSidecarLedger(scope, signal), NOT_RECORDED.sidecar), [scope])
   const { state: sidecar, reload: reloadSidecar } = useResource(hasSidecar ? `sidecar:${runKey}` : null, loadSidecar, refreshToken, pollToken)
+  // The attack pass's record changes while the pass runs: polled the same way, only for a run whose graph has the node. A 404
+  // ATTACK_NOT_FOUND (an unreadable record) loads as null; a run without a pass asks nothing and shows no section.
+  const hasAttack = definition.nodes.some(isAttackNode)
+  const loadAttack = useCallback((signal: AbortSignal) => orNotRecorded(fetchAttackResult(scope, signal), NOT_RECORDED.attack), [scope])
+  const { state: attack, reload: reloadAttack } = useResource(hasAttack ? `attack:${runKey}` : null, loadAttack, refreshToken, pollToken)
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))
@@ -271,6 +277,14 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                 </section>
                 <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
               </div>
+              {hasAttack && (
+                <section className="run-attack" data-testid="attack-section" aria-labelledby="run-attack-title">
+                  <header className="ui-section-header">
+                    <h3 id="run-attack-title">Attack pass</h3>
+                  </header>
+                  <AttackPassBody record={attack} onRetry={reloadAttack} />
+                </section>
+              )}
               {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
               {timeline && <Activity timeline={timeline} labels={labels} phaseOf={phaseOf} attentionOf={nodeId => attention?.nodes.get(nodeId)?.kind ?? null} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
             </>
@@ -301,6 +315,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                     onRetryInputs={reloadInputs}
                     sidecar={sidecar}
                     onRetrySidecar={reloadSidecar}
+                    attack={attack}
+                    onRetryAttack={reloadAttack}
                     refreshToken={refreshToken}
                     onNavigate={onNavigate}
                     highlight={highlight}

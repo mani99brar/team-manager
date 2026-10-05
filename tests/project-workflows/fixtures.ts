@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto'
 import { deflateSync } from 'node:zlib'
 import {
   validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs,
-  type Project, type ReviewResult, type RunDetail, type RunInputs, type SidecarLedger, type WorkflowDefinition,
+  type AttackResult, type Project, type ReviewResult, type RunDetail, type RunInputs, type SidecarLedger, type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
@@ -697,6 +697,8 @@ export const REVIEWER_BLOCKED_MESSAGE = 'Reviewer coverage blocked the candidate
 
 /** The review sidecar's ledger per run (`.../sidecar`, contract 1.6.0); only the `ux-sidecar` runs have one. */
 export const sidecarLedgers: Record<string, SidecarLedger> = {}
+/** The attack pass's served record per run (contract 1.8.0); filled by `fixtures/ux-attack.ts`. */
+export const attackResults: Record<string, AttackResult> = {}
 
 export const runEvents: Record<string, WorkflowEvent[]> = {
   [RUN_SUCCEEDED]: [

@@ -1,0 +1,545 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_commit": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "settings": {
+      "type": "object",
+      "properties": {
+        "angles": {
+          "minItems": 1,
+          "maxItems": 3,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "inputs-state",
+              "permissions-files",
+              "auth-funds"
+            ]
+          }
+        },
+        "budget_usd": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "timeout_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 180
+        },
+        "skeptic_budget_usd": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "skeptic_timeout_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 60
+        },
+        "max_findings": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "requirements": {
+          "maxItems": 10,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.(?:\\/|$)).+$"
+          }
+        },
+        "secret_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "angles",
+        "budget_usd",
+        "timeout_minutes",
+        "skeptic_budget_usd",
+        "skeptic_timeout_minutes",
+        "max_findings",
+        "requirements",
+        "secret_files"
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "refused"
+      ]
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finished_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "attackers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "angle": {
+            "type": "string",
+            "enum": [
+              "inputs-state",
+              "permissions-files",
+              "auth-funds"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "refused",
+              "timed_out"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "out_of_reach": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skeptic": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "not_run",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "timed_out"
+                ]
+              },
+              "started_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "finished_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "session_id": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "cost_usd": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "started_at",
+              "finished_at",
+              "error",
+              "session_id",
+              "cost_usd"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "angle",
+          "status",
+          "started_at",
+          "finished_at",
+          "error",
+          "session_id",
+          "cost_usd",
+          "summary",
+          "out_of_reach",
+          "skeptic"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attacker": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "threat": {
+            "type": "string"
+          },
+          "requirement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "test_file": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!\\/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|\\/)\\.\\.(?:\\/|$)).+$"
+          },
+          "expected": {
+            "type": "string"
+          },
+          "observed": {
+            "type": "string"
+          },
+          "rerun": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "reproduced",
+                      "not_reproduced"
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "passed",
+                          "no_test",
+                          "setup_failed",
+                          "timed_out",
+                          "error"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "exit_code": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -9007199254740991,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "duration_seconds": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "output_tail": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason",
+                  "exit_code",
+                  "duration_seconds",
+                  "output_tail",
+                  "at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skeptic": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "refuted"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "P0",
+                      "P1",
+                      "P2"
+                    ]
+                  }
+                },
+                "required": [
+                  "verdict",
+                  "reason",
+                  "severity"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_reproduced",
+              "unjudged",
+              "verified",
+              "refuted"
+            ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "enum": [
+                    "real",
+                    "false",
+                    "out-of-scope"
+                  ]
+                },
+                "review_found": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "yes",
+                        "no"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "by": {
+                  "type": "string",
+                  "const": "operator"
+                },
+                "at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "review_found",
+                "note",
+                "by",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "ref",
+          "attacker",
+          "severity",
+          "title",
+          "threat",
+          "requirement",
+          "test_file",
+          "expected",
+          "observed",
+          "rerun",
+          "skeptic",
+          "status",
+          "labels"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "contract_version": {
+      "type": "string",
+      "const": "1.8.0"
+    },
+    "node_id": {
+      "type": "string",
+      "const": "attack"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "live",
+        "export"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "run_id",
+    "candidate_commit",
+    "settings",
+    "status",
+    "started_at",
+    "finished_at",
+    "error",
+    "attackers",
+    "findings",
+    "contract_version",
+    "node_id",
+    "source"
+  ],
+  "additionalProperties": false
+}

@@ -254,11 +254,12 @@ export const ACTIVITY_PHASE_LABEL: Record<ActivityPhase, string> = {
 
 /**
  * The phase a step belongs to: the design challenge; the workers' launches; the freeze, the verifications and the combined
- * candidate; the review, the approval and the integration. The review sidecar runs beside the others and has none of its own,
- * so its rows, like the controller's, join the phase they occur in.
+ * candidate; the review, the approval and the integration. The review sidecar and the attack pass run beside the others and
+ * have none of their own, so their rows, like the controller's, join the phase they occur in.
  */
 export function nodePhase(node: { node_id: string; kind: RunDetail['definition']['nodes'][number]['kind'] }): ActivityPhase | null {
   if (node.node_id === 'sidecar' && node.kind === 'review') return null
+  if (node.node_id === 'attack' && node.kind === 'review') return null
   if (node.node_id === 'challenge' && node.kind === 'review') return 'challenge'
   switch (node.kind) {
     case 'worker': return 'workers'

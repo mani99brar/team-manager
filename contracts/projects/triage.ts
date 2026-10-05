@@ -315,6 +315,15 @@ const CONTROLLER_LANE_NODE = 'launch_controller'
  * of the scope's parents and of gap classification, so a run's activity reads the same with and without it.
  */
 export const SIDECAR_NODE_ID = 'sidecar'
+/**
+ * The attack pass's node (docs/PRD_ATTACK_PASS.md 4.6, Appendix A): report-only beside the review. Like the sidecar it is left
+ * out of the last activity, attention, the scope's parents, gap classification and the running headline; unlike the sidecar it
+ * never takes the focus, not even when it is the only step still running (the review decided and the controller waits for
+ * the pass), so the run's headline, Now banner and current step stay the review's.
+ */
+export const ATTACK_NODE_ID = 'attack'
+/** The nodes whose rows never speak for the run: the review sidecar and the attack pass. */
+const ADVISORY_NODE_IDS: ReadonlySet<string | null> = new Set([SIDECAR_NODE_ID, ATTACK_NODE_ID])
 
 // ---- Small helpers ------------------------------------------------------------------------------------------------
 
@@ -701,7 +710,7 @@ function computeTimeline(run: RunData): Timeline {
 
   // Rule 10: the run spans creation to the last non-controller activity (events, the verdict, stop receipts), never `updated_at`.
   const moments: { at: string; source: InstantSource; controller: boolean; pid: boolean; text: string }[] = [
-    ...rows.filter(row => row.node !== SIDECAR_NODE_ID)
+    ...rows.filter(row => !ADVISORY_NODE_IDS.has(row.node))
       .map(row => ({ at: row.event.occurred_at, source: 'event' as const, controller: row.node === null || row.marker !== null, pid: row.marker === 'controller_start', text: row.text })),
     ...(inputs?.workers ?? []).flatMap(worker => worker.stop?.confirmed_at
       ? [{ at: worker.stop.confirmed_at, source: 'receipt' as const, controller: false, pid: false, text: `${worker.node_id} stopped (stop receipt)` }] : []),
@@ -776,7 +785,7 @@ function buildMarkers(run: RunData, rows: Row[]): Marker[] {
 
 /** Rule 6: silences over two minutes, classified by the row before them and the spans they fall inside (never the sidecar's). */
 function buildGaps(run: RunData, rows: Row[], allSpans: Span[]): Gap[] {
-  const spans = allSpans.filter(span => span.node_id !== SIDECAR_NODE_ID)
+  const spans = allSpans.filter(span => !ADVISORY_NODE_IDS.has(span.node_id))
   const moments = [
     ...rows.map(row => ({ at: row.event.occurred_at, row })),
     ...spans.flatMap(span => [span.start, span.end]
@@ -874,15 +883,21 @@ function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
   const depth = depths(detail)
   const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? null
   const pick = (wanted: readonly NodeStatus[], skip: string | null = null) => {
-    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip)
+    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip && node.node_id !== ATTACK_NODE_ID)
     if (!matches.length) return null
     // Parallel lanes share a column: the tie goes to the latest event.
     const tied = matches.filter(node => depth.get(node.node_id) === depth.get(matches[0].node_id))
     return tied.reduce((best, node) => ms(since(node.node_id) ?? '') > ms(since(best.node_id) ?? '') ? node : best)
   }
   // The sidecar runs beside the lanes for the whole work phase: it is the running focus only when nothing else runs.
-  const othersRun = detail.snapshot.nodes.some(node => node.status === 'running' && node.node_id !== SIDECAR_NODE_ID)
-  const node = pick(['failed', 'paused', 'awaiting_approval']) ?? pick(['running'], othersRun ? SIDECAR_NODE_ID : null)
+  const othersRun = detail.snapshot.nodes.some(node => node.status === 'running' && !ADVISORY_NODE_IDS.has(node.node_id))
+  let node = pick(['failed', 'paused', 'awaiting_approval']) ?? pick(['running'], othersRun ? SIDECAR_NODE_ID : null)
+  // The attack pass runs beside the review inside the review step (docs/PRD_ATTACK_PASS.md 4.6). When it runs on alone after
+  // the review decided — approved, so the review node reads `succeeded` (a blocked review reads `failed` and is already the
+  // focus above) — the run is still in its review step, so the review keeps the focus, never the report-only attack node.
+  if (!node && detail.snapshot.nodes.some(candidate => candidate.node_id === ATTACK_NODE_ID && candidate.status === 'running')) {
+    node = detail.snapshot.nodes.find(candidate => candidate.node_id === 'review') ?? null
+  }
   if (!node) return null
   return { node_id: node.node_id, label: labelOf(detail, node.node_id), kind: node.kind, status: node.status, since: since(node.node_id) }
 }
@@ -897,7 +912,7 @@ function scopeStart(detail: RunDetail, rows: readonly Row[], focus: Focus | null
   if (!focus) return 0
   const running = statusRows(rows, focus.node_id).filter(row => row.status === 'running').at(-1)
   if (running) return running.event.sequence
-  const parents = (detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []).filter(parent => parent !== SIDECAR_NODE_ID)
+  const parents = (detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []).filter(parent => !ADVISORY_NODE_IDS.has(parent))
   return rows.filter(row => row.node !== null && parents.includes(row.node) && row.status !== null && row.marker === null).at(-1)?.event.sequence ?? 0
 }
 
@@ -957,7 +972,7 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
 /** Which nodes wait on the operator (6.4): a question, a pane that needs attention, or an approval; `top` by that precedence. */
 export function deriveAttention(run: RunData & { activity?: ServedActivity | null }): RunAttention {
   // The sidecar's rows (an escalation included) wait on nobody: no new attention kind (docs/PRD_REVIEW_SIDECAR.md 4.6).
-  const rows = classify(run.detail, run.events.filter(event => event.node_id !== SIDECAR_NODE_ID))
+  const rows = classify(run.detail, run.events.filter(event => !ADVISORY_NODE_IDS.has(event.node_id)))
   const found = new Map<string, Attention>()
   for (const item of waitingQuestions(run, rows)) {
     const node = `launch_${item.lane}`
@@ -1531,10 +1546,15 @@ function reviewBlockedNow(context: Context): Draft | null {
 function runningNow(context: Context): Draft | null {
   // Also a step re-entered while it still reads failed (a live span), and the focus a resumed controller re-entered (5 b).
   const resumed = interruptionNote(context)?.resumed ?? null
-  const running = context.run.detail.snapshot.nodes.filter(node => node.node_id !== SIDECAR_NODE_ID && (node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live))
+  const running = context.run.detail.snapshot.nodes.filter(node => !ADVISORY_NODE_IDS.has(node.node_id) && (node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live))
   if (!running.length && !resumed && context.status !== 'running') return null
+  // The attack pass runs on inside the review step after the review decided (focusOf keeps the review): the review stays the
+  // current step, so the banner names it, never "between steps" and never the report-only attack node (PRD_ATTACK_PASS 4.6).
+  const attackWait = !running.length && context.focus?.node_id === 'review'
+    && context.run.detail.snapshot.nodes.some(node => node.node_id === ATTACK_NODE_ID && node.status === 'running')
   const headline: Text = ['● Running']
   if (resumed && context.focus) headline.push(` · ${context.focus.label} · resumed at `, clock(resumed.at))
+  else if (attackWait && context.focus) headline.push(` · ${context.focus.label}`)
   else if (!running.length) headline.push(' · between steps')
   for (const node of running.slice(0, 2)) {
     headline.push(` · ${labelOf(context.run.detail, node.node_id)}`)
@@ -1550,7 +1570,7 @@ function runningNow(context: Context): Draft | null {
   const watch = running.flatMap(node => node.node_id.startsWith('launch_') ? [command(`"$PY" -m workflow.interactive attach-one "$RUN" --node ${laneOf(node.node_id)}`, 'Optional, to watch a pane:')] : [])
   return {
     situation: 'running', tone: 'running', glyph: '●', headline,
-    since: resumed?.at ?? (running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : null),
+    since: resumed?.at ?? (running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : attackWait ? context.focus?.since ?? null : null),
     next: { action: 'none', label: context.automatic ? 'No action needed: the controller is supervising.' : 'No action needed while the steps run.', runbook: [], steps: watch, caveat: null },
   }
 }

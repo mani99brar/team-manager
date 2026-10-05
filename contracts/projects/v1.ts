@@ -9,7 +9,8 @@ const version = z.literal('1.0.0')
  * (decisions, the design challenge, completion evidence and worker questions). 1.5.0 adds the run summary's `activity`
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
  * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
- * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29).
+ * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29). 1.8.0 adds the attack pass's
+ * record (`attackResult`).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -530,6 +531,143 @@ export const sidecarLedgerSchema = sidecarLedgerFileSchema.extend({
   source: z.enum(['live', 'export']),
 })
 
+// ---- Attack pass (1.8.0) ----------------------------------------------------------------------------------------------
+
+/**
+ * The attack pass's vocabularies (docs/PRD_ATTACK_PASS.md Appendix A, `contracts/workflow/attack.schema.json` 1.0.0). The pass
+ * status adds the export's `pending` (decisions G10): the plan has `attack` and no `attack.json` exists yet.
+ */
+export const ATTACK_PASS_STATUSES = ['pending', 'running', 'succeeded', 'failed', 'refused'] as const
+export const ATTACK_ATTACKER_STATUSES = ['running', 'succeeded', 'failed', 'refused', 'timed_out'] as const
+export const ATTACK_SKEPTIC_STATUSES = ['not_run', 'running', 'succeeded', 'failed', 'timed_out'] as const
+export const ATTACK_SEVERITIES = ['P0', 'P1', 'P2'] as const
+export const ATTACK_RERUN_STATUSES = ['reproduced', 'not_reproduced'] as const
+export const ATTACK_RERUN_REASONS = ['passed', 'no_test', 'setup_failed', 'timed_out', 'error'] as const
+export const ATTACK_VERDICTS = ['verified', 'refuted'] as const
+export const ATTACK_FINDING_STATUSES = ['not_reproduced', 'unjudged', 'verified', 'refuted'] as const
+export const ATTACK_LABELS = ['real', 'false', 'out-of-scope'] as const
+export const ATTACK_ANGLES = ['inputs-state', 'permissions-files', 'auth-funds'] as const
+
+/**
+ * Appendix A's field rules, shared with the engine's schema: ids, the commit and `session_id` are non-empty strings with no
+ * format check; times, titles and threats are strings with no format or length check; the only nullable fields are `candidate_commit`, every `started_at`, `finished_at` and `error`,
+ * `session_id`, `cost_usd`, an attacker's `summary`, a finding's `requirement`, `rerun` and `skeptic`, `rerun.reason`,
+ * `rerun.exit_code`, a label's `note` and `review_found`; arrays may be empty; nothing is resolved by reference. `settings` is
+ * closed to its eight keys (decisions L1); every other object drops a key the engine adds, as the sidecar ledger does.
+ */
+const attackText = z.string().min(1)
+/** Times are strings with no format check, like every free text of the record (Appendix A makes only ids non-empty). */
+const attackTime = z.string()
+const attackCost = z.number().nonnegative().nullable()
+
+export const attackSettingsSchema = z.strictObject({
+  angles: z.array(z.enum(ATTACK_ANGLES)).min(1).max(3),
+  budget_usd: z.number().min(1).max(50),
+  timeout_minutes: z.number().int().min(5).max(180),
+  skeptic_budget_usd: z.number().min(1).max(20),
+  skeptic_timeout_minutes: z.number().int().min(5).max(60),
+  max_findings: z.number().int().min(1).max(20),
+  /** Repository-relative paths of the project's requirements documents. */
+  requirements: z.array(relativePath).max(10),
+  /** The secret files the launch guard checks: absolute on the host, path-redacted when served. */
+  secret_files: z.array(attackText),
+})
+
+export const attackSkepticRunSchema = z.object({
+  status: z.enum(ATTACK_SKEPTIC_STATUSES),
+  started_at: attackTime.nullable(),
+  finished_at: attackTime.nullable(),
+  error: z.string().nullable(),
+  session_id: attackText.nullable(),
+  cost_usd: attackCost,
+})
+
+export const attackAttackerSchema = z.object({
+  id: attackText,
+  angle: z.enum(ATTACK_ANGLES),
+  status: z.enum(ATTACK_ATTACKER_STATUSES),
+  started_at: attackTime.nullable(),
+  finished_at: attackTime.nullable(),
+  error: z.string().nullable(),
+  session_id: attackText.nullable(),
+  cost_usd: attackCost,
+  summary: z.string().nullable(),
+  /** What the in-process harness could not express offline. */
+  out_of_reach: z.array(z.string()),
+  /** The attacker's skeptic job; never null (`not_run` when it did not run). */
+  skeptic: attackSkepticRunSchema,
+})
+
+export const attackRerunSchema = z.object({
+  status: z.enum(ATTACK_RERUN_STATUSES),
+  /** Null exactly when the test reproduced. */
+  reason: z.enum(ATTACK_RERUN_REASONS).nullable(),
+  exit_code: z.number().int().nullable(),
+  duration_seconds: z.number().nonnegative(),
+  /** At most the last 200 lines of the check's output. */
+  output_tail: z.string(),
+  at: attackTime,
+})
+
+export const attackJudgementSchema = z.object({
+  verdict: z.enum(ATTACK_VERDICTS),
+  reason: z.string(),
+  /** The skeptic may lower the finding's severity, never raise it. */
+  severity: z.enum(ATTACK_SEVERITIES),
+})
+
+export const attackLabelSchema = z.object({
+  label: z.enum(ATTACK_LABELS),
+  review_found: z.enum(['yes', 'no']).nullable(),
+  note: z.string().nullable(),
+  by: z.literal('operator'),
+  at: attackTime,
+})
+
+export const attackFindingSchema = z.object({
+  /** The global id, `A-<n>` in attacker order (decisions G9); `ref` is the attacker's own. */
+  id: attackText,
+  ref: attackText,
+  attacker: attackText,
+  severity: z.enum(ATTACK_SEVERITIES),
+  title: z.string(),
+  threat: z.string(),
+  requirement: z.string().nullable(),
+  /** Relative to the run directory. */
+  test_file: relativePath,
+  expected: z.string(),
+  observed: z.string(),
+  rerun: attackRerunSchema.nullable(),
+  skeptic: attackJudgementSchema.nullable(),
+  status: z.enum(ATTACK_FINDING_STATUSES),
+  /** Oldest first; the latest entry is the current label. */
+  labels: z.array(attackLabelSchema),
+})
+
+/** `<run>/attack.json` as the controller writes it, or the export's `attack` section (Appendix A, plus the export's `pending`). */
+export const attackRecordSchema = z.object({
+  version: z.literal('1.0.0'),
+  run_id: attackText,
+  candidate_commit: attackText.nullable(),
+  settings: attackSettingsSchema,
+  status: z.enum(ATTACK_PASS_STATUSES),
+  started_at: attackTime.nullable(),
+  finished_at: attackTime.nullable(),
+  error: z.string().nullable(),
+  attackers: z.array(attackAttackerSchema),
+  findings: z.array(attackFindingSchema),
+})
+
+/**
+ * The attack pass's record, served at `.../runs/{run_id}/attack` (1.8.0): the record's own fields plus where it was read,
+ * `live` (`<run>/attack.json`, rewritten while the pass runs) or `export` (the export's `attack` section, the fallback).
+ */
+export const attackResultSchema = attackRecordSchema.extend({
+  contract_version: z.literal('1.8.0'),
+  node_id: z.literal('attack'),
+  source: z.enum(['live', 'export']),
+})
+
 export const schemas = {
   projectList: z.strictObject({ projects: z.array(projectSchema) }),
   workflowList: z.strictObject({ workflows: z.array(definitionSchema) }),
@@ -538,6 +676,7 @@ export const schemas = {
   reviewResult: reviewResultSchema,
   runInputs: runInputsSchema,
   sidecarLedger: sidecarLedgerSchema,
+  attackResult: attackResultSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>
@@ -559,6 +698,11 @@ export type SidecarFinding = z.infer<typeof sidecarFindingSchema>
 export type SidecarMessage = z.infer<typeof sidecarMessageSchema>
 export type SidecarPass = z.infer<typeof sidecarPassSchema>
 export type SidecarEscalation = z.infer<typeof sidecarEscalationSchema>
+export type AttackRecord = z.infer<typeof attackRecordSchema>
+export type AttackResult = z.infer<typeof attackResultSchema>
+export type AttackAttacker = z.infer<typeof attackAttackerSchema>
+export type AttackFinding = z.infer<typeof attackFindingSchema>
+export type AttackLabel = z.infer<typeof attackLabelSchema>
 
 export function validateDefinition(input: unknown): WorkflowDefinition {
   const definition = definitionSchema.parse(input)
@@ -708,4 +852,30 @@ export function validateSidecarLedger(input: unknown): SidecarLedger {
   unique(ledger.messages.map(message => message.id), 'message ids')
   unique(ledger.passes.map(pass => pass.n), 'pass numbers')
   return ledger
+}
+
+const SEVERITY_RANK: Record<(typeof ATTACK_SEVERITIES)[number], number> = { P0: 0, P1: 1, P2: 2 }
+
+/**
+ * The served record's cross-field rules (Appendix A): unique finding ids and attacker ids, a re-run's reason null exactly when
+ * it reproduced, a skeptic's severity never above its finding's, and a `pending` pass that has run nothing yet. Like the
+ * engine's schema it resolves no reference (a finding's `attacker` is not looked up).
+ */
+export function validateAttackResult(input: unknown): AttackResult {
+  const result = attackResultSchema.parse(input)
+  const unique = (values: readonly string[], what: string) => {
+    if (new Set(values).size !== values.length) throw new Error(`Duplicate ${what}`)
+  }
+  unique(result.findings.map(finding => finding.id), 'finding ids')
+  unique(result.attackers.map(attacker => attacker.id), 'attacker ids')
+  for (const finding of result.findings) {
+    if (finding.rerun !== null && (finding.rerun.status === 'reproduced') !== (finding.rerun.reason === null)) {
+      throw new Error(`Finding ${finding.id}: a re-run has a reason exactly when it did not reproduce`)
+    }
+    if (finding.skeptic !== null && SEVERITY_RANK[finding.skeptic.severity] < SEVERITY_RANK[finding.severity]) {
+      throw new Error(`Finding ${finding.id}: the skeptic's severity ${finding.skeptic.severity} is above the finding's ${finding.severity}`)
+    }
+  }
+  if (result.status === 'pending' && (result.attackers.length > 0 || result.findings.length > 0)) throw new Error('A pending attack pass has no attackers and no findings yet')
+  return result
 }

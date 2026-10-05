@@ -6,7 +6,8 @@ import * as examples from './examples.js'
 import type { RunInputs } from './v1.js'
 import { validateWorkerResult } from '../workflow/v1.js'
 import {
-  ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateDefinition, validateReviewResult,
+  ATTACK_ATTACKER_STATUSES, ATTACK_FINDING_STATUSES, ATTACK_PASS_STATUSES, ATTACK_RERUN_REASONS, ATTACK_SKEPTIC_STATUSES, attackRecordSchema,
+  ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateAttackResult, validateDefinition, validateReviewResult,
   validateRunDetail, validateRunInputs, validateSidecarLedger,
 } from './v1.js'
 
@@ -20,6 +21,7 @@ test('project examples and generated schemas agree', () => {
   validateReviewResult(examples.reviewResult)
   validateRunInputs(examples.runInputs)
   validateSidecarLedger(examples.sidecarLedger)
+  validateAttackResult(examples.attackResult)
 })
 
 test('rejects cyclic, dangling and duplicate graph nodes', () => {
@@ -532,5 +534,102 @@ test('sidecar ledger 1.6.0: Appendix B field rules, no format or referential che
     const value = base()
     mutate(value)
     assert.throws(() => validateSidecarLedger(value), label)
+  }
+})
+
+/** The record example of docs/PRD_ATTACK_PASS.md Appendix A, read from the PRD itself so the two cannot drift apart. */
+function appendixARecord(): unknown {
+  const prd = readFileSync(new URL('../../docs/PRD_ATTACK_PASS.md', import.meta.url), 'utf8')
+  const appendix = prd.slice(prd.indexOf('## Appendix A'))
+  const block = /```json\n([\s\S]*?)\n```/.exec(appendix)
+  assert.ok(block, 'Appendix A holds a JSON block')
+  return JSON.parse(block[1])
+}
+
+test('attack result 1.8.0: the Appendix A example validates verbatim as attackResult and is the committed example', () => {
+  const record = appendixARecord()
+  // Parsing keeps every field: nothing of Appendix A is dropped as unknown.
+  assert.deepEqual(attackRecordSchema.parse(record), record)
+  assert.deepEqual(record, examples.attackRecord)
+  const served = validateAttackResult({ ...(record as object), contract_version: '1.8.0', node_id: 'attack', source: 'export' })
+  assert.equal(served.source, 'export')
+  assert.equal(served.findings[0].status, 'verified')
+  assert.equal(served.findings[0].labels.at(-1)!.label, 'real')
+  assert.deepEqual(Object.keys(served.settings), ['angles', 'budget_usd', 'timeout_minutes', 'skeptic_budget_usd', 'skeptic_timeout_minutes', 'max_findings', 'requirements', 'secret_files'])
+})
+
+test('attack result 1.8.0: Appendix A field rules, every enum value, pending, no referential checks, unknown keys dropped but settings closed', () => {
+  const base = () => structuredClone(examples.attackResult)
+  const finding = (value: ReturnType<typeof base>, index: number) => value.findings[index] as Record<string, unknown>
+  // Accepted: every value of each enum, every nullable field null, empty arrays, an unresolved attacker, a lower skeptic
+  // severity, the export's pending record (G10) and failed record for an invalid file, and a key the engine adds.
+  const accepted: [string, (value: ReturnType<typeof base>) => void][] = [
+    ['every pass status', value => { for (const status of ATTACK_PASS_STATUSES) { if (status === 'pending') continue; value.status = status; validateAttackResult(value) } }],
+    ['every attacker status', value => { value.attackers = ATTACK_ATTACKER_STATUSES.map((status, index) => ({ ...value.attackers[0], id: `a${index}`, status })) }],
+    ['every skeptic status', value => { value.attackers = ATTACK_SKEPTIC_STATUSES.map((status, index) => ({ ...value.attackers[0], id: `a${index}`, skeptic: { ...value.attackers[0].skeptic, status } })) }],
+    ['every finding status', value => { value.findings = ATTACK_FINDING_STATUSES.map((status, index) => ({ ...value.findings[0], id: `A-${index + 1}`, status })) }],
+    ['every not-reproduced reason', value => { value.findings = ATTACK_RERUN_REASONS.map((reason, index) => ({ ...value.findings[1], id: `A-${index + 1}`, rerun: { ...value.findings[1].rerun!, reason } })) }],
+    ['every label and review_found', value => { value.findings[0].labels = [
+      { label: 'real', review_found: 'yes', note: 'seen', by: 'operator', at: 'x' }, { label: 'false', review_found: null, note: null, by: 'operator', at: 'y' },
+      { label: 'out-of-scope', review_found: 'no', note: null, by: 'operator', at: 'z' }] }],
+    ['a lower skeptic severity', value => { value.findings[0].skeptic!.severity = 'P2' }],
+    ['every nullable field null', value => {
+      Object.assign(value, { candidate_commit: null, started_at: null, finished_at: null, error: null })
+      Object.assign(value.attackers[0], { started_at: null, finished_at: null, error: null, session_id: null, cost_usd: null, summary: null })
+      Object.assign(value.attackers[0].skeptic, { started_at: null, finished_at: null, error: null, session_id: null, cost_usd: null })
+      Object.assign(value.findings[1], { requirement: null, rerun: null, skeptic: null })
+      value.findings[0].rerun!.exit_code = null
+    }],
+    ['any-shaped ids, commit, session and times', value => { value.candidate_commit = 'HEAD'; value.findings[0].id = 'finding one'; value.attackers[0].session_id = 'x'; value.started_at = 'yesterday' }],
+    ['an unresolved attacker', value => { value.findings[0].attacker = 'nobody' }],
+    ['an empty title, threat and times (only ids are non-empty)', value => { value.findings[0].title = ''; value.findings[0].threat = ''; value.findings[0].rerun!.at = ''; value.started_at = '' }],
+    ['empty arrays', value => { value.attackers = []; value.findings = []; value.settings.requirements = []; value.settings.secret_files = [] }],
+    ['the pending record', value => { Object.assign(value, { status: 'pending', candidate_commit: null, started_at: null, finished_at: null, attackers: [], findings: [] }) }],
+    ['the failed record of an invalid file', value => { Object.assign(value, { status: 'failed', error: 'attack.json is not valid: findings[0].status', attackers: [], findings: [] }) }],
+  ]
+  for (const [label, mutate] of accepted) {
+    const value = base()
+    mutate(value)
+    assert.doesNotThrow(() => validateAttackResult(value), label)
+  }
+  const extra = { ...base(), written_by: 'controller' }
+  assert.equal('written_by' in validateAttackResult(extra), false, 'a key the engine adds is dropped, not refused')
+  const refused: [string, (value: ReturnType<typeof base>) => void][] = [
+    ['another record version', value => { (value as Record<string, unknown>).version = '2.0.0' }],
+    ['another contract version', value => { (value as Record<string, unknown>).contract_version = '1.6.0' }],
+    ['another node', value => { (value as Record<string, unknown>).node_id = 'review' }],
+    ['an unknown source', value => { (value as Record<string, unknown>).source = 'cache' }],
+    ['an unknown pass status', value => { (value as Record<string, unknown>).status = 'timed_out' }],
+    ['an unknown attacker status', value => { (value.attackers[0] as Record<string, unknown>).status = 'not_run' }],
+    ['an unknown skeptic status', value => { (value.attackers[0].skeptic as Record<string, unknown>).status = 'refused' }],
+    ['an unknown angle', value => { (value.attackers[0] as Record<string, unknown>).angle = 'network' }],
+    ['an unknown finding severity', value => { finding(value, 0).severity = 'P3' }],
+    ['an unknown skeptic severity', value => { (value.findings[0].skeptic as Record<string, unknown>).severity = 'P3' }],
+    ['an unknown rerun status', value => { (value.findings[0].rerun as Record<string, unknown>).status = 'failed' }],
+    ['an unknown rerun reason', value => { (value.findings[1].rerun as Record<string, unknown>).reason = 'flaky' }],
+    ['an unknown verdict', value => { (value.findings[0].skeptic as Record<string, unknown>).verdict = 'unsure' }],
+    ['an unknown finding status', value => { finding(value, 0).status = 'reproduced' }],
+    ['an unknown label', value => { (value.findings[0].labels[0] as Record<string, unknown>).label = 'maybe' }],
+    ['an unknown review_found', value => { (value.findings[0].labels[0] as Record<string, unknown>).review_found = 'perhaps' }],
+    ['a label by the maintainer', value => { (value.findings[0].labels[0] as Record<string, unknown>).by = 'maintainer' }],
+    ['a skeptic severity above the finding\'s', value => { value.findings[0].skeptic!.severity = 'P0' }],
+    ['a reproduced re-run with a reason', value => { (value.findings[0].rerun as Record<string, unknown>).reason = 'passed' }],
+    ['a not-reproduced re-run without a reason', value => { (value.findings[1].rerun as Record<string, unknown>).reason = null }],
+    ['a settings key beyond the eight (L1)', value => { (value.settings as Record<string, unknown>).attack_check = { argv: ['vitest'] } }],
+    ['a settings key missing', value => { delete (value.settings as Record<string, unknown>).secret_files }],
+    ['an absolute test file', value => { value.findings[0].test_file = '/tmp/A-1.test.ts' }],
+    ['a null attacker skeptic', value => { (value.attackers[0] as Record<string, unknown>).skeptic = null }],
+    ['a null title', value => { finding(value, 0).title = null }],
+    ['an empty ref', value => { value.findings[0].ref = '' }],
+    ['an empty finding id', value => { value.findings[0].id = '' }],
+    ['a null labels list', value => { finding(value, 0).labels = null }],
+    ['duplicate finding ids', value => { value.findings[1].id = 'A-1' }],
+    ['duplicate attacker ids', value => { value.attackers.push({ ...value.attackers[0] }) }],
+    ['a pending pass with findings', value => { value.status = 'pending' }],
+  ]
+  for (const [label, mutate] of refused) {
+    const value = base()
+    mutate(value)
+    assert.throws(() => validateAttackResult(value), label)
   }
 })

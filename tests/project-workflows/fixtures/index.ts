@@ -10,13 +10,14 @@
  * After S1 no slice edits `fixtures.ts`, `mock.ts` or `seed.ts`: a slice changes only its own module. Modules import the
  * builders `fixtures.ts` exports and only types from here and from `seed.ts`, so no import cycle exists.
  */
-import type { ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import type { AttackResult, ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
-  artifactFiles, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
+  artifactFiles, attackResults, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
 import type { SeedContext } from '../seed.ts'
+import { uxAttack } from './ux-attack.ts'
 import { uxLaunch } from './ux-launch.ts'
 import { uxLists } from './ux-lists.ts'
 import { uxNode } from './ux-node.ts'
@@ -41,6 +42,8 @@ export type UxPayloads = {
   artifactFiles: Record<string, ArtifactFile[]>
   /** The review sidecar's served ledger per run (contract 1.6.0). */
   sidecarLedgers?: Record<string, SidecarLedger>
+  /** The attack pass's served record per run (contract 1.8.0). */
+  attackResults?: Record<string, AttackResult>
 }
 
 /** One registry workflow entry, as `seedCandidate` writes them. */
@@ -59,7 +62,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {
@@ -72,6 +75,7 @@ function mergePayloads(modules: readonly UxFixtureModule[]) {
     Object.assign(runInputs, payloads.runInputs)
     Object.assign(artifactFiles, payloads.artifactFiles)
     Object.assign(sidecarLedgers, payloads.sidecarLedgers)
+    Object.assign(attackResults, payloads.attackResults)
     // The mocks index these per run: a run without events, results or artifacts serves none rather than failing.
     for (const runId of Object.keys(payloads.runDetails ?? {})) {
       runEvents[runId] ??= []
