@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -102,6 +103,60 @@ class FeatureLaunchTests(unittest.TestCase):
         with patch("workflow.attack.default_secret_files", return_value=[]):
             _, plain, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
         self.assertNotIn("--attack", plain[0])
+
+    def attack_feature(self, attack_check: bool = True) -> None:
+        """features/project-workflows as a 2.5.0 feature with `attack` (and its policy's attack_check unless told otherwise)."""
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        manifest.update(version="2.5.0", attack={"angles": ["auth-funds"], "requirements": []})
+        save_json(folder / "feature.json", manifest)
+        policy = read_json(folder / "policy.json")
+        policy["version"] = "1.3.0"
+        if attack_check:
+            policy["attack_check"] = {"argv": ["sh", "{file}"], "timeout_seconds": 60}
+        save_json(folder / "policy.json", policy)
+        brief = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (folder / name).write_text(brief)
+        (folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        self.git("add", "."), self.git("commit", "-qm", "attack")
+
+    def dry_run(self, **env) -> subprocess.CompletedProcess:
+        """`python -m workflow launch ... --dry-run` as the operator runs it: a real process, HOME in the test's root."""
+        environment = {key: value for key, value in os.environ.items() if key != "WORKFLOW_ATTACK_SECRET_FILES"}
+        environment.update(HOME=str(self.root / "home"), MD_MANAGER_PROJECTS_CONFIG=str(self.root / "projects.json"), **env)
+        return subprocess.run([sys.executable, "-m", "workflow", "launch", "project-workflows", "--repo", str(self.repo),
+                               "--run-root", str(self.root / "runs"), "--dry-run"], cwd=TOOL, env=environment,
+                              capture_output=True, text=True, timeout=120)
+
+    def test_launch_dry_run_refuses_attack_without_attack_check(self):
+        """PRD 8: a 2.5.0 feature with `attack` whose policy has no attack_check is refused, by the command itself."""
+        self.attack_feature(attack_check=False)
+        result = self.dry_run()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("declares attack but its policy has no attack_check", result.stdout + result.stderr)
+        self.assertFalse((self.root / "runs").exists())  # Refused before any run directory or Git action.
+
+    def test_launch_dry_run_refuses_while_a_listed_secret_file_exists(self):
+        """PRD 4.2/8 and O13: the default wallet path under HOME, and a path WORKFLOW_ATTACK_SECRET_FILES adds, each refuse the
+        launch and its dry run, naming the file; with neither present the same dry run goes through."""
+        self.attack_feature()
+        wallet = self.root / "home" / ".config" / "vps-wallet.env"
+        wallet.parent.mkdir(parents=True)
+        wallet.write_text("KEY=not-a-real-key\n")
+        result = self.dry_run()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"Blocked: an attack pass needs {wallet} off this host", result.stdout + result.stderr)
+        wallet.unlink()
+        extra = self.root / "other-secret.env"
+        extra.write_text("x\n")
+        result = self.dry_run(WORKFLOW_ATTACK_SECRET_FILES=f"{self.root / 'absent.env'}:{extra}")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"Blocked: an attack pass needs {extra} off this host", result.stdout + result.stderr)
+        extra.unlink()
+        result = self.dry_run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "runs").exists())  # A dry run creates nothing either.
 
     def test_a_live_launch_adds_the_run_worktree_and_leaves_your_checkout_on_its_branch(self):
         branch, head = self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD")

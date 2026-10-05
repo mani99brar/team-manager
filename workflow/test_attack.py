@@ -449,6 +449,7 @@ class ChildHarness(unittest.TestCase):
         git(self.repo, "config", "user.email", "t@t")
         git(self.repo, "config", "user.name", "t")
         (self.repo / "app.txt").write_text("the candidate\n")
+        (self.repo / ".gitignore").write_text("build/\n")  # Where a policy setup leaves its (ignored) outputs.
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "candidate")
         self.commit = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
@@ -461,7 +462,7 @@ class ChildHarness(unittest.TestCase):
         self.control = self.tmp / "control.json"
         self.control.write_text("{}")
 
-    def build(self, angles=("auth-funds",), **over):
+    def build(self, angles=("auth-funds",), setup=(), **over):
         item = {"angles": list(angles), **SETTINGS, "requirements": [], "secret_files": [],
                 "requirement_docs": {}, "briefs": {a: {"path": str(attack.BUILTIN_BRIEFS / f"{a}.md"), "sha256": "x"} for a in angles},
                 "skeptic_brief": {"path": str(attack.BUILTIN_BRIEFS / "skeptic.md"), "sha256": "y"},
@@ -472,7 +473,7 @@ class ChildHarness(unittest.TestCase):
                 "nodes": {}, "conventions": None, "attack": item}
         save_json(self.run / "plan.json", plan)
         save_json(self.run / "policy.json", {"version": "1.3.0", "feature": "f", "independent_review": True,
-                  "integration_approval": True, "setup": [],
+                  "integration_approval": True, "setup": list(setup),
                   "workers": [{"node_id": "x", "role": "backend", "required_check_kinds": ["unit"], "owned_paths": ["a"],
                                "checks": [{"id": "c", "kind": "unit", "argv": ["true"], "timeout_seconds": 60, "scenarios": []}]}],
                   "attack_check": {"argv": ["sh", "{file}"], "timeout_seconds": 60}})
@@ -886,3 +887,175 @@ class PassLocks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- run 003 review P1s: setup in the worktrees, the guard on resume, recover(), a terminated child -------------------
+
+ONE_FINDING = {"id": "f1", "severity": "P1", "title": "t", "threat": "th", "requirement": "R",
+               "test_file": "attack-tests/t1.sh", "body": "exit 1\n", "expected": "e", "observed": "o"}
+VERIFIED = {"id": "A-1", "verdict": "verified", "reason": "sound", "severity": "P1"}
+
+
+def alive(pid: int) -> bool:
+    """A live process (a zombie, already exited, counts as gone)."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def attack_events(run: Path) -> list:
+    return [e for e in (json.loads(line) for line in (run / "events.jsonl").read_text().splitlines() if line.strip())
+            if e["node"] == "attack"]
+
+
+class SetupInWorktrees(ChildHarness):
+    """The policy's setup runs in both attack worktrees before the attacker (PRD 4.3/4.4), its logs land in `<run>/attack/`,
+    and a setup that was interrupted runs again when the child resumes."""
+
+    SETUP = [{"argv": ["sh", "-c", "mkdir -p build && echo ready > build/out"], "timeout_seconds": 60}]
+
+    def test_setup_runs_in_both_worktrees_and_the_pass_verifies(self):
+        self.build(setup=self.SETUP)
+        self.set_control(attacker={"findings": [ONE_FINDING]}, skeptic={"verdicts": [VERIFIED]})
+        record = self.run_child()
+        self.assertEqual(record["status"], "succeeded", record.get("error"))
+        self.assertEqual(record["findings"][0]["status"], "verified")
+        for name in ("worktree", "rerun"):
+            self.assertTrue((self.run / "attack" / f"setup-{name}-0.log").is_file())
+            self.assertTrue((self.run / "attack" / f"setup-{name}.done").is_file())
+        # The reset before each re-run keeps ignored setup outputs ([L10]).
+        self.assertEqual((self.tmp / "attack" / "rerun" / "build" / "out").read_text(), "ready\n")
+        validate_schema("attack", record)
+
+    def test_an_interrupted_setup_runs_again_on_resume(self):
+        self.build(setup=self.SETUP)
+        self.set_control(attacker={"findings": [ONE_FINDING]}, skeptic={"verdicts": [VERIFIED]})
+        calls = []
+        original = attack.run_setup
+
+        def interrupted_once(policy, worktree, log_dir, env, prefix="setup"):
+            calls.append(Path(worktree).name)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            return original(policy, worktree, log_dir, env, prefix=prefix)
+        with mock.patch.dict(os.environ, self.env(), clear=True), mock.patch.object(attack, "run_setup", interrupted_once):
+            with self.assertRaises(KeyboardInterrupt):
+                attack.AttackChild(self.run).run()
+            self.assertEqual(read_json(self.run / "attack.json")["status"], "running")
+            attack.AttackChild(self.run).run()
+        self.assertEqual(calls, ["worktree", "worktree", "rerun"])
+        self.assertEqual(read_json(self.run / "attack.json")["findings"][0]["status"], "verified")
+
+
+class SecretGuardOnResume(ChildHarness):
+    """PRD 4.2 and O13: the pinned secret-file list is checked again whenever the child starts, a resumed one included, and
+    before each angle; a file that reappeared refuses the pass and nothing more runs."""
+
+    def test_a_secret_file_that_reappears_refuses_the_resumed_pass(self):
+        secret = self.tmp / "wallet.env"
+        self.build(secret_files=[str(secret)])
+        self.set_control(attacker={"findings": [ONE_FINDING]}, skeptic={"verdicts": [VERIFIED]})
+        original = attack.AttackChild.rerun_findings
+
+        def interrupted(child, record, angle):
+            raise KeyboardInterrupt
+        with mock.patch.dict(os.environ, self.env(), clear=True):
+            with mock.patch.object(attack.AttackChild, "rerun_findings", interrupted), self.assertRaises(KeyboardInterrupt):
+                attack.AttackChild(self.run).run()
+            self.assertIsNone(read_json(self.run / "attack.json")["findings"][0]["rerun"])  # The re-run is still owed.
+            secret.write_text("KEY=not-a-real-key\n")  # The listed file reappears before the next controller resumes.
+            with mock.patch.object(attack.AttackChild, "rerun_findings", side_effect=AssertionError("re-ran")) as rerun:
+                attack.AttackChild(self.run).run()
+            rerun.assert_not_called()
+        self.assertIs(original, attack.AttackChild.rerun_findings)
+        record = read_json(self.run / "attack.json")
+        self.assertEqual(record["status"], "refused")
+        self.assertIn(str(secret), record["error"])
+        self.assertIsNone(record["findings"][0]["rerun"])  # Kept as recorded: nothing re-ran.
+        self.assertEqual(record["attackers"][0]["skeptic"]["status"], "not_run")
+        self.assertFalse((self.tmp / "attack" / "rerun" / "attack-tests" / "t1.sh").exists())
+        events = attack_events(self.run)
+        self.assertEqual((events[-2]["status"], events[-2]["message"]), ("interactive", f"Attack pass refused: {secret} exists on this host"))
+        self.assertEqual((events[-1]["status"], events[-1]["message"]), ("succeeded", "Attack pass ended: refused"))
+        validate_schema("attack", record)
+
+    def test_a_secret_file_that_appears_between_angles_refuses_the_second_attacker(self):
+        secret = self.tmp / "wallet.env"
+        self.build(angles=("inputs-state", "auth-funds"), secret_files=[str(secret)])
+        self.set_control(attacker={"findings": []}, skeptic={"verdicts": []})
+        original = attack.AttackChild.run_attacker
+
+        def then_the_file_appears(child, record, angle, n):
+            attacker = original(child, record, angle, n)
+            secret.write_text("KEY=not-a-real-key\n")
+            return attacker
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                mock.patch.object(attack.AttackChild, "run_attacker", then_the_file_appears):
+            attack.AttackChild(self.run).run()
+        record = read_json(self.run / "attack.json")
+        self.assertEqual([(a["angle"], a["status"]) for a in record["attackers"]],
+                         [("inputs-state", "succeeded"), ("auth-funds", "refused")])
+        self.assertEqual(record["status"], "refused")
+        self.assertEqual(list(read_json(self.run / attack.JOBS)), ["inputs-state"])  # The second attacker never started.
+        self.assertEqual(attack_events(self.run)[-1]["message"], "Attack pass ended: refused")
+        validate_schema("attack", record)
+
+
+def attacker_entry(angle: str, status: str, skeptic: str = "not_run") -> dict:
+    return {"id": angle, "angle": angle, "status": status, "started_at": "2026-10-05T10:00:00Z", "finished_at": None,
+            "error": None, "session_id": f"s-{angle}", "cost_usd": None, "summary": None, "out_of_reach": [],
+            "skeptic": {"status": skeptic, "started_at": None, "finished_at": None, "error": None, "session_id": None, "cost_usd": None}}
+
+
+class Recover(ChildHarness):
+    """[L3], G7: a resumed child kills a recorded orphan (only through sidecar.kill_orphan's pid-and-session check) and
+    records an attacker or skeptic left running as failed (interrupted); nothing reruns it."""
+
+    def test_running_attacker_and_skeptic_become_failed_interrupted_and_orphans_are_killed(self):
+        plan = self.build(angles=("inputs-state", "auth-funds"))
+        record = attack.initial_record(plan, self.commit, "2026-10-05T10:00:00Z")
+        record["attackers"] = [attacker_entry("inputs-state", "running"), attacker_entry("auth-funds", "succeeded", skeptic="running")]
+        save_json(self.run / attack.JOBS, {"inputs-state": {"pid": 4242, "session_id": "sa"},
+                                           "auth-funds.skeptic": {"pid": 4343, "session_id": "sb"}})
+        with mock.patch("workflow.sidecar.kill_orphan") as kill:
+            attack.AttackChild(self.run).recover(record)
+        self.assertEqual(sorted(call.args for call in kill.call_args_list), [(4242, "sa"), (4343, "sb")])
+        saved = read_json(self.run / "attack.json")
+        first, second = saved["attackers"]
+        self.assertEqual((first["status"], first["error"]), ("failed", "interrupted"))
+        self.assertEqual((second["status"], second["skeptic"]["status"], second["skeptic"]["error"]), ("succeeded", "failed", "interrupted"))
+        validate_schema("attack", saved)
+
+
+class TerminatedChild(ChildHarness):
+    """[L3]: stopping the child (stop_child: SIGTERM to its process group) also ends its attacker job, which runs in its own
+    session; nothing is left running, the stop records nothing, and the next child records the attacker interrupted."""
+
+    def test_stop_child_leaves_no_attacker_process_and_resume_records_it_interrupted(self):
+        self.build()
+        self.set_control(attacker={"hang": True})
+        env = {**self.env(), "PYTHONPATH": str(ROOT)}
+        child = subprocess.Popen([sys.executable, "-m", "workflow.attack", str(self.run)], cwd=str(self.tmp), env=env,
+                                 start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        jobs = self.run / attack.JOBS
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (jobs.exists() and read_json(jobs).get("auth-funds")):
+            time.sleep(0.1)
+        attacker_pid = read_json(jobs)["auth-funds"]["pid"]
+        self.assertTrue(alive(attacker_pid))
+        attack.stop_child(self.run)
+        child.wait(timeout=30)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and alive(attacker_pid):
+            time.sleep(0.1)
+        self.assertFalse(alive(attacker_pid))
+        self.assertEqual(read_json(self.run / "attack.json")["attackers"][0]["status"], "running")  # The stop recorded nothing.
+        with mock.patch.dict(os.environ, self.env(), clear=True):
+            attack.AttackChild(self.run).run()
+        record = read_json(self.run / "attack.json")
+        self.assertEqual((record["attackers"][0]["status"], record["attackers"][0]["error"]), ("failed", "interrupted"))
+        self.assertEqual(record["status"], "succeeded")
+        validate_schema("attack", record)

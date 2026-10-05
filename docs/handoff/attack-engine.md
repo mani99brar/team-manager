@@ -235,3 +235,29 @@ output, prompt independence, `close_or_wait` [L9]/[L4]/Ctrl-C, the `_review_deci
   the fix-8 launch wiring test in `test_feature_launch`, the preflight-guard test `test_pipeline.PreflightAttackGuard`,
   `test_pipeline` (67+1), the targeted set (`test_attack test_export test_portable test_guardrails test_sidecar
   test_feature_launch`, 289 tests) and the whole `workflow.run_tests` (905/906 tests) pass; `npm run test:contracts` is 26/0.
+
+### Run 003 review follow-up: a direct fix (2026-10-05, by the operator's maintainer, not a workflow run)
+
+Run 003's reviewers blocked the candidate `7fb2f5b` with four P1s. On the operator's instruction, two real bugs were fixed
+directly on branch `fix/attack-pass-003-p1s` (from `7fb2f5b`), not through a new workflow run:
+
+- **Every fresh pass failed at its first setup command** (general P1). `ensure_worktrees` ran the policy's `setup` before it
+  created `<run>/attack/`, so `checks.execute` raised `FileNotFoundError` opening `attack/setup-0.log` and the pass was
+  recorded `failed` before any attacker started. Fix: create `self.attack_dir` first; give each worktree its own setup log
+  (`setup-<worktree|rerun>-<n>.log`) and a `setup-<name>.done` marker, so a setup that failed or was interrupted runs again
+  on resume. Covered by `test_attack.SetupInWorktrees` (two tests).
+- **A resumed child skipped the secret-file guard** (coverage P1, PRD 4.2). The check ran only `if record is None`. Fix: it
+  runs on every start (fresh or resumed) before any setup/attacker/re-run, and `process_angle` checks again before each
+  angle; a listed file that reappeared records the pass `refused` (every not-yet-started attacker `refused`, nothing re-run)
+  with its closing event. New `Refused` exception. Covered by `test_attack.SecretGuardOnResume` (two tests).
+
+The two remaining P1s are test-coverage gaps, not code defects (the fixes the reviewers checked are correct): the
+pipeline-driven approved+blocked end-to-end test for `_review_decided_at`/tally (general P1-2, already a disclosed deviation
+with `close_or_wait`/`TallyRuntime`/`ReviewDecidedAt` unit coverage), and the `recover()`/`kill_orphan`/SIGTERM paths
+(general P1-3). The latter are now covered too: `test_attack.Recover` and `test_attack.TerminatedChild` (a real child whose
+hanging attacker job is killed by `stop_child`, then recorded `interrupted` on resume). The pipeline-driven end-to-end test
+remains the one open item, recorded here and in decisions.md [L19].
+
+Gates for this fix: `workflow.test_attack` + `workflow.test_feature_launch` (108 tests) pass; the two new secret/setup
+classes fail for the right reasons on the pre-fix `attack.py` (setup: `FileNotFoundError` on `attack/setup-0.log`; guard:
+the resumed pass re-ran instead of refusing, and the second angle's attacker ran). Full `workflow.run_tests` below.

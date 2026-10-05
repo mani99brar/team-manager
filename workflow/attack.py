@@ -462,6 +462,14 @@ def skeptic_prompt(directory: Path, plan: dict, angle: str, findings: list[dict]
 
 # ---- The child: one pass over the frozen candidate ------------------------------------------------------------------
 
+class Refused(Exception):
+    """A listed secret file exists on the host: the pass stops and is recorded `refused` (PRD 4.2)."""
+
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.path = path
+
+
 class JobFailed(RuntimeError):
     """A print job that did not return a valid result of its own session."""
 
@@ -488,11 +496,12 @@ def reset_worktree(worktree: Path) -> None:
         raise RuntimeError(f"Attack worktree not clean after reset: {status.stdout.strip()[:500]}")
 
 
-def run_setup(policy: dict, worktree: Path, log_dir: Path, env: dict) -> None:
-    """The policy's setup in a worktree (checks.execute), as run_lane_commands does; a non-zero exit raises."""
+def run_setup(policy: dict, worktree: Path, log_dir: Path, env: dict, prefix: str = "setup") -> None:
+    """The policy's setup in a worktree (checks.execute), as run_lane_commands does; a non-zero exit raises. Each command's
+    log is `<log_dir>/<prefix>-<index>.log`; the caller creates `log_dir`."""
     from .checks import execute
     for index, setup in enumerate(policy.get("setup", [])):
-        log = log_dir / f"setup-{index}.log"
+        log = log_dir / f"{prefix}-{index}.log"
         code, _, _ = execute(setup["argv"], worktree, log, setup["timeout_seconds"], env)
         if code != 0:
             raise RuntimeError(f"Attack worktree setup {index} failed with exit {code}")
@@ -564,11 +573,16 @@ class AttackChild:
         self.claim()
         try:
             self.recover(record)  # Inside the guard: a failure here still ends the pass `failed`, never silently.
-            if record is None:
-                present = secret_file_present(self.item["secret_files"])
-                if present is not None:
+            # The pinned secret-file list is checked on every start, a resumed one included (PRD 4.2: "when a listed file
+            # reappeared"), before any setup, attacker, re-run or skeptic runs; process_angle checks again before each angle.
+            present = secret_file_present(self.item["secret_files"])
+            if present is not None:
+                if record is None:
                     self.refuse(present)
-                    return
+                else:
+                    self.refuse_resumed(record, present)
+                return
+            if record is None:
                 record = self.start_record()
             # The overall bound counts from the pass's own started_at (S-12), so a resumed child does not reset it.
             self.deadline = (epoch(record.get("started_at")) or self.started) + overall_bound_seconds(self.plan, setup_seconds(self.policy))
@@ -579,6 +593,8 @@ class AttackChild:
                 if not self.angle_complete(record, angle):
                     self.process_angle(record, angle)
             self.finish(record)
+        except Refused as refusal:
+            self.refuse_resumed(record, refusal.path)
         except KeyboardInterrupt:
             raise  # The controller interrupted the child: record nothing; the next controller resumes.
         except BaseException as error:
@@ -629,6 +645,23 @@ class AttackChild:
         self.event("interactive", f"Attack pass refused: {path} exists on this host")
         self.event("succeeded", "Attack pass ended: refused")
 
+    def refuse_resumed(self, record: dict, path: str) -> None:
+        """A listed secret file appeared after the pass started: nothing more runs. What was recorded stays (a finding still
+        owing its re-run keeps `rerun: null`), every angle with no attacker yet gets one recorded `refused`, and the pass ends
+        `refused` with its closing event."""
+        now = iso(self.clock())
+        reason = f"{path} exists on this host"
+        for angle in self.item["angles"]:
+            if self._attacker(record, angle) is None:
+                record["attackers"].append({"id": angle, "angle": angle, "status": "refused", "started_at": None, "finished_at": now,
+                                            "error": reason, "session_id": None, "cost_usd": None, "summary": None,
+                                            "out_of_reach": [], "skeptic": {"status": "not_run", "started_at": None,
+                                            "finished_at": None, "error": None, "session_id": None, "cost_usd": None}})
+        record.update(status="refused", finished_at=now, error=reason)
+        self.save(record)
+        self.event("interactive", f"Attack pass refused: {reason}")
+        self.event("succeeded", "Attack pass ended: refused")
+
     def fail(self, record: dict | None, error: BaseException) -> None:
         record = record if record is not None else pending_record(self.plan)  # recover/start_record failed before a record existed.
         record["status"] = "failed"
@@ -662,17 +695,23 @@ class AttackChild:
 
     # -- worktrees --
     def ensure_worktrees(self) -> None:
+        """Both worktrees at the candidate commit, each set up once. The setup logs go to `<run>/attack/`, so that directory
+        exists before the first setup command opens its log. A setup that failed or was interrupted leaves no marker, so a
+        resumed child runs it again in the worktree it already added."""
         from .worktrees import git_worktree
         env, _ = _check_env()
         bundle = read_json(self.directory / "review-bundle.json")
         commit = bundle["candidate_commit"]
         repo = self.plan["repository"]
+        self.attack_dir.mkdir(parents=True, exist_ok=True)
         for path in (self.worktree, self.rerun_worktree):
             path.parent.mkdir(parents=True, exist_ok=True)
             if not (path / ".git").exists():
                 git_worktree(repo, "add", "--detach", str(path), commit)
-                run_setup(self.policy, path, self.directory / "attack", env)
-        self.attack_dir.mkdir(parents=True, exist_ok=True)
+            done = self.attack_dir / f"setup-{path.name}.done"
+            if not done.exists():
+                run_setup(self.policy, path, self.attack_dir, env, prefix=f"setup-{path.name}")
+                done.write_text(iso(self.clock()) + "\n")
 
     # -- one angle --
     def recover(self, record: dict | None) -> None:
@@ -704,6 +743,9 @@ class AttackChild:
     def process_angle(self, record: dict, angle: str) -> None:
         """Run whatever the angle still owes ([L15], G7): the attacker if it has none yet, then the owed re-runs and the
         skeptic. A resumed child never reruns an interrupted attacker; it runs only what is still owed."""
+        present = secret_file_present(self.item["secret_files"])
+        if present is not None:  # Checked before each angle's jobs and re-runs, not only when the child started.
+            raise Refused(present)
         n = _next_job_number(self.directory)
         attacker = self._attacker(record, angle)
         if attacker is None:
