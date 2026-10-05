@@ -64,6 +64,7 @@ Run attack-pass-003, design challenge attempt 1 (2026-10-05):
 - [L15] Concern 2 (P1), settles run 003's fix 1: no new key or enum value in `attack.json`; `rerun: null` marks a re-run still owed, and a resumed child recovers each finding's test path from the attacker's output on disk.
 - [L16] Run 003 also closes two of run 002's P2 findings: a reported `test_file` is accepted only as a regular file under an `attack-tests` directory in the attack worktree, reached without following a symlink; and preflight decides on an attack pass from `plan.attack`, not from the policy's `attack_check`.
 - [L17] Concern 8 (P2): run 003 is a follow-up of run 002 under O16's plan (carry the build through to integration), so it keeps O16's run-scoped worker pin, `--worker-model claude-opus-4-8`; the judges stay on Opus 5.5. The operator's note of 2026-10-05 for run 003 asked for the same.
+- [L18] Attempt 2, concern 1 (P1), settles fixes 2 and 3: the review's decision time is the latest non-null `reviewers[].accepted_at` in `review.json`'s content, never the file's mtime or a `review` event; the [L12] flag and the added runtime (`max(0, attack finished_at − decision time)`) both use it.
 
 ## Deferred
 
