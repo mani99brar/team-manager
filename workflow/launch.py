@@ -21,7 +21,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
-from . import sidecar
+from . import attack, sidecar
 from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
 
@@ -31,8 +31,10 @@ TOOL = Path(__file__).resolve().parents[1]
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "reviewers"
 BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-# The feature version that adds `critical` (C51): the operator confirmed at the grill that the feature's code is critical;
-# and `tryout` (C7): a user-facing feature the operator tries before the merge to main.
+# The feature versions that may declare `critical` (C51): the operator confirmed at the grill that the feature's code is
+# critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
+# keeps both. The migration hint for an earlier feature with a browser check names the version it should move to.
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0"})
 CRITICAL_VERSION = "2.4.0"
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
@@ -167,6 +169,7 @@ def load_feature(folder: Path) -> dict:
         raise ValueError(LEGACY_FEATURE_MESSAGE)
     if isinstance(manifest, dict):
         sidecar.declared(manifest)
+        attack.declared(manifest)  # Refuses `attack` on a version before 2.5.0, naming the key, before schema validation.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -175,10 +178,10 @@ def load_feature(folder: Path) -> dict:
         validate_node_id(node)
     if not is_guarded(manifest) and ("challenge" in manifest or "prd" in manifest):
         raise ValueError("feature.json challenge and prd need version 2.2.0")
-    if "critical" in manifest and manifest["version"] != CRITICAL_VERSION:
-        raise ValueError(f"feature.json critical needs version {CRITICAL_VERSION} (this file is {manifest['version']})")
-    if "tryout" in manifest and manifest["version"] != CRITICAL_VERSION:
-        raise ValueError(f"feature.json tryout needs version {CRITICAL_VERSION} (this file is {manifest['version']})")
+    if "critical" in manifest and manifest["version"] not in CRITICAL_VERSIONS:
+        raise ValueError(f"feature.json critical needs version {CRITICAL_VERSION} or later (this file is {manifest['version']})")
+    if "tryout" in manifest and manifest["version"] not in CRITICAL_VERSIONS:
+        raise ValueError(f"feature.json tryout needs version {CRITICAL_VERSION} or later (this file is {manifest['version']})")
     reviewers = manifest.get("reviewers")
     if reviewers is not None:
         if manifest["version"] == "2.0.0":
@@ -277,6 +280,17 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     # 2.3.0: the review sidecar's brief, refused here like a reviewer's, before any Git action.
     review_sidecar = sidecar.declared(manifest)
     sidecar_brief = sidecar.brief_path(folder, review_sidecar["prompt"]) if review_sidecar else None
+    # 2.5.0: the attack pass. The secret-file guard and the policy's attack_check are refused here, before any Git action
+    # (the dry run included; pipeline preflight checks the guard again). The list is read once and pinned at prepare.
+    review_attack = attack.declared(manifest)
+    if review_attack is not None:
+        present = attack.secret_file_present(attack.default_secret_files())
+        if present is not None:
+            raise ValueError(f"Blocked: an attack pass needs {present} off this host: move it, then launch again")
+        if "attack_check" not in policy:
+            raise ValueError("feature.json declares attack but its policy has no attack_check (policy 1.3.0, "
+                             "contracts/workflow/verification.schema.json); add it, then launch again")
+        attack.validate_attack_check(policy["attack_check"])
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     tryout = manifest.get("tryout") is True
@@ -301,7 +315,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     elif "tryout" not in manifest:
         browser = [node for node in selected if any(check["kind"] == "browser" for worker in policy["workers"] if worker["node_id"] == node
                                                     for check in worker["checks"])]
-        if browser and manifest["version"] == CRITICAL_VERSION:
+        if browser and manifest["version"] in CRITICAL_VERSIONS:
             notes.append(f"Lane {', '.join(browser)} has a browser check, and feature.json says nothing of a tryout: set \"tryout\": true "
                          "(feature.json 2.4.0) when you should try each run before the merge to main, or false when it is not user-facing.")
         elif browser:  # Earlier versions refuse the key: the note is a migration hint.
@@ -327,6 +341,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             rerooted.append(prd_path(repo, manifest["prd"]))
         if review_sidecar and not review_sidecar["prompt"].startswith(BUILTIN_PREFIX):
             rerooted.append(sidecar_brief)
+        if review_attack:  # The requirements documents, refused here like the PRD when not committed at HEAD (G5).
+            rerooted += [repo / rel for rel in review_attack["requirements"]]
     missing = untracked(repo, rerooted)
     if missing:
         raise ValueError(f"Not committed at HEAD (new, ignored or excluded): {', '.join(missing)}. The run's worktree holds only committed "
@@ -350,6 +366,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                    *(["--allow-untried", allow_untried, "--by", by] if allow_untried is not None else [])]
         preflight.extend(untried)
         prepare.extend(["--tryout", *(["--allow-untried", allow_untried, "--by", by] if allow_untried is not None else [])])
+    if review_attack is not None:
+        # Preflight decides on the attack pass from the feature's `attack` ([L16], run 003 fix 8), not from policy.attack_check.
+        preflight.append("--attack")
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
@@ -366,6 +385,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             builtin = review_sidecar["prompt"].startswith(BUILTIN_PREFIX)
             prepare.extend(["--sidecar-brief", str(sidecar_brief if builtin else in_source(sidecar_brief)),
                             "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
+        if review_attack:
+            prepare.extend(["--attack-settings", json.dumps(review_attack, sort_keys=True)])
     roles = {key: value for key, value in (roles or {}).items() if value is not None}
     pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
     for key, value in roles.items():
@@ -501,7 +522,8 @@ def main(argv=None):
         declared = [worker["node_id"] for worker in manifest["workers"]]
         challenge = is_guarded(manifest) and manifest.get("challenge", True) is True
         review_sidecar = sidecar.declared(manifest)
-        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge, sidecar=review_sidecar is not None)
+        entry = registry_entry(repo, args.feature, run_root.resolve(), declared, challenge=challenge, sidecar=review_sidecar is not None,
+                               attack=attack.declared(manifest) is not None)
         # Before 2.2.0 nothing is refused; the launch says so once, beside (not among) its notes.
         migration = migration_note(manifest)
         if args.dry_run:
@@ -523,6 +545,10 @@ def main(argv=None):
             if review_sidecar:
                 # What prepare pins as plan.sidecar (the brief's text in place of its path); a feature without one prints no key.
                 printed["sidecar"] = {**review_sidecar, "brief": str(sidecar.brief_path(feature_folder(repo, args.feature), review_sidecar["prompt"]))}
+            review_attack = attack.declared(manifest)
+            if review_attack:  # The pinned settings and the guard's result (PRD 4.2); a secret file present raises above.
+                printed["attack"] = {**review_attack, "secret_files": attack.default_secret_files(),
+                                     "guard": "clear: no listed secret file exists on this host"}
             print(json.dumps(printed, indent=2))
             for note in notes + ([migration] if migration else []):
                 print(f"Note: {note}", file=sys.stderr)

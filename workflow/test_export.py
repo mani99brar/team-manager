@@ -294,7 +294,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.7.0")
+        self.assertEqual(exported["version"], "1.8.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -323,7 +323,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.7.0")
+        self.assertEqual(exported["version"], "1.8.0")
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -344,7 +344,7 @@ class ExportRunTests(unittest.TestCase):
         from .test_sidecar import appendix_b
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual((exported["version"], exported["sidecar"]), ("1.7.0", None))
+        self.assertEqual((exported["version"], exported["sidecar"]), ("1.8.0", None))
         self.assertNotIn("sidecar", [node["node_id"] for node in exported["definition"]["nodes"]])
         plan = read_json(directory / "plan.json")
         plan["sidecar"] = {"prompt": "Brief", "cadence_seconds": 900, "pass_timeout_seconds": 600, "max_passes": 16, "max_messages_per_lane": 6}
@@ -368,7 +368,7 @@ class ExportRunTests(unittest.TestCase):
         """Export 1.7.0 (C52), additive: inputs.roles, inputs.controller and inputs.automatic.profile as prepare pinned them."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.7.0")
+        self.assertEqual(exported["version"], "1.8.0")
         self.assertFalse({"roles", "controller"} & set(exported["inputs"]))
         self.assertNotIn("profile", exported["inputs"]["automatic"])
         plan = read_json(directory / "plan.json")
@@ -387,7 +387,7 @@ class ExportRunTests(unittest.TestCase):
         """Within 1.7.0 (C7, C29): inputs.tryout {required, verdicts, allow_untried} from plan.tryout and tryout.json."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.7.0")
+        self.assertEqual(exported["version"], "1.8.0")
         self.assertNotIn("tryout", exported["inputs"])  # A plan from before C7.
         plan = read_json(directory / "plan.json")
         save_json(directory / "plan.json", {**plan, "tryout": False})
@@ -481,10 +481,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.7.0", result.stdout)
+        self.assertIn("version 1.8.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.7.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.8.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")
@@ -551,7 +551,7 @@ class CostTests(unittest.TestCase):
         # The workers stopped before cost was recorded: listed, unknown; nothing known gives no total.
         self.assertEqual([(item["node"], item["role"], item["transport"], item["cost_usd"]) for item in exported["nodes"]],
                          [("ui", "workers", "native", None), ("adapter", "workers", "native", None)])
-        self.assertEqual((exported["total_usd"], exported["by_role"]), (None, {"workers": None, "reviewers": None, "sidecar": None, "challenge": None}))
+        self.assertEqual((exported["total_usd"], exported["by_role"]), (None, {"workers": None, "reviewers": None, "sidecar": None, "challenge": None, "attack": None}))
         save_json(directory / "ui.cost.json", {"session_id": "uuuuuuuu-1111-4111-8111-111111111111", "cost_usd": 3.08, "duration_ms": 600000,
                                                "models": ["claude-opus-5-5"], "recorded_at": "2026-09-21T15:00:00Z"})
         save_json(directory / "review.stdout.json", print_output(1.25, 90000))
@@ -567,7 +567,7 @@ class CostTests(unittest.TestCase):
                           ("sidecar-2", "sidecar", "print", None, None), ("challenge-1", "challenge", "print", 0.5, 1000),
                           ("challenge-2", "challenge", "print", 0.25, 2000)])
         self.assertEqual(exported["nodes"][3]["models"], ["claude-sonnet-5"])
-        self.assertEqual(exported["by_role"], {"workers": 3.08, "reviewers": 1.25, "sidecar": 0.125, "challenge": 0.75})
+        self.assertEqual(exported["by_role"], {"workers": 3.08, "reviewers": 1.25, "sidecar": 0.125, "challenge": 0.75, "attack": None})
         self.assertEqual(exported["total_usd"], 5.205)
         written = (directory / "run-state.json").read_bytes()
         export_run(ExportRuntime(directory))

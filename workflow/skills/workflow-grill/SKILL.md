@@ -7,7 +7,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit
 
 # Workflow grill: settle a feature's decisions before launch
 
-You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0, 2.3.0 or 2.4.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
+You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0, 2.3.0, 2.4.0 or 2.5.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
 
 ## 1. Read before asking
 
@@ -69,6 +69,7 @@ None yet.
 - Quote file paths, check ids and lane ids exactly as the feature files spell them.
 - Record the critical-paths answer (§2) as an Operator decision together with the feature's R32 cell: critical or not, and defects hard or easy to spot. For example `[O1] Q1: AI workers may write validator/ (critical, defects hard to spot). Operator: "<the operator's words>".`
 - When the operator confirms the code is critical, set `"critical": true` in `feature.json` (version 2.4.0; raise an older version to 2.4.0 for it): an automatic run then stops after review for the operator's `approve`, whatever its profile. This key is the one edit you make outside `decisions.md`.
+- When the feature touches a listed critical path or the target has a security requirements document, ask once (PRD_ATTACK_PASS section 3): "Run an attack pass on this feature? Which angle (inputs-state, permissions-files or auth-funds)?" A yes sets `"attack": {"angles": [...], "requirements": [...]}` in `feature.json` (version 2.5.0; raise an older version to 2.5.0 for it), and its policy needs an `attack_check` (policy 1.3.0): at the review step one independent attacker per angle proves each stated requirement that does not hold with a failing test, report-only. It counts as one of the five.
 - Do not edit the tasks, the policy, the PRD or any code. If an answer means a task must change, say which file and what to change, and leave the edit to the operator.
 
 ## 4. Read back, then hand back

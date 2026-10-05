@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Attack pass record v1.0.0",
+  "description": "`<run>/attack.json` of a feature.json 2.5.0 run that declares `attack` (docs/PRD_ATTACK_PASS.md section 4 and Appendix A), written only by the controller (the attack child, `attack-pass`, `attack-label`): atomic replace under `<run>/attack.lock`, validated with `workflow.verification.validate_schema(\"attack\", ...)` before every write. Export 1.8.0 carries it as the top-level `attack` section (null for a run without `plan.attack`; a `pending` record while no attack.json exists yet; a `failed` record when attack.json does not validate). Hand-written; both this schema and the projects contract's `attackResult` close every object. `settings` is exactly the eight keys of Appendix A, built from `plan.attack`, never a copy of it (decisions [L1]). Field rules both validators share: ids, the commit and `session_id` are non-empty strings with no format check; the only nullable fields are `candidate_commit`, every `started_at`, `finished_at` and `error`, `session_id`, `cost_usd`, an attacker's `summary`, a finding's `requirement`, `rerun` and `skeptic`, `rerun.reason`, `rerun.exit_code`, a label's `note` and `review_found` (an attacker's `skeptic` object is never null); a skeptic's `severity` is never above its finding's; a finding's `test_file` is relative to the run directory; `output_tail` holds at most the last 200 lines; arrays may be empty; no referential check. The latest entry of `labels` is the current label. `$defs.output` is what an attacker job returns; `$defs.skeptic_output` is what the skeptic returns, keyed by the global finding id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "candidate_commit", "settings", "status", "started_at", "finished_at", "error", "attackers", "findings"],
+  "properties": {
+    "version": {"const": "1.0.0"},
+    "run_id": {"$ref": "#/$defs/id"},
+    "candidate_commit": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]},
+    "settings": {"$ref": "#/$defs/settings"},
+    "status": {"enum": ["running", "succeeded", "failed", "refused"]},
+    "started_at": {"$ref": "#/$defs/nullableId"},
+    "finished_at": {"$ref": "#/$defs/nullableId"},
+    "error": {"$ref": "#/$defs/nullableText"},
+    "attackers": {"type": "array", "items": {"$ref": "#/$defs/attacker"}},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1},
+    "relPath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"},
+    "nullableId": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1}]},
+    "text": {"type": "string", "maxLength": 4000},
+    "nullableText": {"oneOf": [{"type": "null"}, {"type": "string", "maxLength": 4000}]},
+    "severity": {"enum": ["P0", "P1", "P2"]},
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["angles", "budget_usd", "timeout_minutes", "skeptic_budget_usd", "skeptic_timeout_minutes", "max_findings", "requirements", "secret_files"],
+      "properties": {
+        "angles": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["inputs-state", "permissions-files", "auth-funds"]}},
+        "budget_usd": {"type": "number", "minimum": 1, "maximum": 50},
+        "timeout_minutes": {"type": "integer", "minimum": 5, "maximum": 180},
+        "skeptic_budget_usd": {"type": "number", "minimum": 1, "maximum": 20},
+        "skeptic_timeout_minutes": {"type": "integer", "minimum": 5, "maximum": 60},
+        "max_findings": {"type": "integer", "minimum": 1, "maximum": 20},
+        "requirements": {"type": "array", "maxItems": 10, "uniqueItems": true, "items": {"$ref": "#/$defs/relPath"}},
+        "secret_files": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "skeptic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "started_at", "finished_at", "error", "session_id", "cost_usd"],
+      "properties": {
+        "status": {"enum": ["not_run", "running", "succeeded", "failed", "timed_out"]},
+        "started_at": {"$ref": "#/$defs/nullableId"},
+        "finished_at": {"$ref": "#/$defs/nullableId"},
+        "error": {"$ref": "#/$defs/nullableText"},
+        "session_id": {"$ref": "#/$defs/nullableId"},
+        "cost_usd": {"oneOf": [{"type": "null"}, {"type": "number", "minimum": 0}]}
+      }
+    },
+    "attacker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "angle", "status", "started_at", "finished_at", "error", "session_id", "cost_usd", "summary", "out_of_reach", "skeptic"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "angle": {"enum": ["inputs-state", "permissions-files", "auth-funds"]},
+        "status": {"enum": ["running", "succeeded", "failed", "refused", "timed_out"]},
+        "started_at": {"$ref": "#/$defs/nullableId"},
+        "finished_at": {"$ref": "#/$defs/nullableId"},
+        "error": {"$ref": "#/$defs/nullableText"},
+        "session_id": {"$ref": "#/$defs/nullableId"},
+        "cost_usd": {"oneOf": [{"type": "null"}, {"type": "number", "minimum": 0}]},
+        "summary": {"$ref": "#/$defs/nullableText"},
+        "out_of_reach": {"type": "array", "items": {"$ref": "#/$defs/longText"}},
+        "skeptic": {"$ref": "#/$defs/skeptic"}
+      }
+    },
+    "longText": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "rerun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "exit_code", "duration_seconds", "output_tail", "at"],
+      "properties": {
+        "status": {"enum": ["reproduced", "not_reproduced"]},
+        "reason": {"enum": [null, "passed", "no_test", "setup_failed", "timed_out", "error"]},
+        "exit_code": {"oneOf": [{"type": "null"}, {"type": "integer"}]},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "output_tail": {"type": "string", "maxLength": 20000},
+        "at": {"$ref": "#/$defs/id"}
+      }
+    },
+    "findingSkeptic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "reason", "severity"],
+      "properties": {
+        "verdict": {"enum": ["verified", "refuted"]},
+        "reason": {"$ref": "#/$defs/longText"},
+        "severity": {"$ref": "#/$defs/severity"}
+      }
+    },
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "review_found", "note", "by", "at"],
+      "properties": {
+        "label": {"enum": ["real", "false", "out-of-scope"]},
+        "review_found": {"enum": [null, "yes", "no"]},
+        "note": {"$ref": "#/$defs/note"},
+        "by": {"const": "operator"},
+        "at": {"$ref": "#/$defs/id"}
+      }
+    },
+    "note": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 2000}]},
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ref", "attacker", "severity", "title", "threat", "requirement", "test_file", "expected", "observed", "rerun", "skeptic", "status", "labels"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "ref": {"$ref": "#/$defs/id"},
+        "attacker": {"$ref": "#/$defs/id"},
+        "severity": {"$ref": "#/$defs/severity"},
+        "title": {"$ref": "#/$defs/longText"},
+        "threat": {"$ref": "#/$defs/longText"},
+        "requirement": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/longText"}]},
+        "test_file": {"$ref": "#/$defs/relPath"},
+        "expected": {"$ref": "#/$defs/longText"},
+        "observed": {"$ref": "#/$defs/longText"},
+        "rerun": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/rerun"}]},
+        "skeptic": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/findingSkeptic"}]},
+        "status": {"enum": ["not_reproduced", "unjudged", "verified", "refuted"]},
+        "labels": {"type": "array", "items": {"$ref": "#/$defs/label"}}
+      }
+    },
+    "output": {
+      "description": "What an attacker job returns (`--json-schema`): `id` is the attacker's own (it becomes `ref`), `test_file` a path under `attack-tests/` in the attack worktree; at most `max_findings` findings (the bound is the controller's).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings", "out_of_reach"],
+      "properties": {
+        "summary": {"$ref": "#/$defs/nullableText"},
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "severity", "title", "threat", "requirement", "test_file", "expected", "observed"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "severity": {"$ref": "#/$defs/severity"},
+              "title": {"$ref": "#/$defs/longText"},
+              "threat": {"$ref": "#/$defs/longText"},
+              "requirement": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/longText"}]},
+              "test_file": {"$ref": "#/$defs/relPath"},
+              "expected": {"$ref": "#/$defs/longText"},
+              "observed": {"$ref": "#/$defs/longText"}
+            }
+          }
+        },
+        "out_of_reach": {"type": "array", "items": {"$ref": "#/$defs/longText"}}
+      }
+    },
+    "skeptic_output": {
+      "description": "What the skeptic returns, keyed by the global finding id (A-<n>).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdicts"],
+      "properties": {
+        "verdicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "verdict", "reason", "severity"],
+            "properties": {
+              "id": {"$ref": "#/$defs/id"},
+              "verdict": {"enum": ["verified", "refuted"]},
+              "reason": {"$ref": "#/$defs/longText"},
+              "severity": {"$ref": "#/$defs/severity"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

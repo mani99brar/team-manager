@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "run_id": "claims-007",
+  "candidate_commit": null,
+  "settings": {
+    "angles": [
+      "auth-funds"
+    ],
+    "budget_usd": 15,
+    "timeout_minutes": 60,
+    "skeptic_budget_usd": 5,
+    "skeptic_timeout_minutes": 20,
+    "max_findings": 8,
+    "requirements": [
+      "docs/security/requirements.md"
+    ],
+    "secret_files": [
+      "/home/agentops/.config/vps-wallet.env"
+    ]
+  },
+  "status": "pending",
+  "started_at": null,
+  "finished_at": null,
+  "error": null,
+  "attackers": [],
+  "findings": []
+}

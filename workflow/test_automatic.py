@@ -930,7 +930,7 @@ class ReviewCompletionTests(unittest.TestCase):
         # is not a line case (2) holds the candidate to; a file without the heading counts as a whole.
         tool = Path(__file__).resolve().parents[1]
         briefs = [tool / "workflow/prompts/reviewers/coverage.md", *sorted(tool.glob("features/*/reviewers/coverage.md"))]
-        self.assertEqual(len(briefs), 8)
+        self.assertEqual(len(briefs), 9)  # The bundled brief and the eight feature briefs (attack-pass is the eighth).
         for path in briefs:
             text = " ".join(path.read_text().split())
             first = " ".join(path.read_text().split("\n\n")[0].split())
@@ -997,7 +997,7 @@ class ReviewCompletionTests(unittest.TestCase):
         self.assertEqual(len(bundled), 1)
         self.assertTrue(bundled[0].endswith("stays case (2), P1."), bundled[0][-200:])
         features = sorted(tool.glob("features/*/reviewers/coverage.md"))
-        self.assertEqual(len(features), 7)
+        self.assertEqual(len(features), 8)  # attack-pass is the eighth feature with a coverage brief.
         for path in features:
             with self.subTest(brief=str(path.relative_to(tool))):
                 self.assertEqual(cases(path), bundled)

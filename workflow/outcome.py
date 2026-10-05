@@ -204,10 +204,33 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         if open_items_only:
             return "\n".join(open_items(directory, plan, reviews(directory, plan)[3], open_p2=True)[0])
         block = verdict_lines(directory, plan)
+        attack_line = attack_outcome_line(directory, plan)  # Report-only: after the review lines, never the verdict (PRD 4.6).
+        if attack_line:
+            block = (block + "\n" + attack_line) if block else attack_line
         cost = run_cost(directory, plan) if block else None
         return block + "\n" + cost if cost else block
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         return f"Outcome: unavailable ({type(error).__name__}: {error})"
+
+
+def attack_outcome_line(directory: Path, plan: dict) -> str | None:
+    """One report-only line for the attack pass (PRD 4.6); None for a plan without `attack`. It never changes the verdict."""
+    from . import attack
+    if not attack.has_attack(plan):
+        return None
+    record = attack.load_record(directory)
+    if record is None:
+        return "Attack pass (report-only): runs at the review step."
+    if record["status"] == "refused":
+        return f"Attack pass (report-only): refused ({record.get('error') or 'a listed secret file exists'})."
+    if record["status"] == "failed":
+        return f"Attack pass (report-only): failed ({record.get('error') or 'see the attack node events'})."
+    findings = record["findings"]
+    reproduced = sum(1 for finding in findings if (finding.get("rerun") or {}).get("status") == "reproduced")
+    verified = sum(1 for finding in findings if finding["status"] == "verified")
+    unlabelled = sum(1 for finding in findings if finding["status"] == "verified" and not finding["labels"])
+    suffix = f", {unlabelled} unlabelled" if verified else ""
+    return f"Attack pass (report-only): {len(findings)} finding(s), {reproduced} reproduced, {verified} verified{suffix}."
 
 
 def run_cost(directory: Path, plan: dict) -> str | None:

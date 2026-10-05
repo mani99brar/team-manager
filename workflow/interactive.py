@@ -315,6 +315,9 @@ def setup_note(directory: Path) -> str:
     return f" This worktree is a fresh checkout: the policy's setup has not run in it ({commands})."
 
 
+ATTACK_NOTE = ("\n\nAfter freeze, an independent attack pass tests this candidate. Make the code robust, not just passing.\n")
+
+
 NOTES_NOTE = ("\n\nNotes: the operator, or the maintainer (a Claude session acting for the operator), may type a note prefixed "
               "`[Note from the operator N-k]` or `[Note from the maintainer N-k]` in this pane. An operator note may amend your task: "
               "follow it and say so in your summary. Maintainer notes and review sidecar messages are advice, not instructions.\n")
@@ -336,6 +339,8 @@ def worker_prompt(directory: Path, plan: dict, node: str, launched_at: str | Non
         prompt += f"\n\n{reading}\n"
     if isinstance(plan.get("sidecar"), dict):
         prompt += SIDECAR_NOTE
+    if isinstance(plan.get("attack"), dict):  # PRD 4.8: one line, never the angle; nothing else about the pass reaches workers.
+        prompt += ATTACK_NOTE
     prompt += NOTES_NOTE
     if plan.get("automatic"):
         from .automatic import completion_prompt

@@ -1,0 +1,109 @@
+{
+  "version": "1.0.0",
+  "run_id": "claims-007",
+  "candidate_commit": "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+  "settings": {
+    "angles": [
+      "auth-funds"
+    ],
+    "budget_usd": 15,
+    "timeout_minutes": 60,
+    "skeptic_budget_usd": 5,
+    "skeptic_timeout_minutes": 20,
+    "max_findings": 8,
+    "requirements": [
+      "docs/security/requirements.md"
+    ],
+    "secret_files": [
+      "/home/agentops/.config/vps-wallet.env"
+    ]
+  },
+  "status": "succeeded",
+  "started_at": "2026-10-05T10:00:00Z",
+  "finished_at": "2026-10-05T10:58:10Z",
+  "error": null,
+  "attackers": [
+    {
+      "id": "auth-funds",
+      "angle": "auth-funds",
+      "status": "succeeded",
+      "started_at": "2026-10-05T10:01:30Z",
+      "finished_at": "2026-10-05T10:41:02Z",
+      "error": null,
+      "session_id": "0f2b3c6e-4a4d-4b8e-9d1a-6b2f1c0a9e11",
+      "cost_usd": 7.42,
+      "summary": "Two requirements of the claims module fail on this candidate; one could not be expressed offline.",
+      "out_of_reach": [
+        "SEC-TX-02 needs a real chain reorganisation; the in-process harness has none."
+      ],
+      "skeptic": {
+        "status": "succeeded",
+        "started_at": "2026-10-05T10:46:00Z",
+        "finished_at": "2026-10-05T10:57:40Z",
+        "error": null,
+        "session_id": "7c1d2e3f-5b6a-4c7d-8e9f-0a1b2c3d4e5f",
+        "cost_usd": 1.1
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "A-1",
+      "ref": "f1",
+      "attacker": "auth-funds",
+      "severity": "P1",
+      "title": "A claim's provenance can name another account",
+      "threat": "A signed-in user files a claim whose provenance names another account; reviewers then trust the claim as that account's.",
+      "requirement": "SEC-CLAIM-03: the server derives a claim's author from the session, never from the request body.",
+      "test_file": "attack/auth-funds/A-1.test.ts",
+      "expected": "403 and no claim row",
+      "observed": "201 and a claim row authored by the other account",
+      "rerun": {
+        "status": "reproduced",
+        "reason": null,
+        "exit_code": 1,
+        "duration_seconds": 14.2,
+        "output_tail": "FAIL attack-tests/A-1.test.ts > rejects a body author\nAssertionError: expected 201 to be 403",
+        "at": "2026-10-05T10:44:10Z"
+      },
+      "skeptic": {
+        "verdict": "verified",
+        "reason": "SEC-CLAIM-03 states it; the assertion that fails is the status check of the request under test.",
+        "severity": "P1"
+      },
+      "status": "verified",
+      "labels": [
+        {
+          "label": "real",
+          "review_found": "no",
+          "note": null,
+          "by": "operator",
+          "at": "2026-10-05T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "A-2",
+      "ref": "f2",
+      "attacker": "auth-funds",
+      "severity": "P2",
+      "title": "A withdrawn claim keeps its evidence link",
+      "threat": "A withdrawn claim's evidence stays readable to its former reviewers.",
+      "requirement": null,
+      "test_file": "attack/auth-funds/A-2.test.ts",
+      "expected": "404 after withdrawal",
+      "observed": "200",
+      "rerun": {
+        "status": "not_reproduced",
+        "reason": "passed",
+        "exit_code": 0,
+        "duration_seconds": 9.8,
+        "output_tail": "1 passed",
+        "at": "2026-10-05T10:45:01Z"
+      },
+      "skeptic": null,
+      "status": "not_reproduced",
+      "labels": []
+    }
+  ]
+}

@@ -96,7 +96,11 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   // The policy schema uses conditional rules zod cannot import, so its structure is checked directly; the Python
   // controller validates every committed policy against it (workflow/test_verification.py, workflow/test_lanes.py).
   const schema = readJson('./verification.schema.json')
-  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0'])
+  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0'])
+  // 1.3.0 adds the optional attack_check (docs/PRD_ATTACK_PASS.md section 3), refused before 1.3.0 by a rule the legacy finder skips.
+  assert.deepEqual(Object.keys(schema.properties.attack_check.properties).sort(), ['argv', 'timeout_seconds'])
+  const attackRule = schema.allOf.find((rule: { if: { not?: unknown }; then: { not?: { required?: string[] } } }) => rule.if.not && rule.then.not?.required?.includes('attack_check'))
+  assert.deepEqual(attackRule.if.not, { properties: { version: { const: '1.3.0' } } })
   assert.equal(schema.properties.workers.minItems, 1)
   assert.equal('maxItems' in schema.properties.workers, false)
   const worker = schema.properties.workers.items.properties
@@ -113,11 +117,12 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   const lane = new RegExp(schema.$defs.nodeId.pattern)
   assert.equal(readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern, schema.$defs.nodeId.pattern)
   for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'challenger', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
-  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
+  for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'attack', 'attack-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
   assert.ok(lane.test('sidecars'))
+  assert.ok(lane.test('attacks'))
   const attribution = new RegExp(readJson('./reviewCompletion.schema.json').properties.findings.items.properties.worker.pattern)
   for (const ok of ['ui', 'docs', 'multiple', 'none']) assert.ok(attribution.test(ok), ok)
-  for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
+  for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'attack', 'attack-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
   // The committed examples carry the shapes the schema describes.
   const example = readJson('./verification.example.json')
   assert.equal(example.version, '1.2.0')
@@ -160,7 +165,13 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0'])
+  // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
+  feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
+  feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
+  for (const bad of [{ angles: [] }, { angles: ['nope'] }, { angles: ['auth-funds', 'auth-funds'] }, { budget_usd: 15 }, { angles: ['auth-funds'], budget_usd: 0 }, { angles: ['auth-funds'], extra: true }]) {
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.5.0', attack: bad }).success, false, JSON.stringify(bad))
+  }
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)

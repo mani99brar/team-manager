@@ -25,6 +25,15 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "sidecar-pass":
         from .sidecar import pass_main
         pass_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "attack-pass":
+        from .attack import pass_main
+        pass_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "attack-label":
+        from .attack import label_main
+        label_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "attack-tally":
+        from .attack import tally_main
+        tally_main(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "repair":
         from .repair import repair_main
         repair_main(sys.argv[2:])

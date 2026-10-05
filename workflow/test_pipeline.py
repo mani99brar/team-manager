@@ -327,7 +327,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.7.0")
+            self.assertEqual(exported["version"], "1.8.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -948,6 +948,48 @@ def pipeline_cli(*arguments: str) -> tuple[int, str, str]:
         except SystemExit as exit_:
             code = exit_.code
     return code, out.getvalue(), err.getvalue()
+
+
+class PreflightAttackGuard(unittest.TestCase):
+    """Run 003 fix 8 ([L16]): preflight gates the attack guard on the `--attack` flag (from the feature's attack), not on
+    policy.attack_check. A policy that keeps attack_check without --attack is not guarded."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        for args in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True)
+        (self.repo / "f.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "c"], check=True)
+        self.policy = self.tmp / "policy.json"  # Outside the repo, so preflight's clean check still passes.
+        save_json(self.policy, {"version": "1.3.0", "feature": "f", "independent_review": True, "integration_approval": True,
+                  "workers": [{"node_id": "x", "role": "backend", "required_check_kinds": ["unit"], "owned_paths": ["a"],
+                               "checks": [{"id": "c", "kind": "unit", "argv": ["true"], "timeout_seconds": 60, "scenarios": []}]}],
+                  "attack_check": {"argv": ["sh", "{file}"], "timeout_seconds": 60}})
+        stub = self.tmp / "claude"  # --help lacks --max-budget-usd on purpose; everything else preflight needs is present.
+        stub.write_text('#!/bin/sh\ncase "$1" in\n  --version) echo stub;;\n'
+                        '  --help) echo "--bg --settings --safe-mode --tools --permission-mode --effort";;\n'
+                        '  auth) echo \'{"loggedIn": true}\';;\n  *) exit 2;;\nesac\n')
+        stub.chmod(0o755)
+        path = patch.dict(os.environ, {"PATH": f"{self.tmp}{os.pathsep}{os.environ.get('PATH', '')}"})
+        path.start()
+        self.addCleanup(path.stop)
+        secrets = patch("workflow.attack.default_secret_files", return_value=[])
+        secrets.start()
+        self.addCleanup(secrets.stop)
+
+    def test_the_attack_guard_fires_only_with_the_flag(self):
+        # Without --attack: the policy's attack_check does not trigger the budget guard; preflight passes.
+        code, out, err = pipeline_cli("preflight", str(self.repo), "--repo", str(self.repo), "--policy", str(self.policy))
+        self.assertEqual(code, 0, err)
+        self.assertIn('"preflight": "passed"', out)
+        # With --attack: the missing --max-budget-usd in claude --help refuses preflight (pipeline.py attack guard).
+        code, out, err = pipeline_cli("preflight", str(self.repo), "--repo", str(self.repo), "--policy", str(self.policy), "--attack")
+        self.assertEqual(code, 1)
+        self.assertIn("--max-budget-usd", err)
 
 
 class RecordTests(unittest.TestCase):

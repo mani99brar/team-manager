@@ -54,6 +54,14 @@ Within 1.7.0 (C49), `inputs.challenge`
 gains `history`: each archived attempt (`challenge-<n>.json`) with its status, decision time and P0/P1 concerns, left
 out when no earlier record was archived; and the top-level `costs` section (workflow/costs.py) lists what each session cost by role, with
 a run total, null where unknown.
+
+Version 1.8.0 (additive, docs/PRD_ATTACK_PASS.md Appendix A) records the attack pass of
+feature.json 2.5.0 runs: the top-level `attack` section is `<run>/attack.json` as written
+(contracts/workflow/attack.schema.json), a `pending` record while the plan has `attack` but
+no attack.json exists yet, a `failed` record when attack.json does not validate, and `null`
+for a run without `plan.attack` (every run prepared before). The definition of a run with an
+attack pass has the `attack` node right after `review` (same depends_on), and `approval`
+depends on both `review` and `attack`. Everything else is 1.7.0 unchanged.
 """
 from __future__ import annotations
 
@@ -67,11 +75,12 @@ from types import SimpleNamespace
 
 from .costs import costs_section
 from .guardrails import HOLD, MAX_QUESTIONS, decisions_text, has_challenge
+from .attack import export_section as attack_section, has_attack
 from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.7.0"
+EXPORT_VERSION = "1.8.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -86,13 +95,18 @@ GRAPH_TAIL = [
 CHALLENGE_NODE = {"node_id": "challenge", "label": "Design challenge", "kind": "review", "depends_on": []}
 # The workflow v1 node kinds are frozen: the sidecar, an agent beside the workers, is a `review` node like the challenge.
 SIDECAR_NODE = {"node_id": "sidecar", "label": "Review sidecar", "kind": "review", "depends_on": []}
+# The attack pass of feature.json 2.5.0: a `review` node right after `review`, with the same depends_on; `approval` then
+# depends on both (docs/PRD_ATTACK_PASS.md Appendix A). Only a plan with `attack` has it; every other graph is unchanged.
+ATTACK_NODE = {"node_id": "attack", "label": "Attack pass", "kind": "review", "depends_on": ["candidate"]}
 
 
-def graph_nodes(workers: list[str], challenge: bool = False, sidecar: bool = False) -> list[dict]:
+def graph_nodes(workers: list[str], challenge: bool = False, sidecar: bool = False, attack: bool = False) -> list[dict]:
     """The pinned graph of a run over `workers`: per-lane launch and verify fan-outs around the fixed tail.
 
     A 2.2.0 run with its design challenge starts with the `challenge` node, and every launch depends on it. A 2.3.0 run
     with a review sidecar has the `sidecar` node next (depending on the challenge, if any) and `handoff` depends on it last.
+    A 2.5.0 run with an attack pass has the `attack` node right after `review` (same depends_on), and `approval` depends on
+    both `review` and `attack`.
     """
     launches = [f"launch_{node}" for node in workers]
     verifies = [f"verify_{node}" for node in workers]
@@ -104,13 +118,18 @@ def graph_nodes(workers: list[str], challenge: bool = False, sidecar: bool = Fal
     nodes.append({"node_id": "handoff", "label": "Freeze worker handoffs", "kind": "prepare", "depends_on": launches + ([SIDECAR_NODE["node_id"]] if sidecar else [])})
     nodes.extend({"node_id": name, "label": f"Verify {node}", "kind": "verification", "depends_on": ["handoff"]} for node, name in zip(workers, verifies))
     for item in GRAPH_TAIL:
-        nodes.append({**item, "depends_on": list(item.get("depends_on", verifies))})
+        node = {**item, "depends_on": list(item.get("depends_on", verifies))}
+        if attack and node["node_id"] == "approval":
+            node["depends_on"] = ["review", ATTACK_NODE["node_id"]]
+        nodes.append(node)
+        if attack and node["node_id"] == "review":
+            nodes.append(dict(ATTACK_NODE, depends_on=list(ATTACK_NODE["depends_on"])))
     return nodes
 
 
-def definition(workers: list[str], previous: dict | None, challenge: bool = False, sidecar: bool = False) -> dict:
+def definition(workers: list[str], previous: dict | None, challenge: bool = False, sidecar: bool = False, attack: bool = False) -> dict:
     """A stored definition over the same nodes is kept verbatim (labels included); anything else is rebuilt."""
-    nodes = graph_nodes(workers, challenge, sidecar)
+    nodes = graph_nodes(workers, challenge, sidecar, attack)
     stored = (previous or {}).get("definition")
     if isinstance(stored, dict) and isinstance(stored.get("nodes"), list) and stored.get("name") and \
             [item.get("node_id") for item in stored["nodes"]] == [item["node_id"] for item in nodes]:
@@ -402,12 +421,13 @@ def export_state(runtime, state) -> dict:
                         "sha256": hashlib.sha256(packet_path.read_bytes()).hexdigest()})
     policy = getattr(runtime, "policy", None) or load_optional(runtime.directory / "policy.json")
     value = {"version": EXPORT_VERSION, "run_id": runtime.plan["run_id"], "base_commit": runtime.plan["base_commit"],
-             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan), has_sidecar(runtime.plan)),
+             "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan), has_sidecar(runtime.plan), has_attack(runtime.plan)),
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
              "verification_packets": packets,
              "review": review_section(runtime.directory),
              "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None,
              "sidecar": sidecar_section(runtime.directory, runtime.plan),
+             "attack": attack_section(runtime.directory, runtime.plan),
              "costs": costs_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous

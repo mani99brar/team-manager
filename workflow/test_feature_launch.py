@@ -74,6 +74,35 @@ class FeatureLaunchTests(unittest.TestCase):
     def git(self, *args: str) -> str:
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True).stdout.strip()
 
+    def test_a_feature_with_attack_passes_attack_to_preflight(self):
+        """Run 003 fix 8 ([L16]): launch tells preflight the feature declares an attack pass with `--attack`, so preflight
+        decides on the guard from the feature's `attack`, not from policy.attack_check. A feature without `attack` gets no flag."""
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        manifest.update(version="2.5.0", attack={"angles": ["auth-funds"], "requirements": []})
+        save_json(folder / "feature.json", manifest)
+        policy = read_json(folder / "policy.json")
+        policy["version"] = "1.3.0"  # attack_check is allowed only from policy 1.3.0.
+        policy["attack_check"] = {"argv": ["sh", "{file}"], "timeout_seconds": 60}
+        save_json(folder / "policy.json", policy)
+        brief = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (folder / name).write_text(brief)
+        (folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        self.git("add", "."), self.git("commit", "-qm", "attack")
+        with patch("workflow.attack.default_secret_files", return_value=[]):
+            _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        self.assertEqual(commands[0][3], "preflight")
+        self.assertIn("--attack", commands[0])
+        # A feature without attack gets no --attack, even if its policy still carried attack_check.
+        del manifest["attack"]
+        manifest["version"] = "2.4.0"
+        save_json(folder / "feature.json", manifest)
+        self.git("add", "."), self.git("commit", "-qm", "no attack")
+        with patch("workflow.attack.default_secret_files", return_value=[]):
+            _, plain, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        self.assertNotIn("--attack", plain[0])
+
     def test_a_live_launch_adds_the_run_worktree_and_leaves_your_checkout_on_its_branch(self):
         branch, head = self.git("symbolic-ref", "--short", "HEAD"), self.git("rev-parse", "HEAD")
         runs = self.root / "runs"

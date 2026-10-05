@@ -20,7 +20,7 @@ import os
 ACTORS = ("operator", "maintainer")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
 OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean", "tryout",
-                           "--allow-untried"})
+                           "--allow-untried", "attack-pass", "attack-label"})
 # What every printed next-step command carries: they are addressed to the operator.
 BY_OPERATOR = "--by operator"
 VIA_CLAUDE_CODE = " (via a Claude Code session)"

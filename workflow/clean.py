@@ -192,6 +192,13 @@ def run_worktrees(directory: Path, plan: dict) -> tuple[list[tuple[str, Path]], 
     candidates = [path for path in directory.glob("candidate*") if path.is_dir() and (path.name == "candidate" or path.name.removeprefix("candidate-").isdigit())]
     remove += [("candidate worktree", path) for path in sorted(candidates, key=lambda path: (len(path.name), path.name))]
     remove += [(label, directory / name) for label, name in RUN_WORKTREES if (directory / name).exists()]
+    # The attack pass's two worktrees live outside the run directory, at <runs root>/<run id>.attack/ (decisions [L2]).
+    attack = plan.get("attack") if isinstance(plan.get("attack"), dict) else None
+    if attack:
+        for label, key in (("attack worktree", "worktree"), ("attack re-run worktree", "rerun")):
+            path = Path(attack[key]) if isinstance(attack.get(key), str) else None
+            if path is not None and path.exists():
+                remove.append((label, path))
     kept += [f"{path}: a repair workspace, which may hold an uncommitted fix" for path in sorted(directory.glob("repair-workspace-*")) if path.is_dir()]
     source = source_checkout(directory)  # launch's own checkout of the run (C56); older runs have none.
     if source.exists():

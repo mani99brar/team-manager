@@ -32,8 +32,8 @@ TERMINAL = {"succeeded", "failed", "blocked"}
 # run files `challenge.json`, `challenge-<n>.*`, `challenge-inputs/` and `challenge-worktree/`; the review sidecar
 # (2.3.0) owns the node `sidecar` and the run files `sidecar.*`, `sidecar-<n>.*` and `sidecar-inputs/`.
 NODE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
-RESERVED_NODE_IDS = frozenset({"review", "candidate", "handoff", "approval", "integrate", "multiple", "none", "both", "challenge", "sidecar"})
-RESERVED_NODE_PREFIXES = ("launch_", "verify_", "candidate_", "review-", "challenge-", "sidecar-")
+RESERVED_NODE_IDS = frozenset({"review", "candidate", "handoff", "approval", "integrate", "multiple", "none", "both", "challenge", "sidecar", "attack"})
+RESERVED_NODE_PREFIXES = ("launch_", "verify_", "candidate_", "review-", "challenge-", "sidecar-", "attack-")
 # Plans pinned before lanes were configurable (every existing run) launched exactly these two.
 LEGACY_WORKERS = ("ui", "adapter")
 

@@ -1277,6 +1277,18 @@ def run_status(directory: Path) -> tuple[dict, str]:
         from .tryout import verdicts
         status["tryout"] = {"required": plan["tryout"] is True, "verdicts": verdicts(directory),
                             **({"allow_untried": plan["allow_untried"]} if "allow_untried" in plan else {})}
+    from . import attack
+    if attack.has_attack(plan):
+        attack_record = attack.load_record(directory)
+        if attack_record is None:
+            status["attack"] = "pending"
+        else:
+            verified = [f for f in attack_record["findings"] if f["status"] == "verified"]
+            if verified:
+                unlabelled = sum(1 for finding in verified if not finding["labels"])
+                status["attack"] = f"{len(verified)} verified, {unlabelled} unlabelled"
+            else:
+                status["attack"] = attack_record["status"]
     from .abandon import abandoned
     record = abandoned(directory)
     if record is not None:
@@ -1336,6 +1348,9 @@ def main():
                                                          "into plan.sidecar")
     parser.add_argument("--sidecar-settings", help="prepare --sidecar-brief: the sidecar's bounds as JSON (cadence_seconds, pass_timeout_seconds, "
                                                    "max_passes, max_messages_per_lane; omitted ones take the defaults)")
+    parser.add_argument("--attack-settings", help="prepare --guardrails: the attack pass (feature.json 2.5.0 attack) as JSON (angles and the "
+                                                  "budgets plus requirements); prepare pins plan.attack with the briefs, the attack_check and the "
+                                                  "requirement-document copies")
     parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
     parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
@@ -1344,10 +1359,15 @@ def main():
                                                               "prepare pins plan.tryout; preflight refuses it while 3 other features are untried (C29), prepare only pins")
     parser.add_argument("--allow-untried", metavar="REASON", help="preflight, prepare --tryout: launch past the untried-feature limit; prepare pins "
                                                                   "the reason as plan.allow_untried (--by operator)")
+    parser.add_argument("--attack", action="store_true", help="preflight: the feature declares an attack pass (feature.json 2.5.0 attack, [L16]); "
+                                                              "preflight then runs the secret-file guard and requires --max-budget-usd, from the "
+                                                              "feature's attack and not the policy's attack_check")
     add_actor_argument(parser)
     args = parser.parse_args()
     if args.action not in {"preflight", "prepare"} and (args.tryout or args.allow_untried is not None):
         parser.error("--tryout and --allow-untried apply to preflight and prepare only; the tryout is pinned at prepare")
+    if args.attack and args.action != "preflight":
+        parser.error("--attack applies to preflight only; the attack pass is pinned at prepare from the feature's attack")
     if args.allow_untried is not None and not args.tryout:
         parser.error("--allow-untried applies with --tryout: a launch that asks for no tryout is never held by the limit")
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
@@ -1403,6 +1423,13 @@ def main():
             auth = json.loads(run_claude(["claude", "auth", "status"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout)
             if auth.get("loggedIn") is not True:
                 raise ValueError("Claude is not authenticated")
+            if args.attack:  # The feature declares an attack pass ([L16]): decided from the feature's attack, not policy.attack_check.
+                from . import attack
+                present = attack.secret_file_present(attack.default_secret_files())
+                if present is not None:
+                    raise ValueError(f"Blocked: an attack pass needs {present} off this host: move it, then launch again")
+                if "--max-budget-usd" not in help_text:  # [L6]: the attacker and the skeptic are budgeted.
+                    raise ValueError("Installed Claude CLI lacks --max-budget-usd, which the attack pass needs")
             if args.herdr and os.environ.get("HERDR_ENV") != "1":
                 raise ValueError("Herdr attachment requires a managed caller pane")
             print(json.dumps({"preflight": "passed", "base_commit": git(args.repo.resolve(), "rev-parse", "HEAD"),
@@ -1449,6 +1476,22 @@ def main():
                 sidecar_bounds(sidecar_settings, "--sidecar-settings ")
                 if not args.sidecar_brief.is_file() or not args.sidecar_brief.read_text().strip():
                     raise ValueError(f"Sidecar brief is missing or empty: {args.sidecar_brief}")
+            attack_settings = None
+            if args.attack_settings is not None:
+                from . import attack
+                if not args.guardrails:
+                    parser.error("--attack-settings applies to prepare --guardrails (feature.json 2.5.0) only")
+                try:
+                    attack_settings = json.loads(args.attack_settings)
+                except ValueError as error:
+                    raise ValueError(f"--attack-settings is not JSON: {error}") from None
+                if not isinstance(attack_settings, dict):
+                    raise ValueError("--attack-settings must be a JSON object")
+                attack.settings(attack_settings, "--attack-settings ")
+                attack.requirements_of(attack_settings, "--attack-settings ")
+                if "attack_check" not in policy:
+                    raise ValueError("feature.json declares attack but its policy has no attack_check (policy 1.3.0)")
+                attack.validate_attack_check(policy["attack_check"])
             tasks = {}
             for worker in policy["workers"]:
                 node = worker["node_id"]
@@ -1495,6 +1538,17 @@ def main():
             if args.sidecar_brief:
                 from .sidecar import pin
                 pin(plan, args.sidecar_brief, sidecar_settings)
+            if attack_settings is not None:
+                from . import attack
+                source = args.repo.resolve()
+                reqs = {rel: (source / rel).read_text() for rel in attack_settings.get("requirements", [])}
+                briefs = {angle: (str(attack.BUILTIN_BRIEFS / f"{angle}.md"),
+                                  attack.digest_text((attack.BUILTIN_BRIEFS / f"{angle}.md").read_text())) for angle in attack_settings["angles"]}
+                skeptic = (str(attack.BUILTIN_BRIEFS / "skeptic.md"), attack.digest_text((attack.BUILTIN_BRIEFS / "skeptic.md").read_text()))
+                worktree = directory.parent / f"{directory.name}.attack" / "worktree"
+                rerun = directory.parent / f"{directory.name}.attack" / "rerun"
+                attack.pin(plan, attack_settings, reqs, attack.default_secret_files(), briefs, skeptic,
+                           policy["attack_check"], str(worktree), str(rerun))
             if restore:
                 pin_restore(plan, directory, policy, restore)
             if args.automatic:

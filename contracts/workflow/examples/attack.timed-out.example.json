@@ -1,0 +1,48 @@
+{
+  "version": "1.0.0",
+  "run_id": "claims-007",
+  "candidate_commit": "4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b",
+  "settings": {
+    "angles": [
+      "auth-funds"
+    ],
+    "budget_usd": 15,
+    "timeout_minutes": 60,
+    "skeptic_budget_usd": 5,
+    "skeptic_timeout_minutes": 20,
+    "max_findings": 8,
+    "requirements": [
+      "docs/security/requirements.md"
+    ],
+    "secret_files": [
+      "/home/agentops/.config/vps-wallet.env"
+    ]
+  },
+  "status": "succeeded",
+  "started_at": "2026-10-05T10:00:00Z",
+  "finished_at": "2026-10-05T11:02:00Z",
+  "error": null,
+  "attackers": [
+    {
+      "id": "auth-funds",
+      "angle": "auth-funds",
+      "status": "timed_out",
+      "started_at": "2026-10-05T10:01:00Z",
+      "finished_at": "2026-10-05T11:01:00Z",
+      "error": "timed_out",
+      "session_id": null,
+      "cost_usd": 14.9,
+      "summary": null,
+      "out_of_reach": [],
+      "skeptic": {
+        "status": "not_run",
+        "started_at": null,
+        "finished_at": null,
+        "error": null,
+        "session_id": null,
+        "cost_usd": null
+      }
+    }
+  ],
+  "findings": []
+}

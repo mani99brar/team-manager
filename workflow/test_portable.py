@@ -379,6 +379,28 @@ class SidecarRegistry(Isolated):
         self.assertEqual(json.loads(text)["projects"][0]["workflows"][0]["definition"]["nodes"], nodes)
         self.assertEqual(merge_registry(text, printed["registry"]["entry"]), (None, "Registry already has project-b/skeleton"))
 
+    def test_a_feature_with_attack_registers_the_attack_node_and_merge_keeps_it(self):
+        """The registry entry a launch writes, and a later launch's merge_registry, carry the attack node and the
+        approval-on-both edge for a feature with `attack` (docs/PRD_ATTACK_PASS.md Appendix A; run 003 fix 4)."""
+        target = make_target(self.root)
+        runs_root = self.root / "attack-runs"
+        entry = registry_entry(target, "atk", runs_root, ["app"], attack=True)
+        nodes = entry["workflows"][0]["definition"]["nodes"]
+        by_id = {node["node_id"]: node for node in nodes}
+        self.assertIn("attack", by_id)
+        self.assertEqual(by_id["attack"]["kind"], "review")
+        self.assertEqual(by_id["attack"]["depends_on"], by_id["review"]["depends_on"])
+        self.assertEqual(sorted(by_id["approval"]["depends_on"]), ["attack", "review"])
+        # A later launch rebuilds the definition in merge_registry: the node and the edge survive, not duplicated.
+        text, note = merge_registry(None, entry)
+        kept = json.loads(text)["projects"][0]["workflows"][0]["definition"]["nodes"]
+        self.assertEqual(kept, nodes)
+        again, note = merge_registry(text, entry)
+        self.assertEqual((again, note), (None, f"Registry already has {entry['project_id']}/atk"))
+        # A feature without attack has no attack node (every other graph is unchanged).
+        plain = registry_entry(target, "plain", runs_root, ["app"])["workflows"][0]["definition"]["nodes"]
+        self.assertNotIn("attack", [node["node_id"] for node in plain])
+
 
 class DecisionsNote(Isolated):
     def test_a_decisions_file_without_operator_decisions_launches_binding_as_a_whole_and_the_launch_says_so(self):

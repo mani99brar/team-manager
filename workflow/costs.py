@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .sessions import plan_workers, read_json, review_node, reviewer_ids, save_json
 
-ROLES = ("workers", "reviewers", "sidecar", "challenge")
+ROLES = ("workers", "reviewers", "sidecar", "challenge", "attack")
 COST_KEYS = ("cost_usd", "duration_ms", "models")
 
 
@@ -130,7 +130,7 @@ def costs_section(directory: Path, plan: dict) -> dict:
             add(node, "reviewers", "print", print_cost(directory / f"{node}.stdout.json"))
         elif any((directory / f"{node}.{suffix}").exists() for suffix in ("interactive.json", "stop.json", "cost.json")):
             add(node, "reviewers", "native", native_cost(directory / f"{node}.cost.json"))
-    for prefix, role in (("sidecar", "sidecar"), ("challenge", "challenge")):
+    for prefix, role in (("sidecar", "sidecar"), ("challenge", "challenge"), ("attack", "attack")):
         for n in numbered(directory, prefix):
             add(f"{prefix}-{n}", role, "print", print_cost(directory / f"{prefix}-{n}.stdout.json"))
 
