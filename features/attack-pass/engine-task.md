@@ -6,7 +6,15 @@ A feature.json 2.5.0 feature can declare `attack`, and its run gets an attack pa
 
 ## Context
 
-- **Run 002.** In run `attack-pass-001` this lane did no work before it stopped (it only copied the bundled briefs); start from the base commit.
+- **Run 003 starts from run 002's candidate.** Run `attack-pass-002` built this lane; its combined candidate `b567788874f91622721312c6188ff42922d1e236` (in this repository's object store) passed every policy check of both lanes, and then both reviewers blocked it. Their findings, verbatim, are in `features/attack-pass/run-002-review.md` (`workflow brief` output). First step: `git restore --source=b567788874f91622721312c6188ff42922d1e236 --staged --worktree -- workflow contracts/workflow docs/handoff/attack-engine.md`; then `git diff --stat b567788874f91622721312c6188ff42922d1e236 -- workflow contracts/workflow docs/handoff/attack-engine.md` must print nothing. Read `docs/handoff/attack-engine.md` from it and build on it.
+- **What run 003 must close.** Every P0/P1 finding listed for this lane in `run-002-review.md`, each with a test that fails without the fix:
+  1. A resumed child runs what is still owed: findings whose re-run never happened are re-run and reproduced ones get their skeptic. The finding-to-test-file mapping is persisted (in `attack.json` or the run directory), never kept only in memory.
+  2. `attack-tally` prints the added runtime per run and in total: the review step's span minus the reviewers' own.
+  3. The [L12] flag compares each attacker's `finished_at` with the review's acceptance (`review.json`'s save), not with the `review` event, which on approved runs is written after the wait.
+  4. The registry entry a launch writes, and `merge_registry` on a later launch, keep the `attack` node and the approval-on-both edge for a feature with `attack`.
+  5. `attack-pass` is refused while the run's controller lock is held, and a live operator pass is recognised, so the controller never starts a second child beside it.
+  6. `workflow/test_attack.py` covers every scenario of this task's Acceptance end to end, with fake attacker and skeptic jobs over the toy repository (`run_angle` → `rerun_findings` → `skeptic_job` → `finish`, and the review step through `review_candidate`).
+  Then close the P2 test gaps in the same file that touch behaviour you change, and list the remaining P2s under "Run 003" in the handoff, each with one line on why it stays open.
 - `docs/PRD_ATTACK_PASS.md` is the specification. Its Appendix A pins `attack.json`, the export section, the attention text and the event texts: the `viewer` lane builds its fixtures from it. `decisions.md` in this feature binds the run; its Grill defaults G5 to G13 settle what the PRD leaves open (the `requirements` key, the bundled briefs, the detached child process, `attack-pass` for manual runs, global finding ids, the `pending` export record, labels, event texts).
 - Bundled briefs: install `features/attack-pass/attack-briefs/auth-funds.md`, `inputs-state.md`, `permissions-files.md` and `skeptic.md` as `workflow/prompts/attack/<same name>` unchanged (G6). They are short on purpose; do not extend them. What the controller adds around a brief (the inputs, the protocol, the severity rule, the output schema) lives in `workflow/attack.py`.
 - Analogs to reuse, not copy:
