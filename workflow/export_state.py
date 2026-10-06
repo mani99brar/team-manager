@@ -62,6 +62,15 @@ no attack.json exists yet, a `failed` record when attack.json does not validate,
 for a run without `plan.attack` (every run prepared before). The definition of a run with an
 attack pass has the `attack` node right after `review` (same depends_on), and `approval`
 depends on both `review` and `attack`. Everything else is 1.7.0 unchanged.
+
+Version 1.9.0 (additive, docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A) records the multi-provider
+panels of feature.json 2.6.0 runs: the top-level `panels` section is `<run>/panel.json` verbatim
+(contracts/workflow/panel.schema.json, the object `{version, panels: [...]}`), a `pending` record
+built from `plan.panels` while no panel.json exists yet, a `failed` record (each panel with its
+`error`) when panel.json does not validate, and `null` for a run without `plan.panels` (every run
+prepared before). The graph definition is NOT changed (no panel node this slice) and the `costs`
+section is not changed (panel costs live in panel.json only), so every older run exports
+byte-for-byte as under 1.8.0 apart from the version and the null section.
 """
 from __future__ import annotations
 
@@ -76,11 +85,12 @@ from types import SimpleNamespace
 from .costs import costs_section
 from .guardrails import HOLD, MAX_QUESTIONS, decisions_text, has_challenge
 from .attack import export_section as attack_section, has_attack
+from .panel import export_section as panel_section
 from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.8.0"
+EXPORT_VERSION = "1.9.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -428,6 +438,7 @@ def export_state(runtime, state) -> dict:
              "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None,
              "sidecar": sidecar_section(runtime.directory, runtime.plan),
              "attack": attack_section(runtime.directory, runtime.plan),
+             "panels": panel_section(runtime.directory, runtime.plan),
              "costs": costs_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous

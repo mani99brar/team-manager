@@ -43,7 +43,7 @@ from .verification import CONTRACTS, validate_schema
 
 ATTACK = "attack"
 ATTACK_VERSION = "2.5.0"  # The feature version that may declare `attack`.
-ATTACK_VERSIONS = frozenset({ATTACK_VERSION})
+ATTACK_VERSIONS = frozenset({ATTACK_VERSION, "2.6.0"})  # 2.6.0 (the panel) keeps the attack pass.
 RECORD_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "attack.schema.json"
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "attack"
@@ -115,7 +115,7 @@ def declared(manifest: dict) -> dict | None:
     if value is False:
         return None
     if manifest.get("version") not in ATTACK_VERSIONS:
-        raise ValueError(f"feature.json attack needs version {ATTACK_VERSION} (this file is {manifest.get('version')})")
+        raise ValueError(f"feature.json attack needs version {ATTACK_VERSION} or later (this file is {manifest.get('version')})")
     if not isinstance(value, dict):
         raise ValueError("feature.json attack must be false or an object with angles")
     result = settings(value, "feature.json attack.")

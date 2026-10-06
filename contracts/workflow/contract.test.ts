@@ -165,12 +165,23 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
   for (const bad of [{ angles: [] }, { angles: ['nope'] }, { angles: ['auth-funds', 'auth-funds'] }, { budget_usd: 15 }, { angles: ['auth-funds'], budget_usd: 0 }, { angles: ['auth-funds'], extra: true }]) {
     assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.5.0', attack: bad }).success, false, JSON.stringify(bad))
+  }
+  // 2.6.0 adds the optional multi-provider panels (docs/PRD_MULTI_PROVIDER_PANEL.md section 3; workflow/panel.py refuses them on an earlier version).
+  const panelEntry = { id: 'review-panel', stage: 'review', providers: [{ transport: 'claude', effort: 'high' }, { transport: 'pi', model: 'openai-codex/gpt-6-sol' }],
+    prompt: 'panels/review.md', requirements: ['docs/security/requirements.md'], budget_usd: 5, timeout_minutes: 15, overlap_threshold: 2, report_only: true }
+  feature.parse({ ...structuredClone(reviewed), version: '2.6.0', panels: [panelEntry] })
+  feature.parse({ ...structuredClone(reviewed), version: '2.6.0', panels: [{ ...panelEntry, overlap_threshold: 'all', requirements: [] }] })
+  feature.parse({ ...structuredClone(reviewed), version: '2.6.0', attack: { angles: ['auth-funds'] }, critical: true, sidecar: { prompt: 'builtin:senior-review' }, panels: [panelEntry] })
+  for (const bad of [[], [{ ...panelEntry, report_only: false }], [{ ...panelEntry, stage: 'build' }], [{ ...panelEntry, providers: [] }],
+    [{ ...panelEntry, providers: [{ transport: 'codex' }] }], [{ ...panelEntry, overlap_threshold: 0 }], [{ ...panelEntry, budget_usd: 0 }],
+    [{ ...panelEntry, timeout_minutes: 0 }], [{ ...panelEntry, extra: true }], [{ ...panelEntry, requirements: ['../x.md'] }]]) {
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.6.0', panels: bad }).success, false, JSON.stringify(bad))
   }
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
@@ -223,6 +234,56 @@ test('review sidecar ledger 1.0.0: the PRD Appendix B example validates verbatim
   assert.deepEqual(schema.properties.passes.items, { $ref: '#/$defs/pass' })
   assert.deepEqual(schema.$defs.pass.properties.status.enum, ['completed', 'rejected', 'failed', 'timed_out', 'interrupted'])
   assert.deepEqual(schema.$defs.message.properties.status.enum, ['pending', 'delivered', 'undeliverable', 'refused'])
+})
+
+test('multi-provider panel record 1.0.0: both Appendix A records validate verbatim and the field rules hold', () => {
+  const panel = handWritten('panel')
+  const prd = readFileSync(new URL('../../docs/PRD_MULTI_PROVIDER_PANEL.md', import.meta.url), 'utf8')
+  // Both JSON blocks sit indented inside a bullet of Appendix A, so the fences tolerate leading whitespace; the first is `succeeded`, the second `pending`.
+  const blocks = [...prd.split('## Appendix A')[1].matchAll(/```json\n([\s\S]*?)\n\s*```/g)].map(match => JSON.parse(match[1]))
+  assert.equal(blocks.length, 2)
+  const [succeeded, pending] = blocks
+  assert.equal(succeeded.panels[0].status, 'succeeded')
+  assert.equal(pending.panels[0].status, 'pending')
+  panel.parse(succeeded)
+  panel.parse(pending)
+  const reject = (label: string, mutate: (value: typeof succeeded) => void) => {
+    const value = structuredClone(succeeded)
+    mutate(value)
+    assert.equal(panel.safeParse(value).success, false, label)
+  }
+  reject('unknown key', value => { value.extra = true })
+  reject('unknown panel status', value => { value.panels[0].status = 'blocked' })
+  reject('unknown provider status', value => { value.panels[0].providers[0].status = 'succeeded' })
+  reject('unknown transport', value => { value.panels[0].providers[0].transport = 'codex' })
+  reject('freelanced severity', value => { value.panels[0].findings[0].severity = 'high' })
+  reject('threshold 0', value => { value.panels[0].overlap_threshold = 0 })
+  reject('threshold word', value => { value.panels[0].overlap_threshold = 'any' })
+  reject('no provider raised', value => { value.panels[0].findings[0].providers_raised = [] })
+  reject('error over 4,000', value => { value.panels[0].error = 'e'.repeat(4001) })
+  reject('negative cost', value => { value.panels[0].providers[0].cost_usd = -1 })
+  // A running record, the "all" and 1 thresholds, a challenge stage, a timed-out provider and every nullable field null.
+  const running = structuredClone(pending)
+  running.panels[0].status = 'running'
+  running.panels[0].started_at = '2026-10-06T07:00:00Z'
+  running.panels[0].providers.forEach((provider: { status: string }) => { provider.status = 'running' })
+  panel.parse(running)
+  panel.parse({ ...structuredClone(succeeded), panels: [{ ...structuredClone(succeeded.panels[0]), overlap_threshold: 'all', stage: 'challenge' }] })
+  panel.parse({ ...structuredClone(succeeded), panels: [{ ...structuredClone(succeeded.panels[0]), overlap_threshold: 1 }] })
+  const nulls = structuredClone(succeeded)
+  nulls.panels[0].providers[1] = { ...nulls.panels[0].providers[1], status: 'timed_out', cost_usd: null, context_bytes: null, finding_ids: [], error: 'timed_out after 900 s' }
+  nulls.panels[0].providers[0] = { ...nulls.panels[0].providers[0], model: null, effort: null }
+  nulls.panels[0].findings[0].line = null
+  nulls.panels[0].findings[0].unanchored = true
+  nulls.panels[0].findings[0].accepted = false
+  nulls.panels[0].status = 'failed'
+  nulls.panels[0].error = 'an assembly throw'
+  panel.parse(nulls)
+  const schema = readJson('./panel.schema.json')
+  assert.deepEqual(schema.$defs.panel.properties.status.enum, ['pending', 'running', 'succeeded', 'failed', 'timed_out'])
+  assert.deepEqual(schema.$defs.provider.properties.status.enum, ['pending', 'running', 'ok', 'timed_out', 'error', 'parse_failed'])
+  assert.deepEqual(Object.keys(schema.$defs.finding.properties), ['id', 'severity', 'file', 'line', 'title', 'detail', 'providers_raised', 'accepted', 'unanchored'])
+  assert.equal(schema.$defs.output.type, 'object')  // The claude provider's --json-schema needs an object root.
 })
 
 test('review completion 1.2.0 binds a file to one reviewer node and attributes findings to a lane id, multiple or none, never both', () => {

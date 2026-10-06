@@ -207,6 +207,9 @@ def outcome_block(directory: Path, open_items_only: bool = False) -> str:
         attack_line = attack_outcome_line(directory, plan)  # Report-only: after the review lines, never the verdict (PRD 4.6).
         if attack_line:
             block = (block + "\n" + attack_line) if block else attack_line
+        from .panel import outcome_lines as panel_lines  # Report-only too (PRD_MULTI_PROVIDER_PANEL Appendix A): one line per panel.
+        for line in panel_lines(directory, plan):
+            block = (block + "\n" + line) if block else line
         cost = run_cost(directory, plan) if block else None
         return block + "\n" + cost if cost else block
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:

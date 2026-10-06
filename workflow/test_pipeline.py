@@ -327,7 +327,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.8.0")
+            self.assertEqual(exported["version"], "1.9.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -2079,3 +2079,141 @@ class ActorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PanelLaunchGuards(unittest.TestCase):
+    """feature.json 2.6.0 `panels` (docs/PRD_MULTI_PROVIDER_PANEL.md 4.2; engine acceptance item 7): every launch refusal, dry run
+    included, through launch_commands with the transport proofs behind the injectable seam (no binary spawned); and a full
+    2.6.0 feature carrying prd + sidecar + attack + critical + a review panel launches, with prepare pinning plan.panels last."""
+
+    TASK = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "target"
+        shutil.copytree(Path(__file__).resolve().parent / "testdata" / "project-workflows", self.repo / "features/project-workflows")
+        self.folder = self.repo / "features/project-workflows"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (self.folder / name).write_text(self.TASK)
+        (self.folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        (self.folder / "panels").mkdir()
+        (self.folder / "panels" / "review.md").write_text("THE FEATURE'S PANEL BRIEF\n")
+        (self.repo / "docs" / "security").mkdir(parents=True)
+        (self.repo / "docs" / "PRD.md").write_text("# PRD\n")
+        (self.repo / "docs" / "security" / "requirements.md").write_text("SEC-1: text\n")
+        policy = read_json(self.folder / "policy.json")
+        policy["version"] = "1.3.0"
+        policy["attack_check"] = {"argv": ["sh", "{file}"], "timeout_seconds": 60}
+        save_json(self.folder / "policy.json", policy)
+        self.panel = {"id": "review-panel", "stage": "review", "providers": [{"transport": "claude", "effort": "high"}, {"transport": "pi", "model": "openai-codex/gpt-6-sol"}],
+                      "prompt": "panels/review.md", "requirements": ["docs/security/requirements.md"], "budget_usd": 5, "timeout_minutes": 15,
+                      "overlap_threshold": 2, "report_only": True}
+        self.write_feature()
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.tmp / "projects.json"), "HOME": str(self.tmp / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        secrets = patch("workflow.attack.default_secret_files", return_value=[])
+        secrets.start()
+        self.addCleanup(secrets.stop)
+
+    def write_feature(self, version="2.6.0", **over):
+        manifest = read_json(self.folder / "feature.json")
+        manifest.update(version=version, prd="docs/PRD.md", critical=True, sidecar={"prompt": "builtin:senior-review"},
+                        attack={"angles": ["auth-funds"], "requirements": ["docs/security/requirements.md"]}, panels=[dict(self.panel)])
+        manifest.update(over)
+        save_json(self.folder / "feature.json", manifest)
+        for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"], ["add", "."], ["commit", "-qm", "Feature", "--allow-empty"]):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
+
+    @staticmethod
+    def prove(help_text="--print --max-budget-usd --effort", pi="/nvm/bin/pi"):
+        from . import panel
+
+        def run(argv, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=help_text if argv[1] == "--help" else "0.85.1\n")
+        which = lambda name, path=None: {"claude": "/x/claude", "pi": pi}.get(name)
+        return lambda panels: panel.prove_transports(panels, run=run, environ={"PATH": "/x"}, which=which)
+
+    def launch(self, **kwargs):
+        from .launch import launch_commands
+        return launch_commands(self.repo, "project-workflows", "pw-001", self.tmp / "runs", automatic=True, prove=kwargs.pop("prove", self.prove()), **kwargs)
+
+    def test_each_refusal_before_any_git_action(self):
+        self.write_feature(version="2.5.0")
+        with self.assertRaisesRegex(ValueError, "panels needs version 2.6.0"):
+            self.launch()
+        for over, pattern in (({"panels": [{**self.panel, "report_only": False}]}, "report_only must be true"),
+                              ({"panels": [{**self.panel, "providers": [{"transport": "pi"}]}]}, "needs a model of the form provider/id"),
+                              ({"panels": [{**self.panel, "providers": [{"transport": "pi", "model": "deepseek/deepseek-v4-pro"}]}]}, "Blocked: the DeepSeek key"),
+                              ({"panels": [{**self.panel, "stage": "challenge"}]}, "review stage only"),
+                              ({"panels": [{**self.panel, "prompt": "panels/missing.md"}]}, "missing or empty")):
+            self.write_feature(**over)
+            with self.assertRaisesRegex(ValueError, pattern):
+                self.launch()
+        self.write_feature()
+        with self.assertRaisesRegex(ValueError, "lacks --max-budget-usd"):
+            self.launch(prove=self.prove(help_text="--print --effort"))
+        with self.assertRaisesRegex(ValueError, "needs `pi`"):
+            self.launch(prove=self.prove(pi=None))
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_a_full_2_6_0_feature_launches_and_the_dry_run_prints_the_panels(self):
+        run, commands, _ = self.launch()
+        preflight, prepare = commands[0], commands[2]
+        self.assertIn("--attack", preflight)
+        self.assertEqual(preflight[preflight.index("--panels") + 1], "claude,pi")
+        self.assertIn("--critical", prepare)
+        self.assertIn("--sidecar-brief", prepare)
+        self.assertIn("--attack-settings", prepare)
+        settings = json.loads(prepare[prepare.index("--panel-settings") + 1])
+        self.assertEqual(settings["pi_bin"], "/nvm/bin")
+        [item] = settings["panels"]
+        self.assertTrue(item["prompt"].endswith("features/project-workflows/panels/review.md"))
+        self.assertNotIn(str(self.repo), item["prompt"])  # The brief at its path in the run's source checkout, as the tasks are.
+        self.assertEqual((item["requirements"], item["overlap_threshold"], item["report_only"]), (["docs/security/requirements.md"], 2, True))
+        # The dry run prints what prepare pins, and executes only the two probes (patched here).
+        from .launch import main
+        out = io.StringIO()
+        with patch("workflow.panel.prove_transports", return_value={"pi_bin": "/nvm/bin"}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.tmp / "runs"), "--dry-run", "--automatic"])
+        printed = json.loads(out.getvalue())
+        self.assertFalse(printed["executes"])
+        self.assertEqual(printed["panels"]["pi_bin"], "/nvm/bin")
+        self.assertEqual(printed["panels"]["panels"][0]["id"], "review-panel")
+        self.assertEqual(printed["guardrails"]["feature_version"], "2.6.0")
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_prepare_pins_plan_panels_last_with_the_brief_text_and_sha(self):
+        from . import panel
+        from .sidecar import BUILTIN_BRIEFS
+        run = self.tmp / "runs" / "pw-001"
+        subprocess.run(["git", "-C", str(self.repo), "switch", "-q", "-c", "feature/project-workflows/pw-001"], check=True)  # As the launch's worktree is.
+        brief = self.folder / "panels" / "review.md"
+        settings = {"panels": [{**self.panel, "prompt": str(brief)}], "pi_bin": "/nvm/bin"}
+        code, out, err = pipeline_cli("prepare", str(run), "--repo", str(self.repo), "--policy", str(self.folder / "policy.json"),
+                                      "--task", f"ui={self.folder / 'ui-task.md'}", "--task", f"adapter={self.folder / 'adapter-task.md'}",
+                                      "--guardrails", "--decisions", str(self.folder / "decisions.md"), "--prd", str(self.repo / "docs" / "PRD.md"),
+                                      "--sidecar-brief", str(BUILTIN_BRIEFS / "senior-review.md"),
+                                      "--attack-settings", json.dumps({"angles": ["auth-funds"], "requirements": ["docs/security/requirements.md"]}),
+                                      "--panel-settings", json.dumps(settings), "--automatic", "--critical")
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["feature_version"], "2.6.0")  # Pinned last: not the attack's 2.5.0 nor the sidecar's 2.3.0.
+        self.assertTrue(plan["attack"]["angles"] == ["auth-funds"] and plan["sidecar"]["prompt"])
+        [item] = plan["panels"]
+        self.assertEqual(item["prompt"], {"source": str(brief), "text": "THE FEATURE'S PANEL BRIEF\n", "sha256": panel.digest_text("THE FEATURE'S PANEL BRIEF\n")})
+        self.assertEqual(item["requirement_docs"], {"docs/security/requirements.md": "SEC-1: text\n"})
+        self.assertEqual((item["pi_bin"], item["prd_label"], item["stage"]), ("/nvm/bin", "docs/PRD.md", "review"))
+        self.assertEqual(item["providers"], [{"transport": "claude", "model": None, "effort": "high"}, {"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": None}])
+        panel.validate_plan(plan)
+        from .export_state import export_state
+        from .pipeline import ExportRuntime
+        exported = export_state(ExportRuntime(run), SimpleNamespace(tasks=[], values={}, next=[]))
+        self.assertEqual(exported["panels"]["panels"][0]["status"], "pending")
+        # --panel-settings outside --guardrails, and --panels outside preflight, are refused.
+        code, _, err = pipeline_cli("prepare", str(self.tmp / "runs" / "pw-002"), "--repo", str(self.repo), "--policy", str(self.folder / "policy.json"),
+                                    "--task", f"ui={self.folder / 'ui-task.md'}", "--task", f"adapter={self.folder / 'adapter-task.md'}",
+                                    "--panel-settings", json.dumps(settings))
+        self.assertNotEqual(code, 0)
+        self.assertIn("--panel-settings applies to prepare --guardrails", err)

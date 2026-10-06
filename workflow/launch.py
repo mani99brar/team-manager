@@ -21,7 +21,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
-from . import attack, sidecar
+from . import attack, panel, sidecar
 from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
 
@@ -33,8 +33,8 @@ BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # The feature versions that may declare `critical` (C51): the operator confirmed at the grill that the feature's code is
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
-# keeps both. The migration hint for an earlier feature with a browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0"})
+# and 2.6.0 (the multi-provider panel) keep both. The migration hint for an earlier feature with a browser check names the version it should move to.
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0"})
 CRITICAL_VERSION = "2.4.0"
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
@@ -170,6 +170,7 @@ def load_feature(folder: Path) -> dict:
     if isinstance(manifest, dict):
         sidecar.declared(manifest)
         attack.declared(manifest)  # Refuses `attack` on a version before 2.5.0, naming the key, before schema validation.
+        panel.declared(manifest)  # Refuses `panels` on a version before 2.6.0 (and each per-panel refusal), naming the key.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -219,8 +220,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
                     roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
-                    follows: str | None = None, allow_untried: str | None = None) -> tuple[Path, list[list[str]], list[str]]:
-    """The exact commands a launch runs against the target `repo`, the run directory and any notes; nothing is executed here.
+                    follows: str | None = None, allow_untried: str | None = None, prove=None) -> tuple[Path, list[list[str]], list[str]]:
+    """The exact commands a launch runs against the target `repo`, the run directory and any notes. Nothing of the run is executed
+    here; the one exception is a feature with `panels` (2.6.0), whose two read-only transport probes (`claude --help` for a
+    claude provider, `pi --version` for a pi provider; `panel.prove_transports`, injectable as `prove`) run here so a dry run
+    refuses what a live launch would.
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
     checkout of a new branch at its HEAD (`source_checkout`, beside the run directory). Every later command gets that
@@ -291,6 +295,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             raise ValueError("feature.json declares attack but its policy has no attack_check (policy 1.3.0, "
                              "contracts/workflow/verification.schema.json); add it, then launch again")
         attack.validate_attack_check(policy["attack_check"])
+    # 2.6.0: the panels (PRD_MULTI_PROVIDER_PANEL 4.2). The stage guard, the DeepSeek key guard, each brief and the two transport
+    # probes are refused here, before any Git action (the dry run included; pipeline preflight proves the transports again).
+    review_panels = panel.declared(manifest)
+    panel_briefs, proved = {}, None
+    if review_panels:
+        panel.check_launch(review_panels)
+        for item in review_panels:
+            panel_briefs[item["id"]] = panel.brief_path(folder, item["prompt"])
+        proved = (prove or panel.prove_transports)(review_panels)
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     tryout = manifest.get("tryout") is True
@@ -343,6 +356,10 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             rerooted.append(sidecar_brief)
         if review_attack:  # The requirements documents, refused here like the PRD when not committed at HEAD (G5).
             rerooted += [repo / rel for rel in review_attack["requirements"]]
+        for item in review_panels or []:  # A panel's requirements and its feature-file brief, likewise.
+            rerooted += [repo / rel for rel in item["requirements"]]
+            if not item["prompt"].startswith(BUILTIN_PREFIX):
+                rerooted.append(panel_briefs[item["id"]])
     missing = untracked(repo, rerooted)
     if missing:
         raise ValueError(f"Not committed at HEAD (new, ignored or excluded): {', '.join(missing)}. The run's worktree holds only committed "
@@ -369,6 +386,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     if review_attack is not None:
         # Preflight decides on the attack pass from the feature's `attack` ([L16], run 003 fix 8), not from policy.attack_check.
         preflight.append("--attack")
+    if review_panels:
+        # Preflight proves the declared transports again (claude --max-budget-usd, pi --version) from this list.
+        preflight.extend(["--panels", ",".join(sorted({provider["transport"] for item in review_panels for provider in item["providers"]}))])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     for reviewer_id, path in reviewers.items():
@@ -387,6 +407,12 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                             "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
         if review_attack:
             prepare.extend(["--attack-settings", json.dumps(review_attack, sort_keys=True)])
+        if review_panels:
+            # Each panel with its brief as the path prepare reads (the committed file in the source checkout, or the bundled one)
+            # and the pi bin directory the probe resolved; prepare pins plan.panels last (text + sha256, requirement copies).
+            pinned = [{**item, "prompt": str(panel_briefs[item["id"]] if item["prompt"].startswith(BUILTIN_PREFIX) else in_source(panel_briefs[item["id"]]))}
+                      for item in review_panels]
+            prepare.extend(["--panel-settings", json.dumps({"panels": pinned, "pi_bin": proved["pi_bin"]}, sort_keys=True)])
     roles = {key: value for key, value in (roles or {}).items() if value is not None}
     pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
     for key, value in roles.items():
@@ -549,6 +575,9 @@ def main(argv=None):
             if review_attack:  # The pinned settings and the guard's result (PRD 4.2); a secret file present raises above.
                 printed["attack"] = {**review_attack, "secret_files": attack.default_secret_files(),
                                      "guard": "clear: no listed secret file exists on this host"}
+            if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
+                printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
+                                     "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
             print(json.dumps(printed, indent=2))
             for note in notes + ([migration] if migration else []):
                 print(f"Note: {note}", file=sys.stderr)

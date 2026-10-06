@@ -1504,7 +1504,7 @@ class SidecarGraph(unittest.TestCase):
         sequence = [event["node"] for event in events]
         self.assertLess(sequence.index("sidecar"), next(index for index, event in enumerate(events) if event["node"] == "freeze"))
         exported = read_json(self.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
         self.assertEqual(exported["sidecar"]["passes"][0]["status"], "failed")
         self.assertIsNotNone(exported["sidecar"]["closed_at"])
         validate_schema("sidecar", exported["sidecar"])
@@ -1698,7 +1698,7 @@ class ExportsAndPrompt(SidecarRun):
         self.script_steps([{"output": output([upsert()])}])
         self.run_pass()
         exported = export_run(ExportRuntime(self.directory))
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
         self.assertEqual(exported["sidecar"], self.ledger())
         self.assertEqual([node["node_id"] for node in exported["definition"]["nodes"]][:2], ["sidecar", "launch_ui"])
         # A ledger that fails its schema is not evidence: null, never guessed.
