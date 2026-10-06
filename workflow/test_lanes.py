@@ -1020,6 +1020,9 @@ class Panes(unittest.TestCase):
         self.plan["mode"] = "interactive"
         save_json(self.directory / "plan.json", self.plan)
         self.sessions = InteractiveSessions(self.directory, executable="claude")
+        config = patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "claude-config")})  # Never the operator's own.
+        config.start()
+        self.addCleanup(config.stop)
 
     def row(self, node):
         uuid = {"ui": "11111111-1111-4111-8111-111111111111", "adapter": "22222222-2222-4222-8222-222222222222",

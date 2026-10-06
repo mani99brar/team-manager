@@ -78,6 +78,48 @@ def listed_rows(result: subprocess.CompletedProcess) -> list | None:
     return rows if isinstance(rows, list) else None
 
 
+TRUSTED = "hasTrustDialogAccepted"
+TRUST_WRITES = 3
+
+
+def claude_config_path(env=None) -> Path:
+    """Claude Code's own config file, where it records the folders the operator trusted: `$CLAUDE_CONFIG_DIR/.claude.json`
+    when that variable is set and not blank, else `~/.claude.json`."""
+    folder = (os.environ if env is None else env).get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(folder).expanduser() / ".claude.json" if folder else Path.home() / ".claude.json"
+
+
+def trust_workspace(worktree: Path, config: Path) -> None:
+    """Record `worktree` as trusted in Claude Code's config, as accepting its trust prompt does.
+
+    `claude --bg` refuses a folder nobody trusted ("Workspace not trusted"), and a trusted parent folder does not count,
+    so every run's fresh worktree needs its own entry. Only this key of this folder's entry changes; the rest of the file
+    is kept, and the file is replaced whole (private, 0600). Claude Code rewrites the file itself, so the entry is read
+    back, and written again if a concurrent write dropped it. A file that is not a JSON object is never overwritten.
+    """
+    key = str(worktree.resolve())
+    for _ in range(TRUST_WRITES):
+        try:
+            document = json.loads(config.read_text())
+        except FileNotFoundError:
+            document = {}
+        except ValueError as error:
+            raise RuntimeError(f"Claude Code's config {config} is not JSON ({error}); refusing to record {key} as trusted") from error
+        if not isinstance(document, dict) or not isinstance(document.setdefault("projects", {}), dict):
+            raise RuntimeError(f"Claude Code's config {config} has an unexpected shape; refusing to record {key} as trusted")
+        entry = document["projects"].setdefault(key, {})
+        if entry.get(TRUSTED) is True:
+            return
+        entry[TRUSTED] = True
+        config.parent.mkdir(parents=True, exist_ok=True)
+        temporary = config.with_name(f".{config.name}.{os.getpid()}.trust.tmp")
+        with temporary.open("w") as handle:
+            os.chmod(temporary, 0o600)
+            json.dump(document, handle, indent=2)
+        os.replace(temporary, config)
+    raise RuntimeError(f"Could not record {key} as trusted in {config}: another writer replaced it {TRUST_WRITES} times")
+
+
 class InteractiveSessions(ClaudeSessions):
     """Native Claude background sessions, not print-mode jobs or Herdr-owned agents."""
 
@@ -101,6 +143,11 @@ class InteractiveSessions(ClaudeSessions):
 
     def launch_name(self, node: str) -> str:
         return launch_name(self.plan["run_id"], node)
+
+    def trust(self, cwd: Path) -> None:
+        """Trust a worktree this run created (inside the run directory) before a session launches there; nothing else."""
+        if cwd.resolve().is_relative_to(self.directory.resolve()):
+            trust_workspace(cwd, claude_config_path())
 
     def node_worktree(self, node: str) -> Path:
         """Workers live in the plan's worktrees; every reviewer in the run's shared candidate checkout."""
@@ -235,6 +282,7 @@ class InteractiveSessions(ClaudeSessions):
         # wait_handoffs applies): a prompt too long for argv is refused while nothing is recorded or launched.
         prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
         refuse_long_prompt(node, prompt)
+        self.trust(cwd)  # Before the receipt: a failed write records nothing, so the launch can simply run again.
         save_json(path, receipt)
         automatic = bool(self.plan.get("automatic"))
         if automatic:
@@ -280,6 +328,7 @@ class InteractiveSessions(ClaudeSessions):
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat()}
         refuse_long_prompt(node, prompt)  # Before the receipt: nothing is recorded or launched.
+        self.trust(cwd)
         save_json(path, receipt)
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # Claude permission rules spell absolute paths as //absolute/path, and file writes are

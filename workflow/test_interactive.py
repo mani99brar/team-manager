@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
-from .interactive import InteractiveSessions, attach_panels, require_shell
+from .interactive import InteractiveSessions, attach_panels, claude_config_path, require_shell, trust_workspace
 from .sessions import read_json, save_json
 
 
@@ -455,7 +455,7 @@ class InteractiveTests(unittest.TestCase):
             kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
             return subprocess.CompletedProcess([], 0)
         leaked = {"WORKFLOW_WORKER_EFFORT": "max", "CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_MODEL": "claude-haiku", "CLAUDECODE": "1",
-                  "CLAUDE_CONFIG_DIR": "/home/operator/.claude"}
+                  "CLAUDE_CONFIG_DIR": str(self.root / "operator-claude")}
         with patch.dict(os.environ, leaked), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
             with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
                 self.sessions.run("ui")
@@ -468,7 +468,7 @@ class InteractiveTests(unittest.TestCase):
         for call in launch.call_args_list:
             env = call.kwargs["env"]
             self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE"} & set(env))
-            self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/home/operator/.claude")
+            self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.root / "operator-claude"))
 
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
@@ -815,6 +815,70 @@ class InteractiveTests(unittest.TestCase):
             stdin.isatty.return_value = True
             main()  # `claude attach` exited 0 with the session alive: the operator detached.
         attach.assert_called_once_with(["claude", "attach", self.reviewer_row()["id"]], cwd=self.directory / "review-worktree")
+
+
+    def worker_started(self, *args, **kwargs):
+        kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+        return subprocess.CompletedProcess([], 0)
+
+    def test_a_worker_launch_trusts_its_worktree_first_and_keeps_the_rest_of_the_config(self):
+        # `claude --bg` refuses a folder nobody trusted, and a trusted parent does not count (seen live, Claude Code 2.1.289).
+        config = claude_config_path()
+        self.assertTrue(config.is_relative_to(self.root))  # The test's own config, never the operator's.
+        config.parent.mkdir(parents=True)
+        save_json(config, {"theme": "dark", "projects": {"/elsewhere": {"hasTrustDialogAccepted": True, "allowedTools": []}}})
+        worktree = str(Path(self.plan["nodes"]["ui"]["worktree"]).resolve())
+        seen = []
+        def started(*args, **kwargs):
+            seen.append(read_json(config)["projects"].get(worktree, {}).get("hasTrustDialogAccepted"))
+            return self.worker_started(*args, **kwargs)
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run", side_effect=started):
+            self.sessions.run("ui")
+        self.assertEqual(seen, [True])
+        document = read_json(config)
+        self.assertEqual(document["theme"], "dark")
+        self.assertEqual(document["projects"]["/elsewhere"], {"hasTrustDialogAccepted": True, "allowedTools": []})
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+
+    def test_a_failed_trust_write_records_no_launch_so_the_launch_can_run_again(self):
+        config = claude_config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text("{not json")
+        with patch.object(self.sessions, "inventory", return_value=[]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run") as launch:
+            with self.assertRaisesRegex(RuntimeError, "not JSON"):
+                self.sessions.run("ui")
+        launch.assert_not_called()
+        self.assertFalse((self.directory / "ui.interactive.json").exists())
+        self.assertEqual(config.read_text(), "{not json")
+
+    def test_a_worktree_outside_the_run_is_never_trusted(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.sessions.trust(outside)
+        self.assertFalse(claude_config_path().exists())
+        self.sessions.trust(self.directory / "review-worktree")
+        self.assertIn(str((self.directory / "review-worktree").resolve()), read_json(claude_config_path())["projects"])
+
+    def test_trust_is_written_again_when_claude_code_drops_it_and_refused_after_three_tries(self):
+        config = self.root / "config" / ".claude.json"
+        worktree = self.directory
+        replace = os.replace
+        drops = iter([True, False])
+        def racing(source, target):
+            replace(source, target)
+            if next(drops, True):  # Claude Code rewrites the file from its own copy, without the new entry.
+                Path(target).write_text('{"projects": {}}')
+        with patch("workflow.interactive.os.replace", side_effect=racing) as replaced:
+            trust_workspace(worktree, config)
+        self.assertEqual(replaced.call_count, 2)
+        self.assertTrue(read_json(config)["projects"][str(worktree.resolve())]["hasTrustDialogAccepted"])
+        trust_workspace(worktree, config)  # Already trusted: nothing is written.
+        save_json(config, {"projects": {}})
+        with patch("workflow.interactive.os.replace", side_effect=lambda source, target: (replace(source, target), Path(target).write_text('{"projects": {}}'))):
+            with self.assertRaisesRegex(RuntimeError, "replaced it 3 times"):
+                trust_workspace(worktree, config)
 
 
 class AttachOneTests(unittest.TestCase):
