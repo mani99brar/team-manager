@@ -261,12 +261,27 @@ Before completing, a browser lane runs the spec files it changed with a JSON rep
 
 ```bash
 WORKFLOW_VERIFICATION_PHASE=<worker|candidate> PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json \
+  PYTHONSAFEPATH=1 PYTHONPATH=<md-manager checkout> <its .venv/bin/python> -m workflow browser-queue run --label <lane> -- \
   npx --no-install playwright test --config=<config> --reporter=json <spec files>
 PYTHONSAFEPATH=1 PYTHONPATH=<md-manager checkout> <its .venv/bin/python> -m workflow check-report \
   "$(git rev-parse --show-toplevel)/../policy.json" <lane> <tmp>/report.json
 ```
 
 The controller appends this command to the pinned task of every lane with a browser check, spelled out with its own interpreter and checkout: a target's worktree cannot import `workflow`, `python` may not be on the lane's PATH, and `PYTHONSAFEPATH` keeps a target's own `workflow` directory from shadowing the tool's. The policy is the run's pinned `policy.json`, one directory above the lane's worktree (`<run>/worktree-<lane>`), the one the verifier applies, so the command works from anywhere in the worktree. `check-report` also takes a feature directory or any policy file, and `--all` for a full run; it needs jsonschema but not LangGraph, so an operator can run it from any directory: `PYTHONPATH="$HOME/dev/md-manager" "$PY" -m workflow check-report ~/dev/project-B/features/<feature> <lane> report.json`.
+
+The `browser-queue run` prefix waits for a free browser slot while the machine's browser queue is on (below) and runs the command at once while it is off; it exits with the command's code. Runs pinned before the queue existed spell the command without it.
+
+### Browser queue
+
+A browser suite (the API, a Vite dev server and Chromium) is the heaviest step of a run: on an 8-core, 11 GiB machine one took about 2.7 GiB and 166 s alone, two at once 205 s each, three at once 321 s each with the load at 12. The browser queue lets runs and lanes work in parallel and makes only their browser suites take turns: every browser check, the verifier's (worker and candidate phase) and a worker's own run before `check-report`, first takes one of N machine-wide slots and waits while all are held. It is off until switched on, for every run on the machine at once, running or not:
+
+```bash
+"$PY" -m workflow browser-queue on --slots 2   # queue from now on; --slots is kept when omitted (2 at first)
+"$PY" -m workflow browser-queue status         # on or off, and who holds each slot (run, phase, lane, attempt, check)
+"$PY" -m workflow browser-queue off            # every browser check runs at once again, also those waiting
+```
+
+A slot is an flock on `slot-<n>.lock` in `~/.config/md-manager/browser-queue/` (`MD_MANAGER_BROWSER_QUEUE` names another directory), beside `settings.json` (`{"enabled", "slots"}`). The kernel frees a slot when its holder exits however it exits, so a killed check or controller never leaves one taken. Settings are read again every 2 s while a check waits: `off` or more slots frees waiting checks at once; fewer slots let the current holders finish. The queue never fails a check: a malformed `settings.json` is reported in the controller's output and the check runs unqueued (`on` or `off` rewrites it). Waiting is not check time: the verifier's `timeout_seconds` starts once the slot is taken. A waiting check prints `Browser queue: <run> <phase> <lane> attempt <n> <check> waits for one of <n> slots (held by ...)` to the controller's output, and the line it took a slot with; the viewer does not show the wait.
 
 `check-report` prints one line per required scenario of the lane's browser checks: `ok`, `not in this report`, or the problem in the verifier's words, then the test counts. It exits 1 on any problem: a misnamed, missing or duplicated `screenshot:<id>`, a duplicated scenario title, a scenario or other test that did not pass, Playwright's global errors. Scenarios of spec files the worker did not run are listed as `not in this report` and fail only with `--all`. It checks that each screenshot file exists, not that it lies in the verifier's output directory, which only the verifier's run has.
 

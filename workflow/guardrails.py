@@ -192,11 +192,16 @@ def refusals(target: Path, folder: Path, manifest: dict, tasks: dict[str, Path])
 # sessions.prepare puts each lane's worktree at <run>/worktree-<lane>, beside <run>/policy.json.
 CHECK_REPORT = (f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[1]))} {shlex.quote(sys.executable)} "
                 '-m workflow check-report "$(git rev-parse --show-toplevel)/../policy.json"')
+# The worker's own Playwright run goes through the machine's browser queue (browser_queue): it waits for a slot while
+# the queue is on and all slots are held, and runs at once while it is off.
+BROWSER_QUEUE = (f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[1]))} {shlex.quote(sys.executable)} "
+                 "-m workflow browser-queue run --label {lane} --")
 BROWSER_RULES = ("\nBrowser scenarios: each scenario id of your browser checks appears in exactly one test title as `[scenario:<id>]`, "
                  "and that test, when it passes, attaches exactly one image/png named `screenshot:<id>` (other attachments are fine); "
                  "before completing, run the spec files you changed with `WORKFLOW_VERIFICATION_PHASE=<worker|candidate> "
-                 "PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json npx --no-install playwright test --config=<config> --reporter=json "
-                 "<spec files>` and check the report with the verifier's own rules against the run's pinned policy (it only "
+                 "PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json {browser_queue} npx --no-install playwright test --config=<config> "
+                 "--reporter=json <spec files>` (the prefix waits for a free browser slot when the machine's browser queue is on; "
+                 "keep it) and check the report with the verifier's own rules against the run's pinned policy (it only "
                  "reads it), from anywhere in your worktree: `{check_report} {lane} <tmp>/report.json`.")
 APPROVED = "\nApproved ownership and checks:\n"
 
@@ -206,7 +211,8 @@ def pinned_task(text: str, worker: dict) -> str:
     with browser checks the scenario rules the verifier applies and the command that applies them to a report."""
     task = text + APPROVED + json.dumps(worker)
     if any(check["kind"] == "browser" for check in worker["checks"]):
-        task += BROWSER_RULES.format(check_report=CHECK_REPORT, lane=worker["node_id"])
+        task += BROWSER_RULES.format(check_report=CHECK_REPORT, lane=worker["node_id"],
+                                     browser_queue=BROWSER_QUEUE.format(lane=shlex.quote(worker["node_id"])))
     return task
 
 

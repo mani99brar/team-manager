@@ -14,6 +14,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .browser_queue import browser_slot
 from .sessions import git, save_json, scrub_env, terminate
 from .verification import evaluate_worker, policy_digest
 from .worktrees import WorktreeError, git_worktree, without_controller_git_config
@@ -431,7 +432,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     env["TMPDIR"] = str(tmpdir)
     executions, receipts, errors, effective_commands, scenario_errors = [], [], [], [], []
     try:
-        run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands, scenario_errors)
+        run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands, scenario_errors,
+                          label=f"{plan['run_id']} {phase} {node} attempt {attempt}")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
     # Source edits by checks invalidate the evidence. Ignored caches are allowed.
@@ -504,7 +506,8 @@ def lane_tmpdir() -> Path:
 
 
 def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Path, env: dict, capture: "Capture",
-                      executions: list, receipts: list, errors: list, effective_commands: list, scenario_errors: list) -> None:
+                      executions: list, receipts: list, errors: list, effective_commands: list, scenario_errors: list,
+                      label: str = "") -> None:
     for index, setup in enumerate(policy.get("setup", [])):
         log = directory / f"setup-{index}.log"
         code, _, _ = execute(setup["argv"], worktree, log, setup["timeout_seconds"], env)
@@ -524,7 +527,12 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
                 argv.extend(["--reporter=json", f"--output={browser_output}", "--workers=1", "--retries=0"])
                 check_env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(browser_report)
             effective_commands.append(argv)
-            code, start, finish = execute(argv, worktree, log, check["timeout_seconds"], check_env)
+            if check["kind"] == "browser":
+                # One of the machine's browser slots when the queue is on (browser_queue); the timeout starts once it is taken.
+                with browser_slot(f"{label} {check['id']}".strip()):
+                    code, start, finish = execute(argv, worktree, log, check["timeout_seconds"], check_env)
+            else:
+                code, start, finish = execute(argv, worktree, log, check["timeout_seconds"], check_env)
             log_id = capture.add(log, "log")
             executions.append({"command": shlex.join(check["argv"]), "cwd": str(worktree),
                                "started_at": start, "finished_at": finish, "exit_code": code, "log_artifact_id": log_id})
