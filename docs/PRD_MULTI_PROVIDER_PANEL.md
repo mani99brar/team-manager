@@ -63,7 +63,7 @@ A target feature's `feature.json` 2.6.0 adds the optional `panels` (2.5.0 and ea
 }
 ```
 
-- `id` is unique per feature; `panel` and `panel-` join the reserved ids and prefixes, and the exported node id is `panel-<id>`. `stage` is `challenge` or `review`.
+- `id` is unique per feature. `stage` is `challenge` or `review` (a `stage: challenge` panel is refused at launch this slice). The panel's events use node id `panel-<id>` but add **no graph node and no reserved id** this slice.
 - Each `providers[]` entry is `{transport: "claude"|"pi", model?, effort?}`. `claude` with no model runs the ambient/judge default; its `effort` is taken from the entry (the model may fall back to the judges pin). `pi` requires a `model` of the form `provider/id` (`openai-codex/gpt-6-sol`, `deepseek/deepseek-v4-pro`). A `deepseek/*` provider is **refused at launch** until the DeepSeek key guard is satisfied (section 4.2).
 - `prompt` is the panel's brief, relative to the feature directory. `requirements` is 0–10 repo-relative paths pinned at prepare and placed in the context file (the review stage's requirements docs; for the challenge stage it may be empty). `overlap_threshold` is an integer `N` (accept a finding raised by ≥N providers), or `"all"`, or `1` (accept any). `report_only` must be `true` in v1 (a non-true value is refused).
 - `budget_usd` bounds the claude provider via `--max-budget-usd`; pi has no budget flag, so for a pi provider `budget_usd` is informational and the `timeout_minutes` is the only bound. A provider job is stopped at the timeout.
@@ -147,7 +147,7 @@ Deferred to later slices: broaden the transport adapter to other roles; add a ve
 
 ## Appendix A — the record, export, events and node both lanes build to
 
-- **`<run>/panel.json`** (schema `contracts/workflow/panel.schema.json` 1.0.0). Per panel: `{id, stage, status, overlap_threshold, context_bytes|null, providers: [...], findings: [...], started_at|null, ended_at|null, budget_usd}`. `status` is `pending|running|succeeded|failed|timed_out`. Each provider: `{transport, model|null, effort|null, status: pending|running|ok|timed_out|error|parse_failed, cost_usd|null, context_bytes|null, finding_ids: [...], error|null}` (`model` null for a default `claude`; `effort` null for `pi`). Each finding: `{id, severity, file, line|null, title, detail, providers_raised: [...], accepted: bool, unanchored: bool}`. `context_bytes`, `started_at`, `ended_at` are null until the child starts. The detached child is its only writer, under its own blocking **`panel.lock`** (an flock modelled on the attack pass's `record_lock`, a separate file) — **never** the controller's non-blocking `run_lock`/`controller.lock`, which the controller holds for the whole step. The schema and the viewer's `panelResults` parser both validate these two records verbatim (the contract test compares them, as the attack pass does):
+- **`<run>/panel.json`** (schema `contracts/workflow/panel.schema.json` 1.0.0). Per panel: `{id, stage, status, overlap_threshold, context_bytes|null, providers: [...], findings: [...], started_at|null, ended_at|null, budget_usd, error|null}`. `status` is `pending|running|succeeded|failed|timed_out`. Each provider: `{transport, model|null, effort|null, status: pending|running|ok|timed_out|error|parse_failed, cost_usd|null, context_bytes|null, finding_ids: [...], error|null}` (`model` null for a default `claude`; `effort` null for `pi`). Each finding: `{id, severity, file, line|null, title, detail, providers_raised: [...], accepted: bool, unanchored: bool}`. `context_bytes`, `started_at`, `ended_at` are null until the child starts. A **panel-level `error`** (string or null) carries the failure reason when a panel fails before or without a provider error — an assembly throw, a dead child, a passed bound, or an unreadable/invalid `panel.json` the export reads (as the attack pass builds a `failed` record with `error`). The detached child is its only writer, under its own blocking **`panel.lock`** (an flock modelled on the attack pass's `record_lock`, a separate file) — **never** the controller's non-blocking `run_lock`/`controller.lock`, which the controller holds for the whole step. The schema and the viewer's `panelResults` parser both validate these two records verbatim (the contract test compares them, as the attack pass does):
 
   ```json
   {
@@ -163,7 +163,7 @@ Deferred to later slices: broaden the transport adapter to other roles; add a ve
         "findings": [
           {"id": "f1", "severity": "P1", "file": "packages/api/src/modules/claims/reconcile.ts", "line": 52, "title": "mined set from non-final evidence", "detail": "A reorg can strand a mined publication.", "providers_raised": ["claude", "openai-codex/gpt-6-sol"], "accepted": true, "unanchored": false}
         ],
-        "started_at": "2026-10-06T07:00:00Z", "ended_at": "2026-10-06T07:00:39Z", "budget_usd": 5
+        "started_at": "2026-10-06T07:00:00Z", "ended_at": "2026-10-06T07:00:39Z", "budget_usd": 5, "error": null
       }
     ]
   }
@@ -182,7 +182,7 @@ Deferred to later slices: broaden the transport adapter to other roles; add a ve
           {"transport": "claude", "model": null, "effort": "high", "status": "pending", "cost_usd": null, "context_bytes": null, "finding_ids": [], "error": null},
           {"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": null, "status": "pending", "cost_usd": null, "context_bytes": null, "finding_ids": [], "error": null}
         ],
-        "findings": [], "started_at": null, "ended_at": null, "budget_usd": 5
+        "findings": [], "started_at": null, "ended_at": null, "budget_usd": 5, "error": null
       }
     ]
   }
