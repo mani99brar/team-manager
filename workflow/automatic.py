@@ -1034,13 +1034,17 @@ def wait_grace(runtime, state: ReviewStatus, started: dict, timeout: int, gaps: 
 
 
 def review_candidate(runtime) -> dict:
-    """The review node, with the attack pass of feature.json 2.5.0 beside it (docs/PRD_ATTACK_PASS.md 4.1, [L4], [L9]).
+    """The review node, with the attack pass of feature.json 2.5.0 (docs/PRD_ATTACK_PASS.md 4.1, [L4], [L9]) and the
+    multi-provider panels of 2.6.0 (docs/PRD_MULTI_PROVIDER_PANEL.md 4.1) beside it.
 
     The review is unchanged; every exit goes through one `attack.close_or_wait_attack`, which waits for the pass after the
     review decided (review.json exists) and records it `failed` on an exit with no review.json, and does nothing for a plan
-    without `attack`. The child is started only on the paths that launch or rebind reviewers (`_review_candidate` calls
-    `attack.ensure_started`), never on the reconciliation raise (note 4)."""
-    from . import attack
+    without `attack`; then, in its own `finally` so an interrupt the attack close re-raises still reaches it, through one
+    `panel.collect`, which reaps the in-process provider jobs (exited ones first), bounds the still-running ones by their own
+    timeout, and writes the terminal panel.json, or leaves it non-terminal on an interrupt. The attack child and the panel
+    jobs are started only on the paths that launch or rebind reviewers (`_review_candidate` calls `attack.ensure_started`
+    and `panel.ensure_started`), never on the reconciliation raise (note 4)."""
+    from . import attack, panel
     error = None
     try:
         return _review_candidate(runtime)
@@ -1048,12 +1052,18 @@ def review_candidate(runtime) -> dict:
         error = caught
         raise
     finally:
-        attack.close_or_wait_attack(runtime, error)
+        try:
+            attack.close_or_wait_attack(runtime, error)
+        except BaseException as caught:  # A KeyboardInterrupt re-raised by the decided attack wait: the panel collect sees it too.
+            error = caught if error is None else error
+            raise
+        finally:
+            panel.collect(runtime, error)
 
 
 def _review_candidate(runtime) -> dict:
     """Called only by the LangGraph review node. Ambiguous invocations never replay."""
-    from . import attack
+    from . import attack, panel
     validate_automatic(runtime.plan)
     bundle, digest = runtime.validate_bundle()
     if combined_status_path(runtime).exists():
@@ -1062,6 +1072,7 @@ def _review_candidate(runtime) -> dict:
         if combined.get("bundle_sha256") == digest and combined.get("status") == "succeeded":
             runtime.validate_review(combined["review"])
             attack.ensure_started(runtime)  # Re-entry on an accepted review: resume the pass while it is not terminal.
+            panel.ensure_started(runtime)  # And the panels' non-terminal providers (PRD_MULTI_PROVIDER_PANEL Appendix A, resume rerun).
             if combined.get("transport") == "native":
                 # Accepted earlier, but a stop was not confirmed: retry it (the stop intent makes it idempotent). A stop
                 # confirmed before its cost was recorded (C49; a controller killed in between) goes through stop_session
@@ -1074,6 +1085,7 @@ def _review_candidate(runtime) -> dict:
             # The reviewers kept running while the controller was away: bind what the launches produced, never launch again.
             rebind_reviewers(runtime, state)
             attack.ensure_started(runtime)  # After the rebind, which keeps the reviewers; never on the reconciliation raise below.
+            panel.ensure_started(runtime)
             return _accept_native(runtime, bundle, digest, state)
         raise RuntimeError("Prior reviewer invocation needs reconciliation; no automatic relaunch")
     cwd = runtime.directory / "review-worktree"
@@ -1084,6 +1096,7 @@ def _review_candidate(runtime) -> dict:
     with patch.open("w") as handle:
         subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
     attack.ensure_started(runtime)  # The attack pass runs in parallel with the reviewers (PRD 4.1, [L4]); started before they launch.
+    panel.ensure_started(runtime)  # The panels' provider jobs, in-process beside the reviewers on both transports (PRD_MULTI_PROVIDER_PANEL 4.1).
     if reviewer_transport(runtime.plan) == "print":
         return _review_print(runtime, bundle, digest, cwd, patch)
     return _review_native(runtime, bundle, digest, patch)

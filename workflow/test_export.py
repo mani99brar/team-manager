@@ -294,7 +294,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -323,7 +323,8 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
+        self.assertIsNone(exported["panels"])  # 1.9.0: null for a run without plan.panels.
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
         self.assertEqual(exported["values"]["integrated_commit"], "d" * 40)
@@ -344,7 +345,7 @@ class ExportRunTests(unittest.TestCase):
         from .test_sidecar import appendix_b
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual((exported["version"], exported["sidecar"]), ("1.8.0", None))
+        self.assertEqual((exported["version"], exported["sidecar"]), ("1.9.0", None))
         self.assertNotIn("sidecar", [node["node_id"] for node in exported["definition"]["nodes"]])
         plan = read_json(directory / "plan.json")
         plan["sidecar"] = {"prompt": "Brief", "cadence_seconds": 900, "pass_timeout_seconds": 600, "max_passes": 16, "max_messages_per_lane": 6}
@@ -368,7 +369,7 @@ class ExportRunTests(unittest.TestCase):
         """Export 1.7.0 (C52), additive: inputs.roles, inputs.controller and inputs.automatic.profile as prepare pinned them."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
         self.assertFalse({"roles", "controller"} & set(exported["inputs"]))
         self.assertNotIn("profile", exported["inputs"]["automatic"])
         plan = read_json(directory / "plan.json")
@@ -387,7 +388,7 @@ class ExportRunTests(unittest.TestCase):
         """Within 1.7.0 (C7, C29): inputs.tryout {required, verdicts, allow_untried} from plan.tryout and tryout.json."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.8.0")
+        self.assertEqual(exported["version"], "1.9.0")
         self.assertNotIn("tryout", exported["inputs"])  # A plan from before C7.
         plan = read_json(directory / "plan.json")
         save_json(directory / "plan.json", {**plan, "tryout": False})
@@ -481,10 +482,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.8.0", result.stdout)
+        self.assertIn("version 1.9.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.8.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.9.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")
@@ -572,6 +573,44 @@ class CostTests(unittest.TestCase):
         written = (directory / "run-state.json").read_bytes()
         export_run(ExportRuntime(directory))
         self.assertEqual((directory / "run-state.json").read_bytes(), written)  # Stable: same files, same export.
+
+    def test_export_1_9_0_panels_null_pending_and_record_leave_definition_and_costs_byte_identical(self):
+        """Export 1.9.0 (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A): `panels` is null without plan.panels, the pending record
+        from plan.panels before panel.json exists, the record verbatim once written; `definition()`/`graph_nodes()` and the
+        `costs`/`by_role` section are byte-identical with and without a panel (no node, no cost role this slice)."""
+        from . import panel
+        from .export_state import definition, graph_nodes
+        directory = legacy_run(self.root)
+        without = export_run(ExportRuntime(directory))
+        self.assertIsNone(without["panels"])
+        plan = read_json(directory / "plan.json")
+        plan["panels"] = [{"id": "review-panel", "stage": "review", "providers": [{"transport": "claude", "model": None, "effort": "high"},
+                           {"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": None}],
+                           "prompt": {"source": "builtin:review", "text": "brief", "sha256": "x"}, "requirements": [], "requirement_docs": {},
+                           "budget_usd": 5, "timeout_minutes": 15, "overlap_threshold": 2, "report_only": True,
+                           "pi_bin": "/nvm/bin", "prd_label": None}]
+        save_json(directory / "plan.json", plan)
+        pending = export_run(ExportRuntime(directory))
+        self.assertEqual(pending["panels"]["panels"][0]["status"], "pending")
+        self.assertEqual([provider["status"] for provider in pending["panels"]["panels"][0]["providers"]], ["pending", "pending"])
+        # The record verbatim once the controller wrote it.
+        record = panel.pending_record(plan)
+        record["panels"][0].update(status="succeeded", started_at="t", ended_at="t", context_bytes=10)
+        panel.save_record(directory, record)
+        written = export_run(ExportRuntime(directory))
+        self.assertEqual(written["panels"], record)
+        # No graph node, no cost role: byte-identical definition and costs with and without the panel.
+        self.assertEqual(json.dumps(without["definition"], sort_keys=True), json.dumps(written["definition"], sort_keys=True))
+        self.assertEqual(json.dumps(without["costs"], sort_keys=True), json.dumps(written["costs"], sort_keys=True))
+        self.assertEqual(set(without["costs"]["by_role"]), {"workers", "reviewers", "sidecar", "challenge", "attack"})
+        self.assertEqual(graph_nodes(["ui", "adapter"]), graph_nodes(["ui", "adapter"], False, False, False))
+        self.assertEqual(definition(["ui", "adapter"], None), definition(["ui", "adapter"], None, False, False, False))
+        self.assertEqual({key for key in written if key not in without}, set())
+        # An unreadable panel.json exports a failed record with its error, never null.
+        (directory / "panel.json").write_text("{not json")
+        broken = export_run(ExportRuntime(directory))
+        self.assertEqual(broken["panels"]["panels"][0]["status"], "failed")
+        self.assertTrue(broken["panels"]["panels"][0]["error"].startswith("panel.json is not valid"))
 
     def test_challenge_history_lists_each_archived_attempt_with_its_p0_p1(self):
         from .export_state import challenge_section

@@ -35,7 +35,8 @@ FEED = "attention.jsonl"
 # `sidecar`: a review sidecar P0/P1 that reached no lane, or an escalation (C41), recorded on the finding's lane.
 # `awaiting_approval`: an automatic run with finish "approval" stopped after review (C51), recorded on `approval` with the
 # approve command; never `finished`, which says the branch was fast-forwarded.
-KINDS = frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar", "awaiting_approval", "attack"})
+# `panel`: a multi-provider panel ended with at least one accepted finding (PRD_MULTI_PROVIDER_PANEL Appendix A), recorded on the run.
+KINDS = frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "finished", "sidecar", "awaiting_approval", "attack", "panel"})
 # Named for the unit that adds it, and refused until it joins KINDS: a run paused on a usage limit (C46).
 RESERVED_KINDS = frozenset({"usage_limit"})
 # The feed's lock is taken without blocking, retried every LOCK_RETRY_SECONDS for at most LOCK_WAIT_SECONDS: a holder that

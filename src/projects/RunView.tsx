@@ -3,7 +3,7 @@ import {
   buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import { fetchAttackResult, fetchEvents, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
+import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { AttackPassBody } from './node/AttackSections.tsx'
@@ -11,6 +11,7 @@ import { LanesLine, NowBanner } from './NowBanner.tsx'
 import { boardSplitWidth } from './node/board.ts'
 import { nodePhase } from './node/model.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
+import { ProviderPanelBody } from './providerPanel.tsx'
 import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
 import { isAttackNode, isSidecarNode } from './status.ts'
@@ -110,6 +111,12 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const hasAttack = definition.nodes.some(isAttackNode)
   const loadAttack = useCallback((signal: AbortSignal) => orNotRecorded(fetchAttackResult(scope, signal), NOT_RECORDED.attack), [scope])
   const { state: attack, reload: reloadAttack } = useResource(hasAttack ? `attack:${runKey}` : null, loadAttack, refreshToken, pollToken)
+  // The multi-provider panel has no graph node this slice (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A), so every run asks for
+  // its record, polled the same way: a 404 PANELS_NOT_FOUND (no panels, an older export, an unreadable record) loads as null
+  // and shows no section, so a run without panels and every older export render as today.
+  const loadPanels = useCallback((signal: AbortSignal) => orNotRecorded(fetchPanelResults(scope, signal), NOT_RECORDED.panels), [scope])
+  const { state: panels, reload: reloadPanels } = useResource(`panels:${runKey}`, loadPanels, refreshToken, pollToken)
+  const hasPanels = panels.status === 'error' || (panels.status === 'ready' && panels.data !== null)
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))
@@ -285,6 +292,14 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                   <AttackPassBody record={attack} onRetry={reloadAttack} />
                 </section>
               )}
+              {hasPanels && (
+                <section className="run-panels" data-testid="panel-section" aria-labelledby="run-panels-title">
+                  <header className="ui-section-header">
+                    <h3 id="run-panels-title">Panel</h3>
+                  </header>
+                  <ProviderPanelBody record={panels} onRetry={reloadPanels} />
+                </section>
+              )}
               {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
               {timeline && <Activity timeline={timeline} labels={labels} phaseOf={phaseOf} attentionOf={nodeId => attention?.nodes.get(nodeId)?.kind ?? null} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
             </>
@@ -317,6 +332,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                     onRetrySidecar={reloadSidecar}
                     attack={attack}
                     onRetryAttack={reloadAttack}
+                    panels={panels}
+                    onRetryPanels={reloadPanels}
                     refreshToken={refreshToken}
                     onNavigate={onNavigate}
                     highlight={highlight}

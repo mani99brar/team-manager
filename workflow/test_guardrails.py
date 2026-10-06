@@ -585,7 +585,7 @@ sys.exit(1 if mode == 'exit' else 0)
             self.assertEqual(code, 1, output)
             self.assertIn("Blocked:", output)
             self.assertIn(message, output)
-            self.assertNotIn("Traceback", output)
+            self.assertNotIn("Traceback (most recent call last)", output)  # The word alone appears in a stale-session warning's echoed argv.
             blocked = [event for event in self.events(directory) if event[:2] == ("challenge", "blocked")]
             self.assertEqual(len(blocked), 1, self.events(directory))
             self.assertIn(message, blocked[0][2])
@@ -653,7 +653,7 @@ class ChallengeCheckoutFails(FailingChallenge):
         output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
         self.assertEqual(code, 1, output)
         self.assertIn("Blocked:", output)
-        self.assertNotIn("Traceback", output)
+        self.assertNotIn("Traceback (most recent call last)", output)  # The word alone appears in a stale-session warning's echoed argv.
         [event] = [event for event in self.events(directory) if event[0] == "challenge"]
         self.assertEqual(event[1], "blocked")
         self.assertIn("worktree", event[2])
@@ -1654,7 +1654,7 @@ class ChallengeHold(GuardedFeature):
         self.assertIn("could not be read", lines)
         self.assertEqual(code, 1, output)
         self.assertTrue(output.startswith("Blocked:"), output)
-        self.assertNotIn("Traceback", output)
+        self.assertNotIn("Traceback (most recent call last)", output)  # The word alone appears in a stale-session warning's echoed argv.
         # A pinned file it cannot read (or decode) leaves the held fact too, as the next step does.
         task = self.folder / "ui-task.md"
         task.chmod(0)
@@ -3426,7 +3426,7 @@ class ExportSeam(unittest.TestCase):
             directory = legacy_run(Path(root))
             before = export_run(ExportRuntime(directory))
             self.assertEqual(before["version"], EXPORT_VERSION)
-            self.assertEqual(EXPORT_VERSION, "1.8.0")
+            self.assertEqual(EXPORT_VERSION, "1.9.0")
             self.assertIsNone(before["sidecar"])  # A run prepared without a sidecar (every run before 1.6.0).
             self.assertEqual((before["inputs"]["decisions"], before["inputs"]["challenge"]), (None, None))
             self.assertEqual([worker["questions"] for worker in before["inputs"]["workers"].values()], [[], []])
@@ -3553,7 +3553,7 @@ class GrillSkill(unittest.TestCase):
         intro, read, ask, write, back = (body[body.index(start):body.index(end)] for start, end in (
             ("You interview", "## 1."), ("## 1.", "## 2."), ("## 2.", "## 3."), ("## 3.", "## 4."), ("## 4.", "The design challenge then")))
         # Line 10: both guarded versions, and only the operator's answers bind (C4, decision 8).
-        self.assertIn("A `feature.json` 2.2.0, 2.3.0, 2.4.0 or 2.5.0 feature cannot launch without a non-empty `decisions.md`", intro)
+        self.assertIn("A `feature.json` 2.2.0, 2.3.0, 2.4.0, 2.5.0 or 2.6.0 feature cannot launch without a non-empty `decisions.md`", intro)
         self.assertIn("Only the operator's answers bind the run", intro)
         self.assertNotIn("binds the whole run", body)
         # §1: the target's CLAUDE.md, values kept by hand that the repository records (C3), and every limit played back (C1).

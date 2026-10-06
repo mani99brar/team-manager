@@ -1289,6 +1289,10 @@ def run_status(directory: Path) -> tuple[dict, str]:
                 status["attack"] = f"{len(verified)} verified, {unlabelled} unlabelled"
             else:
                 status["attack"] = attack_record["status"]
+    from . import panel
+    panel_lines = panel.status_lines(directory, plan)  # `panel <id>: <a> accepted of <n>` (PRD_MULTI_PROVIDER_PANEL Appendix A).
+    if panel_lines:
+        status["panels"] = panel_lines
     from .abandon import abandoned
     record = abandoned(directory)
     if record is not None:
@@ -1351,6 +1355,11 @@ def main():
     parser.add_argument("--attack-settings", help="prepare --guardrails: the attack pass (feature.json 2.5.0 attack) as JSON (angles and the "
                                                   "budgets plus requirements); prepare pins plan.attack with the briefs, the attack_check and the "
                                                   "requirement-document copies")
+    parser.add_argument("--panel-settings", help="prepare --guardrails: the multi-provider panels (feature.json 2.6.0 panels) as JSON "
+                                                 "{panels: [...], pi_bin}; prepare pins plan.panels last, with each brief's text and sha256 and the "
+                                                 "requirement-document copies")
+    parser.add_argument("--panels", help="preflight: the transports the feature's panels declare (comma-separated claude,pi); preflight "
+                                         "proves them again (claude --max-budget-usd, pi --version)")
     parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
     parser.add_argument("--follows", type=Path, metavar="RUN", help="prepare: the run directory this run follows up (C30), pinned as plan.follows "
@@ -1368,6 +1377,8 @@ def main():
         parser.error("--tryout and --allow-untried apply to preflight and prepare only; the tryout is pinned at prepare")
     if args.attack and args.action != "preflight":
         parser.error("--attack applies to preflight only; the attack pass is pinned at prepare from the feature's attack")
+    if args.panels and args.action != "preflight":
+        parser.error("--panels applies to preflight only; the panels are pinned at prepare from --panel-settings")
     if args.allow_untried is not None and not args.tryout:
         parser.error("--allow-untried applies with --tryout: a launch that asks for no tryout is never held by the limit")
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
@@ -1430,6 +1441,9 @@ def main():
                     raise ValueError(f"Blocked: an attack pass needs {present} off this host: move it, then launch again")
                 if "--max-budget-usd" not in help_text:  # [L6]: the attacker and the skeptic are budgeted.
                     raise ValueError("Installed Claude CLI lacks --max-budget-usd, which the attack pass needs")
+            if args.panels:  # The panels' transports, proved again (PRD_MULTI_PROVIDER_PANEL 4.2): claude --max-budget-usd, pi --version.
+                from . import panel
+                panel.prove_transports([{"providers": [{"transport": name} for name in args.panels.split(",") if name]}])
             if args.herdr and os.environ.get("HERDR_ENV") != "1":
                 raise ValueError("Herdr attachment requires a managed caller pane")
             print(json.dumps({"preflight": "passed", "base_commit": git(args.repo.resolve(), "rev-parse", "HEAD"),
@@ -1492,6 +1506,23 @@ def main():
                 if "attack_check" not in policy:
                     raise ValueError("feature.json declares attack but its policy has no attack_check (policy 1.3.0)")
                 attack.validate_attack_check(policy["attack_check"])
+            panel_settings = None
+            if args.panel_settings is not None:
+                from . import panel
+                if not args.guardrails:
+                    parser.error("--panel-settings applies to prepare --guardrails (feature.json 2.6.0) only")
+                try:
+                    panel_settings = json.loads(args.panel_settings)
+                except ValueError as error:
+                    raise ValueError(f"--panel-settings is not JSON: {error}") from None
+                if not isinstance(panel_settings, dict) or not isinstance(panel_settings.get("panels"), list) or not panel_settings["panels"]:
+                    raise ValueError("--panel-settings must be a JSON object {panels: [...], pi_bin}")
+                panel_settings["panels"] = [panel.settings(item, f"--panel-settings panels[{index}].") for index, item in enumerate(panel_settings["panels"])]
+                panel.check_launch(panel_settings["panels"])
+                for item in panel_settings["panels"]:
+                    brief = Path(item["prompt"])
+                    if not brief.is_file() or not brief.read_text().strip():
+                        raise ValueError(f"Panel brief for {item['id']} is missing or empty: {brief}")
             tasks = {}
             for worker in policy["workers"]:
                 node = worker["node_id"]
@@ -1549,6 +1580,17 @@ def main():
                 rerun = directory.parent / f"{directory.name}.attack" / "rerun"
                 attack.pin(plan, attack_settings, reqs, attack.default_secret_files(), briefs, skeptic,
                            policy["attack_check"], str(worktree), str(rerun))
+            if panel_settings is not None:
+                # Pinned LAST among the feature pins, so plan.feature_version reads 2.6.0 (PRD_MULTI_PROVIDER_PANEL Appendix A).
+                from . import panel
+                source = args.repo.resolve()
+                reqs = {rel: (source / rel).read_text() for item in panel_settings["panels"] for rel in item["requirements"]}
+                briefs = {item["id"]: (item["prompt"], Path(item["prompt"]).read_text()) for item in panel_settings["panels"]}
+                try:
+                    prd_label = str(args.prd.resolve().relative_to(source)) if args.prd else None
+                except ValueError:
+                    prd_label = args.prd.name if args.prd else None
+                panel.pin(plan, panel_settings["panels"], briefs, reqs, panel_settings.get("pi_bin"), prd_label)
             if restore:
                 pin_restore(plan, directory, policy, restore)
             if args.automatic:

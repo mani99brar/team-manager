@@ -1,5 +1,5 @@
 import type { WorkerResult } from '../workflow/v1.js'
-import type { AttackRecord, AttackResult, ReviewFinding, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
+import type { AttackRecord, AttackResult, PanelRecord, PanelResults, ReviewFinding, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
 
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
@@ -335,3 +335,45 @@ export const attackRecord: AttackRecord = {
 
 /** The same record as the attack route serves it from the export's `attack` section. */
 export const attackResult: AttackResult = { contract_version: '1.8.0', node_id: 'attack', source: 'export', ...attackRecord }
+
+/**
+ * The multi-provider panel's record exactly as docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A pins it: one review-stage panel
+ * that succeeded, two providers (a default claude and pi's openai-codex/gpt-6-sol) both raising the one finding, accepted at
+ * threshold 2.
+ */
+export const panelRecord: PanelRecord = {
+  version: '1.0.0',
+  panels: [
+    {
+      id: 'review-panel', stage: 'review', status: 'succeeded',
+      overlap_threshold: 2, context_bytes: 48213,
+      providers: [
+        { transport: 'claude', model: null, effort: 'high', status: 'ok', cost_usd: 0.021, context_bytes: 48213, finding_ids: ['f1'], error: null },
+        { transport: 'pi', model: 'openai-codex/gpt-6-sol', effort: null, status: 'ok', cost_usd: 0.0047, context_bytes: 48213, finding_ids: ['f1'], error: null },
+      ],
+      findings: [
+        { id: 'f1', severity: 'P1', file: 'packages/api/src/modules/claims/reconcile.ts', line: 52, title: 'mined set from non-final evidence', detail: 'A reorg can strand a mined publication.', providers_raised: ['claude', 'openai-codex/gpt-6-sol'], accepted: true, unanchored: false },
+      ],
+      started_at: '2026-10-06T07:00:00Z', ended_at: '2026-10-06T07:00:39Z', budget_usd: 5, error: null,
+    },
+  ],
+}
+
+/** Appendix A's `pending` record: what the export builds from `plan.panels` before `panel.json` exists. */
+export const panelPendingRecord: PanelRecord = {
+  version: '1.0.0',
+  panels: [
+    {
+      id: 'review-panel', stage: 'review', status: 'pending',
+      overlap_threshold: 2, context_bytes: null,
+      providers: [
+        { transport: 'claude', model: null, effort: 'high', status: 'pending', cost_usd: null, context_bytes: null, finding_ids: [], error: null },
+        { transport: 'pi', model: 'openai-codex/gpt-6-sol', effort: null, status: 'pending', cost_usd: null, context_bytes: null, finding_ids: [], error: null },
+      ],
+      findings: [], started_at: null, ended_at: null, budget_usd: 5, error: null,
+    },
+  ],
+}
+
+/** The same record as the panels route serves it from the export's `panels` section. */
+export const panelResults: PanelResults = { contract_version: '1.9.0', source: 'export', ...panelRecord }

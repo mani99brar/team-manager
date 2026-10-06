@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Multi-provider panel record v1.0.0",
+  "description": "`<run>/panel.json` of a feature.json 2.6.0 run that declares `panels` (docs/PRD_MULTI_PROVIDER_PANEL.md section 4 and Appendix A), written only by the controller inside the review step (it holds `controller.lock`; no separate lock this slice), validated with `workflow.verification.validate_schema(\"panel\", ...)` before every write. Export 1.9.0 carries it verbatim as the top-level `panels` section (null for a run without `plan.panels`; a `pending` record while no panel.json exists yet; a `failed` record with its `error` when panel.json does not validate). Hand-written; this schema and the projects contract's `panelResults` both close every object and validate Appendix A's two verbatim records. One entry per declared panel, in declaration order. The panel `status` is `pending|running|succeeded|failed|timed_out` (`succeeded` when at least one provider is `ok`, `timed_out` when every provider timed out, `failed` for an assembly throw, an internal exception or a non-interrupt exit with no review.json); a provider's is `pending|running|ok|timed_out|error|parse_failed`. The nullable fields are a panel's `context_bytes`, `started_at`, `ended_at` and `error`, a provider's `model` (null for a default `claude`), `effort` (null for `pi`), `status`-dependent `cost_usd`, `context_bytes` and `error`, and a finding's `line`. `overlap_threshold` is an integer N (at least N providers) or the string `all`. A finding's `file` is the canonical context label it anchored to, or the provider's own text when `unanchored`; `providers_raised` names each provider once as `model` or, for a default claude, `claude`; `accepted` follows the threshold; an unanchored finding is never accepted. Arrays may be empty; no referential check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "panels"
+  ],
+  "properties": {
+    "version": {
+      "const": "1.0.0"
+    },
+    "panels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/panel"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nullableId": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "nullableText": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "maxLength": 4000
+        }
+      ]
+    },
+    "nullableCost": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        }
+      ]
+    },
+    "nullableBytes": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "severity": {
+      "enum": [
+        "P0",
+        "P1",
+        "P2"
+      ]
+    },
+    "threshold": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "const": "all"
+        }
+      ]
+    },
+    "panel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "stage",
+        "status",
+        "overlap_threshold",
+        "context_bytes",
+        "providers",
+        "findings",
+        "started_at",
+        "ended_at",
+        "budget_usd",
+        "error"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "stage": {
+          "enum": [
+            "challenge",
+            "review"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "timed_out"
+          ]
+        },
+        "overlap_threshold": {
+          "$ref": "#/$defs/threshold"
+        },
+        "context_bytes": {
+          "$ref": "#/$defs/nullableBytes"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/provider"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "started_at": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "budget_usd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "error": {
+          "$ref": "#/$defs/nullableText"
+        }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "model",
+        "effort",
+        "status",
+        "cost_usd",
+        "context_bytes",
+        "finding_ids",
+        "error"
+      ],
+      "properties": {
+        "transport": {
+          "enum": [
+            "claude",
+            "pi"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "effort": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "ok",
+            "timed_out",
+            "error",
+            "parse_failed"
+          ]
+        },
+        "cost_usd": {
+          "$ref": "#/$defs/nullableCost"
+        },
+        "context_bytes": {
+          "$ref": "#/$defs/nullableBytes"
+        },
+        "finding_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/nullableText"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "file",
+        "line",
+        "title",
+        "detail",
+        "providers_raised",
+        "accepted",
+        "unanchored"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "providers_raised": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "accepted": {
+          "type": "boolean"
+        },
+        "unanchored": {
+          "type": "boolean"
+        }
+      }
+    },
+    "output": {
+      "description": "What a claude provider job returns (`--json-schema`, object root: Claude Code's structured output needs an object root); a pi provider returns the findings array bare, with a free-text severity the controller normalizes (critical\u2192P0, high\u2192P1, anything else\u2192P2) before anchoring `file`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findings"
+      ],
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "severity",
+              "file",
+              "line",
+              "title",
+              "detail"
+            ],
+            "properties": {
+              "severity": {
+                "$ref": "#/$defs/severity"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
