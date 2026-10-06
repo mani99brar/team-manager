@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ SCHEMA = CONTRACTS / "panel.schema.json"
 RECORD = "panel.json"
 DIR = "panel"  # `<run>/panel/<id>/`: the context file, each provider's prompt/output/stderr files and the pi scratch dirs.
 CONTEXT = "context.txt"
+NO_FILE = "(no file)"  # The record's `file` placeholder for a finding a provider returned with no file: the viewer pins `file` min length 1, so an empty string would drop the whole panel section (P1).
 STAGES = ("challenge", "review")
 LIVE_STAGES = ("review",)  # This slice; `challenge` is refused at launch (PRD 4.2, [L3]).
 TRANSPORTS = ("claude", "pi")
@@ -639,7 +641,7 @@ def normalize_findings(raw: list, labels: list[str], worktree: str | None) -> li
             line = int(line.strip())
         if not (type(line) is int and line >= 0):
             line = parsed_line
-        result.append({"severity": normalize_severity(item.get("severity")), "file": clip(file, 512) or "", "line": line,
+        result.append({"severity": normalize_severity(item.get("severity")), "file": clip(file, 512) or NO_FILE, "line": line,
                        "title": clip(item.get("title") or "(untitled)", 2000), "detail": clip(item.get("detail") or "", 4000),
                        "unanchored": unanchored})
     return result
@@ -800,8 +802,7 @@ def start_provider(runtime, panel_index: int, provider_index: int, item: dict, e
             process = popen_claude(command, cwd=cwd, env=job_env(), stdin=stdin, stdout=out, stderr=err, text=True, start_new_session=True)
         marker = f"--session-id {session_id}"
     else:
-        cwd = panel_dir / f"scratch-{slug}"
-        cwd.mkdir(exist_ok=True)
+        cwd = Path(tempfile.mkdtemp(prefix="mpp-panel-"))  # A neutral temp root, never the run/state tree: pi 0.85.1 absolutizes `@context.txt` into the `<file name>` tag it sends, so the cwd it expands must not carry the user/feature/run/panel path (PRD 4.3, P1).
         shutil.copyfile(context, cwd / CONTEXT)  # The same bytes, named relative to the scratch cwd.
         command = pi_command(item["pi_bin"], entry, brief)
         with stdout_path.open("w") as out, stderr_path.open("w") as err:
@@ -870,6 +871,8 @@ def ensure_started(runtime, *, clock=time.time) -> None:
                     continue
                 provider.update(status="running", context_bytes=size, error=None)
                 jobs.setdefault(item["id"], []).append(job)
+            if item["id"] not in jobs:  # Every owed provider failed to launch (nothing is running): finalize to a terminal record now, never a perpetual `running` (P1).
+                _finalize(directory, plan, panel_index, record, {}, now)
         save_record(directory, record)
     except Exception as error:  # noqa: BLE001
         _warn(f"could not start the provider jobs: {type(error).__name__}: {error}")

@@ -326,7 +326,9 @@ class Overlap(unittest.TestCase):
         raw = [finding("docs/PRD_X.md", None, "contradiction"), finding("operator-request", None, "scope"), finding("src/nothing.ts", 3, "ghost"),
                finding("", None, "no file")]
         found = panel.normalize_findings(raw, labels, None)
-        self.assertEqual([(f["file"], f["unanchored"]) for f in found], [("docs/PRD_X.md", False), ("operator-request", False), ("src/nothing.ts", True), ("", True)])
+        # A finding with no file is unanchored and carries the `(no file)` placeholder, never an empty string the viewer's min-length rule would drop the whole panel over (P1).
+        self.assertEqual([(f["file"], f["unanchored"]) for f in found], [("docs/PRD_X.md", False), ("operator-request", False), ("src/nothing.ts", True), ("(no file)", True)])
+        self.assertTrue(all(f["file"] for f in found))
         findings, _ = panel.overlap([("claude", found), ("openai-codex/gpt-6-sol", [found[2]])], 1, 2)
         ghost = [f for f in findings if f["title"] == "ghost"]
         self.assertEqual([(f["unanchored"], f["accepted"], f["providers_raised"]) for f in ghost], [(True, False, ["claude"]), (True, False, ["openai-codex/gpt-6-sol"])])
@@ -560,7 +562,8 @@ class ReviewStep(Harness):
         # The pi job: the brief positional, @context.txt relative to the scratch cwd, env -i with PATH, no credential variable.
         seen = read_json(self.pi_seen)
         self.assertEqual(seen["argv"][-2:], [plan["panels"][0]["prompt"]["text"], "@context.txt"])
-        self.assertEqual(Path(seen["cwd"]).resolve(), (self.run / "panel" / "review-panel" / "scratch-openai-codex-gpt-6-sol").resolve())
+        # The pi scratch cwd is a neutral temp root outside the run/state tree, so the absolute path pi expands `@context.txt` to carries no user/feature/run/panel layout (P1).
+        self.assertFalse(str(Path(seen["cwd"]).resolve()).startswith(str(self.run.resolve())))
         self.assertTrue(seen["context_exists"])
         self.assertEqual(seen["context_bytes"], entry["context_bytes"])
         self.assertEqual(set(seen["env"]) - {"PWD", "SHLVL", "_", "OLDPWD"}, {"PATH", "HOME", "LANG", "TMPDIR"})
@@ -666,6 +669,20 @@ class ReviewStep(Harness):
         panel.collect(runtime, None, clock=lambda: clock["now"], sleep=sleep)
         entry = self.record()["panels"][0]
         self.assertEqual((entry["status"], [p["status"] for p in entry["providers"]], entry["error"]), ("timed_out", ["timed_out", "timed_out"], "every provider timed out"))
+
+    def test_a_panel_whose_every_provider_fails_to_launch_is_finalized_failed_not_left_running(self):
+        """P1: a single-provider panel whose pinned pi_bin is missing at review time records `failed` from ensure_started itself
+        (no job ever reaches collect), never a perpetual `running` the operator never learns ended."""
+        plan = self.plan(providers=[{"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": None}])
+        plan["panels"][0]["pi_bin"] = str(self.tmp / "no-such-bin")  # Missing at review time: Popen raises, the only provider cannot launch.
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        self.assertEqual(runtime.panel_jobs.get("review-panel", []), [])  # Nothing launched.
+        entry = self.record()["panels"][0]
+        self.assertEqual((entry["status"], [p["status"] for p in entry["providers"]]), ("failed", ["error"]))
+        self.assertIn("no provider returned findings", entry["error"])
+        self.assertIsNotNone(entry["ended_at"])
+        self.assertEqual(entry["findings"], [])
 
     def test_a_generic_non_decided_exit_records_a_terminal_failed_record_never_a_perpetual_running(self):
         """Acceptance item 4: a failed reviewer launch (no review.json, not an interrupt) terminates the jobs and records failed."""
