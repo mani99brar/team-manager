@@ -11,8 +11,13 @@ import {
   type AttackFinding,
   type AttackResult,
   isBlockingFinding,
+  type PanelEntry,
+  type PanelFinding,
+  type PanelProvider,
+  type PanelResults,
   schemas,
   validateAttackResult,
+  validatePanelResults,
   validateReviewResult,
   validateRunDetail,
   validateRunInputs,
@@ -33,11 +38,11 @@ import {
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
-export type { AttackAttacker, AttackFinding, AttackResult, Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
 export { isBlockingFinding }
 
 /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
-export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND' } as const
+export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND', panels: 'PANELS_NOT_FOUND' } as const
 
 export type ApiErrorKind = 'network' | 'http' | 'malformed'
 
@@ -99,6 +104,7 @@ export const paths = {
   inputs: (scope: RunScope) => `${paths.run(scope)}/inputs`,
   sidecar: (scope: RunScope) => `${paths.run(scope)}/sidecar`,
   attack: (scope: RunScope) => `${paths.run(scope)}/attack`,
+  panels: (scope: RunScope) => `${paths.run(scope)}/panels`,
 }
 
 async function request(path: string, signal: AbortSignal | undefined, accept: string): Promise<Response> {
@@ -292,6 +298,14 @@ export function fetchAttackResult(scope: RunScope, signal?: AbortSignal): Promis
     if (result.run_id !== scope.runId) throw new Error(`the attack pass record belongs to run ${result.run_id}.`)
     return result
   }, signal)
+}
+
+/**
+ * The multi-provider panel's record (contract 1.9.0), live while the panel runs: polled, never cached as immutable. The record
+ * names no run (Appendix A), so only the route's scope ties it to the run viewed.
+ */
+export function fetchPanelResults(scope: RunScope, signal?: AbortSignal): Promise<PanelResults> {
+  return requestJson(paths.panels(scope), input => validatePanelResults(input), signal)
 }
 
 /** Whether a failure is the contract's 404 for a section the run's export does not carry. */

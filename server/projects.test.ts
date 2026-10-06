@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateAttackResult, validateDefinition, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+import { schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
 import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
 import { seedCandidate } from '../tests/project-workflows/seed.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { ATTACK_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
+import { ATTACK_BYTE_LIMIT, PANEL_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
 import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
@@ -107,6 +107,10 @@ type RunSpec = {
   attack?: unknown
   /** Content written to the live `<run>/attack.json`. */
   liveAttack?: string
+  /** Export 1.9.0: the `panels` section as persisted (undefined leaves the key out; null is an explicit null). */
+  panels?: unknown
+  /** Content written to the live `<run>/panel.json`. */
+  livePanel?: string
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -117,6 +121,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
   if (spec.diffFile !== undefined) await writeFile(join(dir, 'review.diff'), spec.diffFile)
   if (spec.liveLedger !== undefined) await writeFile(join(dir, 'sidecar.ledger.json'), spec.liveLedger)
   if (spec.liveAttack !== undefined) await writeFile(join(dir, 'attack.json'), spec.liveAttack)
+  if (spec.livePanel !== undefined) await writeFile(join(dir, 'panel.json'), spec.livePanel)
   const registrations: Registration[] = []
   for (const packetSpec of spec.packets ?? []) {
     const phase = packetSpec.phase ?? 'worker'
@@ -178,6 +183,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     ...(spec.review !== undefined ? { review: spec.review } : {}), ...(spec.inputs !== undefined ? { inputs: spec.inputs } : {}),
     ...(spec.sidecar !== undefined ? { sidecar: spec.sidecar } : {}),
     ...(spec.attack !== undefined ? { attack: spec.attack } : {}),
+    ...(spec.panels !== undefined ? { panels: spec.panels } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
@@ -1506,7 +1512,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.9.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.10.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -2938,6 +2944,196 @@ test('[attack] a seeded run with an attack pass has the activity and status of i
 })
 
 // ---- Run roles, the controller record and the profile (C52): export 1.7.0 ----
+
+// ---- Multi-provider panel (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A): export 1.9.0 and the live record, no node ------
+
+/**
+ * The two records of Appendix A, read from the PRD itself: the `succeeded` record and the `pending` one, in that order. Both
+ * blocks are indented inside a bullet, so the fences tolerate leading whitespace (design-challenge note 4).
+ */
+async function panelAppendixA(): Promise<[string, string]> {
+  const prd = await readFile(new URL('../docs/PRD_MULTI_PROVIDER_PANEL.md', import.meta.url), 'utf8')
+  const blocks = [...prd.slice(prd.indexOf('## Appendix A')).matchAll(/^[ \t]*```json\n([\s\S]*?)\n[ \t]*```/gm)].map(block => block[1])
+  assert.equal(blocks.length, 2, 'Appendix A holds the succeeded and the pending record')
+  return [blocks[0], blocks[1]]
+}
+const PANEL_RUN = 'panel-run'
+const panelOf = async (): Promise<PanelRecord> => JSON.parse((await panelAppendixA())[0]) as PanelRecord
+const panelPendingOf = async (): Promise<PanelRecord> => JSON.parse((await panelAppendixA())[1]) as PanelRecord
+/** Appendix A's running record: the succeeded one with the statuses `running`, `ended_at` null and no findings yet. */
+async function panelRunningOf(): Promise<PanelRecord> {
+  const record = await panelOf()
+  Object.assign(record.panels[0], { status: 'running', ended_at: null, findings: [] })
+  for (const provider of record.panels[0].providers) Object.assign(provider, { status: 'running', cost_usd: null, finding_ids: [] })
+  return record
+}
+/** A 1.9.0 run in its review step; the graph is every older run's (no panel node this slice). */
+const panelRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
+  runId: PANEL_RUN, version: '1.9.0', values: reviewedValues(), next: ['review'], packets: reviewedPackets, events: reviewingEvents, sidecar: null, attack: null, ...spec,
+})
+const panelsRoute = (run = PANEL_RUN) => url('alpha', 'main', run, '/panels')
+
+test('[panel] a 1.9.0 export loads with the Appendix A record, the pending record, null and garbage; an invalid record never fails the run or the run list; the graph is unchanged', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, panelRun({ panels: await panelOf() }))
+    await writeRun(root, panelRun({ runId: 'panel-pending', panels: await panelPendingOf() }))
+    await writeRun(root, panelRun({ runId: 'panel-null', panels: null }))
+    for (const [runId, garbage] of [['panel-garbage', { version: '1.0.0', panels: [{ id: 'x', status: 'exploded' }] }], ['panel-string', 'not a record'], ['panel-array', [1, 2, 3]],
+      ['panel-threshold-zero', { ...(await panelOf()), panels: [{ ...(await panelOf()).panels[0], overlap_threshold: 0 }] }]] as const) {
+      await writeRun(root, panelRun({ runId, panels: garbage }))
+    }
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    assert.deepEqual(list.runs.map(run => run.run_id).sort(), [PANEL_RUN, 'panel-array', 'panel-garbage', 'panel-null', 'panel-pending', 'panel-string', 'panel-threshold-zero'].sort())
+    for (const run of list.runs) {
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', run.run_id))).json())
+      // No graph node this slice: the pinned definition is every older run's, and nothing of the activity reads the panel.
+      assert.deepEqual(detail.definition.nodes.map(node => node.node_id), DEFINITION.nodes.map(node => node.node_id), run.run_id)
+      assert.equal(detail.snapshot.nodes.some(node => node.node_id.startsWith('panel')), false)
+    }
+    const served = validatePanelResults((await get(app, panelsRoute())).json())
+    assert.deepEqual([served.contract_version, served.source, served.version, served.panels.length], ['1.9.0', 'export', '1.0.0', 1])
+    assert.equal('node_id' in served, false)
+    assert.deepEqual([served.panels[0].id, served.panels[0].stage, served.panels[0].status, served.panels[0].findings.length, served.panels[0].findings[0].accepted], ['review-panel', 'review', 'succeeded', 1, true])
+    const pending = validatePanelResults((await get(app, panelsRoute('panel-pending'))).json())
+    assert.deepEqual([pending.source, pending.panels[0].status, pending.panels[0].findings.length, pending.panels[0].started_at], ['export', 'pending', 0, null])
+    assert.deepEqual(pending.panels[0].providers.map(provider => provider.status), ['pending', 'pending'])
+    for (const runId of ['panel-null', 'panel-garbage', 'panel-string', 'panel-array', 'panel-threshold-zero']) assertError(await get(app, panelsRoute(runId)), 404, 'PANELS_NOT_FOUND')
+  })
+})
+
+test('[panel] a 1.8.0 export answers PANELS_NOT_FOUND even beside a live panel.json, as does a 1.9.0 run without panels; a 1.9.0 export keeps every other section', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const live = JSON.stringify(await panelOf())
+    await writeRun(root, { runId: 'export-180', version: '1.8.0', attack: null, sidecar: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2), livePanel: live })
+    await writeRun(root, { runId: 'no-panels', version: '1.9.0', attack: null, sidecar: null, panels: null, values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2), livePanel: live })
+    for (const runId of ['export-180', 'no-panels']) {
+      assert.equal((await get(app, url('alpha', 'main', runId))).status, 200)
+      assertError(await get(app, panelsRoute(runId)), 404, 'PANELS_NOT_FOUND')
+    }
+    // A 1.9.0 export serves its review, inputs, sidecar and attack sections exactly as a 1.8.0 one.
+    await writeRun(root, panelRun({ runId: 'full-190', panels: await panelOf(), review: reviewSection(), inputs: inputsSection(), sidecar: null, attack: null }))
+    validateReviewResult((await get(app, url('alpha', 'main', 'full-190', '/reviews/1'))).json())
+    validateRunInputs((await get(app, url('alpha', 'main', 'full-190', '/inputs'))).json())
+    assertError(await get(app, url('alpha', 'main', 'full-190', '/attack')), 404, 'ATTACK_NOT_FOUND')
+    assertError(await get(app, url('alpha', 'main', 'full-190', '/sidecar')), 404, 'SIDECAR_NOT_FOUND')
+    assert.equal(validatePanelResults((await get(app, panelsRoute('full-190'))).json()).source, 'export')
+  })
+})
+
+test('[panel] the live record wins whenever it is readable and valid, with no mtime comparison; a malformed, invalid or oversized live file falls back to the export (pending or the record), with the reason logged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-panel-'))
+  try {
+    const runsRoot = join(root, 'runs')
+    await mkdir(runsRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify({ version: 1, projects: [{ project_id: 'alpha', name: 'Alpha', repository: join(root, 'repo'), workflows: [{ workflow_id: 'main', runs_root: runsRoot, definition: DEFINITION }] }] }), 'test registry')
+    const warnings: string[] = []
+    const store = new RunStore(config, { warn: (message, details) => warnings.push(`${message} ${JSON.stringify(details)}`) })
+    const scope = store.scope('alpha', 'main')
+    const running = await panelRunningOf()
+    // A live record whose texts name the worktree's absolute path: served redacted.
+    const redactable = await panelOf()
+    const finding = redactable.panels[0].findings[0]
+    finding.detail = `A reorg can strand a mined publication (see ${join(root, 'worktree-review', 'reconcile.ts')}).`
+    finding.file = join(root, 'worktree-review', 'packages', 'reconcile.ts')
+    redactable.panels[0].providers[1].error = `pi wrote its stream to ${join(root, 'panel', 'pi.stdout')}`
+    redactable.panels[0].error = `context assembled at ${join(root, 'panel', 'context.txt')}`
+    const cases: [string, string | null, PanelRecord, 'live' | 'export', string][] = [
+      ['live-over-pending', JSON.stringify(running), await panelPendingOf(), 'live', 'running'],
+      ['live-over-succeeded', JSON.stringify(running), await panelOf(), 'live', 'running'],
+      ['live-older-than-export', JSON.stringify(running), await panelOf(), 'live', 'running'],
+      ['live-redacted', JSON.stringify(redactable), await panelPendingOf(), 'live', 'succeeded'],
+      ['live-malformed', '{"version": "1.0.0", "panels": [', await panelOf(), 'export', 'succeeded'],
+      ['live-invalid', JSON.stringify({ ...running, panels: [{ id: 'review-panel' }] }), await panelOf(), 'export', 'succeeded'],
+      ['live-bad-enum', JSON.stringify({ ...running, panels: [{ ...running.panels[0], status: 'refused' }] }), await panelPendingOf(), 'export', 'pending'],
+      ['live-bad-threshold', JSON.stringify({ ...running, panels: [{ ...running.panels[0], overlap_threshold: 'some' }] }), await panelPendingOf(), 'export', 'pending'],
+      ['live-duplicate-ids', JSON.stringify({ ...running, panels: [running.panels[0], running.panels[0]] }), await panelOf(), 'export', 'succeeded'],
+      ['live-oversized', JSON.stringify({ ...running, padding: 'x'.repeat(4 * 1024 * 1024) }), await panelOf(), 'export', 'succeeded'],
+      ['live-absent', null, await panelPendingOf(), 'export', 'pending'],
+    ]
+    assert.equal(PANEL_BYTE_LIMIT, 4 * 1024 * 1024)
+    for (const [runId, file, section, source, status] of cases) {
+      await writeRun(runsRoot, panelRun({ runId, panels: section, ...(file === null ? {} : { livePanel: file }) }))
+      if (runId === 'live-older-than-export') {
+        // The live file predates the export by an hour: it still wins, since only validity decides (Appendix A: no mtime).
+        const old = new Date(Date.now() - 3_600_000)
+        await utimes(join(runsRoot, runId, 'panel.json'), old, old)
+        assert.ok((await stat(join(runsRoot, runId, 'panel.json'))).mtimeMs < (await stat(join(runsRoot, runId, 'run-state.json'))).mtimeMs)
+      }
+      warnings.length = 0
+      const result = validatePanelResults(await store.panelResults(scope, runId))
+      assert.deepEqual([result.source, result.panels[0].status], [source, status], runId)
+      if (source === 'export' && file !== null) assert.ok(warnings.some(warning => warning.includes(runId) && /panel/i.test(warning)), `${runId}: the reason is logged (${warnings.join(' | ')})`)
+      // A record, valid or not, never fails the run.
+      validateRunDetail((await store.loadRun(scope, runId)).detail)
+    }
+    const redacted = validatePanelResults(await store.panelResults(scope, 'live-redacted'))
+    assert.equal(redacted.panels[0].findings[0].detail, 'A reorg can strand a mined publication (see <path>).')
+    assert.equal(redacted.panels[0].findings[0].file, '<path>')
+    assert.equal(redacted.panels[0].providers[1].error, 'pi wrote its stream to <path>')
+    assert.equal(redacted.panels[0].error, 'context assembled at <path>')
+    assert.ok(!JSON.stringify(redacted).includes(root) && !JSON.stringify(redacted).includes('/home/'))
+    // Neither readable: not recorded, never an error page or a failed run.
+    await writeRun(runsRoot, panelRun({ runId: 'both-invalid', panels: { broken: true }, livePanel: 'not json' }))
+    await assert.rejects(store.panelResults(scope, 'both-invalid'), (error: { status: number; code: string }) => error.status === 404 && error.code === 'PANELS_NOT_FOUND')
+    validateRunDetail((await store.loadRun(scope, 'both-invalid')).detail)
+    assert.equal((await store.listRuns(scope)).length, cases.length + 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('[panel] both Appendix A records are served field for field, live and from the export; a threshold of "all" or 1, a challenge stage, a running provider and every nullable field null are served, never skipped', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const [succeeded, pending] = await panelAppendixA()
+    await writeRun(root, panelRun({ runId: 'verbatim-live', panels: JSON.parse(pending), livePanel: succeeded }))
+    await writeRun(root, panelRun({ runId: 'verbatim-export', panels: JSON.parse(succeeded) }))
+    await writeRun(root, panelRun({ runId: 'verbatim-pending', panels: JSON.parse(pending) }))
+    for (const [runId, source, text] of [['verbatim-live', 'live', succeeded], ['verbatim-export', 'export', succeeded], ['verbatim-pending', 'export', pending]] as const) {
+      const served = validatePanelResults((await get(app, panelsRoute(runId))).json())
+      const { contract_version, source: servedSource, ...record } = served
+      assert.deepEqual([contract_version, servedSource], ['1.9.0', source], runId)
+      assert.deepEqual(record, JSON.parse(text), runId)
+    }
+    // Design-challenge note 3: the values the verbatim records do not carry.
+    const all = await panelOf()
+    Object.assign(all.panels[0], { id: 'challenge-panel', stage: 'challenge', overlap_threshold: 'all', status: 'running', ended_at: null, context_bytes: null, error: null })
+    all.panels[0].providers[0] = { ...all.panels[0].providers[0], model: null, effort: null, status: 'running', cost_usd: null, context_bytes: null, finding_ids: [], error: null }
+    all.panels[0].findings[0] = { ...all.panels[0].findings[0], line: null, accepted: false }
+    const any = await panelOf()
+    Object.assign(any.panels[0], { id: 'any-panel', overlap_threshold: 1 })
+    const timedOut = await panelOf()
+    Object.assign(timedOut.panels[0], { id: 'timed-out-panel', status: 'timed_out', findings: [], error: 'every provider timed out' })
+    for (const provider of timedOut.panels[0].providers) Object.assign(provider, { status: 'timed_out', finding_ids: [], error: 'timed out after 15 minutes; its process group was stopped', cost_usd: null })
+    const multi: PanelRecord = { version: '1.0.0', panels: [all.panels[0], any.panels[0], timedOut.panels[0]] }
+    await writeRun(root, panelRun({ runId: 'thresholds', panels: await panelPendingOf(), livePanel: JSON.stringify(multi) }))
+    const served = validatePanelResults((await get(app, panelsRoute('thresholds'))).json())
+    assert.equal(served.source, 'live')
+    assert.deepEqual(served.panels.map(panel => [panel.id, panel.stage, panel.overlap_threshold, panel.status]), [['challenge-panel', 'challenge', 'all', 'running'], ['any-panel', 'review', 1, 'succeeded'], ['timed-out-panel', 'review', 2, 'timed_out']])
+    assert.deepEqual(served.panels[0].providers[0], { transport: 'claude', model: null, effort: null, status: 'running', cost_usd: null, context_bytes: null, finding_ids: [], error: null })
+    assert.equal(served.panels[0].findings[0].line, null)
+    assert.deepEqual(served.panels[2].providers.map(provider => provider.status), ['timed_out', 'timed_out'])
+  })
+})
+
+test('[panel] the panels route is read-only: other methods are 405, HEAD works, nothing is written', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    await writeRun(runsRoot('alpha', 'main'), panelRun({ panels: await panelPendingOf(), livePanel: (await panelAppendixA())[0] }))
+    const before = await snapshotTree(runsRoot('alpha', 'main'))
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
+      const response = await app.inject({ method, url: panelsRoute(), payload: method === 'OPTIONS' ? undefined : { accepted: true } })
+      assert.equal(response.statusCode, 405, method)
+      assert.equal(response.headers.allow, 'GET, HEAD')
+      assert.equal(response.json().error.code, 'METHOD_NOT_ALLOWED')
+    }
+    assert.equal((await app.inject({ method: 'HEAD', url: panelsRoute() })).statusCode, 200)
+    const response = await get(app, panelsRoute())
+    assert.equal(response.status, 200)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.equal(validatePanelResults(response.json()).source, 'live')
+    assert.deepEqual(await snapshotTree(runsRoot('alpha', 'main')), before)
+  })
+})
 
 test('[roles] a 1.7.0 export serves the pinned roles, the controller record and the profile; a 1.6.0 export serves them as null', async () => {
   await harness(async ({ app, runsRoot }) => {

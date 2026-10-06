@@ -7,8 +7,9 @@ import type { RunInputs } from './v1.js'
 import { validateWorkerResult } from '../workflow/v1.js'
 import {
   ATTACK_ATTACKER_STATUSES, ATTACK_FINDING_STATUSES, ATTACK_PASS_STATUSES, ATTACK_RERUN_REASONS, ATTACK_SKEPTIC_STATUSES, attackRecordSchema,
-  ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, schemas, sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateAttackResult, validateDefinition, validateReviewResult,
-  validateRunDetail, validateRunInputs, validateSidecarLedger,
+  ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, PANEL_PROVIDER_STATUSES, PANEL_SEVERITIES, PANEL_STAGES, PANEL_STATUSES, PANEL_TRANSPORTS, panelRecordSchema, schemas,
+  sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult,
+  validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelResults,
 } from './v1.js'
 
 test('project examples and generated schemas agree', () => {
@@ -22,6 +23,7 @@ test('project examples and generated schemas agree', () => {
   validateRunInputs(examples.runInputs)
   validateSidecarLedger(examples.sidecarLedger)
   validateAttackResult(examples.attackResult)
+  validatePanelResults(examples.panelResults)
 })
 
 test('rejects cyclic, dangling and duplicate graph nodes', () => {
@@ -631,5 +633,111 @@ test('attack result 1.8.0: Appendix A field rules, every enum value, pending, no
     const value = base()
     mutate(value)
     assert.throws(() => validateAttackResult(value), label)
+  }
+})
+
+/**
+ * The two records of docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A (the `succeeded` one, then the `pending` one), read from the
+ * PRD itself so the two cannot drift apart. Both blocks are indented inside a bullet, so the fences tolerate leading
+ * whitespace (the attack helper's bare `\n```` never matches them: design-challenge note 4).
+ */
+function panelAppendixARecords(): unknown[] {
+  const prd = readFileSync(new URL('../../docs/PRD_MULTI_PROVIDER_PANEL.md', import.meta.url), 'utf8')
+  const appendix = prd.slice(prd.indexOf('## Appendix A'))
+  const blocks = [...appendix.matchAll(/^[ \t]*```json\n([\s\S]*?)\n[ \t]*```/gm)].map(block => JSON.parse(block[1]) as unknown)
+  assert.equal(blocks.length, 2, 'Appendix A holds exactly two JSON blocks: the succeeded record and the pending record')
+  return blocks
+}
+
+test('panel results 1.9.0: both Appendix A records validate verbatim as panelResults and are the committed examples', () => {
+  const [succeeded, pending] = panelAppendixARecords()
+  // Parsing keeps every field: nothing of Appendix A is dropped as unknown.
+  assert.deepEqual(panelRecordSchema.parse(succeeded), succeeded)
+  assert.deepEqual(panelRecordSchema.parse(pending), pending)
+  assert.deepEqual(succeeded, examples.panelRecord)
+  assert.deepEqual(pending, examples.panelPendingRecord)
+  for (const [record, source] of [[succeeded, 'export'], [pending, 'export'], [succeeded, 'live']] as const) {
+    const served = validatePanelResults({ ...(record as object), contract_version: '1.9.0', source })
+    assert.equal(served.source, source)
+    assert.equal('node_id' in served, false, 'the panel has no graph node this slice: no node_id')
+  }
+  const served = validatePanelResults(examples.panelResults)
+  assert.deepEqual([served.panels[0].stage, served.panels[0].status, served.panels[0].overlap_threshold], ['review', 'succeeded', 2])
+  assert.deepEqual(served.panels[0].findings[0].providers_raised, ['claude', 'openai-codex/gpt-6-sol'])
+  assert.deepEqual(served.panels[0].providers.map(provider => [provider.model, provider.cost_usd]), [[null, 0.021], ['openai-codex/gpt-6-sol', 0.0047]])
+  const pendingServed = validatePanelResults({ ...examples.panelPendingRecord, contract_version: '1.9.0', source: 'export' })
+  assert.deepEqual(pendingServed.panels[0].providers.map(provider => provider.status), ['pending', 'pending'])
+})
+
+test('panel results 1.9.0: Appendix A field rules, every enum value, threshold "all" and 1, a challenge stage, a running provider, every nullable null, unknown keys dropped', () => {
+  const base = (): PanelResults => structuredClone(examples.panelResults)
+  type Panel = PanelResults['panels'][number]
+  const panelOf = (value: PanelResults): Panel => value.panels[0]
+  const accepted: [string, (value: PanelResults) => void][] = [
+    ['every panel status', value => { value.panels = PANEL_STATUSES.filter(status => status !== 'pending').map((status, index) => ({ ...panelOf(value), id: `p${index}`, status })) }],
+    ['every provider status', value => { panelOf(value).providers = PANEL_PROVIDER_STATUSES.map(status => ({ ...panelOf(value).providers[0], status })) }],
+    ['every stage', value => { value.panels = PANEL_STAGES.map(stage => ({ ...panelOf(value), id: `${stage}-panel`, stage })) }],
+    ['every transport', value => { panelOf(value).providers = PANEL_TRANSPORTS.map(transport => ({ ...panelOf(value).providers[0], transport })) }],
+    ['every severity', value => { panelOf(value).findings = PANEL_SEVERITIES.map((severity, index) => ({ ...panelOf(value).findings[0], id: `f${index}`, severity })) }],
+    // Design-challenge note 3: a live record with a threshold the verbatim records do not carry must not be skipped.
+    ['overlap threshold "all"', value => { panelOf(value).overlap_threshold = 'all' }],
+    ['overlap threshold 1 (any provider)', value => { panelOf(value).overlap_threshold = 1 }],
+    ['overlap threshold 3', value => { panelOf(value).overlap_threshold = 3 }],
+    ['a challenge-stage panel', value => { panelOf(value).stage = 'challenge' }],
+    ['a running panel with a running provider', value => { Object.assign(panelOf(value), { status: 'running', ended_at: null }); panelOf(value).providers[1].status = 'running' }],
+    ['every nullable field null', value => {
+      Object.assign(panelOf(value), { context_bytes: null, started_at: null, ended_at: null, error: null })
+      Object.assign(panelOf(value).providers[0], { model: null, effort: null, cost_usd: null, context_bytes: null, error: null })
+      panelOf(value).findings[0].line = null
+    }],
+    ['a timed-out panel whose providers all timed out, with errors', value => {
+      Object.assign(panelOf(value), { status: 'timed_out', findings: [], error: 'every provider timed out' })
+      for (const provider of panelOf(value).providers) Object.assign(provider, { status: 'timed_out', finding_ids: [], error: 'timed out after 15 minutes; its process group was stopped' })
+    }],
+    ['a failed panel with its error and no provider error', value => { Object.assign(panelOf(value), { status: 'failed', findings: [], providers: [], error: 'context assembly failed: OSError' }) }],
+    ['an unanchored, not accepted finding with any file text', value => { panelOf(value).findings.push({ ...panelOf(value).findings[0], id: 'f2', file: '../outside.ts', unanchored: true, accepted: false, providers_raised: ['claude'] }) }],
+    ['empty arrays', value => { Object.assign(panelOf(value), { providers: [], findings: [] }) }],
+    ['no panels at all', value => { value.panels = [] }],
+    ['the pending record', value => { value.panels = structuredClone(examples.panelPendingRecord.panels) }],
+    ['any-shaped times and a zero budget', value => { Object.assign(panelOf(value), { started_at: 'yesterday', ended_at: 'today', budget_usd: 0 }) }],
+    ['unresolved finding ids and providers', value => { panelOf(value).providers[0].finding_ids = ['nobody']; panelOf(value).findings[0].providers_raised = ['deepseek/deepseek-v4-pro'] }],
+  ]
+  for (const [label, mutate] of accepted) {
+    const value = base()
+    mutate(value)
+    assert.doesNotThrow(() => validatePanelResults(value), label)
+  }
+  const extra = base() as PanelResults & { written_by?: string }
+  extra.written_by = 'controller'
+  ;(panelOf(extra) as Panel & { pid?: number }).pid = 4242
+  const served = validatePanelResults(extra)
+  assert.equal('written_by' in served, false, 'a key the engine adds is dropped, not refused')
+  assert.equal('pid' in served.panels[0], false)
+
+  const refused: [string, (value: PanelResults) => void][] = [
+    ['another contract version', value => { (value as Record<string, unknown>).contract_version = '1.8.0' }],
+    ['another record version', value => { (value as Record<string, unknown>).version = '1.1.0' }],
+    ['a node id (none this slice)', value => { (value as Record<string, unknown>).source = 'node' }],
+    ['an unknown panel status', value => { (panelOf(value) as Record<string, unknown>).status = 'refused' }],
+    ['an unknown provider status', value => { (panelOf(value).providers[0] as Record<string, unknown>).status = 'succeeded' }],
+    ['an unknown stage', value => { (panelOf(value) as Record<string, unknown>).stage = 'integrate' }],
+    ['an unknown transport', value => { (panelOf(value).providers[0] as Record<string, unknown>).transport = 'openai' }],
+    ['a freelanced severity', value => { (panelOf(value).findings[0] as Record<string, unknown>).severity = 'high' }],
+    ['a threshold of 0', value => { (panelOf(value) as Record<string, unknown>).overlap_threshold = 0 }],
+    ['a fractional threshold', value => { (panelOf(value) as Record<string, unknown>).overlap_threshold = 1.5 }],
+    ['a threshold word other than all', value => { (panelOf(value) as Record<string, unknown>).overlap_threshold = 'some' }],
+    ['a missing panel error key', value => { delete (panelOf(value) as Partial<Panel>).error }],
+    ['a missing provider error key', value => { delete (panelOf(value).providers[0] as Partial<Panel['providers'][number]>).error }],
+    ['a null finding file', value => { (panelOf(value).findings[0] as Record<string, unknown>).file = null }],
+    ['an empty panel id', value => { panelOf(value).id = '' }],
+    ['a negative cost', value => { panelOf(value).providers[0].cost_usd = -1 }],
+    ['duplicate panel ids', value => { value.panels.push(structuredClone(panelOf(value))) }],
+    ['duplicate finding ids', value => { panelOf(value).findings.push({ ...panelOf(value).findings[0] }) }],
+    ['a pending panel with findings', value => { Object.assign(panelOf(value), { status: 'pending', started_at: null, ended_at: null }) }],
+  ]
+  for (const [label, mutate] of refused) {
+    const value = base()
+    mutate(value)
+    assert.throws(() => validatePanelResults(value), label)
   }
 })

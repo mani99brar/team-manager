@@ -10,7 +10,7 @@ const version = z.literal('1.0.0')
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
  * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
  * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29). 1.8.0 adds the attack pass's
- * record (`attackResult`).
+ * record (`attackResult`). 1.9.0 adds the multi-provider panel's record (`panelResults`).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -668,6 +668,91 @@ export const attackResultSchema = attackRecordSchema.extend({
   source: z.enum(['live', 'export']),
 })
 
+// ---- Multi-provider panel (1.9.0) ---------------------------------------------------------------------------------------
+
+/**
+ * The panel's vocabularies (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A, `contracts/workflow/panel.schema.json` 1.0.0). The
+ * panel status includes the export's `pending` (built from `plan.panels` before `panel.json` exists); a provider is `pending`
+ * or `running` until it ends `ok`, `timed_out`, `error` (died) or `parse_failed` (returned non-JSON). A finding's severity is
+ * the normalizer's P0/P1/P2 (PRD 4.4 maps a freelanced severity onto them).
+ */
+export const PANEL_STATUSES = ['pending', 'running', 'succeeded', 'failed', 'timed_out'] as const
+export const PANEL_PROVIDER_STATUSES = ['pending', 'running', 'ok', 'timed_out', 'error', 'parse_failed'] as const
+export const PANEL_STAGES = ['challenge', 'review'] as const
+export const PANEL_TRANSPORTS = ['claude', 'pi'] as const
+export const PANEL_SEVERITIES = ['P0', 'P1', 'P2'] as const
+
+/**
+ * Appendix A's field rules: ids, the stage, the transport and the file label are non-empty strings; titles, details, errors
+ * and times are strings with no format or length check; the nullable fields are exactly `model` (null for a default `claude`),
+ * `effort` (null for `pi`), `context_bytes`, `started_at`, `ended_at`, `cost_usd`, a finding's `line` and every `error`;
+ * `overlap_threshold` is an integer N (accept a finding raised by at least N providers, 1 for any) or the literal `"all"`;
+ * arrays may be empty; nothing is resolved by reference (a provider's `finding_ids` and a finding's `providers_raised` are
+ * not looked up). A key the engine adds is dropped, as the sidecar ledger and the attack record drop them.
+ */
+const panelText = z.string().min(1)
+const panelTime = z.string()
+
+export const panelOverlapThresholdSchema = z.union([z.number().int().min(1), z.literal('all')])
+
+export const panelProviderSchema = z.object({
+  transport: z.enum(PANEL_TRANSPORTS),
+  /** `provider/id` for `pi` (`openai-codex/gpt-6-sol`); null for a default `claude`. */
+  model: z.string().nullable(),
+  effort: z.string().nullable(),
+  status: z.enum(PANEL_PROVIDER_STATUSES),
+  /** The cost the transport reported: for `openai-codex` pi's estimate (the account is flat-rate), kept as reported. */
+  cost_usd: z.number().nonnegative().nullable(),
+  context_bytes: z.number().int().nonnegative().nullable(),
+  finding_ids: z.array(panelText),
+  error: z.string().nullable(),
+})
+
+export const panelFindingSchema = z.object({
+  id: panelText,
+  severity: z.enum(PANEL_SEVERITIES),
+  /** The canonical context label the finding was anchored to (or the provider's own path when unanchored). */
+  file: panelText,
+  line: z.number().int().nonnegative().nullable(),
+  title: z.string(),
+  detail: z.string(),
+  /** Each provider that raised it once, by transport or `provider/id`. */
+  providers_raised: z.array(panelText),
+  accepted: z.boolean(),
+  unanchored: z.boolean(),
+})
+
+export const panelEntrySchema = z.object({
+  id: panelText,
+  stage: z.enum(PANEL_STAGES),
+  status: z.enum(PANEL_STATUSES),
+  overlap_threshold: panelOverlapThresholdSchema,
+  context_bytes: z.number().int().nonnegative().nullable(),
+  providers: z.array(panelProviderSchema),
+  findings: z.array(panelFindingSchema),
+  started_at: panelTime.nullable(),
+  ended_at: panelTime.nullable(),
+  budget_usd: z.number().nonnegative(),
+  /** The panel-level failure reason (an assembly throw, a passed bound, an unreadable `panel.json` the export read); null otherwise. */
+  error: z.string().nullable(),
+})
+
+/** `<run>/panel.json` as the controller writes it, or the export's `panels` section (Appendix A, verbatim). */
+export const panelRecordSchema = z.object({
+  version: z.literal('1.0.0'),
+  panels: z.array(panelEntrySchema),
+})
+
+/**
+ * The panel record, served at `.../runs/{run_id}/panels` (1.9.0): the record's own fields plus where it was read, `live`
+ * (`<run>/panel.json`, rewritten while the panel runs) or `export` (the export's `panels` section, the fallback). No `node_id`:
+ * the panel has no graph node this slice (decisions L4); its section opens from the run page.
+ */
+export const panelResultsSchema = panelRecordSchema.extend({
+  contract_version: z.literal('1.9.0'),
+  source: z.enum(['live', 'export']),
+})
+
 export const schemas = {
   projectList: z.strictObject({ projects: z.array(projectSchema) }),
   workflowList: z.strictObject({ workflows: z.array(definitionSchema) }),
@@ -677,6 +762,7 @@ export const schemas = {
   runInputs: runInputsSchema,
   sidecarLedger: sidecarLedgerSchema,
   attackResult: attackResultSchema,
+  panelResults: panelResultsSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>
@@ -703,6 +789,12 @@ export type AttackResult = z.infer<typeof attackResultSchema>
 export type AttackAttacker = z.infer<typeof attackAttackerSchema>
 export type AttackFinding = z.infer<typeof attackFindingSchema>
 export type AttackLabel = z.infer<typeof attackLabelSchema>
+export type PanelRecord = z.infer<typeof panelRecordSchema>
+export type PanelResults = z.infer<typeof panelResultsSchema>
+export type PanelEntry = z.infer<typeof panelEntrySchema>
+export type PanelProvider = z.infer<typeof panelProviderSchema>
+export type PanelFinding = z.infer<typeof panelFindingSchema>
+export type PanelOverlapThreshold = z.infer<typeof panelOverlapThresholdSchema>
 
 export function validateDefinition(input: unknown): WorkflowDefinition {
   const definition = definitionSchema.parse(input)
@@ -877,5 +969,23 @@ export function validateAttackResult(input: unknown): AttackResult {
     }
   }
   if (result.status === 'pending' && (result.attackers.length > 0 || result.findings.length > 0)) throw new Error('A pending attack pass has no attackers and no findings yet')
+  return result
+}
+
+/**
+ * The served panel record's cross-field rules (Appendix A): unique panel ids, unique finding ids within a panel, and a
+ * `pending` panel that has run nothing yet (no findings, no started time). Like the engine's schema it resolves no reference
+ * (a provider's `finding_ids` and a finding's `providers_raised` are not looked up), so a live record mid-write never fails.
+ */
+export function validatePanelResults(input: unknown): PanelResults {
+  const result = panelResultsSchema.parse(input)
+  const unique = (values: readonly string[], what: string) => {
+    if (new Set(values).size !== values.length) throw new Error(`Duplicate ${what}`)
+  }
+  unique(result.panels.map(panel => panel.id), 'panel ids')
+  for (const panel of result.panels) {
+    unique(panel.findings.map(finding => finding.id), `finding ids in panel ${panel.id}`)
+    if (panel.status === 'pending' && (panel.findings.length > 0 || panel.started_at !== null)) throw new Error(`Panel ${panel.id}: a pending panel has no findings and no start time yet`)
+  }
   return result
 }

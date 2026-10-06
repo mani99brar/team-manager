@@ -7,8 +7,8 @@ import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, validateAttackResult, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
-  type AttackRecord, type AttackResult, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  type AttackRecord, type AttackResult, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -36,7 +36,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * null, and a challenge node served paused while its hold waits for `resume --launch`; C49: `inputs.challenge.history`, the
  * replaced records with their P0/P1, absent before and served as [], and a top-level `costs` section the viewer does not read
  * yet) and 1.8.0 (the attack pass: a top-level `attack` section holding its record, a `pending` record or null, and an `attack`
- * graph node beside `review`). A section is served only when the
+ * graph node beside `review`) and 1.9.0 (the multi-provider panel: a top-level `panels` section holding the `panel.json`
+ * record verbatim, a `pending` record or null; no graph node and no events this slice). A section is served only when the
  * export carries it; `values` is never mined for either. Exports before 1.4.0 have one reviewer named `review`:
  * the adapter fills its `reviewers` entry from the single section, so the viewer has one code path.
  *
@@ -56,6 +57,10 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * Contract 1.8.0 (docs/PRD_ATTACK_PASS.md 4.6, Appendix A): the attack pass's record is served on its own route the same way,
  * read live from `<run>/attack.json` (rewritten while the pass runs) and else from the export's `attack` section, which is
  * never parsed with the export either. The `attack` node is report-only: its rows never speak for the run.
+ *
+ * Contract 1.9.0 (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A): the panel's record is served on its own route the same way, read
+ * live from `<run>/panel.json` whenever it is readable and valid (no mtime comparison) and else from the export's `panels`
+ * section, never parsed with the export. The panel has no graph node this slice, so nothing of the run's activity reads it.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -76,7 +81,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
@@ -103,6 +108,10 @@ const ATTACK_NODE = 'attack'
 const ATTACK_FILE = 'attack.json'
 /** The live record is read up to this bound: at most 20 findings per angle, each with at most 200 lines of output. */
 export const ATTACK_BYTE_LIMIT = 4 * 1024 * 1024
+/** The multi-provider panel's record (export 1.9.0), rewritten by the controller while the panel runs; no graph node this slice. */
+const PANEL_FILE = 'panel.json'
+/** The live record is read up to this bound, the attack pass's; a panel holds a handful of findings per provider. */
+export const PANEL_BYTE_LIMIT = 4 * 1024 * 1024
 
 /**
  * Absolute filesystem paths in persisted messages are never forwarded to clients. A path starts at the string start
@@ -330,6 +339,11 @@ const exportSchema = z.object({
    * unknown data like the sidecar's: validated only when the attack route serves it, so a record can never fail the run.
    */
   attack: z.unknown().optional(),
+  /**
+   * Export 1.9.0: the panel record (`panel.json` verbatim), a `pending` record, or null for a run without panels; absent
+   * before. Kept as unknown data like the attack's: validated only when the panels route serves it.
+   */
+  panels: z.unknown().optional(),
 })
 
 const rawEventSchema = z.object({
@@ -388,6 +402,8 @@ export type LoadedRun = {
   sidecar: unknown
   /** The export's `attack` section as written (export 1.8.0), unvalidated; undefined when the export predates it. */
   attack: unknown
+  /** The export's `panels` section as written (export 1.9.0), unvalidated; undefined when the export predates it. */
+  panels: unknown
 }
 
 export type ArtifactContent = {
@@ -1100,6 +1116,51 @@ export class RunStore {
   }
 
   /**
+   * The multi-provider panel's record (contract 1.9.0, Appendix A's live-vs-export rule): the live `<run>/panel.json` whenever
+   * it is readable and valid (no mtime comparison: a valid live file always wins), else the export's `panels` section when it
+   * is a valid record (the `pending` record included), else 404 `PANELS_NOT_FOUND` (an export before 1.9.0 or a run without
+   * panels, each even beside a live file; a record unreadable or invalid both live and in the export). A file or section that fails the
+   * contract is skipped with its reason logged, never an error page. There is no graph node to consult this slice.
+   */
+  async panelResults(scope: Scope, runId: string): Promise<PanelResults> {
+    const run = await this.loadRun(scope, runId)
+    const notRecorded = () => new ProjectApiError(404, 'PANELS_NOT_FOUND', 'No panel is recorded for this run: it has no panels, its record is not readable or its export predates the multi-provider panel.')
+    // A run without `plan.panels` exports null and never writes `panel.json`: a stray live file is not a panel of this run.
+    if (run.panels === undefined || run.panels === null) throw notRecorded()
+    const skip = (source: PanelResults['source'], reason: string) => this.options.warn?.('Panel record skipped', {
+      project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: runId, source, reason,
+    })
+    const live = await this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) return null
+      try {
+        return await readBounded(directory, [PANEL_FILE], PANEL_BYTE_LIMIT)
+      } catch (error) {
+        if (!(error instanceof ProjectApiError)) throw error
+        skip('live', `${PANEL_FILE} exceeds the ${PANEL_BYTE_LIMIT} byte read limit`)
+        return null
+      } finally {
+        await directory.close()
+      }
+    })
+    if (live !== null) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(live.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const served = parsed === undefined ? { error: `${PANEL_FILE} is not valid JSON` } : projectPanels(parsed, 'live')
+      if ('result' in served) return served.result
+      skip('live', served.error)
+    }
+    const served = projectPanels(run.panels, 'export')
+    if ('result' in served) return served.result
+    skip('export', served.error)
+    throw notRecorded()
+  }
+
+  /**
    * Serves one registered artifact: a packet artifact beside its verification packet, or the review diff the
    * export registered at the run root. Both registries are consulted; an ID registered with different hashes,
    * a malformed entry or an untrusted packet is refused, and the content is served only when it still hashes
@@ -1219,7 +1280,7 @@ export class RunStore {
     } catch (error) {
       throw contractFailure('run activity', error)
     }
-    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null, attack: state.attack }
+    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels }
   }
 
   /**
@@ -1641,6 +1702,36 @@ function projectAttack(runId: string, raw: unknown, source: AttackResult['source
         rerun: finding.rerun === null ? null : { ...finding.rerun, output_tail: redactPaths(finding.rerun.output_tail.split('\n').slice(-200).join('\n')), at: ledgerTime(finding.rerun.at) },
         skeptic: finding.skeptic === null ? null : { ...finding.skeptic, reason: text(finding.skeptic.reason) },
         labels: finding.labels.map(label => ({ ...label, note: nullable(label.note), at: ledgerTime(label.at) })),
+      })),
+    })
+    return { result }
+  } catch (error) {
+    return { error: `the ${source} record violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})` }
+  }
+}
+
+// ---- The multi-provider panel's record (contract 1.9.0) --------------------------------------------------------
+
+/**
+ * The record (`<run>/panel.json` or the export's `panels` section) onto the contract: Appendix A's shape and rules, path-
+ * redacted texts (a finding's title, detail and file label, every error), Z times. Unknown keys are dropped. The record names
+ * no run, so there is no foreign-file check. Returns the reason instead when it does not conform.
+ */
+function projectPanels(raw: unknown, source: PanelResults['source']): { result: PanelResults } | { error: string } {
+  const parsed = panelRecordSchema.safeParse(raw)
+  if (!parsed.success) return { error: `the ${source} record ${issueText(parsed.error)}` }
+  const record: PanelRecord = parsed.data
+  const text = (value: string) => boundedRedacted(value, 8000)
+  const nullable = (value: string | null) => value === null ? null : text(value)
+  const time = (value: string | null) => value === null ? null : ledgerTime(value)
+  try {
+    const result = validatePanelResults({
+      contract_version: '1.9.0', source,
+      version: record.version,
+      panels: record.panels.map(panel => ({
+        ...panel, started_at: time(panel.started_at), ended_at: time(panel.ended_at), error: nullable(panel.error),
+        providers: panel.providers.map(provider => ({ ...provider, finding_ids: [...provider.finding_ids], error: nullable(provider.error) })),
+        findings: panel.findings.map(finding => ({ ...finding, file: text(finding.file), title: text(finding.title), detail: text(finding.detail), providers_raised: [...finding.providers_raised] })),
       })),
     })
     return { result }

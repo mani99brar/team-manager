@@ -10,10 +10,10 @@
  * After S1 no slice edits `fixtures.ts`, `mock.ts` or `seed.ts`: a slice changes only its own module. Modules import the
  * builders `fixtures.ts` exports and only types from here and from `seed.ts`, so no import cycle exists.
  */
-import type { AttackResult, ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import type { AttackResult, PanelResults, ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
-  artifactFiles, attackResults, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
+  artifactFiles, attackResults, panelResults, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
 import type { SeedContext } from '../seed.ts'
@@ -21,6 +21,7 @@ import { uxAttack } from './ux-attack.ts'
 import { uxLaunch } from './ux-launch.ts'
 import { uxLists } from './ux-lists.ts'
 import { uxNode } from './ux-node.ts'
+import { uxPanel } from './ux-panel.ts'
 import { uxReview } from './ux-review.ts'
 import { uxRun } from './ux-run.ts'
 import { uxSidecar } from './ux-sidecar.ts'
@@ -44,6 +45,8 @@ export type UxPayloads = {
   sidecarLedgers?: Record<string, SidecarLedger>
   /** The attack pass's served record per run (contract 1.8.0). */
   attackResults?: Record<string, AttackResult>
+  /** The multi-provider panel's served record per run (contract 1.9.0). */
+  panelResults?: Record<string, PanelResults>
 }
 
 /** One registry workflow entry, as `seedCandidate` writes them. */
@@ -62,7 +65,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {
@@ -76,6 +79,7 @@ function mergePayloads(modules: readonly UxFixtureModule[]) {
     Object.assign(artifactFiles, payloads.artifactFiles)
     Object.assign(sidecarLedgers, payloads.sidecarLedgers)
     Object.assign(attackResults, payloads.attackResults)
+    Object.assign(panelResults, payloads.panelResults)
     // The mocks index these per run: a run without events, results or artifacts serves none rather than failing.
     for (const runId of Object.keys(payloads.runDetails ?? {})) {
       runEvents[runId] ??= []

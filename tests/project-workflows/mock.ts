@@ -2,12 +2,12 @@
  * Worker-phase mocks for the not-yet-present projects backend. Only `/api/projects` and its nested routes
  * are intercepted; every other request (Pi/Claude listing, documents, mutations) reaches the real isolated
  * API. Responses are the explicit contract fixtures from `fixtures.ts`, plus contract-shaped 404s. Review
- * results, run inputs, the sidecar ledger and the attack pass's record answer with the contract's `REVIEW_NOT_FOUND` /
- * `INPUTS_NOT_FOUND` / `SIDECAR_NOT_FOUND` / `ATTACK_NOT_FOUND` codes when a run has none, exactly like the real adapter for
- * exports that predate those sections.
+ * results, run inputs, the sidecar ledger, the attack pass's record and the panel record answer with the contract's
+ * `REVIEW_NOT_FOUND` / `INPUTS_NOT_FOUND` / `SIDECAR_NOT_FOUND` / `ATTACK_NOT_FOUND` / `PANELS_NOT_FOUND` codes when a run has
+ * none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, attackResults, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
+import { artifactFiles, attackResults, panelResults, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
 
@@ -63,6 +63,10 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (kind === 'attack' && tail.length === 0) {
     const result = attackResults[runId]
     return result ? json(result) : notFound('No attack pass is recorded for this run: it has no attack pass, its record is not readable or its export predates the attack pass.', 'ATTACK_NOT_FOUND')
+  }
+  if (kind === 'panels' && tail.length === 0) {
+    const result = panelResults[runId]
+    return result ? json(result) : notFound('No panel is recorded for this run: it has no panels, its record is not readable or its export predates the multi-provider panel.', 'PANELS_NOT_FOUND')
   }
   if (kind === 'artifacts' && tail.length === 1) {
     const artifact = artifactFiles[runId].find(file => file.artifact_id === tail[0])

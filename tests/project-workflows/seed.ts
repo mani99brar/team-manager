@@ -19,7 +19,9 @@
  * the handoff interrupt with no packet: one on the adapter's second question, one after the controller blocked on the ui
  * worker's fourth question (its `controller` event names no graph node).
  * The `ux-attack` runs are 1.8.0 exports (docs/PRD_ATTACK_PASS.md Appendix A): the top-level `sidecar` and `attack` sections,
- * the latter a record, a `pending` record or null, and for some runs a live `<run>/attack.json` beside it.
+ * the latter a record, a `pending` record or null, and for some runs a live `<run>/attack.json` beside it. The `ux-panel` runs
+ * are 1.9.0 exports (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A): the top-level `panels` section (the panel record verbatim,
+ * a `pending` record or null) and for some runs a live `<run>/panel.json` beside it; no graph node.
  * The viewer UX slices seed their own workflows through `fixtures/index.ts` (docs/PRD_VIEWER_UX.md section 11), with the
  * writers below handed over as a `SeedContext`.
  */
@@ -162,9 +164,10 @@ export type RunOptions = {
   packets: (runDir: string) => object[]
   /**
    * Export version; 1.2.0 (the default) carries the `review` and `inputs` sections, 1.0.0 neither, 1.3.0 also pins the lane
-   * selection, 1.4.0 the reviewer set, 1.6.0 the `sidecar` section, 1.8.0 the `sidecar` and `attack` sections.
+   * selection, 1.4.0 the reviewer set, 1.6.0 the `sidecar` section, 1.8.0 the `sidecar` and `attack` sections, 1.9.0 also the
+   * `panels` section.
    */
-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0'
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0'
   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
   reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
@@ -183,6 +186,10 @@ export type RunOptions = {
   attack?: unknown
   /** The live `<run>/attack.json` the controller rewrites while the pass runs. */
   attackFile?: unknown
+  /** Export 1.9.0: the `panels` section (the panel record verbatim, a `pending` record, or null for a run without panels). */
+  panels?: unknown
+  /** The live `<run>/panel.json` the controller rewrites while the panel runs. */
+  panelFile?: unknown
 }
 
 function writeRun(runsRoot: string, repository: string, runId: string, options: RunOptions) {
@@ -195,7 +202,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   const plan = {
     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
-    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
@@ -205,6 +212,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   if (options.diff !== undefined) writeFileSync(join(runDir, 'review.diff'), options.diff)
   if (options.sidecarLedger !== undefined) writeJson(join(runDir, 'sidecar.ledger.json'), options.sidecarLedger)
   if (options.attackFile !== undefined) writeJson(join(runDir, 'attack.json'), options.attackFile)
+  if (options.panelFile !== undefined) writeJson(join(runDir, 'panel.json'), options.panelFile)
   const packets = options.packets(runDir)
   const state = {
     version, run_id: runId, base_commit: BASE_COMMIT, created_at: options.createdAt,
@@ -212,8 +220,9 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
     values: { run_id: runId, ...options.values }, next: options.next, tasks: options.tasks, events: options.events,
     verification_packets: packets, updated_at: options.updatedAt,
     ...(version !== '1.0.0' ? { review: options.review ?? null, inputs } : {}),
-    ...(version === '1.6.0' || version === '1.8.0' ? { sidecar: options.sidecar ?? null } : {}),
-    ...(version === '1.8.0' ? { attack: options.attack ?? null } : {}),
+    ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { sidecar: options.sidecar ?? null } : {}),
+    ...(version === '1.8.0' || version === '1.9.0' ? { attack: options.attack ?? null } : {}),
+    ...(version === '1.9.0' ? { panels: options.panels ?? null } : {}),
   }
   writeJson(join(runDir, 'run-state.json'), state)
   return runDir
