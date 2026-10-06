@@ -59,15 +59,24 @@ Two calibration runs on the claims-005 candidate (known bug: SEC-GH-11, forged G
 
 ---
 
-## 5. The `pi` multi-provider transport — hard limits (operational)
+## 5. The `pi` multi-provider transport — CORRECTED 2026-10-06
 
-`pi -p` (the CLI that reaches OpenAI/DeepSeek) **works only for small prose prompts** (its original idea-review use: returns in seconds). For code review it is **unsuitable as-is**:
-- **Code fences hang it:** a 6 KB ```` ``` ````-fenced diff returns 0 bytes after 15 min; the same content **without fences** returns.
-- **Size cliff:** anything past ~8–10 KB hangs to 0 output (both GPT and DeepSeek, `@file` and stdin, both models), while equivalent small prose works.
-- **Concurrency:** ~40% of chunks time out when 6 run at once.
-- Workaround used: source-only diff, **no fences, 7 KB chunks** → ~60% delivery, no cross-file context, and context-loss false positives (§4).
+> **Correction.** The 2026-10-05 conclusion in this section — "`pi -p` can't review code; 8 KB size cliff; fences hang it" — was **wrong**. Re-tested 2026-10-06 (pi 0.85.1): with stdin closed and a working provider, `pi -p` reviewed a **45 KB / 700-line diff inline in 24 s** (`openai-codex/gpt-6.1-sol`), returned real findings (CID/SHA mismatch, tx-hint count-before-insert race, `mined`-reorg finality), and — given the **full** diff — correctly judged the `succeeded` refactor as `.some()` (a boolean), i.e. it did **not** reproduce the chunking false positive of §4. There is no fence or ~8 KB cliff. The original failures were two conflated bugs, below.
+>
+> **The clincher.** Given the full **143 KB** claims-005 prompt (security requirements + 6 candidate files) via **`@file`** with stdin closed, `openai-codex/gpt-6-sol` returned **5 findings in 39 s, SEC-GH-11 at P0 first** — the forged-provenance bug the attack pass missed at *both* effort levels and pine's security review caught in only 0–2/3 samples (it also found SEC-GH-12/13, SEC-IDX-01 and a new SEC-GH-17). A **different provider, through pi**, independently found the hardest bug with full context. This is multi-provider decorrelation (§4) demonstrated on a *working* pi transport. (Pass large content via `@file` or stdin, never argv — a 143 KB argv hits the shell's `ARG_MAX` with "Argument list too long" before pi is even called.)
 
-**Implication:** a `pi -p` transport could **not** be bolted onto md-manager's reviewers/attackers for real diffs without fixing this. For GPT/DeepSeek code review, call their native APIs with proper structured payloads, not the `pi -p` prompt path. (Claude via a Code subagent has no such limit — full diff + requirements, reliably.)
+**The two real bugs (both fixable, neither fundamental):**
+1. **Open stdin blocks `pi -p`.** In print mode pi waits for stdin EOF even when the prompt is a message arg; the §5/§4 orchestrator (`pi_orchestrator.py`) ran `subprocess.run(..., capture_output=True)` with **inherited stdin** → it hung to 0 output regardless of payload size. Fix: **`stdin=subprocess.DEVNULL`** (or `</dev/null`). This alone explains most of the "size cliff" and "fences hang" symptoms — a ~300-byte prompt hung the same way until stdin was closed.
+2. **DeepSeek is currently degraded.** `deepseek/deepseek-v4-pro` and `deepseek/deepseek-flash` both hang to 0 output (60–300 s, no auth error) as of 2026-10-06, though `pi auth check --provider deepseek` says `ready` and the key is set. In §4/§5 (2026-10-05) DeepSeek answered tiny prompts in ~2 s, so it has degraded since (quota/billing/endpoint, consistent with the C42 key being throttled or invalidated). GPT (`openai-codex`) answers in 8–11 s. **Treat provider availability as runtime-variable**: a pipeline using pi must tolerate a provider hanging (timeout + report-only skip, like the attack pass).
+
+**Operational facts for a pi transport:**
+- **Close stdin.** Always `stdin=DEVNULL` / `</dev/null` for `pi -p`.
+- **Usable GPT models on this ChatGPT (OAuth) account:** `gpt-6.1-sol`, `gpt-6-sol`, `gpt-5.6-sol` (fast). `gpt-5.4-mini`, `gpt-5.6-codex-spark` return `not supported when using Codex with a ChatGPT account`. `pi --list-models`' "yes" column does **not** mean account-usable — probe before relying on a model.
+- **Two context-passing modes both work:** inline (paste the diff into the prompt) and tool-read (run pi with its `read` tool enabled, deny `edit,write,bash`, tell it the file path). Inline is simpler and more deterministic; tool-read lets it pull cross-file context in a worktree. Full context beats chunking — it is what avoided the §4 false positive.
+- **No `codex` CLI on this box** (C37's `codex exec` plan was probed on the Mac). GPT is reachable only via `pi` here unless codex is installed.
+- **Concurrency** (~40% chunk failure at 6-way in §5) was never isolated from the stdin bug; re-measure before assuming a concurrency limit.
+
+**Implication (reversed):** a `pi` transport **can** be used for md-manager code review — close stdin, pick a working provider/model, pass the full candidate (inline or tool-read), and treat provider hangs as a timeout→skip. This is the basis for the configurable multi-provider review panel. (Claude via a Code subagent remains the most reliable single lens; pi adds genuine provider decorrelation when its provider is up.)
 
 ---
 
