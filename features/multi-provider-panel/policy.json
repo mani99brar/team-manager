@@ -1,0 +1,154 @@
+{
+  "version": "1.2.0",
+  "feature": "Multi-provider panel: a report-only, configurable panel node at the design challenge or review step; the transport adapter (claude + pi); its own record and the run page's Panel section",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "docs/handoff/panel-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts/projects",
+        "src/projects",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/handoff/panel-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "panel-section",
+              "description": "A run whose export carries the Appendix A panels record shows a Panel section on its run page: a report-only line saying it never changes the run's verdict; per panel a headline with the stage, the finding and accepted counts and the overlap threshold; the accepted findings each with severity, file:line, title, detail and the providers that raised it (an overlap badge when more than one); the not-accepted and unanchored findings folded below; each provider with its transport, model, status and cost (openai-codex shows subscription-covered, not a dollar amount). A pending run says the panel runs at its stage; a failed or timed-out panel shows its error; a provider that timed out or failed shows that state; a run with panels null has no section; the graph's panel node opens the same section; at 390 px no horizontal overflow"
+            },
+            {
+              "id": "panel-challenge-and-live",
+              "description": "A challenge-stage panel renders its section on the challenge view as well as the run page. Candidate phase against the real API: a seeded run whose live panel.json is newer than its export shows the live record (source live) and a run without one shows the export's; worker phase: a mocked record moving from running to succeeded shows the new accepted counts within one poll without a reload (page.clock)"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

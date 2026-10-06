@@ -1,0 +1,36 @@
+{
+  "version": "2.4.0",
+  "critical": true,
+  "name": "Multi-provider panel (PRD_MULTI_PROVIDER_PANEL): a report-only, configurable panel node that runs at the design challenge or the review step, sends the stage's material to several providers (claude and pi-routed gpt/deepseek) through a transport adapter, and records each provider's findings annotated with cross-provider overlap; its own record on the run page, never blocks",
+  "branch_prefix": "feature/multi-provider-panel-runs",
+  "policy": "policy.json",
+  "prd": "docs/PRD_MULTI_PROVIDER_PANEL.md",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "reviewers/general.md"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "reviewers/coverage.md"
+    }
+  ],
+  "sidecar": {
+    "prompt": "builtin:senior-review",
+    "cadence_seconds": 900,
+    "pass_timeout_seconds": 600,
+    "max_passes": 12,
+    "max_messages_per_lane": 4
+  },
+  "tryout": false
+}
