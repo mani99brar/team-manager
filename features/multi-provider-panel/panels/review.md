@@ -4,7 +4,7 @@ Review the material that follows (a candidate diff, the project's requirements, 
 
 Each section of the material is headed by a line `=== <label> ===`, where `<label>` is the file's canonical repository-relative path. In `file`, cite that label VERBATIM (copy it from the section header) — do not add `a/`/`b/` prefixes, line hunks or absolute paths.
 
-Return ONLY a JSON array of findings, each:
+Return ONLY the findings as JSON and nothing else — a bare array `[ … ]`, or, when a structured-output schema is supplied (the claude provider is given a `{"findings":[…]}` schema), the object `{"findings": [ … ]}`. Each finding:
 `{"severity":"P0"|"P1"|"P2","file":"<the canonical label of the section>","line":<number or null>,"title":"<short>","detail":"<one or two sentences: the gap and why it is exploitable or wrong>"}`
 
-Rules: `severity` MUST be exactly one of `P0`/`P1`/`P2` (P0 breaks auth/provenance/funds or corrupts state; P1 a real defect with a narrower trigger; P2 a latent footgun or missing guard) — do not use words like "high"/"medium". Cite only labels present in the material. Report `[]` if you find nothing. Do not include prose outside the JSON array.
+Rules: `severity` MUST be exactly one of `P0`/`P1`/`P2` (P0 breaks auth/provenance/funds or corrupts state; P1 a real defect with a narrower trigger; P2 a latent footgun or missing guard) — do not use words like "high"/"medium". Cite only labels present in the material. Report an empty array `[]` (or `{"findings": []}`) if you find nothing. Do not include prose outside the JSON.

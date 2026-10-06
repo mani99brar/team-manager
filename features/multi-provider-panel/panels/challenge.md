@@ -4,7 +4,7 @@ Review the material that follows (the PRD, the lane task files, the decisions, a
 
 Each section of the material is headed by a line `=== <label> ===`, where `<label>` is a canonical name such as the PRD's repo path, `features/<f>/<lane>-task.md`, `features/<f>/decisions.md`, or the literal `operator-request`. In `file`, cite that label VERBATIM (copy it from the section header).
 
-Return ONLY a JSON array of findings, each:
+Return ONLY the findings as JSON and nothing else — a bare array `[ … ]`, or, when a structured-output schema is supplied (the claude provider is given a `{"findings":[…]}` schema), the object `{"findings": [ … ]}`. Each finding:
 `{"severity":"P0"|"P1"|"P2","file":"<the canonical label of the section that carries the risk>","line":null,"title":"<short>","detail":"<one or two sentences: the design risk and the cheapest place to resolve it>"}`
 
-Rules: `severity` MUST be exactly one of `P0`/`P1`/`P2` (P0 a flaw that would invalidate the build or breach security/funds; P1 a real gap that will cause rework; P2 a smaller ambiguity) — do not use words like "high"/"medium". Cite only labels present in the material. Report `[]` if the design is sound. Do not include prose outside the JSON array.
+Rules: `severity` MUST be exactly one of `P0`/`P1`/`P2` (P0 a flaw that would invalidate the build or breach security/funds; P1 a real gap that will cause rework; P2 a smaller ambiguity) — do not use words like "high"/"medium". Cite only labels present in the material. Report an empty array `[]` (or `{"findings": []}`) if the design is sound. Do not include prose outside the JSON.
