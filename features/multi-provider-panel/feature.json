@@ -19,10 +19,6 @@
     {
       "reviewer_id": "general",
       "prompt": "reviewers/general.md"
-    },
-    {
-      "reviewer_id": "coverage",
-      "prompt": "reviewers/coverage.md"
     }
   ],
   "sidecar": {
