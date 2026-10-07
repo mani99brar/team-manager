@@ -24,7 +24,8 @@ From the grill session of 2026-10-07 with the operator. The feature is the first
 
 ## Changes after launch
 
-None yet.
+- [L1] attention-notify-002, attempt 1 (design challenge P1, ruled by the operator on 2026-10-07): [G3] and [G6] stand as written. The lane drops the five-failure fallback restored from run 001 (`FALLBACK_AFTER`, the placeholder body `N records could not be sent as text after 5 attempts; read attention.jsonl`, the `failed: true` log entries and the offset move past them), its test and its RUNBOOK sentence. A failing or timed-out send retries every minute with the offset unchanged, and a stuck batch shows as a failed systemd unit the operator unsticks by hand. The instance lock stays. Operator: "Drop the fallback (Recommended)".
+- [L2] attention-notify-003 (follow-up of 002, whose review the general reviewer blocked with one P1 on 2026-10-07; restored from candidate e5db4f7): a retry must never lose a record when the feed changed under it. The saved batch is identified by the records it holds (each by `run_id` and `at`), not by a byte span and a list of sent run ids: a retry re-reads from the saved offset, and if the bytes there no longer parse to the saved records, it discards the pending batch and plans afresh from the offset; a record already sent (same `run_id` and `at`) is skipped, every other record is sent. The RUNBOOK's unstick recipe is rewritten to match and to the one that loses nothing (edit the offending line's text, or move the offset to a line boundary with a named command); the sentence in [L1] about deleting the state file is withdrawn, since that replays the whole feed. A test deletes a whole line from a failed batch while a later record of another run was appended, and proves the later record is sent and logged. Operator: "Yes foolow up with another follow up run".
 
 ## Deferred
 
