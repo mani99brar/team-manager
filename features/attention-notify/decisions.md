@@ -10,7 +10,6 @@ From the grill session of 2026-10-07 with the operator. The feature is the first
 - [O4] Q4: all ten record kinds are pushed, one line each inside the run's folded message, as `[run_id] kind: text`. Operator: "All ten kinds, one line each in the run's folded message (recommended)."
 - [O5] Q5: no quiet hours, and a cap of 10 messages per hour across all runs; past the cap the rest folds into one "N more records" message at the next minute. Plus a presence flag (working or away) the operator sets, which changes the tailer's behaviour; its design is delegated to the grill ([G1]). Operator: "Any hour (no quiet hours), with the 10/hour cap. But also add a flag that says whether I am working or not (e.g. an 'away'/'working' status I can set), so the tailer can behave differently depending on it. Propose how that flag should work and what it changes."
 
-- [O6] Read-back 2026-10-07: confirms [G1] to [G8] and the Deferred list as written. Operator: "Confirmed as proposed."
 
 ## Grill defaults
 
