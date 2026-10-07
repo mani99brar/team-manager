@@ -1,0 +1,32 @@
+{
+  "version": "1.2.0",
+  "feature": "Attention notifications: tailer, presence flag, example systemd units and RUNBOOK section",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "workers": [
+    {
+      "node_id": "main",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit"
+      ],
+      "owned_paths": [
+        "workflow"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        }
+      ]
+    }
+  ]
+}

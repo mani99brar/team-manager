@@ -1,0 +1,25 @@
+{
+  "version": "2.4.0",
+  "name": "Attention notifications: a oneshot tailer of the controller's attention.jsonl that pushes each new record to the operator through a configured notify command, folded per run, capped per hour, with an operator presence flag",
+  "branch_prefix": "feature/attention-notify",
+  "prd": "docs/PRD_ATTENTION_NOTIFY.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "main",
+      "task": "main-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critical": false,
+  "tryout": false
+}
