@@ -840,6 +840,14 @@ class NotifyCase(unittest.TestCase):
         self.assertEqual(self.state()["topics"], {"attention-notify-003": {"thread": 100, "name": "⏸ attention-notify-003 · Attention notifications"},
                                                   "md-manager ab7716e7": {"thread": 101, "name": "💬 Current ideas"}})
         self.assertFalse(rename_log.exists())
+        # A session's state changes alone renames nothing: its emoji is fixed, so a permission prompt costs no rename.
+        with self.feed.open("a") as handle:
+            handle.write(json.dumps({"at": attention_notify.iso(NOON + 61), "run_id": "md-manager ab7716e7", "run_dir": "/home/x/dev/md-manager", "kind": "pane",
+                                     "node": "ab7716e7", "text": "permission_prompt: Claude needs your permission to use Bash", "title": "Current ideas"}) + "\n")
+        self.now = NOON + 65
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.sent()[-1][1].splitlines()[0], "🔐 <b>Current ideas · permission prompt</b>")
+        self.assertFalse(rename_log.exists())
         # The run is blocked and the pane's title changed: both topics are renamed, the new names kept.
         self.append("attention-notify-003", "review_blocked", "Review blocked by general (blocked, 1 open P1).", node="review", at=NOON + 70, run_dir=str(run_dir))
         with self.feed.open("a") as handle:
@@ -847,8 +855,8 @@ class NotifyCase(unittest.TestCase):
                                      "node": "ab7716e7", "text": "permission_prompt: Claude needs your permission to use Bash", "title": "Notifier rollout"}) + "\n")
         self.now = NOON + 120
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(rename_log.read_text().splitlines(), ["100|🛑 attention-notify-003 · Attention notifications", "101|🔐 Notifier rollout"])
-        self.assertEqual(self.state()["topics"]["md-manager ab7716e7"], {"thread": 101, "name": "🔐 Notifier rollout"})
+        self.assertEqual(rename_log.read_text().splitlines(), ["100|🛑 attention-notify-003 · Attention notifications", "101|💬 Notifier rollout"])
+        self.assertEqual(self.state()["topics"]["md-manager ab7716e7"], {"thread": 101, "name": "💬 Notifier rollout"})
         self.assertEqual(self.log.with_name(self.log.name + ".chat").read_text().splitlines()[-2:], ["-100777|100", "-100777|101"])
         # A rename that fails is a warning and exit 2: the message still goes, in its topic, and the rename is tried again.
         rename_log.with_name(rename_log.name + ".renamefail").write_text("")

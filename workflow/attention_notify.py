@@ -51,8 +51,9 @@ line per record with its run in bold, no commands. The plain format is the defau
 
 Topic names. A run's topic is named `<emoji> <run id> · <feature in plain words>` (the first clause of the feature.json
 `name` in the run's source checkout, else the feature slug as words); a session's `<emoji> <pane title>` (the record's
-`title`, the Herdr pane's terminal title). The emoji is the state's. The state keeps `{thread, name}` per run and, with
-`rename` in `topic`, renames the topic when the name changes (another state, another pane title).
+`title`, the Herdr pane's terminal title). A run's emoji is the state's, a session's is always 💬. The state keeps
+`{thread, name}` per run and, with `rename` in `topic`, renames the topic when the name changes (a run's state, a pane's
+title).
 
 `python -m workflow presence [working|away] [--for 9h]` reads or writes `presence.json`: `{"status", "since", "until"}`.
 `--for` sets `until`, after which the status reads `working` again; a missing or malformed file reads `working`.
@@ -571,14 +572,18 @@ def feature_words(record: dict) -> str:
     return name
 
 
+SESSION_EMOJI = "💬"
+
+
 def topic_name(run_id: str, records: list[dict], home: str = "") -> str:
-    """What the run's or session's topic is called: the state's emoji, then the session's pane title, or the run id and
-    its feature in plain words."""
+    """What the run's or session's topic is called: a run's is the state's emoji, the run id and its feature in plain
+    words (renamed as the run's state changes); a session's is one fixed emoji and the pane's title (a session changes
+    state many times a day, and a rename posts a service line each time, so only the title renames it)."""
     lead = next((item for item in records if item.get("kind") in IMMEDIATE), records[-1])
     shown = describe(lead, home)
     title = lead.get("title") if isinstance(lead.get("title"), str) and lead.get("title").strip() else None
     words = feature_words(lead)
-    name = f"{shown['emoji']} {title}" if title else f"{shown['emoji']} {run_id}" + (f" · {words}" if words else "")
+    name = f"{SESSION_EMOJI} {title}" if title else f"{shown['emoji']} {run_id}" + (f" · {words}" if words else "")
     return " ".join(name.split())[:TOPIC_NAME_LIMIT]
 
 
