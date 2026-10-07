@@ -4,6 +4,15 @@
   "independent_review": true,
   "integration_approval": true,
   "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
   "workers": [
     {
       "node_id": "main",
