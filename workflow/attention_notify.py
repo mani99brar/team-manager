@@ -152,8 +152,14 @@ def presence_main(argv: list[str], *, env: dict | None = None, clock=time.time) 
 
 # --- the tailer -------------------------------------------------------------------------------------------------------
 
-def load_config(folder: Path) -> list[str]:
-    """notify.json's argv. Raises NotifyError for a missing or malformed file."""
+SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASS|CREDENTIAL", re.IGNORECASE)
+
+
+def load_config(folder: Path) -> tuple[list[str], dict[str, str]]:
+    """notify.json's argv and its optional `env`, the variables set for the command (the target chat, for example
+    `TELEGRAM_CHAT_ID`, which the command reads instead of its own default). A name that looks like a secret (token, key,
+    secret, password, credential) is refused: the tokens stay in the command's own files, never here (decisions [G5]).
+    Raises NotifyError for a missing or malformed file."""
     path = folder / CONFIG
     try:
         value = read_json(path)
@@ -164,7 +170,41 @@ def load_config(folder: Path) -> list[str]:
     argv = value.get("argv") if isinstance(value, dict) else None
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         raise NotifyError(f'{path} must hold {{"argv": [<command>, <arguments>...]}}, strings only')
-    return argv
+    env = value.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(k, str) and k and isinstance(v, str) for k, v in env.items()):
+        raise NotifyError(f'{path}: "env" must be an object of variable names to string values')
+    secret = sorted(name for name in env if SECRET_NAME.search(name))
+    if secret:
+        raise NotifyError(f'{path}: "env" must not carry a secret ({", ".join(secret)}): keep tokens in the notify command\'s own files')
+    topic = value.get("topic")
+    if topic is not None:
+        topic_argv = topic.get("argv") if isinstance(topic, dict) else None
+        name = topic.get("env") if isinstance(topic, dict) else None
+        if not isinstance(topic_argv, list) or not topic_argv or not all(isinstance(item, str) and item for item in topic_argv) \
+                or not isinstance(name, str) or not name or SECRET_NAME.search(name):
+            raise NotifyError(f'{path}: "topic" must hold {{"argv": [<command that prints a thread id>, ...], "env": "<variable the send reads>"}}')
+    return argv, env, topic
+
+
+def create_topic(topic: dict, name: str) -> int:
+    """Run the topic command with the topic's name as its last argument and return the integer thread id it prints.
+    Raises NotifyError when it is not there, exits non-zero, does not end within TIMEOUT_SECONDS or prints no integer."""
+    from .worktrees import without_controller_git_config
+    argv = topic["argv"]
+    try:
+        done = subprocess.run([*argv, name], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=TIMEOUT_SECONDS, env=without_controller_git_config(os.environ))
+    except subprocess.TimeoutExpired:
+        raise NotifyError(f"topic command {argv[0]} did not end within {TIMEOUT_SECONDS} s") from None
+    except OSError as error:
+        raise NotifyError(f"topic command {argv[0]} could not run: {error}") from error
+    detail = (done.stderr or done.stdout).decode("utf-8", "replace").strip().splitlines()
+    if done.returncode != 0:
+        raise NotifyError(f"topic command {argv[0]} exited {done.returncode}" + (f": {detail[-1][:200]}" if detail else ""))
+    try:
+        return int(done.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise NotifyError(f"topic command {argv[0]} printed no thread id" + (f": {detail[-1][:200]}" if detail else "")) from None
 
 
 def key_of(record: dict) -> list:
@@ -173,7 +213,7 @@ def key_of(record: dict) -> list:
 
 
 def empty_state() -> dict:
-    return {"version": VERSION, "offset": 0, "sent": [], "held": [], "pushed": []}
+    return {"version": VERSION, "offset": 0, "sent": [], "held": [], "pushed": [], "topics": {}}
 
 
 def load_state(folder: Path) -> dict:
@@ -191,6 +231,9 @@ def load_state(folder: Path) -> dict:
     state["held"] = [item for item in value.get("held") or [] if isinstance(item, dict) and isinstance(item.get("run_id"), str)
                      and isinstance(item.get("kind"), str) and isinstance(item.get("text"), str)]
     state["pushed"] = [key for key in value.get("pushed") or [] if isinstance(key, list) and len(key) == 4 and isinstance(key[0], str)]
+    topics = value.get("topics")
+    state["topics"] = {run_id: thread for run_id, thread in (topics or {}).items() if isinstance(run_id, str) and isinstance(thread, int)} \
+        if isinstance(topics, dict) else {}
     return state
 
 
@@ -253,13 +296,13 @@ def fold(lines: list[str], header: str | None = None) -> tuple[str, int]:
     return (header or "")[:BODY_LIMIT], len(lines)
 
 
-def send(argv: list[str], title: str, body: str) -> None:
-    """Run the notify command with the title and the body as its last two arguments. Raises NotifyError when it is not
-    there, exits non-zero or does not end within TIMEOUT_SECONDS."""
+def send(argv: list[str], title: str, body: str, env: dict[str, str] | None = None) -> None:
+    """Run the notify command with the title and the body as its last two arguments, and notify.json's `env` set in its
+    environment. Raises NotifyError when it is not there, exits non-zero or does not end within TIMEOUT_SECONDS."""
     from .worktrees import without_controller_git_config  # `python -m workflow` adds hooks-off; the command runs as written.
     try:
         done = subprocess.run([*argv, title, body], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=TIMEOUT_SECONDS, env=without_controller_git_config(os.environ))
+                              timeout=TIMEOUT_SECONDS, env={**without_controller_git_config(os.environ), **(env or {})})
     except subprocess.TimeoutExpired:
         raise NotifyError(f"notify command {argv[0]} did not end within {TIMEOUT_SECONDS} s") from None
     except OSError as error:
@@ -276,10 +319,11 @@ class Tailer:
         self.folder, self.clock, self.out = folder, clock, sys.stderr if out is None else out
         self.sent_messages = self.sent_records = 0
         self.held_records = 0
+        self.warnings: list[str] = []  # A topic that could not be created: the message went without it; the pass exits 2.
 
     def run(self) -> None:
         now = self.clock()
-        argv = load_config(self.folder)
+        argv, env, topic = load_config(self.folder)
         state = load_state(self.folder)
         records, start, end = read_feed(self.folder / FEED, state["offset"], self.out)
         state["offset"] = start
@@ -289,7 +333,7 @@ class Tailer:
         messages = self.plan(records, state, presence, now)
         try:
             for message in messages:  # Stops at the first refusal: what follows waits, unlost, for the next pass.
-                send(argv, TITLE, message["body"])
+                send(argv, TITLE, message["body"], self.thread_env(topic, state, message, env))
                 self.log(message["records"], now)
                 state["sent"].append({"at": iso(now), "digest": message["digest"]})
                 state["pushed"].extend(key_of(record) for record in message["records"])
@@ -304,21 +348,36 @@ class Tailer:
         if json.dumps(state, sort_keys=True) != before:  # A minute with nothing new leaves the file as it was.
             self.save(state)
 
+    def thread_env(self, topic: dict | None, state: dict, message: dict, env: dict[str, str]) -> dict[str, str]:
+        """The send's environment: `env`, plus the run's topic thread id under the topic's variable when topics are
+        configured and the message is one run's. The topic is created once per run, by name = run id, and its id kept
+        in `state["topics"]`; a creation that fails is a warning (the message goes without a topic, into the group's
+        general topic) and is tried again at the next run message. A digest (several runs) has no topic."""
+        run_id = message["run_id"]
+        if topic is None or run_id is None:
+            return env
+        thread = state["topics"].get(run_id)
+        if thread is None:
+            try:
+                thread = create_topic(topic, run_id)
+            except NotifyError as error:
+                self.warnings.append(f"topic for {run_id} not created, sent without it: {error}")
+                return env
+            state["topics"][run_id] = thread
+        return {**env, topic["env"]: str(thread)}
+
     def plan(self, records: list[dict], state: dict, presence: str, now: float) -> list[dict]:
-        """The messages of this run in order: a digest of what is held (when one may go out), then one message per run of
-        the new records, in the feed order of their first unsent record. A record already pushed by a pass a send
-        refused, or already held, is skipped. Lines past the cap, or held by presence, join `state["held"]`."""
+        """The messages of this run in order: one message per run of the new records, in the feed order of their first
+        unsent record, then a digest of what is held (when one may go out). The digest goes last so that a held line the
+        channel refuses blocks nothing that waits on the operator: the run messages before it went out and were logged
+        before the refusal. A record already pushed by a pass a send refused, or already held, is skipped. Lines past
+        the cap, or held by presence, join `state["held"]`."""
         done = {tuple(key) for key in state["pushed"]} | {tuple(key_of(item)) for item in state["held"]}
         records = [record for record in records if tuple(key_of(record)) not in done]
+        held_before = list(state["held"])  # What this pass holds waits for the next pass's digest, as the RUNBOOK says.
         window = state["sent"]
         slots = CAP - len(window)
         messages = []
-        releasable = [item for item in state["held"] if presence == "working" or item["kind"] in IMMEDIATE]
-        if releasable and (slots > 0 or not any(item.get("digest") for item in window)):
-            body, left = fold([line_of(item) for item in releasable], f"{len(releasable)} more records")
-            included = releasable[:len(releasable) - left]
-            messages.append({"run_id": None, "digest": True, "body": body, "records": included})
-            slots -= 1
         groups: dict[str, list[dict]] = {}
         for record in records:
             groups.setdefault(record["run_id"], []).append(record)
@@ -336,6 +395,11 @@ class Tailer:
             self.hold(state, pushed[len(pushed) - left:], "overflow", now)
             messages.append({"run_id": run_id, "digest": False, "body": body, "records": included})
             slots -= 1
+        releasable = [item for item in held_before if presence == "working" or item["kind"] in IMMEDIATE]
+        if releasable and (slots > 0 or not any(item.get("digest") for item in window)):
+            body, left = fold([line_of(item) for item in releasable], f"{len(releasable)} more records")
+            included = releasable[:len(releasable) - left]
+            messages.append({"run_id": None, "digest": True, "body": body, "records": included})
         return messages
 
     def hold(self, state: dict, records: list[dict], reason: str, now: float) -> None:
@@ -379,6 +443,10 @@ def attention_notify_main(argv: list[str], *, env: dict | None = None, clock=tim
                 if tailer.sent_messages or tailer.held_records:
                     print(f"Attention notify: sent {tailer.sent_messages} message(s) for {tailer.sent_records} record(s), "
                           f"held {tailer.held_records}", flush=True)
+            if tailer.warnings:
+                for warning in tailer.warnings:
+                    print(f"Attention notify: {warning}", file=sys.stderr, flush=True)
+                sys.exit(2)
     except NotifyError as error:
         print(f"Attention notify failed: {error}", file=sys.stderr, flush=True)
         sys.exit(2)

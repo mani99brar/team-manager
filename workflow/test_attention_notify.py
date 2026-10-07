@@ -26,6 +26,19 @@ TOOL = Path(__file__).resolve().parents[1]
 NOON = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc).timestamp()
 # Records its arguments as one JSON line per call; exits 1 while a `fail` file sits beside the log or the body says
 # POISON; sleeps while a `slow` file does (never past the test's patched timeout by much).
+# The topic command: records the name, prints a fresh thread id (100, 101, ...); exits 1 while a `topicfail` file sits
+# beside its log.
+TOPIC_STUB = """\
+import os, sys
+log = sys.argv[1]
+if os.path.exists(log + ".topicfail"):
+    print("stub refused the topic", file=sys.stderr)
+    sys.exit(1)
+count = len(open(log).read().splitlines()) if os.path.exists(log) else 0
+with open(log, "a") as handle:
+    handle.write(sys.argv[2] + "\\n")
+print(100 + count)
+"""
 STUB = """\
 import json, os, sys, time
 log = sys.argv[1]
@@ -33,6 +46,8 @@ if os.path.exists(log + ".slow"):
     time.sleep(2)
 with open(log, "a") as handle:
     handle.write(json.dumps(sys.argv[2:]) + "\\n")
+with open(log + ".chat", "a") as handle:  # The chat and the topic the command would send to: notify.json's `env` reaches it.
+    handle.write(os.environ.get("TELEGRAM_CHAT_ID", "") + "|" + os.environ.get("TELEGRAM_THREAD_ID", "") + "\\n")
 if os.path.exists(log + ".fail") or "POISON" in sys.argv[-1]:
     print("stub refused the message", file=sys.stderr)
     sys.exit(1)
@@ -111,7 +126,7 @@ class NotifyCase(unittest.TestCase):
             {"at": "2026-10-07T12:00:01Z", "sent_at": "2026-10-07T12:01:00Z", "run_id": "other-002", "kind": "finished"}])
         self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
         self.assertEqual(self.state()["pushed"], [])
-        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "topics", "version"])
         # The next minute: nothing new, nothing sent, nothing printed, the state untouched.
         before = (self.config / "attention-notify.state.json").stat().st_mtime_ns
         self.now = NOON + 120
@@ -137,7 +152,7 @@ class NotifyCase(unittest.TestCase):
         self.assertRegex(err, r"^Attention notify failed: notify command .* exited 1: stub refused the message\n$")
         self.assertEqual(len(self.sent()), 1)  # The attempt reached the command once.
         self.assertEqual((self.state()["offset"], self.state()["pushed"], self.state()["sent"]), (0, [], []))  # Not a send: no cap count.
-        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])  # No byte span, no failure count: nothing reads one.
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "topics", "version"])  # No byte span, no failure count: nothing reads one.
         self.assertEqual(self.notified(), [])
         # A command that does not end within the timeout is the same failure.
         (self.log.parent / "sent.jsonl.fail").unlink()
@@ -433,7 +448,7 @@ class NotifyCase(unittest.TestCase):
         self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()], [("first-001", "question"), ("first-001", "pane")])
         self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
         self.assertEqual(self.state()["pushed"], [])  # Every message went: the set is cleared with the offset move.
-        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "topics", "version"])
         self.now = NOON + 240
         self.assertEqual(self.run_once(), (0, "", ""))
         self.assertEqual(self.notified().count({"at": "2026-10-07T12:02:10Z", "sent_at": "2026-10-07T12:03:00Z", "run_id": "first-001", "kind": "pane"}), 1)
@@ -458,11 +473,10 @@ class NotifyCase(unittest.TestCase):
         self.assertEqual(self.presence("working")[0], 0)
         self.now = NOON + 180
         self.assertEqual(self.run_once()[0], 2)
-        self.assertEqual(self.bodies()[-2:], ["1 more records\n[first-001] finished: feature/first fast-forwarded to abc",
-                                              "[second-002] question: POISON: Worker ui asked question 1 of 3: C or D?"])
-        self.assertEqual(self.state()["held"], [])
-        self.assertEqual(self.state()["pushed"], [["first-001", "2026-10-07T12:00:00Z", "question", "ui"],
-                                                  ["first-001", "2026-10-07T12:00:01Z", "finished", None]])
+        # The run messages go first and the digest last: the refused line stops the pass before the digest, which waits.
+        self.assertEqual(self.bodies()[-1], "[second-002] question: POISON: Worker ui asked question 1 of 3: C or D?")
+        self.assertEqual(len(self.state()["held"]), 1)
+        self.assertEqual(self.state()["pushed"], [["first-001", "2026-10-07T12:00:00Z", "question", "ui"]])
         self.now = NOON + 240
         self.assertEqual(self.run_once()[0], 2)
         self.assertEqual([body[:12] for body in self.bodies()[-2:]], ["[second-002]", "[second-002]"])  # Only the refused line again.
@@ -470,10 +484,132 @@ class NotifyCase(unittest.TestCase):
         self.feed.write_text("\n".join(line.replace("POISON: ", "") for line in lines) + "\n")
         self.now = NOON + 300
         self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-2:], ["[second-002] question: Worker ui asked question 1 of 3: C or D?",
+                                              "1 more records\n[first-001] finished: feature/first fast-forwarded to abc"])
         self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()],
-                         [("first-001", "question"), ("first-001", "finished"), ("second-002", "question")])
+                         [("first-001", "question"), ("second-002", "question"), ("first-001", "finished")])
         self.assertEqual(sum(1 for line in self.notified() if line["kind"] == "finished"), 1)
         self.assertEqual((self.state()["offset"], self.state()["pushed"], self.state()["held"]), (self.feed.stat().st_size, [], []))
+
+    def test_a_refused_held_line_blocks_nothing_that_waits_on_the_operator_and_is_unstuck_in_the_state_file(self):
+        # Away: a finished record whose text the channel refuses is held. Working again, with a new question in the feed:
+        # the question goes out (the digest is planned last), the pass exits 2 on the digest, and the held copy, which
+        # the feed was already read past, is unstuck by editing its entry in the state file, never a feed line.
+        self.assertEqual(self.presence("away")[0], 0)
+        self.append("first-001", "finished", "POISON: feature/first fast-forwarded to abc", node=None, at=NOON)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once(), (0, "Attention notify: sent 0 message(s) for 0 record(s), held 1\n", ""))
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        self.assertEqual(self.presence("working")[0], 0)
+        self.append("second-002", "question", "Worker ui asked question 1 of 3: C or D?", at=NOON + 70)
+        self.now = NOON + 120
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.bodies(), ["[second-002] question: Worker ui asked question 1 of 3: C or D?",  # Went, then the digest was refused.
+                                         "1 more records\n[first-001] finished: POISON: feature/first fast-forwarded to abc"])
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()], [("second-002", "question")])
+        # The refusal keeps the offset for the retry, as any refusal does; the question that went is remembered by key.
+        self.assertLess(self.state()["offset"], self.feed.stat().st_size)
+        self.assertEqual(self.state()["pushed"], [["second-002", "2026-10-07T12:01:10Z", "question", "ui"]])
+        self.assertEqual([item["run_id"] for item in self.state()["held"]], ["first-001"])
+        self.append("third-003", "pane", "Worker ui needs attention in its pane", at=NOON + 130)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 2)  # The pane record still reaches the operator; only the digest is refused again.
+        self.assertEqual(self.bodies()[-2:], ["[third-003] pane: Worker ui needs attention in its pane",
+                                              "1 more records\n[first-001] finished: POISON: feature/first fast-forwarded to abc"])
+        # The unstick the RUNBOOK gives for a held record: edit that entry's text in the state file.
+        state = self.state()
+        state["held"][0]["text"] = state["held"][0]["text"].replace("POISON: ", "")
+        save_json(self.config / "attention-notify.state.json", state)
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "1 more records\n[first-001] finished: feature/first fast-forwarded to abc")
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()],
+                         [("second-002", "question"), ("third-003", "pane"), ("first-001", "finished")])
+        self.assertEqual((self.state()["held"], self.state()["pushed"]), ([], []))
+        self.assertIn("A held record (the digest", (TOOL / "workflow/RUNBOOK.md").read_text())
+
+    def test_notify_json_env_names_the_target_chat_and_never_a_secret(self):
+        # The command's own files decide the channel and its token; notify.json's `env` only redirects it (the group
+        # instead of the DM, [O6]) by setting variables the command reads, here TELEGRAM_CHAT_ID.
+        chats = self.log.with_name(self.log.name + ".chat")
+        self.append()
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(chats.read_text().splitlines(), ["|"])  # No env: the command's own default chat, no topic.
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)], "env": {"TELEGRAM_CHAT_ID": "-1001234567890"}})
+        self.append(at=NOON + 1)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(chats.read_text().splitlines(), ["|", "-1001234567890|"])
+        for env, detail in (({"TELEGRAM_BOT_TOKEN": "123:abc"}, "TELEGRAM_BOT_TOKEN"), ({"NTFY_TOPIC": 7}, '"env" must be an object'), ("x", '"env" must be an object')):
+            save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)], "env": env})
+            self.append(at=NOON + 70)
+            self.now = NOON + 120
+            code, out, err = self.run_once()
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn(detail, err)
+            self.assertEqual(err.count("\n"), 1)
+        self.assertEqual(len(self.bodies()), 2)  # The refused configs sent nothing.
+
+    def test_a_forum_group_gets_one_topic_per_run_kept_in_the_state_and_a_failed_topic_is_a_warning(self):
+        # [O7]: with `topic` in notify.json, each run's first message creates a topic named after the run (the topic
+        # command prints its thread id), the id is kept in the state and every later message of the run carries it in
+        # the topic's variable; a digest (several runs) goes without one. A topic command that fails is one stderr line
+        # and exit 2: the message still goes, without a topic, and the next message of that run tries again.
+        chats = self.log.with_name(self.log.name + ".chat")
+        topic_stub, topic_log = self.root / "topic-stub.py", self.root / "topics.txt"
+        topic_stub.write_text(TOPIC_STUB)
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)], "env": {"TELEGRAM_CHAT_ID": "-100777"},
+                                                "topic": {"argv": [sys.executable, str(topic_stub), str(topic_log)], "env": "TELEGRAM_THREAD_ID"}})
+        self.append("demo-001", at=NOON)
+        self.append("other-002", "pane", "Worker ui needs attention in its pane", at=NOON + 1)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001", "other-002"])
+        self.assertEqual(chats.read_text().splitlines(), ["-100777|100", "-100777|101"])
+        self.assertEqual(self.state()["topics"], {"demo-001": 100, "other-002": 101})
+        self.append("demo-001", "review_blocked", "Review blocked by general (blocked, 1 open P1)", node="review", at=NOON + 70)
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001", "other-002"])  # Created once per run.
+        self.assertEqual(chats.read_text().splitlines()[-1], "-100777|100")
+        # A digest carries lines of several runs: no topic.
+        self.assertEqual(self.presence("away")[0], 0)
+        self.append("demo-001", "finished", "feature/demo fast-forwarded to abc", node=None, at=NOON + 130)
+        self.append("other-002", "finished", "feature/other fast-forwarded to def", node=None, at=NOON + 131)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.presence("working")[0], 0)
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1].splitlines()[0], "2 more records")
+        self.assertEqual(chats.read_text().splitlines()[-1], "-100777|")
+        # The topic command fails for a new run: the message goes without a topic, the pass says so and exits 2.
+        topic_log.with_name(topic_log.name + ".topicfail").write_text("")
+        self.append("third-003", "question", "Worker ui asked question 1 of 3: E or F?", at=NOON + 250)
+        self.now = NOON + 300
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertEqual(err, "Attention notify: topic for third-003 not created, sent without it: topic command " + sys.executable
+                              + " exited 1: stub refused the topic\n")
+        self.assertEqual(self.bodies()[-1], "[third-003] question: Worker ui asked question 1 of 3: E or F?")
+        self.assertEqual(chats.read_text().splitlines()[-1], "-100777|")
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)  # Sent: nothing is retried.
+        self.assertNotIn("third-003", self.state()["topics"])
+        topic_log.with_name(topic_log.name + ".topicfail").unlink()
+        self.append("third-003", "pane", "Worker ui needs attention in its pane", at=NOON + 310)
+        self.now = NOON + 360
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.state()["topics"]["third-003"], 102)
+        self.assertEqual(chats.read_text().splitlines()[-1], "-100777|102")
+        self.assertEqual([line["run_id"] for line in self.notified()].count("third-003"), 2)
+        # A malformed `topic` is refused like a malformed `env`.
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)], "topic": {"argv": [], "env": "X"}})
+        self.append(at=NOON + 370)
+        self.now = NOON + 420
+        code, out, err = self.run_once()
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn('"topic" must hold', err)
 
     def test_a_second_instance_at_once_sends_nothing_and_exits_0(self):
         self.append()
@@ -530,6 +666,11 @@ class UnitsAndDocs(unittest.TestCase):
         for text in ("systemctl --user enable --now attention-notify.timer", "loginctl enable-linger $USER", "loginctl show-user $USER -p Linger",
                      '"argv"', '"status"', '"until"', "python -m workflow presence", "attention-notify.state.json", "attention-notified.jsonl",
                      "notify.json", "presence.json", "10 messages", "exits 2",
+                     # [O6]: the target chat is set in notify.json's `env`, never a token; the group's id and the bot in it.
+                     '"env"', "TELEGRAM_CHAT_ID", "the group's chat id", "never a token",
+                     # [O7]: a forum group, one topic per run, the thread ids in the state; the bot an admin with Manage topics.
+                     '"topic"', "TELEGRAM_THREAD_ID", "Manage topics", "one topic per run", '"topics"',
+                     "--create-topic", "message_thread_id", "/telegram:access group add",
                      # The install block starts the offset at the feed's end before the first pass, or the whole feed is replayed.
                      '"offset": %s, "sent": [], "held": [], "pushed": []', "stat -c %s ~/.config/md-manager/attention.jsonl",
                      "without this the first pass replays every record the feed holds",
@@ -538,8 +679,12 @@ class UnitsAndDocs(unittest.TestCase):
                      # [L2]: the retry skips what went by record key and sends the rest; a refused line is unstuck by editing
                      # or deleting that line only, which sits at or after the offset; never an earlier line or the state file.
                      "skips the records already sent", "`pushed`", "run id, timestamp, kind and node", "not lost",
-                     "edit the offending line's text in `attention.jsonl`, or delete that line",
-                     "at or after the saved offset", "never edit or delete an earlier line (already notified)",
+                     "edit that line's text in `attention.jsonl`, or delete the line",
+                     "at or after the saved offset", "Never edit or delete a feed line before the offset",
+                     # A held record was read past; its copy is the state file's `held` entry, edited with the timer stopped.
+                     "A held record (the digest", "entry of `held` in `attention-notify.state.json`",
+                     "systemctl --user stop attention-notify.timer", "edit that entry's `text`",
+                     "the digest is planned last, so a refused digest holds back nothing else",
                      "wait, unlost, until the line is edited or deleted",
                      "Do not delete the state file for this: that replays the whole feed",
                      "Deleting it replays the whole feed from its first byte, drops the held lines and resets the cap window"):
