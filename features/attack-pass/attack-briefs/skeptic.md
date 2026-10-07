@@ -4,7 +4,7 @@ Each finding you get claims that the candidate breaks a stated requirement, and 
 
 For each finding, check:
 - Does a specification document actually state the requirement the test asserts? Quote the line. A test that asserts a behaviour no document requires is refuted.
-- Is the behaviour inside this feature's scope as the documents describe it?
+- A requirement stated in any requirements document you were given applies to whatever changed code is subject to it. Do not refute merely because the requirement lives in a different document than the feature's own PRD, or because another component could also enforce it. Refute on scope only if the requirement genuinely does not govern the behaviour the test exercises.
 - Does the failure in the output come from the code under test, at the assertion that encodes the requirement, and not from the harness, the test's own setup, a fixture, a missing dependency or a timeout?
 - Would the observed behaviour still satisfy the stated requirement, read as written?
 

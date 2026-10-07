@@ -1,5 +1,7 @@
 # MD Manager Workflow — Learnings
 
+> **Moved 2026-10-06:** the shared copy is `~/.local/share/agent-memory/repo/learnings/md-manager-workflow.md`, synced to every machine by agent-memory. Edit it there; this file is no longer updated.
+
 Durable, data-grounded learnings about the md-manager workflow pipeline, its review/attack layers, and how to operate and evaluate them. Assembled 2026-10-05 → 2026-10-06. Local only.
 
 **Sources:** the MD Manager Run Ledger (132 pipeline + 87 ultracode runs; artifact `https://claude.ai/artifact/P6EE5JdhdS2feUnstCXHGb`); the attack-pass pilot calibration (`md-manager-reviews/attack-pass-pilot-calibration-report.md`); two multi-provider review experiments (`md-manager-reviews/multi-provider-review-claims-005.md` and `md-manager-reviews/mpreview-batch/RESULTS.md`); and hands-on operation this session.
