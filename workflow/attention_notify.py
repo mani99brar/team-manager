@@ -186,14 +186,15 @@ def load_config(folder: Path) -> tuple[list[str], dict[str, str]]:
     return argv, env, topic
 
 
-def create_topic(topic: dict, name: str) -> int:
-    """Run the topic command with the topic's name as its last argument and return the integer thread id it prints.
-    Raises NotifyError when it is not there, exits non-zero, does not end within TIMEOUT_SECONDS or prints no integer."""
+def create_topic(topic: dict, name: str, env: dict[str, str] | None = None) -> int:
+    """Run the topic command with the topic's name as its last argument, and notify.json's `env` set in its environment
+    (the target chat: the topic is created where the messages go), and return the integer thread id it prints. Raises
+    NotifyError when it is not there, exits non-zero, does not end within TIMEOUT_SECONDS or prints no integer."""
     from .worktrees import without_controller_git_config
     argv = topic["argv"]
     try:
         done = subprocess.run([*argv, name], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=TIMEOUT_SECONDS, env=without_controller_git_config(os.environ))
+                              timeout=TIMEOUT_SECONDS, env={**without_controller_git_config(os.environ), **(env or {})})
     except subprocess.TimeoutExpired:
         raise NotifyError(f"topic command {argv[0]} did not end within {TIMEOUT_SECONDS} s") from None
     except OSError as error:
@@ -359,7 +360,7 @@ class Tailer:
         thread = state["topics"].get(run_id)
         if thread is None:
             try:
-                thread = create_topic(topic, run_id)
+                thread = create_topic(topic, run_id, env)
             except NotifyError as error:
                 self.warnings.append(f"topic for {run_id} not created, sent without it: {error}")
                 return env

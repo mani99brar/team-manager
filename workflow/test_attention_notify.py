@@ -35,8 +35,8 @@ if os.path.exists(log + ".topicfail"):
     print("stub refused the topic", file=sys.stderr)
     sys.exit(1)
 count = len(open(log).read().splitlines()) if os.path.exists(log) else 0
-with open(log, "a") as handle:
-    handle.write(sys.argv[2] + "\\n")
+with open(log, "a") as handle:  # The name, and the chat the command would create it in: notify.json's `env` reaches it too.
+    handle.write(sys.argv[2] + "|" + os.environ.get("TELEGRAM_CHAT_ID", "") + "\\n")
 print(100 + count)
 """
 STUB = """\
@@ -565,13 +565,13 @@ class NotifyCase(unittest.TestCase):
         self.append("other-002", "pane", "Worker ui needs attention in its pane", at=NOON + 1)
         self.now = NOON + 60
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001", "other-002"])
+        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001|-100777", "other-002|-100777"])  # Created in the target chat.
         self.assertEqual(chats.read_text().splitlines(), ["-100777|100", "-100777|101"])
         self.assertEqual(self.state()["topics"], {"demo-001": 100, "other-002": 101})
         self.append("demo-001", "review_blocked", "Review blocked by general (blocked, 1 open P1)", node="review", at=NOON + 70)
         self.now = NOON + 120
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001", "other-002"])  # Created once per run.
+        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001|-100777", "other-002|-100777"])  # Created once per run.
         self.assertEqual(chats.read_text().splitlines()[-1], "-100777|100")
         # A digest carries lines of several runs: no topic.
         self.assertEqual(self.presence("away")[0], 0)
