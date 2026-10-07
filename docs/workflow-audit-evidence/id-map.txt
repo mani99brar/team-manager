@@ -1,0 +1,57 @@
+C-id	merge id	match	title
+C1	GRILL-1	0.79	The grill plays back how it read your words, then reads back everything that will bind, before any launch
+C2	GRILL-2	0.79	A Recommended option commits only to what its question asks
+C3	GRILL-3	1.00	Offer the repository's own pattern as an option, and derive values the repository already records
+C4	GRILL-4	1.00	Split decisions.md by source: your decisions bind and are protected, assistant defaults stay open to challenge
+C5	GRILL-5	1.00	Grill robustness: keep unanswered questions open, confirm free-text answers, test the skill, and record each feature's R32 cell
+C6	AUTH-1	1.00	Every acceptance item names its proof, checked by a warning-only launch lint that reaches every author
+C7	AUTH-2	1.00	User-facing tasks state how a user really drives the feature, each run leaves a cheap tryout, and your verdicts are recorded before the merge to main
+C8	CHAL-1	1.00	Opt-in hold after a passing challenge, so you read every concern before workers start
+C9	CHAL-2	1.00	In unattended runs, give the passing challenge's concerns to the workers as advisory notes
+C10	CHAL-3	0.98	Challenge output says who must act: one recommendation per concern, decisions that pause, consequence classes, a scope trace and an acceptance-to-check map
+C11	CHAL-4	1.00	Refuse a challenge rerun on unchanged files, show reruns the earlier P0/P1s, and cap attempts
+C12	CHAL-5	1.00	Let the challenge read the code it judges: restored snapshots and installed dependencies
+C13	CHAL-6	1.00	Measure first, then take a second challenge sample in unattended runs when the first one passes
+C14	WORK-6	1.00	Run workers and the verifier without your credentials: a Bash sandbox, read-deny rules and a recorded opt-out
+C15	WORK-4	0.91	Workers start with setup done, and every session gets the target's CLAUDE.md conventions in its prompt
+C16	WORK-1	0.93	Completion rules: an untestable or reinterpreted requirement becomes a question, the controller states the deadline, and the Stop-line bug is fixed
+C17	WORK-2	0.99	A recorded `workflow note` for mid-run instructions, two named roles, and a required actor on every gate action
+C18	WORK-3	0.95	Accept finished sessions that the registry still lists as "working" or "blocked"
+C19	WORK-5	0.95	Deny pattern kills and pushes for workers as hygiene, and leave the live-chain boundary to C14
+C20	GATE-1	1.00	When you decline tests, each self-reported acceptance item becomes a pinned policy check before launch
+C21	GATE-10	1.00	Test validator-cli from its entry point with chains that disagree, and check the dev line's arbToGnosis claimer now
+C22	GATE-9	1.00	Only you broadcast mainnet transactions; agents prepare a decoded plan that a second reader checks
+C23	GATE-5	1.00	Check each approved run against current main before it lands, and catch overlapping ownership across parallel runs at launch
+C24	GATE-6	0.98	Fix three controller defects only Codex found: non-ASCII freeze paths, incomplete bundles, and cached packets of the wrong phase
+C25	GATE-7	1.00	One git helper for every controller call: hooks, fsmonitor and diff drivers off, and a refusal when a lane has changed the shared .git
+C26	GATE-2	1.00	Let resume re-pin policy.json before any worker has started
+C27	GATE-3	0.98	Warning-only policy lint at launch: weakened checks, kind mismatches, changed check definitions and tight timeouts
+C28	GATE-4	0.99	Defer checks by lane dependency, not by check kind, and stop re-checking an identical tree in single-lane runs
+C29	GATE-8	1.00	Stop launching new user-facing features while 3 approved ones wait for your tryout
+C30	FIX-1	1.00	A review-blocked brief, findings carried as TODO lines, reproducers through the entry point, recorded lineage and an abandon command, instead of follow-up runs built by hand
+C31	FIX-2	0.97	Cap unattended fix cycles, and carry open findings and observed defects into later runs through one findings ledger that closes only when the fix lands
+C32	FIX-3	1.00	Verify and review an existing commit without a worker: small fixes after approval, re-reviews and merge chores
+C33	REV-1	0.95	When one reviewer blocks, let the others finish, and record every verdict they wrote
+C34	REV-2	1.00	Coverage blocks only on a shown failure, a contradicted requirement or an untested real-use line; all reviewers share one rubric; the verdict follows the findings
+C35	REV-3	1.00	Role-specific reviewer inputs: coverage reads worker evidence, general traces added scope back to the request
+C36	REV-8	1.00	An audit command for code you write by hand in critical paths, built on review-commit
+C37	REV-6	1.00	Run a second-provider bug hunt on each controller branch before it merges, and correct the record of who reviewed
+C38	REV-5	1.00	Add an exerciser that runs the candidate the way a user would, alongside the reviewers who only read
+C39	REV-7	1.00	Replay past runs, about five samples per case, to measure prompt and provider changes before adopting them
+C40	REV-4	1.00	Name review.json as the record, drop the unread duplicate, and check the review worktree for planted configuration
+C41	LOOP-1	1.00	Replace ad hoc /loop reviewers with staged, workflow-owned signals: deterministic checks first, then event-triggered triage
+C42	OBS-7	1.00	Rotate the credentials leaked into the ai-logs archive, and stop the export from copying credential files
+C43	OBS-8	1.00	Reports to you start from an outcome block generated from the run record, not from the orchestrator's memory
+C44	OBS-1	1.00	Timeline and attention signals tell the truth: outcomes, reasons, flakes and a notification when you are needed
+C45	OBS-6	1.00	Keep a main ledger: which run reviewed each commit on main, what landed unreviewed, which bases held blocked code, and which defects escaped
+C46	OBS-2	1.00	A usage-limit stop pauses the run until the reset instead of burning its deadline
+C47	OBS-3	1.00	Remove derived checkouts once their evidence is sealed
+C48	OBS-4	1.00	Cap operator-side spend: smaller context for long sessions, event-driven supervision, budgets for ultracode and campaigns
+C49	OBS-5	1.00	Record cost and time per run, and export every challenge attempt with what happened to its P0/P1s
+C50	OBS-9	1.00	Correct REPORT.md's causes, counts, paths and R32 row, and check its counts against the run index
+C51	CONF-2	1.00	Optional approval stop at the end of automatic runs, showing what is still open, and a record that matches what will happen
+C52	CONF-1	1.00	Pin model and effort per role, the controller version, and your attended or unattended profile at prepare, and record them in the run
+C53	CONF-3	1.00	Ship short orchestrator rules with the tool, including presence and how to ask you, and keep md-manager's own fixes and design docs in its repo
+C54	CONF-6	1.00	A `workflow doctor` probe after each Claude Code update checks, through each role's own transport, what sessions actually receive
+C55	CONF-5	1.00	Enforce the unattended monitor's authority with tools, not prompt text, and narrow what it may type into workers
+C56	CONF-4	1.00	Keep workflow files out of third-party PR branches with an automated pr-branch, launch from per-run clones, and keep a feature queue

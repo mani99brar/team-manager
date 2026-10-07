@@ -1,0 +1,4 @@
+git diff-tree --no-commit-id --no-renames --name-only -r BASE TREE (as pipeline.py:454):
+"docs/caf\303\251.md"
+git diff --cached --no-renames --name-only -z BASE (as changed_files, pipeline.py:215):
+docs/café.md

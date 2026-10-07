@@ -1,0 +1,11 @@
+agent-workflows run sessions: 199; with an 'instructions' attachment: 0; CLI versions ['2.1.281', '2.1.282', '2.1.283']
+sessions containing each attachment type: environment=199, model=199, total_tokens_reminder=199, session_context=199, date=199, credential_org=199, prompt_snapshot=199, silent_turn_reminder=168, structured_output=78, auto_mode=41, remote_session_change=41, deferred_tools_record=39, edited_text_file=35, read_truncation_notice=33, queued_command=20, deferred_tools_delta=2
+md-manager-workflows run sessions: 44; with 'instructions': 0 (md-manager has no CLAUDE.md)
+run sessions that read CLAUDE.md with a tool (repo, role): kleros-v2/challenge 0/1; kleros-v2/review 0/2; kleros-v2/worker 0/1; project-B/challenge 3/75; project-B/review 0/76; project-B/worker 26/38; vea/challenge 0/2; vea/review 0/2; vea/worker 0/2
+orchestrator -home-agentops-dev-kleros-vea/128fa457 instructions=True versions=['2.1.280']
+orchestrator -home-agentops-dev-kleros-vea/afa2430f instructions=True versions=['2.1.283']
+orchestrator -home-agentops-dev-kleros-vea/d08f4b54 instructions=False versions=['2.1.280']
+orchestrator -home-agentops-dev-kleros-kleros-v2/1a949f6a instructions=True versions=['2.1.283']
+orchestrator -home-agentops-dev-kleros-kleros-v2/de0afaad instructions=False versions=['2.1.283']
+orchestrator -home-agentops-dev-project-B/0094b893 instructions=True versions=['2.1.281']
+orchestrator -home-agentops-dev-project-B/a169f327 instructions=True versions=['2.1.281', '2.1.283']

@@ -1,0 +1,68 @@
+{
+  "_what": "Per-sample severity of each subject that any sample rated P0/P1, on byte-identical inputs. A = archived sample, r1..r5 = replays in replay/<case>/out/<s>.stream.jsonl (challenge) or replay/<case>/<s>/run/review-*.completion.json (reviewers). '-' = subject not mentioned.",
+  "setup": {
+    "claude": "claude 2.1.287, --model claude-opus-5-5 --effort high (archived sessions: 2.1.282, opus-5-5, effort high); challenge flags from automatic.print_command; reviewer flags from interactive.launch_reviewer (print mode instead of --bg)",
+    "codex": "codex-cli 0.155.1, gpt-6-astra, model_reasoning_effort=high, --sandbox read-only --ephemeral --ignore-user-config"
+  },
+  "challenge": {
+    "df5 docking-feel-001 attempt 5 (== attempt 6 input)": {
+      "samples": ["A5", "A6", "r1", "r2", "r3", "r4", "r5"],
+      "paused": [1, 0, 0, 0, 0, 1, 0],
+      "centre-tile adjacency leaves a just-outside dead zone at the real south docks": ["P1", "-", "-", "P2", "P2", "P1", "P2"]
+    },
+    "sc3 sea-compact-001 attempt 3": {
+      "samples": ["A3", "r1", "r2", "r3", "r4"],
+      "paused": [1, 1, 0, 1, 1],
+      "hold ahead+E docking only works exactly on the dock axis": ["P1", "P1", "P2", "P1", "P1"]
+    },
+    "io3 intel-online-001 attempt 3": {
+      "samples": ["A3", "r1", "r2", "r3", "r4"],
+      "paused": [1, 1, 1, 1, 0],
+      "no server-side moored-at-dock check": ["P1", "P1", "P1", "P1", "-"],
+      "purchase invariant needs the checks inside stepReveals after every ledger write": ["P2", "P1", "P2", "P2", "P2"]
+    },
+    "fk4 fruit-kits-core-001 attempt 4": {
+      "samples": ["A4", "r1", "r2", "r3", "r4"],
+      "paused": [1, 0, 1, 1, 0],
+      "golden-trace fixtures cannot be loaded/stored under the checks": ["P1", "P2", "P2", "P2", "P2"],
+      "'Smoke damage per hit is lower' is empty": ["P2", "-", "P2", "P1", "P2"],
+      "bolt rules ignore thrown/knockdown defenders": ["-", "-", "P1", "-", "P2"]
+    },
+    "vea2 veashi-vea-addresses-002 attempt 1 (Claude)": {
+      "samples": ["A1", "r1", "r2", "r3", "r4"],
+      "paused": [0, 0, 0, 0, 0],
+      "testnet-only scope questioned": ["-", "-", "-", "-", "-"],
+      "provenance fields questioned as unrequested": ["-", "-", "-", "-", "-"],
+      "hardcoded network->chainId map vs .chainId files": ["P2", "P2", "alt only", "-", "P2"]
+    },
+    "vea2 Codex (gap-1-4 x2 + gap-2-4 c1..c3)": {
+      "paused": [0, 0, 0, 0, 0],
+      "testnet-only scope questioned": 0,
+      "provenance fields questioned": 0,
+      "hardcoded network->chainId map raised": 0,
+      "recommends explicit route table": 5
+    }
+  },
+  "review": {
+    "mofg match-online-fixes-001 general": {
+      "samples": ["A", "r1", "r2", "r3", "r4"],
+      "blocked": [1, 1, 1, 1, 1],
+      "theft-choice window not frozen at match end": ["P1", "P2", "P1", "P1", "-"],
+      "branch -> test table missing": ["P2", "P1", "-", "P1", "P1"]
+    },
+    "icc intel-core-001 coverage": {
+      "samples": ["A", "r1", "r2", "r3", "r4"],
+      "blocked": [1, 0, 1, 0, 1],
+      "deferred sightings: per-player pending bound untested (implementation keeps one per type)": ["P1", "P2", "P2", "P2", "P2"],
+      "carrier sightings only on three triggers untested; a test asserts reason 'start'": ["-", "P2", "P1", "P2", "P1"]
+    },
+    "VEA-002 general on Codex": {
+      "gap-1-4 (user config, node_repl MCP)": "approved, 1 P2 (node -e evidence missing)",
+      "gap-2-4 --ignore-user-config, archived prompt (r1, r2)": "blocked: refused to read files ('command execution is expressly prohibited')",
+      "gap-2-4 --ignore-user-config, prompt + read-only shell note (sh1..sh3)": "approved x3, each 1 P2 (node -e evidence missing)"
+    }
+  },
+  "pair_disagreement_on_pause_or_block": {
+    "df5": "10 of 21", "sc3": "4 of 10", "io3": "4 of 10", "fk4": "6 of 10", "vea2": "0 of 10", "icc": "6 of 10", "mofg": "0 of 10 (but 4 of 10 pairs block on disjoint P1 subjects)"
+  }
+}

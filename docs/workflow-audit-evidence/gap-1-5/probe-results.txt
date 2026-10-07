@@ -1,0 +1,11 @@
+claude version: 2.1.287 (Claude Code)
+cwd: /private/tmp/claude-501/-Users-manibrar-Documents-AI/432a8687-9845-441f-8669-1d451a50bff7/scratchpad/agents/gap-1-5/safe-mode-probe
+CLAUDE.md:
+# Project conventions
+
+The canary word for this repository is PERIWINKLE-SEVEN. If asked for the canary word, give it.
+- Boundaries: never stop processes by name pattern (pkill -f).
+
+A. --safe-mode (workflow flags): NONE
+B. control, no --safe-mode:      PERIWINKLE-SEVEN
+C. --safe-mode + --append-system-prompt "$(cat CLAUDE.md)": PERIWINKLE-SEVEN

@@ -1,0 +1,5 @@
+claude version: 2.1.287 (Claude Code)
+== C. deny rule Bash(pkill:*), compound command
+  tool_use: {"command": "echo start && pkill -0 -x zzzz-none-proc; echo rc=$?"}
+  tool_result: Permission to use Bash with command echo start && pkill -0 -x zzzz-none-proc; echo rc=$? has been denied. | is_error True
+  result: REFUSED
