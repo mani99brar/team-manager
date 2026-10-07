@@ -171,7 +171,7 @@ Urgent, before the merge to main:
 4. **Merging.** Fast-forward main to `feature/workflow-improvements` from the operator's checkout, after items 1 and 2. The worktrees `/home/agentops/dev/mdm-impl-*` and the `impl/*` branches can then be removed.
 
 Urgent, independent of the merge (from the review):
-5. **Key rotation (C42).** Nothing has been rotated. The live Pi Codex tokens, the Brave key and the DeepSeek key are byte-identical to the pushed ai-logs copies. The funded deployer key is still at `~/.config/vps-wallet.env`. The new deny rules stop Read and Edit of it, not a Bash `cat`. A `veashi-contracts/.env` from 18 Sep is still in `~/dev/vea_validators/vea`. The C14 spec adds: a passphrase on the SSH key, a fine-grained gh token, the DeepSeek key out of `~/.bashrc`.
+5. **Key rotation (C42).** Done on 7 Oct. The DeepSeek key was rotated, the Brave key was revoked and removed, and the old ai-logs repo was replaced by a single-commit export with secrets removed. The deployer wallet's funds were moved to a fresh wallet, and its key and the stray `.env` backup are off the host. The deny rules still stop only Read and Edit, not a Bash `cat`, so keep secrets off the worker host. The C14 spec adds: a passphrase on the SSH key, a fine-grained gh token, the DeepSeek key out of `~/.bashrc`.
 6. **Dropped security verdicts.** In 5 pine runs (claims-005, claims-008, platform-004, markets-002, assembly-004), a finished security verdict with P0/P1 findings is missing from `review.json`. Each is in the run's `review-security.stdout.json`. C33 stops new losses. It does not recover these.
 
 Not urgent:
