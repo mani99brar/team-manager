@@ -4,8 +4,11 @@ presence flag that says whether they are working or away (RUNBOOK "Attention not
 `python -m workflow attention-notify` is a oneshot, run every minute by a systemd user timer. It reads `attention.jsonl`
 (beside the Projects registry, as attention.feed_path finds it) from the byte offset saved in `attention-notify.state.json`,
 groups the complete new lines by run in feed order, folds each run's records into one message (title `md-manager`, body one
-line per record `[run_id] kind: text`, each text cut at TEXT_LIMIT characters and the body at BODY_LIMIT), runs the argv of
-`notify.json` with the title and the body as its last two arguments, appends one line `{at, sent_at, run_id, kind}` per
+line per record `[run_id] kind: text`, each text cut at TEXT_LIMIT characters and the body at BODY_LIMIT; or, with
+`"format": "html"` in `notify.json`, a Telegram HTML message: an emoji and a bold title line naming the run and its state,
+one line per record, what the operator has to do, the commands the records carry as tappable code and copy buttons, and
+`/verb_run@bot` commands for the panel; see "Message format"), runs the argv of `notify.json` with the title and the body
+as its last two arguments, appends one line `{at, sent_at, run_id, kind}` per
 pushed record to `attention-notified.jsonl`, then saves the offset. The command reads no secret: delivery, the channels and
 their tokens stay in the configured command.
 
@@ -31,6 +34,21 @@ with nothing sent. The feed is read with a plain open and never its lock, so a c
 on a notify call. A second instance at once (the timer and a run by hand) finds `attention-notify.lock` held, says so
 and exits 0.
 
+Message format (`"format": "html"`). The body is Telegram HTML (parse_mode HTML, which the command gets as
+`NOTIFY_PARSE_MODE=HTML` in its environment, with the inline keyboard as JSON in `NOTIFY_REPLY_MARKUP` when the message
+has buttons): every piece of record text is escaped (`<`, `>`, `&`) before a tag touches it, so a record quoting
+`--accept-challenge "<reason>"` is sent as written. The title line is the kind's emoji, then bold `<run id> · <state>`,
+the state being that of the first record that waits on the operator (IMMEDIATE), else the last record's. Each record is
+one line, the node in bold, the text with the home folder shortened to `~` and the run's folder to its id, cut at a word.
+The `python -m workflow …` commands the text carries are listed as `<code>` lines (tap copies them) and as `copy_text`
+inline buttons; the text before the first command is the line's prose. The footer says what to do (`👉 …`, per kind)
+and lists the panel's commands, `/<verb>_<run>@<bot>` with `"bot"` from `notify.json` (a group needs the bot named; the
+run id with every other character folded to `_`, kept under Telegram's 32 characters), which the operator's panel
+reads as `<verb> <run>` (agent-workflow `panel/CLAUDE.md`). A session record (agent-workflow's session hook, kinds
+`pane` and `finished`, text `[tab] event: …`) gets the event's emoji and state (permission prompt, turn ended) and the tab
+title in italics; `**bold**` and `` `code` `` in a reply are turned into tags. A digest is `📬 <b>N more records</b>` and one
+line per record with its run in bold, no commands. The plain format is the default, byte for byte what it was.
+
 `python -m workflow presence [working|away] [--for 9h]` reads or writes `presence.json`: `{"status", "since", "until"}`.
 `--for` sets `until`, after which the status reads `working` again; a missing or malformed file reads `working`.
 """
@@ -39,6 +57,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import html
 import json
 import os
 import re
@@ -69,6 +88,8 @@ IMMEDIATE = frozenset({"question", "pane", "challenge_paused", "review_blocked",
 HELD = KINDS - IMMEDIATE
 DURATION = re.compile(r"(\d+(?:\.\d+)?)([smhd])")
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+PLAIN, HTML = "plain", "html"
+BOT_NAME = re.compile(r"[A-Za-z0-9_]{1,32}")
 
 
 class NotifyError(Exception):
@@ -155,11 +176,13 @@ def presence_main(argv: list[str], *, env: dict | None = None, clock=time.time) 
 SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASS|CREDENTIAL", re.IGNORECASE)
 
 
-def load_config(folder: Path) -> tuple[list[str], dict[str, str]]:
+def load_config(folder: Path) -> tuple[list[str], dict[str, str], dict | None, dict]:
     """notify.json's argv and its optional `env`, the variables set for the command (the target chat, for example
     `TELEGRAM_CHAT_ID`, which the command reads instead of its own default). A name that looks like a secret (token, key,
     secret, password, credential) is refused: the tokens stay in the command's own files, never here (decisions [G5]).
-    Raises NotifyError for a missing or malformed file."""
+    `format` (optional, `plain` or `html`, see "Message format") and `bot` (optional, the panel bot's username without
+    `@`, named in the `/verb_run@bot` commands) make up the returned style. Raises NotifyError for a missing or malformed
+    file."""
     path = folder / CONFIG
     try:
         value = read_json(path)
@@ -183,7 +206,12 @@ def load_config(folder: Path) -> tuple[list[str], dict[str, str]]:
         if not isinstance(topic_argv, list) or not topic_argv or not all(isinstance(item, str) and item for item in topic_argv) \
                 or not isinstance(name, str) or not name or SECRET_NAME.search(name):
             raise NotifyError(f'{path}: "topic" must hold {{"argv": [<command that prints a thread id>, ...], "env": "<variable the send reads>"}}')
-    return argv, env, topic
+    style = {"format": value.get("format", PLAIN), "bot": value.get("bot")}
+    if style["format"] not in (PLAIN, HTML):
+        raise NotifyError(f'{path}: "format" must be "{PLAIN}" or "{HTML}"')
+    if style["bot"] is not None and not (isinstance(style["bot"], str) and BOT_NAME.fullmatch(style["bot"])):
+        raise NotifyError(f'{path}: "bot" must be the bot\'s username without @ (letters, digits and _)')
+    return argv, env, topic, style
 
 
 def create_topic(topic: dict, name: str, env: dict[str, str] | None = None) -> int:
@@ -280,9 +308,9 @@ def line_of(record: dict) -> str:
     return f"[{record['run_id']}] {record['kind']}: {cut(record['text'])}"
 
 
-def fold(lines: list[str], header: str | None = None) -> tuple[str, int]:
-    """The body (the header, then as many lines as fit BODY_LIMIT) and how many lines were left out; a body that leaves
-    lines out ends with `… and N more in the feed`."""
+def fold(lines: list[str], header: str | None = None, footer: str | None = None) -> tuple[str, int]:
+    """The body (the header, then as many lines as fit BODY_LIMIT, then the footer) and how many lines were left out; a
+    body that leaves lines out says `… and N more in the feed` after the lines."""
     kept = list(lines)
     while kept:
         parts = [header] if header else []
@@ -290,11 +318,13 @@ def fold(lines: list[str], header: str | None = None) -> tuple[str, int]:
         left = len(lines) - len(kept)
         if left:
             parts.append(f"… and {left} more in the feed")
+        if footer:
+            parts.append(footer)
         body = "\n".join(parts)
         if len(body) <= BODY_LIMIT:
             return body, left
         kept.pop()
-    return (header or "")[:BODY_LIMIT], len(lines)
+    return "\n".join(part for part in (header, footer) if part)[:BODY_LIMIT], len(lines)
 
 
 def send(argv: list[str], title: str, body: str, env: dict[str, str] | None = None) -> None:
@@ -313,18 +343,182 @@ def send(argv: list[str], title: str, body: str, env: dict[str, str] | None = No
         raise NotifyError(f"notify command {argv[0]} exited {done.returncode}" + (f": {detail[-1][:200]}" if detail else ""))
 
 
+# --- the message (format html) ---------------------------------------------------------------------------------------
+
+COMMAND_LIMIT = 32          # Telegram recognises /commands of up to 32 characters (letters, digits, _), then @bot.
+COPY_TEXT_LIMIT = 256       # Bot API: copy_text.text is 1-256 characters.
+MAX_BUTTONS = 3
+# Per kind: the emoji, the state named in the title line, what the operator has to do, the panel's verbs.
+KIND_STYLE = {
+    "question": ("❓", "question", "Answer the worker's question.", ("show", "status")),
+    "pane": ("🖥", "needs you in its pane", "Attach the pane and answer there.", ("show", "status")),
+    "challenge_paused": ("⏸", "challenge paused", "Edit the task, decisions or PRD and resume, or accept the challenge.",
+                         ("resume", "accept", "status")),
+    "review_blocked": ("🛑", "review blocked", "Read the findings; they are fixed in a follow-up run.", ("review", "status")),
+    "controller_blocked": ("⛔", "controller blocked", "Inspect the evidence, then repair the lane or launch a follow-up run.",
+                           ("review", "status")),
+    "awaiting_approval": ("✋", "awaiting approval", "Approve or reject the candidate.", ("approve", "status")),
+    "finished": ("✅", "finished", None, ("status",)),
+    "sidecar": ("🔎", "sidecar finding", "Read the sidecar's finding.", ("review", "status")),
+    "attack": ("🗡", "attack pass", "Read the attack report.", ("review", "status")),
+    "panel": ("📣", "panel", None, ("status",)),
+}
+# A session record (agent-workflow's session_notify_hook.py): kind `pane` or `finished`, the text `[tab title] event: …`.
+SESSION_STYLE = {
+    "permission_prompt": ("🔐", "permission prompt", "Allow or deny: the prompt with its buttons is in the bot's DM, or answer in the pane.",
+                          ("show", "status")),
+    "elicitation_dialog": ("❓", "needs an answer", "Answer in the pane.", ("show", "status")),
+    "turn ended": ("💬", "turn ended", None, ("show", "status")),
+}
+SESSION_OTHER = ("🔔", None, "Look at the session.", ("show", "status"))
+DIGEST_EMOJI = "📬"
+SESSION_TEXT = re.compile(r"(?:\[(?P<tab>[^\]]{1,80})\] )?(?P<event>[a-z_]+(?: [a-z]+)?)(?::\s*(?P<rest>.*))?$", re.S)
+# A `python -m workflow …` command inside a record's text: the interpreter (any path), the module, then its arguments,
+# a quoted one kept whole; a `;` ends it (the texts join two commands with `; or …`).
+COMMAND = re.compile(r'(?:\S*/)?python3?(?: -I)? -m workflow(?:\.\w+)*(?:[ \t]+(?:"[^"]*"|[^\s;]+))*')
+# What the texts say right before a command: dropped from the prose once the command is listed on its own.
+LEAD_IN = re.compile(r"[\s:;,]*(?:then run|run|or accept it|Reattach the pane with|Status|status)?[\s:;,]*$")
+MARKDOWN_BOLD = re.compile(r"\*\*([^*\n]+?)\*\*")
+MARKDOWN_CODE = re.compile(r"`([^`\n]+?)`")
+
+
+def esc(text: str) -> str:
+    """Telegram HTML: `<`, `>` and `&` escaped, quotes kept (they are text, and inside <code> they must copy as written)."""
+    return html.escape(str(text), quote=False)
+
+
+def cut_words(text: str, limit: int = TEXT_LIMIT) -> str:
+    """`cut`, at a word boundary when one lies in the second half of the room."""
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    head = text[:limit - 1]
+    space = head.rfind(" ")
+    return (head[:space] if space > limit // 2 else head).rstrip() + "…"
+
+
+def tidy(text: str, record: dict, home: str, *, prose: bool = True) -> str:
+    """The home folder as `~` (bash expands it back, so a command stays runnable); in prose the run's folder as its id."""
+    run_dir = record.get("run_dir")
+    if prose and isinstance(run_dir, str) and run_dir and isinstance(record.get("run_id"), str):
+        text = text.replace(run_dir, record["run_id"])
+    if home:
+        text = text.replace(home + "/", "~/")
+    return text
+
+
+def commands_of(text: str) -> list[tuple[str, str]]:
+    """The `python -m workflow …` commands in the text, each with a label: its subcommand, `accept` for a resume that
+    accepts the challenge, `attach` for workflow.interactive attach-one."""
+    found = []
+    for match in COMMAND.finditer(text):
+        command = match.group(0).rstrip(".")
+        words = command.split()
+        after = words[words.index("workflow") + 1:] if "workflow" in words else words[words.index("-m") + 2:]
+        label = next((word for word in after if not word.startswith("-")), "command")
+        if "--accept-challenge" in words:
+            label = "accept"
+        elif label == "attach-one":
+            label = "attach"
+        found.append((label, command))
+    return found
+
+
+def markdown_tags(escaped: str) -> str:
+    """`**bold**` and `` `code` `` of an assistant's reply as tags; the text is already escaped."""
+    return MARKDOWN_CODE.sub(r"<code>\1</code>", MARKDOWN_BOLD.sub(r"<b>\1</b>", escaped))
+
+
+def describe(record: dict, home: str = "") -> dict:
+    """What one record shows: emoji, state, todo, verbs, the tab title (session records), its prose (HTML) and its
+    commands (label, text) with the home folder as `~`."""
+    kind, text = record.get("kind"), " ".join(str(record.get("text", "")).split())
+    style = KIND_STYLE.get(kind, ("•", kind or "record", None, ("status",)))
+    tab, session = None, False
+    match = SESSION_TEXT.fullmatch(text)
+    if match and (match.group("event") in SESSION_STYLE or (kind == "pane" and " " not in match.group("event"))):
+        session, tab = True, match.group("tab")
+        event = match.group("event")
+        emoji, state, todo, verbs = SESSION_STYLE.get(event, SESSION_OTHER)
+        style = (emoji, state or event.replace("_", " "), todo, verbs)
+        text = match.group("rest") or ""
+    commands = [(label, tidy(command, record, home, prose=False)) for label, command in commands_of(text)]
+    first = COMMAND.search(text)
+    prose = LEAD_IN.sub("", text[:first.start()]) if first else text
+    prose = esc(cut_words(tidy(prose, record, home)))
+    if session:
+        prose = markdown_tags(prose).replace(" / ", "\n")
+    return {"emoji": style[0], "state": style[1], "todo": style[2], "verbs": style[3], "session": session, "tab": tab, "prose": prose,
+            "commands": commands}
+
+
+def command_token(verb: str, run_id: str, bot: str | None) -> str:
+    """`/<verb>_<run>@<bot>`: the run id in the command's own alphabet, cut from the front to Telegram's limit."""
+    base = re.sub(r"[^a-z0-9]+", "_", run_id.lower()).strip("_")
+    room = COMMAND_LIMIT - len(verb) - 1
+    if len(base) > room:
+        base = base[-room:].strip("_")
+    return f"/{verb}_{base}" + (f"@{bot}" if bot else "")
+
+
+def render_line(record: dict, home: str, *, with_run: bool, with_emoji: bool) -> str:
+    """One record: emoji, the run in bold (digests), the tab title in italics, the node in bold, the prose."""
+    shown = describe(record, home)
+    parts = [shown["emoji"]] if with_emoji else []
+    if with_run:
+        parts.append(f"<b>{esc(record['run_id'])}</b> {esc(shown['state'])}:")
+    if shown["tab"]:
+        parts.append(f"<i>{esc(shown['tab'])}</i>")
+    node = record.get("node")
+    if node and not shown["session"] and not with_run:
+        parts.append(f"<b>{esc(node)}</b>:")
+    parts.append(shown["prose"])
+    return " ".join(part for part in parts if part)
+
+
+def render_run(run_id: str, records: list[dict], style: dict, home: str = "") -> tuple[str, int, str | None]:
+    """One run's message in HTML: the title line, one line per record, the footer (todo, commands, panel commands); the
+    lines that did not fit are left out as `fold` does. Returns the body, how many lines were left out and the inline
+    keyboard (copy buttons for the commands) as JSON, or None."""
+    lead = next((item for item in records if item.get("kind") in IMMEDIATE), records[-1])
+    shown = describe(lead, home)
+    header = f"{shown['emoji']} <b>{esc(run_id)} · {esc(shown['state'])}</b>"
+    lines = [render_line(item, home, with_run=False, with_emoji=len(records) > 1) for item in records]
+    commands: list[tuple[str, str]] = []
+    for item in records:
+        for label, command in describe(item, home)["commands"]:
+            if command not in [text for _, text in commands]:
+                commands.append((label, command))
+    footer = []
+    if shown["todo"]:
+        footer.append(f"👉 {esc(shown['todo'])}")
+    footer.extend(f"{esc(label)}: <code>{esc(command)}</code>" for label, command in commands)
+    footer.append(" ".join(command_token(verb, run_id, style.get("bot")) for verb in shown["verbs"]))
+    body, left = fold(lines, header, "\n".join(footer))
+    buttons = [{"text": f"📋 {label}", "copy_text": {"text": command}} for label, command in commands if len(command) <= COPY_TEXT_LIMIT]
+    markup = json.dumps({"inline_keyboard": [buttons[:MAX_BUTTONS]]}, ensure_ascii=False) if buttons else None
+    return body, left, markup
+
+
+def render_digest(records: list[dict], home: str = "") -> tuple[str, int]:
+    header = f"{DIGEST_EMOJI} <b>{len(records)} more records</b>"
+    return fold([render_line(item, home, with_run=True, with_emoji=True) for item in records], header)
+
+
 class Tailer:
     """One run of the command over the files in `folder`."""
 
-    def __init__(self, folder: Path, clock=time.time, out=None):
+    def __init__(self, folder: Path, clock=time.time, out=None, home: str | None = None):
         self.folder, self.clock, self.out = folder, clock, sys.stderr if out is None else out
+        self.home = os.environ.get("HOME", "") if home is None else home  # Only a string to shorten paths with; no file of it is read.
+        self.style = {"format": PLAIN, "bot": None}
         self.sent_messages = self.sent_records = 0
         self.held_records = 0
         self.warnings: list[str] = []  # A topic that could not be created: the message went without it; the pass exits 2.
 
     def run(self) -> None:
         now = self.clock()
-        argv, env, topic = load_config(self.folder)
+        argv, env, topic, self.style = load_config(self.folder)
         state = load_state(self.folder)
         records, start, end = read_feed(self.folder / FEED, state["offset"], self.out)
         state["offset"] = start
@@ -334,7 +528,7 @@ class Tailer:
         messages = self.plan(records, state, presence, now)
         try:
             for message in messages:  # Stops at the first refusal: what follows waits, unlost, for the next pass.
-                send(argv, TITLE, message["body"], self.thread_env(topic, state, message, env))
+                send(argv, TITLE, message["body"], self.style_env(message, self.thread_env(topic, state, message, env)))
                 self.log(message["records"], now)
                 state["sent"].append({"at": iso(now), "digest": message["digest"]})
                 state["pushed"].extend(key_of(record) for record in message["records"])
@@ -367,6 +561,15 @@ class Tailer:
             state["topics"][run_id] = thread
         return {**env, topic["env"]: str(thread)}
 
+    def style_env(self, message: dict, env: dict[str, str]) -> dict[str, str]:
+        """With format html: the parse mode and, when the message has buttons, the inline keyboard, for the command."""
+        if self.style["format"] != HTML:
+            return env
+        env = {**env, "NOTIFY_PARSE_MODE": "HTML"}
+        if message.get("markup"):
+            env["NOTIFY_REPLY_MARKUP"] = message["markup"]
+        return env
+
     def plan(self, records: list[dict], state: dict, presence: str, now: float) -> list[dict]:
         """The messages of this run in order: one message per run of the new records, in the feed order of their first
         unsent record, then a digest of what is held (when one may go out). The digest goes last so that a held line the
@@ -391,16 +594,23 @@ class Tailer:
             if slots <= 0:
                 self.hold(state, pushed, "cap", now)
                 continue
-            body, left = fold([line_of(item) for item in pushed])
+            markup = None
+            if self.style["format"] == HTML:
+                body, left, markup = render_run(run_id, pushed, self.style, self.home)
+            else:
+                body, left = fold([line_of(item) for item in pushed])
             included = pushed[:len(pushed) - left]
             self.hold(state, pushed[len(pushed) - left:], "overflow", now)
-            messages.append({"run_id": run_id, "digest": False, "body": body, "records": included})
+            messages.append({"run_id": run_id, "digest": False, "body": body, "records": included, "markup": markup})
             slots -= 1
         releasable = [item for item in held_before if presence == "working" or item["kind"] in IMMEDIATE]
         if releasable and (slots > 0 or not any(item.get("digest") for item in window)):
-            body, left = fold([line_of(item) for item in releasable], f"{len(releasable)} more records")
+            if self.style["format"] == HTML:
+                body, left = render_digest(releasable, self.home)
+            else:
+                body, left = fold([line_of(item) for item in releasable], f"{len(releasable)} more records")
             included = releasable[:len(releasable) - left]
-            messages.append({"run_id": None, "digest": True, "body": body, "records": included})
+            messages.append({"run_id": None, "digest": True, "body": body, "records": included, "markup": None})
         return messages
 
     def hold(self, state: dict, records: list[dict], reason: str, now: float) -> None:
@@ -411,8 +621,8 @@ class Tailer:
             if key in known:
                 continue
             known.add(key)
-            state["held"].append({"at": record.get("at"), "run_id": record["run_id"], "kind": record["kind"], "node": record.get("node"),
-                                  "text": record["text"], "reason": reason, "held_at": iso(now)})
+            state["held"].append({"at": record.get("at"), "run_id": record["run_id"], "run_dir": record.get("run_dir"), "kind": record["kind"],
+                                  "node": record.get("node"), "text": record["text"], "reason": reason, "held_at": iso(now)})
             self.held_records += 1
 
     def log(self, records: list[dict], now: float) -> None:
