@@ -49,6 +49,11 @@ reads as `<verb> <run>` (agent-workflow `panel/CLAUDE.md`). A session record (ag
 title in italics; `**bold**` and `` `code` `` in a reply are turned into tags. A digest is `📬 <b>N more records</b>` and one
 line per record with its run in bold, no commands. The plain format is the default, byte for byte what it was.
 
+Topic names. A run's topic is named `<emoji> <run id> · <feature in plain words>` (the first clause of the feature.json
+`name` in the run's source checkout, else the feature slug as words); a session's `<emoji> <pane title>` (the record's
+`title`, the Herdr pane's terminal title). The emoji is the state's. The state keeps `{thread, name}` per run and, with
+`rename` in `topic`, renames the topic when the name changes (another state, another pane title).
+
 `python -m workflow presence [working|away] [--for 9h]` reads or writes `presence.json`: `{"status", "since", "until"}`.
 `--for` sets `until`, after which the status reads `working` again; a missing or malformed file reads `working`.
 """
@@ -203,9 +208,12 @@ def load_config(folder: Path) -> tuple[list[str], dict[str, str], dict | None, d
     if topic is not None:
         topic_argv = topic.get("argv") if isinstance(topic, dict) else None
         name = topic.get("env") if isinstance(topic, dict) else None
+        rename = topic.get("rename") if isinstance(topic, dict) else None
         if not isinstance(topic_argv, list) or not topic_argv or not all(isinstance(item, str) and item for item in topic_argv) \
-                or not isinstance(name, str) or not name or SECRET_NAME.search(name):
-            raise NotifyError(f'{path}: "topic" must hold {{"argv": [<command that prints a thread id>, ...], "env": "<variable the send reads>"}}')
+                or not isinstance(name, str) or not name or SECRET_NAME.search(name) \
+                or (rename is not None and (not isinstance(rename, list) or not rename or not all(isinstance(item, str) and item for item in rename))):
+            raise NotifyError(f'{path}: "topic" must hold {{"argv": [<command that prints a thread id>, ...], "env": "<variable the send reads>"}}'
+                              ' and, optionally, "rename": [<command run with the thread id and the new name>, ...]')
     style = {"format": value.get("format", PLAIN), "bot": value.get("bot")}
     if style["format"] not in (PLAIN, HTML):
         raise NotifyError(f'{path}: "format" must be "{PLAIN}" or "{HTML}"')
@@ -236,6 +244,23 @@ def create_topic(topic: dict, name: str, env: dict[str, str] | None = None) -> i
         raise NotifyError(f"topic command {argv[0]} printed no thread id" + (f": {detail[-1][:200]}" if detail else "")) from None
 
 
+def rename_topic(topic: dict, thread: int, name: str, env: dict[str, str] | None = None) -> None:
+    """Run the topic's `rename` command with the thread id and the new name as its last two arguments. Raises NotifyError
+    when it is not there, exits non-zero or does not end within TIMEOUT_SECONDS."""
+    from .worktrees import without_controller_git_config
+    argv = topic["rename"]
+    try:
+        done = subprocess.run([*argv, str(thread), name], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=TIMEOUT_SECONDS, env={**without_controller_git_config(os.environ), **(env or {})})
+    except subprocess.TimeoutExpired:
+        raise NotifyError(f"rename command {argv[0]} did not end within {TIMEOUT_SECONDS} s") from None
+    except OSError as error:
+        raise NotifyError(f"rename command {argv[0]} could not run: {error}") from error
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout).decode("utf-8", "replace").strip().splitlines()
+        raise NotifyError(f"rename command {argv[0]} exited {done.returncode}" + (f": {detail[-1][:200]}" if detail else ""))
+
+
 def key_of(record: dict) -> list:
     """What identifies a record across passes: its run, timestamp, kind and node (the feed's own fields, never a byte span)."""
     return [record.get("run_id"), record.get("at"), record.get("kind"), record.get("node")]
@@ -260,9 +285,12 @@ def load_state(folder: Path) -> dict:
     state["held"] = [item for item in value.get("held") or [] if isinstance(item, dict) and isinstance(item.get("run_id"), str)
                      and isinstance(item.get("kind"), str) and isinstance(item.get("text"), str)]
     state["pushed"] = [key for key in value.get("pushed") or [] if isinstance(key, list) and len(key) == 4 and isinstance(key[0], str)]
-    topics = value.get("topics")
-    state["topics"] = {run_id: thread for run_id, thread in (topics or {}).items() if isinstance(run_id, str) and isinstance(thread, int)} \
-        if isinstance(topics, dict) else {}
+    topics = value.get("topics") if isinstance(value.get("topics"), dict) else {}
+    for run_id, item in topics.items():  # `{thread, name}`; a bare thread id (the first version's shape) has no name yet.
+        if isinstance(run_id, str) and isinstance(item, int):
+            state["topics"][run_id] = {"thread": item, "name": None}
+        elif isinstance(run_id, str) and isinstance(item, dict) and isinstance(item.get("thread"), int):
+            state["topics"][run_id] = {"thread": item["thread"], "name": item.get("name") if isinstance(item.get("name"), str) else None}
     return state
 
 
@@ -450,9 +478,11 @@ def describe(record: dict, home: str = "") -> dict:
     kind, text = record.get("kind"), " ".join(str(record.get("text", "")).split())
     style = KIND_STYLE.get(kind, ("•", kind or "record", None, ("status",)))
     tab, session = None, False
+    if isinstance(record.get("title"), str) and record["title"].strip():
+        tab = " ".join(record["title"].split())
     match = SESSION_TEXT.fullmatch(text)
     if match and (match.group("event") in SESSION_STYLE or (kind == "pane" and " " not in match.group("event"))):
-        session, tab = True, match.group("tab")
+        session, tab = True, tab or match.group("tab")
         event = match.group("event")
         emoji, state, todo, verbs = SESSION_STYLE.get(event, SESSION_OTHER)
         style = (emoji, state or event.replace("_", " "), todo, verbs)
@@ -481,13 +511,14 @@ def command_token(verb: str, run_id: str, bot: str | None) -> str:
     return f"/{verb}_{base}" + (f"@{bot}" if bot else "")
 
 
-def render_line(record: dict, home: str, *, with_run: bool, with_emoji: bool) -> str:
-    """One record: emoji, the run in bold (digests), the tab title in italics, the node in bold, the prose."""
+def render_line(record: dict, home: str, *, with_run: bool, with_emoji: bool, with_tab: bool = True) -> str:
+    """One record: emoji, the run in bold (digests), the tab title in italics (unless the title line names it), the node in
+    bold, the prose."""
     shown = describe(record, home)
     parts = [shown["emoji"]] if with_emoji else []
     if with_run:
         parts.append(f"<b>{esc(record['run_id'])}</b> {esc(shown['state'])}:")
-    if shown["tab"]:
+    if shown["tab"] and with_tab:
         parts.append(f"<i>{esc(shown['tab'])}</i>")
     node = record.get("node")
     if node and not shown["session"] and not with_run:
@@ -502,8 +533,8 @@ def render_run(run_id: str, records: list[dict], style: dict, home: str = "") ->
     keyboard (copy buttons for the commands) as JSON, or None."""
     lead = next((item for item in records if item.get("kind") in IMMEDIATE), records[-1])
     shown = describe(lead, home)
-    header = f"{shown['emoji']} <b>{esc(run_id)} · {esc(shown['state'])}</b>"
-    lines = [render_line(item, home, with_run=False, with_emoji=len(records) > 1) for item in records]
+    header = f"{shown['emoji']} <b>{esc(shown['tab'] if shown['session'] and shown['tab'] else run_id)} · {esc(shown['state'])}</b>"
+    lines = [render_line(item, home, with_run=False, with_emoji=len(records) > 1, with_tab=not shown["session"]) for item in records]
     commands: list[tuple[str, str]] = []
     for item in records:
         for label, command in describe(item, home)["commands"]:
@@ -518,6 +549,37 @@ def render_run(run_id: str, records: list[dict], style: dict, home: str = "") ->
     buttons = [{"text": f"📋 {label}", "copy_text": {"text": command}} for label, command in commands if len(command) <= COPY_TEXT_LIMIT]
     markup = json.dumps({"inline_keyboard": [buttons[:MAX_BUTTONS]]}, ensure_ascii=False) if buttons else None
     return body, left, markup
+
+
+TOPIC_NAME_LIMIT = 120    # Telegram allows 128.
+
+
+def feature_words(record: dict) -> str:
+    """The run's feature in plain words: the first clause of its feature.json `name` in the run's source checkout
+    (`<run dir>.source/features/<feature>/feature.json`), else the feature folder's slug as words."""
+    run_dir = record.get("run_dir")
+    if not isinstance(run_dir, str) or not run_dir:
+        return ""
+    folder = Path(run_dir)
+    slug = folder.parent.name
+    name = ""
+    with contextlib.suppress(OSError, ValueError, AttributeError, TypeError):
+        name = read_json(folder.with_name(folder.name + ".source") / "features" / slug / "feature.json").get("name", "")
+    name = " ".join(str(name).split(":", 1)[0].split()) if isinstance(name, str) else ""
+    if not name or len(name) > 60:
+        name = slug.replace("-", " ").replace("_", " ").strip().capitalize()
+    return name
+
+
+def topic_name(run_id: str, records: list[dict], home: str = "") -> str:
+    """What the run's or session's topic is called: the state's emoji, then the session's pane title, or the run id and
+    its feature in plain words."""
+    lead = next((item for item in records if item.get("kind") in IMMEDIATE), records[-1])
+    shown = describe(lead, home)
+    title = lead.get("title") if isinstance(lead.get("title"), str) and lead.get("title").strip() else None
+    words = feature_words(lead)
+    name = f"{shown['emoji']} {title}" if title else f"{shown['emoji']} {run_id}" + (f" · {words}" if words else "")
+    return " ".join(name.split())[:TOPIC_NAME_LIMIT]
 
 
 def render_digest(records: list[dict], home: str = "") -> tuple[str, int]:
@@ -565,21 +627,31 @@ class Tailer:
 
     def thread_env(self, topic: dict | None, state: dict, message: dict, env: dict[str, str]) -> dict[str, str]:
         """The send's environment: `env`, plus the run's topic thread id under the topic's variable when topics are
-        configured and the message is one run's. The topic is created once per run, by name = run id, and its id kept
-        in `state["topics"]`; a creation that fails is a warning (the message goes without a topic, into the group's
-        general topic) and is tried again at the next run message. A digest (several runs) has no topic."""
+        configured and the message is one run's. The topic is created once per run, named by `topic_name` (the state's
+        emoji, then the session's pane title or the run id and its feature), and its id and name kept in
+        `state["topics"]`; when the name changes (another state, another pane title) the topic is renamed through the
+        topic's `rename` command. A creation that fails is a warning (the message goes without a topic, into the group's
+        general topic) and is tried again at the next run message; a rename that fails is a warning and is tried again
+        at the next message. A digest (several runs) has no topic."""
         run_id = message["run_id"]
         if topic is None or run_id is None:
             return env
-        thread = state["topics"].get(run_id)
-        if thread is None:
+        name = topic_name(run_id, message["records"], self.home)
+        known = state["topics"].get(run_id)
+        if known is None:
             try:
-                thread = create_topic(topic, run_id, env)
+                thread = create_topic(topic, name, env)
             except NotifyError as error:
                 self.warnings.append(f"topic for {run_id} not created, sent without it: {error}")
                 return env
-            state["topics"][run_id] = thread
-        return {**env, topic["env"]: str(thread)}
+            state["topics"][run_id] = {"thread": thread, "name": name}
+        elif known.get("name") != name and topic.get("rename"):  # The state changed (its emoji) or the pane's title did.
+            try:
+                rename_topic(topic, known["thread"], name, env)
+                known["name"] = name
+            except NotifyError as error:
+                self.warnings.append(f"topic for {run_id} not renamed to {name!r}: {error}")
+        return {**env, topic["env"]: str(state["topics"][run_id]["thread"])}
 
     def style_env(self, message: dict, env: dict[str, str]) -> dict[str, str]:
         """With format html: the parse mode and, when the message has buttons, the inline keyboard, for the command."""
@@ -642,7 +714,7 @@ class Tailer:
                 continue
             known.add(key)
             state["held"].append({"at": record.get("at"), "run_id": record["run_id"], "run_dir": record.get("run_dir"), "kind": record["kind"],
-                                  "node": record.get("node"), "text": record["text"], "reason": reason, "held_at": iso(now)})
+                                  "node": record.get("node"), "text": record["text"], "title": record.get("title"), "reason": reason, "held_at": iso(now)})
             self.held_records += 1
 
     def log(self, records: list[dict], now: float) -> None:

@@ -28,6 +28,15 @@ NOON = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc).timestamp()
 # POISON; sleeps while a `slow` file does (never past the test's patched timeout by much).
 # The topic command: records the name, prints a fresh thread id (100, 101, ...); exits 1 while a `topicfail` file sits
 # beside its log.
+RENAME_STUB = """\
+import os, sys
+log = sys.argv[1]
+if os.path.exists(log + ".renamefail"):
+    print("stub refused the rename", file=sys.stderr)
+    sys.exit(1)
+with open(log, "a") as handle:  # The thread and the new name.
+    handle.write(sys.argv[2] + "|" + sys.argv[3] + "\\n")
+"""
 TOPIC_STUB = """\
 import os, sys
 log = sys.argv[1]
@@ -72,9 +81,9 @@ class NotifyCase(unittest.TestCase):
         save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)]})
         self.now = NOON
 
-    def append(self, run_id="demo-001", kind="question", text="Worker ui asked question 1 of 3: A or B?", node="ui", at=None, raw=None):
+    def append(self, run_id="demo-001", kind="question", text="Worker ui asked question 1 of 3: A or B?", node="ui", at=None, raw=None, run_dir=None):
         at = self.now if at is None else at
-        line = raw if raw is not None else json.dumps({"at": attention_notify.iso(at), "run_id": run_id, "run_dir": f"/runs/{run_id}",
+        line = raw if raw is not None else json.dumps({"at": attention_notify.iso(at), "run_id": run_id, "run_dir": run_dir or f"/runs/{run_id}",
                                                        "kind": kind, "node": node, "text": text}) + "\n"
         with self.feed.open("a") as handle:
             handle.write(line)
@@ -468,8 +477,8 @@ class NotifyCase(unittest.TestCase):
         self.now = NOON + 60
         self.assertEqual(self.run_once()[0], 0)
         self.assertEqual(self.sent()[-1][1].splitlines(), [
-            "🔐 <b>md-manager 9b9ba4d9 · permission prompt</b>",
-            "🔐 <i>Current ideas</i> Claude needs your permission to use Bash",
+            "🔐 <b>Current ideas · permission prompt</b>",
+            "🔐 Claude needs your permission to use Bash",
             "💬 1. <b>Get the chat ID</b> from <code>getUpdates</code> &amp; co.",
             "2. Add the group.",
             "If it &lt;fails&gt;, retry.",
@@ -758,13 +767,14 @@ class NotifyCase(unittest.TestCase):
         self.append("other-002", "pane", "Worker ui needs attention in its pane", at=NOON + 1)
         self.now = NOON + 60
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001|-100777", "other-002|-100777"])  # Created in the target chat.
+        # Created in the target chat, named by the state's emoji, the run id and the feature folder (`/runs/<run>` here).
+        self.assertEqual(topic_log.read_text().splitlines(), ["❓ demo-001 · Runs|-100777", "🖥 other-002 · Runs|-100777"])
         self.assertEqual(chats.read_text().splitlines(), ["-100777|100", "-100777|101"])
-        self.assertEqual(self.state()["topics"], {"demo-001": 100, "other-002": 101})
+        self.assertEqual(self.state()["topics"], {"demo-001": {"thread": 100, "name": "❓ demo-001 · Runs"}, "other-002": {"thread": 101, "name": "🖥 other-002 · Runs"}})
         self.append("demo-001", "review_blocked", "Review blocked by general (blocked, 1 open P1)", node="review", at=NOON + 70)
         self.now = NOON + 120
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(topic_log.read_text().splitlines(), ["demo-001|-100777", "other-002|-100777"])  # Created once per run.
+        self.assertEqual(topic_log.read_text().splitlines(), ["❓ demo-001 · Runs|-100777", "🖥 other-002 · Runs|-100777"])  # Created once per run.
         self.assertEqual(chats.read_text().splitlines()[-1], "-100777|100")
         # A digest carries lines of several runs: no topic.
         self.assertEqual(self.presence("away")[0], 0)
@@ -793,7 +803,7 @@ class NotifyCase(unittest.TestCase):
         self.append("third-003", "pane", "Worker ui needs attention in its pane", at=NOON + 310)
         self.now = NOON + 360
         self.assertEqual(self.run_once()[0], 0)
-        self.assertEqual(self.state()["topics"]["third-003"], 102)
+        self.assertEqual(self.state()["topics"]["third-003"]["thread"], 102)
         self.assertEqual(chats.read_text().splitlines()[-1], "-100777|102")
         self.assertEqual([line["run_id"] for line in self.notified()].count("third-003"), 2)
         # A malformed `topic` is refused like a malformed `env`.
@@ -803,6 +813,74 @@ class NotifyCase(unittest.TestCase):
         code, out, err = self.run_once()
         self.assertEqual((code, out), (2, ""))
         self.assertIn('"topic" must hold', err)
+
+    def test_a_topic_is_named_after_the_pane_title_or_the_feature_and_renamed_when_the_state_or_title_changes(self):
+        topic_stub, topic_log = self.root / "topic-stub.py", self.root / "topics.txt"
+        rename_stub, rename_log = self.root / "rename-stub.py", self.root / "renames.txt"
+        topic_stub.write_text(TOPIC_STUB)
+        rename_stub.write_text(RENAME_STUB)
+        self.html_config(env={"TELEGRAM_CHAT_ID": "-100777"},
+                         topic={"argv": [sys.executable, str(topic_stub), str(topic_log)], "env": "TELEGRAM_THREAD_ID",
+                                "rename": [sys.executable, str(rename_stub), str(rename_log)]})
+        # A run under `<feature>/<run>` with a source checkout: the feature's name, first clause, in the topic's name.
+        run_dir = self.root / "state" / "attention-notify" / "attention-notify-003"
+        (run_dir.with_name(run_dir.name + ".source") / "features" / "attention-notify").mkdir(parents=True)
+        save_json(run_dir.with_name(run_dir.name + ".source") / "features" / "attention-notify" / "feature.json",
+                  {"name": "Attention notifications: a oneshot tailer of the feed", "version": "2.4.0"})
+        with self.feed.open("a") as handle:
+            handle.write(json.dumps({"at": attention_notify.iso(NOON), "run_id": "attention-notify-003", "run_dir": str(run_dir), "kind": "challenge_paused",
+                                     "node": "challenge", "text": "Design challenge attempt 1 paused the run."}) + "\n")
+            # A session record carries the pane's title: the topic is named after it, and so is the message's title line.
+            handle.write(json.dumps({"at": attention_notify.iso(NOON + 1), "run_id": "md-manager ab7716e7", "run_dir": "/home/x/dev/md-manager", "kind": "finished",
+                                     "node": "ab7716e7", "text": "turn ended: Both notifiers are on.", "title": "Current ideas"}) + "\n")
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(topic_log.read_text().splitlines(), ["⏸ attention-notify-003 · Attention notifications|-100777", "💬 Current ideas|-100777"])
+        self.assertEqual(self.sent()[-1][1].splitlines()[:2], ["💬 <b>Current ideas · turn ended</b>", "Both notifiers are on."])
+        self.assertEqual(self.state()["topics"], {"attention-notify-003": {"thread": 100, "name": "⏸ attention-notify-003 · Attention notifications"},
+                                                  "md-manager ab7716e7": {"thread": 101, "name": "💬 Current ideas"}})
+        self.assertFalse(rename_log.exists())
+        # The run is blocked and the pane's title changed: both topics are renamed, the new names kept.
+        self.append("attention-notify-003", "review_blocked", "Review blocked by general (blocked, 1 open P1).", node="review", at=NOON + 70, run_dir=str(run_dir))
+        with self.feed.open("a") as handle:
+            handle.write(json.dumps({"at": attention_notify.iso(NOON + 71), "run_id": "md-manager ab7716e7", "run_dir": "/home/x/dev/md-manager", "kind": "pane",
+                                     "node": "ab7716e7", "text": "permission_prompt: Claude needs your permission to use Bash", "title": "Notifier rollout"}) + "\n")
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(rename_log.read_text().splitlines(), ["100|🛑 attention-notify-003 · Attention notifications", "101|🔐 Notifier rollout"])
+        self.assertEqual(self.state()["topics"]["md-manager ab7716e7"], {"thread": 101, "name": "🔐 Notifier rollout"})
+        self.assertEqual(self.log.with_name(self.log.name + ".chat").read_text().splitlines()[-2:], ["-100777|100", "-100777|101"])
+        # A rename that fails is a warning and exit 2: the message still goes, in its topic, and the rename is tried again.
+        rename_log.with_name(rename_log.name + ".renamefail").write_text("")
+        self.append("attention-notify-003", "finished", "feature/attention-notify fast-forwarded to abc: the run is finished.", node=None, at=NOON + 130, run_dir=str(run_dir))
+        self.now = NOON + 180
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertIn("topic for attention-notify-003 not renamed to '✅ attention-notify-003 · Attention notifications': rename command", err)
+        self.assertEqual(self.log.with_name(self.log.name + ".chat").read_text().splitlines()[-1], "-100777|100")
+        self.assertEqual(self.state()["topics"]["attention-notify-003"]["name"], "🛑 attention-notify-003 · Attention notifications")
+        rename_log.with_name(rename_log.name + ".renamefail").unlink()
+        self.append("attention-notify-003", "sidecar", "Review sidecar pass 1: P2 S-1 on lane main did not reach the lane.", node="main", at=NOON + 190, run_dir=str(run_dir))
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(rename_log.read_text().splitlines()[-1], "100|🔎 attention-notify-003 · Attention notifications")
+        # A state file from the first version holds bare thread ids: read as topics without a name, renamed at the next message.
+        state = self.state()
+        state["topics"] = {"attention-notify-003": 100}
+        save_json(self.config / "attention-notify.state.json", state)
+        self.append("attention-notify-003", "question", "Worker main asked question 1 of 3: A or B?", node="main", at=NOON + 250, run_dir=str(run_dir))
+        self.now = NOON + 300
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(rename_log.read_text().splitlines()[-1], "100|❓ attention-notify-003 · Attention notifications")
+        self.assertEqual(self.state()["topics"]["attention-notify-003"], {"thread": 100, "name": "❓ attention-notify-003 · Attention notifications"})
+        # Without a source checkout the feature slug is the name, in words; a malformed `rename` is refused.
+        self.assertEqual(attention_notify.feature_words({"run_dir": "/state/review-sidecar/review-sidecar-002"}), "Review sidecar")
+        self.assertEqual(attention_notify.feature_words({}), "")
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)],
+                                                "topic": {"argv": [sys.executable, str(topic_stub), str(topic_log)], "env": "X", "rename": "no"}})
+        self.append(at=NOON + 310)
+        self.now = NOON + 360
+        self.assertIn('"topic" must hold', self.run_once()[2])
 
     def test_a_second_instance_at_once_sends_nothing_and_exits_0(self):
         self.append()
