@@ -1,0 +1,12 @@
+# Runs attention-notify.service at the start of every minute. Persistent=false: minutes missed while the user instance
+# was down are not run at once when it comes back; the next pass reads every record since the saved offset anyway.
+[Unit]
+Description=md-manager attention notifications every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=false
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+# Example user unit for `python -m workflow attention-notify` (RUNBOOK "Attention notifications"). Copy both files to
+# ~/.config/systemd/user/, adjust the two paths, then `systemctl --user daemon-reload` and enable the timer. The user
+# instance does not inherit your shell's environment: a registry elsewhere than ~/.config/md-manager/ needs the
+# Environment line below, with the same value every launch uses, or the timer tails a feed no controller writes.
+[Unit]
+Description=md-manager attention notifications: one pass over attention.jsonl
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/md-manager
+ExecStart=%h/dev/md-manager/.venv/bin/python -m workflow attention-notify
+# Environment=MD_MANAGER_PROJECTS_CONFIG=%h/.config/md-manager/projects.json

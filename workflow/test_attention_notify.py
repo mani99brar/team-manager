@@ -1,0 +1,564 @@
+"""attention_notify.py: the tailer folds the feed's new records per run, sends them through the configured command, logs
+each pushed line and moves its offset only after every message went; the cap, the digest and the presence flag hold what
+must wait; a failure exits 2 with the offset unchanged and the records that went remembered by key, so a retry repeats
+nothing and loses nothing when the feed changed under it; nothing here sends a real notification or touches the
+operator's ~/.config/md-manager/."""
+import contextlib
+import fcntl
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from . import attention_notify
+from .attention import KINDS
+from .attention_notify import (BODY_LIMIT, CAP, HELD, IMMEDIATE, TEXT_LIMIT, attention_notify_main, config_dir, fold, parse_duration,
+                               presence_main, presence_status)
+from .sessions import read_json, save_json
+
+TOOL = Path(__file__).resolve().parents[1]
+NOON = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc).timestamp()
+# Records its arguments as one JSON line per call; exits 1 while a `fail` file sits beside the log or the body says
+# POISON; sleeps while a `slow` file does (never past the test's patched timeout by much).
+STUB = """\
+import json, os, sys, time
+log = sys.argv[1]
+if os.path.exists(log + ".slow"):
+    time.sleep(2)
+with open(log, "a") as handle:
+    handle.write(json.dumps(sys.argv[2:]) + "\\n")
+if os.path.exists(log + ".fail") or "POISON" in sys.argv[-1]:
+    print("stub refused the message", file=sys.stderr)
+    sys.exit(1)
+"""
+
+
+class NotifyCase(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.config = self.root / "config"
+        self.config.mkdir()
+        # Only the registry's location: every file of the feature follows it, so nothing under the real home is read.
+        self.env = {"MD_MANAGER_PROJECTS_CONFIG": str(self.config / "projects.json")}
+        self.feed = self.config / "attention.jsonl"
+        self.stub = self.root / "notify-stub.py"
+        self.stub.write_text(STUB)
+        self.log = self.root / "sent.jsonl"
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)]})
+        self.now = NOON
+
+    def append(self, run_id="demo-001", kind="question", text="Worker ui asked question 1 of 3: A or B?", node="ui", at=None, raw=None):
+        at = self.now if at is None else at
+        line = raw if raw is not None else json.dumps({"at": attention_notify.iso(at), "run_id": run_id, "run_dir": f"/runs/{run_id}",
+                                                       "kind": kind, "node": node, "text": text}) + "\n"
+        with self.feed.open("a") as handle:
+            handle.write(line)
+
+    def run_once(self, *argv) -> tuple[int, str, str]:
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                attention_notify_main(list(argv), env=self.env, clock=lambda: self.now)
+            except SystemExit as exit:
+                code = exit.code or 0
+        return code, out.getvalue(), err.getvalue()
+
+    def presence(self, *argv) -> tuple[int, str, str]:
+        out, err, code = io.StringIO(), io.StringIO(), 0
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                presence_main(list(argv), env=self.env, clock=lambda: self.now)
+            except SystemExit as exit:
+                code = exit.code or 0
+        return code, out.getvalue(), err.getvalue()
+
+    def sent(self) -> list[list[str]]:
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def bodies(self) -> list[str]:
+        return [call[-1] for call in self.sent()]
+
+    def notified(self) -> list[dict]:
+        path = self.config / "attention-notified.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def state(self) -> dict:
+        return read_json(self.config / "attention-notify.state.json")
+
+    def test_new_records_fold_per_run_into_one_message_each_and_the_offset_moves_once_sent(self):
+        self.append("demo-001", "question", "Worker ui asked question 1 of 3: A or B?")
+        self.append("other-002", "finished", "feature/other fast-forwarded to abc", node=None, at=NOON + 1)
+        self.append("demo-001", "pane", "Worker ui needs attention in its pane", at=NOON + 2)
+        self.now = NOON + 60
+        code, out, err = self.run_once()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, "Attention notify: sent 2 message(s) for 3 record(s), held 0\n")
+        # One message per run in feed order; the title and the body are the configured argv's last two arguments.
+        self.assertEqual(self.sent(), [["md-manager", "[demo-001] question: Worker ui asked question 1 of 3: A or B?\n"
+                                                      "[demo-001] pane: Worker ui needs attention in its pane"],
+                                       ["md-manager", "[other-002] finished: feature/other fast-forwarded to abc"]])
+        self.assertEqual(self.notified(), [
+            {"at": "2026-10-07T12:00:00Z", "sent_at": "2026-10-07T12:01:00Z", "run_id": "demo-001", "kind": "question"},
+            {"at": "2026-10-07T12:00:02Z", "sent_at": "2026-10-07T12:01:00Z", "run_id": "demo-001", "kind": "pane"},
+            {"at": "2026-10-07T12:00:01Z", "sent_at": "2026-10-07T12:01:00Z", "run_id": "other-002", "kind": "finished"}])
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        self.assertEqual(self.state()["pushed"], [])
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])
+        # The next minute: nothing new, nothing sent, nothing printed, the state untouched.
+        before = (self.config / "attention-notify.state.json").stat().st_mtime_ns
+        self.now = NOON + 120
+        self.assertEqual(self.run_once(), (0, "", ""))
+        self.assertEqual(len(self.sent()), 2)
+        self.assertEqual((self.config / "attention-notify.state.json").stat().st_mtime_ns, before)
+        # All ten kinds are pushed, one line each.
+        for index, kind in enumerate(sorted(KINDS)):
+            self.append("kinds-003", kind, f"text of {kind}", at=NOON + 200 + index)
+        self.now = NOON + 300
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1].splitlines(), [f"[kinds-003] {kind}: text of {kind}" for kind in sorted(KINDS)])
+        self.assertEqual(len(self.notified()), 13)
+
+    def test_a_failing_or_slow_notify_command_keeps_the_offset_exits_2_and_the_records_go_again(self):
+        self.append()
+        self.append("demo-001", "pane", "Worker ui needs attention in its pane", at=NOON + 1)
+        (self.log.parent / "sent.jsonl.fail").touch()
+        self.now = NOON + 60
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertEqual(err.count("\n"), 1)
+        self.assertRegex(err, r"^Attention notify failed: notify command .* exited 1: stub refused the message\n$")
+        self.assertEqual(len(self.sent()), 1)  # The attempt reached the command once.
+        self.assertEqual((self.state()["offset"], self.state()["pushed"], self.state()["sent"]), (0, [], []))  # Not a send: no cap count.
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])  # No byte span, no failure count: nothing reads one.
+        self.assertEqual(self.notified(), [])
+        # A command that does not end within the timeout is the same failure.
+        (self.log.parent / "sent.jsonl.fail").unlink()
+        (self.log.parent / "sent.jsonl.slow").touch()
+        self.now = NOON + 120
+        with patch("workflow.attention_notify.TIMEOUT_SECONDS", 0.3):
+            code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertIn("did not end within 0.3 s", err)
+        self.assertEqual((self.state()["offset"], self.state()["pushed"]), (0, []))
+        # A command that is not there, too.
+        (self.log.parent / "sent.jsonl.slow").unlink()
+        save_json(self.config / "notify.json", {"argv": [str(self.root / "missing-notify")]})
+        self.now = NOON + 180
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertIn("could not run", err)
+        self.assertEqual(self.state()["offset"], 0)
+        # The next run sends the same records again, and only then the offset moves.
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)]})
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[demo-001] question: Worker ui asked question 1 of 3: A or B?\n"
+                                            "[demo-001] pane: Worker ui needs attention in its pane")
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        self.assertEqual(len(self.state()["sent"]), 1)
+        self.assertEqual([line["kind"] for line in self.notified()], ["question", "pane"])
+
+    def test_a_missing_or_malformed_notify_json_or_an_unreadable_feed_sends_nothing_and_exits_2(self):
+        self.append()
+        for content in (None, "{not json", '{"argv": []}', '{"argv": "notify.sh"}', '{"argv": ["notify.sh", 3]}', '["notify.sh"]'):
+            with self.subTest(content):
+                if content is None:
+                    (self.config / "notify.json").unlink()
+                else:
+                    (self.config / "notify.json").write_text(content)
+                code, out, err = self.run_once()
+                self.assertEqual(code, 2)
+                self.assertEqual(err.count("\n"), 1)
+                self.assertTrue(err.startswith("Attention notify failed: "), err)
+                self.assertIn("notify.json", err)
+        self.assertEqual(self.sent(), [])
+        self.assertFalse((self.config / "attention-notify.state.json").exists())
+        # A feed that cannot be read (here a folder in its place): the same, with the offset where it was.
+        save_json(self.config / "notify.json", {"argv": [sys.executable, str(self.stub), str(self.log)]})
+        self.assertEqual(self.run_once()[0], 0)
+        offset = self.state()["offset"]
+        self.feed.unlink()
+        self.feed.mkdir()
+        code, out, err = self.run_once()
+        self.assertEqual(code, 2)
+        self.assertIn("attention.jsonl cannot be read", err)
+        self.assertEqual(self.state()["offset"], offset)
+        self.assertEqual(len(self.sent()), 1)
+        # No feed at all (no controller recorded anything yet) is an empty feed, not a failure.
+        self.feed.rmdir()
+        self.assertEqual(self.run_once(), (0, "", ""))
+
+    def test_a_feed_shorter_than_the_offset_is_read_from_the_start(self):
+        self.append(text="first " * 20)
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        # The feed was replaced (rotated by hand): shorter than the offset, so it is read again from its first byte.
+        self.feed.write_text("")
+        self.append("fresh-002", "finished", "feature/fresh fast-forwarded to def", node=None)
+        self.assertLess(self.feed.stat().st_size, self.state()["offset"])
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[fresh-002] finished: feature/fresh fast-forwarded to def")
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+
+    def test_the_eleventh_message_in_an_hour_is_held_and_one_digest_per_window_follows(self):
+        for index in range(CAP):
+            self.append(f"run-{index:03d}", at=NOON + index)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(len(self.sent()), CAP)
+        # The eleventh message is held: nothing sent, the record waits in the state.
+        self.append("run-010", "finished", "feature/run-010 fast-forwarded to abc", node=None, at=NOON + 70)
+        self.now = NOON + 120
+        code, out, err = self.run_once()
+        self.assertEqual((code, err, out), (0, "", "Attention notify: sent 0 message(s) for 0 record(s), held 1\n"))
+        self.assertEqual(len(self.sent()), CAP)
+        self.assertEqual([(item["run_id"], item["reason"]) for item in self.state()["held"]], [("run-010", "cap")])
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)  # Held is not unsent: the offset moves.
+        # The next run sends one `N more records` message for the held lines instead; it counts as a send.
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "1 more records\n[run-010] finished: feature/run-010 fast-forwarded to abc")
+        self.assertEqual(self.state()["held"], [])
+        self.assertEqual(len(self.state()["sent"]), CAP + 1)
+        self.assertEqual(self.notified()[-1]["run_id"], "run-010")
+        # A twelfth record within the hour: held, and no second digest while the window already carries one.
+        self.append("run-011", "pane", "Worker ui needs attention in its pane", at=NOON + 190)
+        for minute in (4, 5, 6):
+            self.now = NOON + 60 * minute
+            self.assertEqual(self.run_once()[0], 0)
+            self.assertEqual(len(self.sent()), CAP + 1)
+        self.assertEqual([item["run_id"] for item in self.state()["held"]], ["run-011"])
+        # The window opens (the first sends are an hour old): the held lines go out as one digest.
+        self.now = NOON + 60 + 3601
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "1 more records\n[run-011] pane: Worker ui needs attention in its pane")
+        self.assertEqual(self.state()["held"], [])
+
+    def test_only_sent_messages_count_toward_the_cap(self):
+        for index in range(CAP - 1):
+            self.append(f"run-{index:03d}", at=NOON + index)
+        self.assertEqual(self.run_once()[0], 0)
+        self.append("run-fail", "question", "POISON: a body the channel refuses", at=NOON + 20)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual(len(self.state()["sent"]), CAP - 1)  # The refused attempt is not a send.
+        self.feed.write_text("")  # Drop the poison (the feed shrank: read from the start).
+        self.append("run-last", at=NOON + 80)
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[run-last] question: Worker ui asked question 1 of 3: A or B?")
+        self.assertEqual(self.state()["held"], [])
+
+    def test_away_pushes_what_waits_on_the_operator_and_holds_the_rest_until_working(self):
+        self.assertEqual(IMMEDIATE, frozenset({"question", "pane", "challenge_paused", "review_blocked", "controller_blocked", "awaiting_approval"}))
+        self.assertEqual(HELD, frozenset({"finished", "sidecar", "attack", "panel"}))
+        self.assertEqual(self.presence("away")[0], 0)
+        self.append("demo-001", "question", "Worker ui asked question 1 of 3: A or B?")
+        self.append("demo-001", "finished", "feature/demo fast-forwarded to abc", node=None, at=NOON + 1)
+        self.append("other-002", "sidecar", "Review sidecar pass 2: P1 S-2 did not reach lane ui", at=NOON + 2)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies(), ["[demo-001] question: Worker ui asked question 1 of 3: A or B?"])
+        self.assertEqual([(item["run_id"], item["kind"], item["reason"]) for item in self.state()["held"]],
+                         [("demo-001", "finished", "away"), ("other-002", "sidecar", "away")])
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        self.now = NOON + 120
+        self.assertEqual(self.run_once(), (0, "", ""))  # Still away: the held lines wait.
+        self.assertEqual(self.presence("working")[0], 0)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "2 more records\n[demo-001] finished: feature/demo fast-forwarded to abc\n"
+                                            "[other-002] sidecar: Review sidecar pass 2: P1 S-2 did not reach lane ui")
+        self.assertEqual(self.state()["held"], [])
+        self.assertEqual([line["kind"] for line in self.notified()], ["question", "finished", "sidecar"])
+        # `until` passing returns the status to working by itself and releases the held lines the same way.
+        self.assertEqual(self.presence("away", "--for", "9h")[0], 0)
+        self.append("demo-001", "panel", "Panel ended with 1 accepted finding", node=None, at=NOON + 200)
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(len(self.bodies()), 2)
+        self.now = NOON + 180 + 9 * 3600 + 1
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "1 more records\n[demo-001] panel: Panel ended with 1 accepted finding")
+
+    def test_the_presence_command_reads_and_sets_the_flag(self):
+        self.assertEqual(self.presence(), (0, "working\n", ""))  # No file: working.
+        self.assertEqual(presence_status(self.config, self.now), "working")
+        code, out, err = self.presence("away", "--for", "9h")
+        self.assertEqual((code, err, out), (0, "", "away since 2026-10-07T12:00:00Z until 2026-10-07T21:00:00Z\n"))
+        self.assertEqual(read_json(self.config / "presence.json"), {"status": "away", "since": "2026-10-07T12:00:00Z", "until": "2026-10-07T21:00:00Z"})
+        self.assertEqual(self.presence(), (0, "away since 2026-10-07T12:00:00Z until 2026-10-07T21:00:00Z\n", ""))
+        self.now = NOON + 9 * 3600
+        self.assertEqual(self.presence(), (0, "working (away until 2026-10-07T21:00:00Z passed)\n", ""))
+        self.assertEqual(presence_status(self.config, self.now), "working")
+        self.assertEqual(self.presence("working"), (0, "working since 2026-10-07T21:00:00Z\n", ""))
+        self.assertEqual(read_json(self.config / "presence.json"), {"status": "working", "since": "2026-10-07T21:00:00Z", "until": None})
+        self.assertEqual(self.presence("away"), (0, "away since 2026-10-07T21:00:00Z\n", ""))
+        self.assertEqual(presence_status(self.config, self.now + 10 ** 6), "away")  # No `until`: away until set by hand.
+        # A malformed file reads working; so does a duration that is not one, or --for with working, which are refused.
+        (self.config / "presence.json").write_text('{"status": "asleep"}')
+        self.assertEqual(self.presence(), (0, "working\n", ""))
+        (self.config / "presence.json").write_text("{not json")
+        self.assertEqual(presence_status(self.config, self.now), "working")
+        self.assertEqual(self.presence("away", "--for", "soon")[0], 2)
+        self.assertEqual(self.presence("working", "--for", "9h")[0], 2)
+        self.assertEqual([parse_duration(text) for text in ("9h", "30m", "1h30m", "2d", "45s")], [32400, 1800, 5400, 172800, 45])
+        self.assertEqual(self.presence("tired")[0], 2)  # argparse refuses any other word.
+
+    def test_a_long_text_is_cut_and_a_long_body_ends_with_how_many_more_are_in_the_feed(self):
+        self.append(text="x" * 400)
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[demo-001] question: " + "x" * (TEXT_LIMIT - 1) + "…")
+        self.assertEqual(len(self.bodies()[-1].split(": ", 1)[1]), TEXT_LIMIT)
+        self.append(text="y" * TEXT_LIMIT, at=NOON + 1)  # Exactly the limit: untouched.
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[demo-001] question: " + "y" * TEXT_LIMIT)
+        # Twenty long records of one run: the body stays under the limit and says how many lines it leaves out.
+        for index in range(20):
+            self.append("long-002", "sidecar", f"{index:02d} " + "z" * 290, at=NOON + 10 + index)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        body = self.bodies()[-1]
+        self.assertLessEqual(len(body), BODY_LIMIT)
+        lines = body.splitlines()
+        self.assertEqual(lines[-1], f"… and {20 - (len(lines) - 1)} more in the feed")
+        self.assertTrue(lines[0].startswith("[long-002] sidecar: 00 "))
+        self.assertEqual(len(self.notified()), 2 + len(lines) - 1)  # Only the pushed lines are logged.
+        # The lines left out are held, and go out in the next digest.
+        left = 20 - (len(lines) - 1)
+        self.assertEqual([item["reason"] for item in self.state()["held"]], ["overflow"] * left)
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1].splitlines()[0], f"{left} more records")
+        self.assertEqual(self.state()["held"], [])
+        self.assertEqual(fold([]), ("", 0))
+
+    def test_the_tailer_never_takes_the_feeds_lock(self):
+        # A controller appends under the feed's exclusive lock and drops its record after 5 s without it: the tailer reads
+        # with a plain open, so a slow notify call never costs the controller a record.
+        self.append()
+        with self.feed.open("a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies(), ["[demo-001] question: Worker ui asked question 1 of 3: A or B?"])
+        self.assertNotIn("fcntl", Path(attention_notify.__file__).read_text().split("def read_feed")[1].split("def cut")[0])
+
+    def test_a_trailing_partial_line_waits_and_a_junk_line_is_skipped(self):
+        self.append()
+        self.append(raw='{"at": "2026-10-07T12:00:01Z", "run_id": "demo-001", "kind": "pa')  # The controller is mid-write.
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(len(self.bodies()), 1)
+        self.assertEqual(self.state()["offset"], len(self.feed.read_text().splitlines()[0]) + 1)
+        with self.feed.open("a") as handle:  # The write completes.
+            handle.write('ne", "node": "ui", "text": "Worker ui needs attention in its pane"}\n')
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(self.bodies()[-1], "[demo-001] pane: Worker ui needs attention in its pane")
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        # A complete line that is not a record: one stderr line, skipped, the offset moves past it; the next record goes.
+        offset = self.state()["offset"]
+        self.append(raw="not a record\n")
+        self.append(raw='{"kind": "finished"}\n')
+        self.append("demo-001", "finished", "feature/demo fast-forwarded to abc", node=None, at=NOON + 70)
+        self.now = NOON + 120
+        code, out, err = self.run_once()
+        self.assertEqual(code, 0)
+        self.assertEqual(err.splitlines(), [f"Attention notify: skipped a line of {self.feed} that is not a record (line 1 after offset {offset})",
+                                            f"Attention notify: skipped a line of {self.feed} that is not a record (line 2 after offset {offset})"])
+        self.assertEqual(self.bodies()[-1], "[demo-001] finished: feature/demo fast-forwarded to abc")
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+
+    def test_a_record_that_went_is_not_repeated_while_a_later_message_fails_and_what_follows_waits_unlost(self):
+        self.append("first-001", "question", "Worker ui asked question 1 of 3: A or B?", at=NOON)
+        self.append("second-002", "question", "POISON: Worker ui asked question 1 of 3: C or D?", at=NOON + 1)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual(self.bodies()[0], "[first-001] question: Worker ui asked question 1 of 3: A or B?")
+        # The state names what went by record key, never by byte span or by run.
+        self.assertEqual((self.state()["offset"], self.state()["pushed"]), (0, [["first-001", "2026-10-07T12:00:00Z", "question", "ui"]]))
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual([body[:12] for body in self.bodies()], ["[first-001] ", "[second-002]", "[second-002]"])
+        # A new record of the first run arrives while the second still fails. Its run's first unsent record follows the
+        # refused line, so it waits, unlost: the pass stops at the first refusal.
+        self.append("first-001", "pane", "Worker ui needs attention in its pane", at=NOON + 130)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual([body[:12] for body in self.bodies()], ["[first-001] ", "[second-002]", "[second-002]", "[second-002]"])
+        self.assertEqual(len(self.state()["pushed"]), 1)
+        # The operator edits the offending line's text: the same pass sends it and the record that waited behind it.
+        lines = self.feed.read_text().splitlines()
+        self.feed.write_text("\n".join(line.replace("POISON: ", "") for line in lines) + "\n")
+        self.now = NOON + 240
+        code, out, err = self.run_once()
+        self.assertEqual((code, err, out), (0, "", "Attention notify: sent 2 message(s) for 2 record(s), held 0\n"))
+        self.assertEqual(self.bodies()[-2:], ["[second-002] question: Worker ui asked question 1 of 3: C or D?",
+                                              "[first-001] pane: Worker ui needs attention in its pane"])
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()],
+                         [("first-001", "question"), ("second-002", "question"), ("first-001", "pane")])
+        self.assertEqual((self.state()["offset"], self.state()["pushed"]), (self.feed.stat().st_size, []))
+        self.now = NOON + 300
+        self.assertEqual(self.run_once(), (0, "", ""))
+
+    def test_a_record_appended_while_a_batch_fails_is_sent_once_the_poison_line_is_deleted(self):
+        # [L2]: the retry identifies what went by record (run_id, at, kind, node), never by a byte span, so a feed edited
+        # under it loses nothing. Every record gets its own `at`.
+        poison_text = "POISON: Worker ui asked question 1 of 3: C or D? " + "(a body the channel refuses) " * 3
+        self.append("first-001", "question", "Worker ui asked question 1 of 3: A or B?", at=NOON)
+        self.append("second-002", "question", poison_text, at=NOON + 1)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual([body[:12] for body in self.bodies()], ["[first-001] ", "[second-002]"])
+        self.assertEqual(self.state()["offset"], 0)
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()], [("first-001", "question")])
+        # The operator deletes the whole poison line. Meanwhile a later record of the already-sent run was appended, and its
+        # line is shorter than the deleted one, so it ends inside the deleted line's byte span.
+        lines = self.feed.read_text().splitlines(keepends=True)
+        self.feed.write_text(lines[0])
+        self.append("first-001", "pane", "Worker ui needs attention in its pane", at=NOON + 130)
+        self.assertLess(len(self.feed.read_text().splitlines(keepends=True)[1]), len(lines[1]))
+        self.now = NOON + 180
+        code, out, err = self.run_once()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.bodies()[-1], "[first-001] pane: Worker ui needs attention in its pane")
+        self.assertEqual(len(self.bodies()), 3)  # The first run's question is not repeated.
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()], [("first-001", "question"), ("first-001", "pane")])
+        self.assertEqual(self.state()["offset"], self.feed.stat().st_size)
+        self.assertEqual(self.state()["pushed"], [])  # Every message went: the set is cleared with the offset move.
+        self.assertEqual(sorted(self.state()), ["held", "offset", "pushed", "sent", "version"])
+        self.now = NOON + 240
+        self.assertEqual(self.run_once(), (0, "", ""))
+        self.assertEqual(self.notified().count({"at": "2026-10-07T12:02:10Z", "sent_at": "2026-10-07T12:03:00Z", "run_id": "first-001", "kind": "pane"}), 1)
+
+    def test_a_record_held_inside_a_failing_batch_goes_out_once_when_presence_flips(self):
+        # Away: a question goes, a finished record is held, a later run's line is refused. Working again: the digest
+        # carries the held record, and the retry does not plan it a second time as a run message.
+        self.assertEqual(self.presence("away")[0], 0)
+        self.append("first-001", "question", "Worker ui asked question 1 of 3: A or B?", at=NOON)
+        self.append("first-001", "finished", "feature/first fast-forwarded to abc", node=None, at=NOON + 1)
+        self.append("second-002", "question", "POISON: Worker ui asked question 1 of 3: C or D?", at=NOON + 2)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual([body[:12] for body in self.bodies()], ["[first-001] ", "[second-002]"])
+        self.assertEqual([(item["run_id"], item["kind"], item["node"], item["reason"]) for item in self.state()["held"]],
+                         [("first-001", "finished", None, "away")])
+        self.assertEqual(self.state()["pushed"], [["first-001", "2026-10-07T12:00:00Z", "question", "ui"]])
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 2)  # Still away: the held record stays held once, the question is not repeated.
+        self.assertEqual([body[:12] for body in self.bodies()], ["[first-001] ", "[second-002]", "[second-002]"])
+        self.assertEqual(len(self.state()["held"]), 1)
+        self.assertEqual(self.presence("working")[0], 0)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual(self.bodies()[-2:], ["1 more records\n[first-001] finished: feature/first fast-forwarded to abc",
+                                              "[second-002] question: POISON: Worker ui asked question 1 of 3: C or D?"])
+        self.assertEqual(self.state()["held"], [])
+        self.assertEqual(self.state()["pushed"], [["first-001", "2026-10-07T12:00:00Z", "question", "ui"],
+                                                  ["first-001", "2026-10-07T12:00:01Z", "finished", None]])
+        self.now = NOON + 240
+        self.assertEqual(self.run_once()[0], 2)
+        self.assertEqual([body[:12] for body in self.bodies()[-2:]], ["[second-002]", "[second-002]"])  # Only the refused line again.
+        lines = self.feed.read_text().splitlines()
+        self.feed.write_text("\n".join(line.replace("POISON: ", "") for line in lines) + "\n")
+        self.now = NOON + 300
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual([(line["run_id"], line["kind"]) for line in self.notified()],
+                         [("first-001", "question"), ("first-001", "finished"), ("second-002", "question")])
+        self.assertEqual(sum(1 for line in self.notified() if line["kind"] == "finished"), 1)
+        self.assertEqual((self.state()["offset"], self.state()["pushed"], self.state()["held"]), (self.feed.stat().st_size, [], []))
+
+    def test_a_second_instance_at_once_sends_nothing_and_exits_0(self):
+        self.append()
+        with (self.config / "attention-notify.lock").open("a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            code, out, err = self.run_once()
+        self.assertEqual((code, out, err), (0, "", "Attention notify: another instance is running; nothing done\n"))
+        self.assertEqual(self.sent(), [])
+        self.assertFalse((self.config / "attention-notify.state.json").exists())
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_every_file_lives_beside_the_registry_and_nothing_under_the_real_home_is_read(self):
+        self.assertEqual(config_dir(self.env), self.config)
+        self.assertEqual(config_dir({}), Path.home() / ".config/md-manager")
+        self.presence("away")
+        self.append()
+        with patch("pathlib.Path.home", side_effect=AssertionError("the real home was consulted")):
+            self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(sorted(path.name for path in self.config.iterdir()),
+                         ["attention-notified.jsonl", "attention-notify.lock", "attention-notify.state.json", "attention.jsonl",
+                          "notify.json", "presence.json"])
+        self.assertNotIn("Path.home", Path(attention_notify.__file__).read_text())
+
+    def test_the_commands_dispatch_from_python_m_workflow(self):
+        self.append()
+        env = {**os.environ, **self.env}
+        done = subprocess.run([sys.executable, "-m", "workflow", "presence", "away", "--for", "2h"], cwd=TOOL, env=env, capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        self.assertTrue(done.stdout.startswith("away since "), done.stdout)
+        done = subprocess.run([sys.executable, "-m", "workflow", "attention-notify"], cwd=TOOL, env=env, capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stderr, done.stdout), (0, "", "Attention notify: sent 1 message(s) for 1 record(s), held 0\n"))
+        self.assertEqual(self.bodies(), ["[demo-001] question: Worker ui asked question 1 of 3: A or B?"])
+        done = subprocess.run([sys.executable, "-m", "workflow", "attention-notify"], cwd=TOOL, env=env, capture_output=True, text=True)
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+
+class UnitsAndDocs(unittest.TestCase):
+    def test_the_example_units_are_a_oneshot_every_minute_without_catch_up(self):
+        service = (TOOL / "workflow/systemd/attention-notify.service").read_text()
+        timer = (TOOL / "workflow/systemd/attention-notify.timer").read_text()
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("-m workflow attention-notify", service)
+        self.assertIn("WorkingDirectory=", service)
+        self.assertIn(".venv/bin/python", service)
+        self.assertIn("# Environment=MD_MANAGER_PROJECTS_CONFIG=", service)
+        self.assertIn("OnCalendar=*-*-* *:*:00", timer)
+        self.assertIn("Persistent=false", timer)
+        self.assertIn("WantedBy=timers.target", timer)
+
+    def test_the_runbook_section_and_the_readme_rows(self):
+        runbook = (TOOL / "workflow/RUNBOOK.md").read_text()
+        section = runbook.split("## Attention notifications", 1)[1].split("\n## ", 1)[0]
+        for text in ("systemctl --user enable --now attention-notify.timer", "loginctl enable-linger $USER", "loginctl show-user $USER -p Linger",
+                     '"argv"', '"status"', '"until"', "python -m workflow presence", "attention-notify.state.json", "attention-notified.jsonl",
+                     "notify.json", "presence.json", "10 messages", "exits 2",
+                     # The install block starts the offset at the feed's end before the first pass, or the whole feed is replayed.
+                     '"offset": %s, "sent": [], "held": [], "pushed": []', "stat -c %s ~/.config/md-manager/attention.jsonl",
+                     "without this the first pass replays every record the feed holds",
+                     # The notify script's contract is checked by hand before the timer is enabled.
+                     "once more with the network cut: it must exit non-zero",
+                     # [L2]: the retry skips what went by record key and sends the rest; a refused line is unstuck by editing
+                     # or deleting that line only, which sits at or after the offset; never an earlier line or the state file.
+                     "skips the records already sent", "`pushed`", "run id, timestamp, kind and node", "not lost",
+                     "edit the offending line's text in `attention.jsonl`, or delete that line",
+                     "at or after the saved offset", "never edit or delete an earlier line (already notified)",
+                     "wait, unlost, until the line is edited or deleted",
+                     "Do not delete the state file for this: that replays the whole feed",
+                     "Deleting it replays the whole feed from its first byte, drops the held lines and resets the cap window"):
+            with self.subTest(text):
+                self.assertIn(text, section)
+        for text in ("fallback line", "failed: true", "after 5 attempts",  # [L1]: no fallback, so none documented.
+                     "pending", "move `offset`", "sent_runs"):  # [L2]: no saved batch, no offset-moving recipe.
+            self.assertNotIn(text, section)
+        # The install block's starter state holds the keys the module writes, so the first pass reads it whole.
+        printf = next(line for line in section.splitlines() if line.startswith("printf '{\"version\""))
+        self.assertEqual(json.loads(printf.split("printf '", 1)[1].split("\\n'", 1)[0] % 0), {**attention_notify.empty_state(), "offset": 0})
+        self.assertNotIn("pending", Path(attention_notify.__file__).read_text())
+        install = section.split("```bash", 1)[1].split("```", 1)[0].splitlines()
+        self.assertLess(next(i for i, line in enumerate(install) if "attention-notify.state.json" in line),
+                        next(i for i, line in enumerate(install) if line.startswith('"$PY" -m workflow attention-notify')))
+        readme = (TOOL / "workflow/README.md").read_text()
+        self.assertIn("| `$PY -m workflow attention-notify` |", readme)
+        self.assertIn("| `$PY -m workflow presence [working\\|away] [--for 9h]` |", readme)
+
+
+if __name__ == "__main__":
+    unittest.main()
