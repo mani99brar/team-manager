@@ -378,6 +378,8 @@ SESSION_TEXT = re.compile(r"(?:\[(?P<tab>[^\]]{1,80})\] )?(?P<event>[a-z_]+(?: [
 COMMAND = re.compile(r'(?:\S*/)?python3?(?: -I)? -m workflow(?:\.\w+)*(?:[ \t]+(?:"[^"]*"|[^\s;]+))*')
 # What the texts say right before a command: dropped from the prose once the command is listed on its own.
 LEAD_IN = re.compile(r"[\s:;,]*(?:then run|run|or accept it|Reattach the pane with|Status|status)?[\s:;,]*$")
+# A sentence that follows a command in the same text (`…approve <bundle> --by operator. Nothing is pushed until then.`).
+SENTENCE_END = re.compile(r"\.\s+(?=[A-Z])")
 MARKDOWN_BOLD = re.compile(r"\*\*([^*\n]+?)\*\*")
 MARKDOWN_CODE = re.compile(r"`([^`\n]+?)`")
 
@@ -407,12 +409,25 @@ def tidy(text: str, record: dict, home: str, *, prose: bool = True) -> str:
     return text
 
 
+def command_spans(text: str) -> list[tuple[int, int, str]]:
+    """Where each `python -m workflow …` command starts and ends in the text, and the command; a sentence that follows
+    the command is not part of it."""
+    spans = []
+    for match in COMMAND.finditer(text):
+        command = match.group(0)
+        end = SENTENCE_END.search(command)
+        if end:
+            command = command[:end.start()]
+        command = command.rstrip(".")
+        spans.append((match.start(), match.start() + len(command), command))
+    return spans
+
+
 def commands_of(text: str) -> list[tuple[str, str]]:
     """The `python -m workflow …` commands in the text, each with a label: its subcommand, `accept` for a resume that
     accepts the challenge, `attach` for workflow.interactive attach-one."""
     found = []
-    for match in COMMAND.finditer(text):
-        command = match.group(0).rstrip(".")
+    for _, _, command in command_spans(text):
         words = command.split()
         after = words[words.index("workflow") + 1:] if "workflow" in words else words[words.index("-m") + 2:]
         label = next((word for word in after if not word.startswith("-")), "command")
@@ -443,8 +458,13 @@ def describe(record: dict, home: str = "") -> dict:
         style = (emoji, state or event.replace("_", " "), todo, verbs)
         text = match.group("rest") or ""
     commands = [(label, tidy(command, record, home, prose=False)) for label, command in commands_of(text)]
-    first = COMMAND.search(text)
-    prose = LEAD_IN.sub("", text[:first.start()]) if first else text
+    spans = command_spans(text)
+    prose = text
+    if spans:  # The text before the first command, and the sentence after the last one when there is one.
+        prose = LEAD_IN.sub("", text[:spans[0][0]])
+        after = text[spans[-1][1]:].lstrip(" .;:,")
+        if after[:1].isupper():
+            prose = f"{prose} {after}" if prose else after
     prose = esc(cut_words(tidy(prose, record, home)))
     if session:
         prose = markdown_tags(prose).replace(" / ", "\n")

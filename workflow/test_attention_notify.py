@@ -475,6 +475,18 @@ class NotifyCase(unittest.TestCase):
             "If it &lt;fails&gt;, retry.",
             "👉 Allow or deny: the prompt with its buttons is in the bot's DM, or answer in the pane.",
             "/show_md_manager_9b9ba4d9@panel_bot /status_md_manager_9b9ba4d9@panel_bot"])
+        # A sentence after a command stays prose and out of the command (the awaiting_approval text); a worker's question
+        # keeps its answer command whole.
+        shown = describe({"kind": "awaiting_approval", "text": "Awaiting your approval: python -m workflow approve /runs/x --bundle abc --by operator. "
+                                                               "Nothing is fast-forwarded or pushed until then."})
+        self.assertEqual(shown["commands"], [("approve", "python -m workflow approve /runs/x --bundle abc --by operator")])
+        self.assertEqual(shown["prose"], "Awaiting your approval Nothing is fast-forwarded or pushed until then.")
+        shown = describe({"kind": "question", "text": "Worker ui asked question 1 of 3: A or B? Answer: python -m workflow answer /runs/x ui --by operator \"<text>\""})
+        self.assertEqual(shown["commands"], [("answer", "python -m workflow answer /runs/x ui --by operator \"<text>\"")])
+        self.assertEqual(shown["prose"], "Worker ui asked question 1 of 3: A or B? Answer")
+        shown = describe({"kind": "attack", "text": "Attack pass (report-only): 2 verified finding(s) to label: python -m workflow attack-label r-1 <id> --label real|false|out-of-scope --by operator"})
+        self.assertEqual(shown["commands"][0][1], "python -m workflow attack-label r-1 <id> --label real|false|out-of-scope --by operator")
+        self.assertEqual(shown["prose"], "Attack pass (report-only): 2 verified finding(s) to label")
         # Any other notification type is a bell with the event as its state; a bare `turn ended` has no prose.
         self.assertEqual(describe({"kind": "pane", "text": "auth_success: Signed in"})["emoji"], "🔔")
         self.assertEqual(describe({"kind": "pane", "text": "auth_success: Signed in"})["state"], "auth success")
@@ -506,6 +518,36 @@ class NotifyCase(unittest.TestCase):
         self.assertEqual(lines[-2], "👉 Read the sidecar's finding.")
         self.assertIsNone(markup)
         self.assertGreater(left, 0)
+
+    def test_format_html_keeps_presence_cap_dedupe_and_topics_as_they_are_and_the_digest_is_formatted(self):
+        topic_stub, topic_log = self.root / "topic-stub.py", self.root / "topics.txt"
+        topic_stub.write_text(TOPIC_STUB)
+        self.html_config(env={"TELEGRAM_CHAT_ID": "-100777"}, topic={"argv": [sys.executable, str(topic_stub), str(topic_log)], "env": "TELEGRAM_THREAD_ID"})
+        self.assertEqual(self.presence("away")[0], 0)
+        self.append("demo-001", "finished", "feature/demo fast-forwarded to abc: the run is finished.", node=None, at=NOON)
+        self.append("demo-001", "question", "Worker ui asked question 1 of 3: A or B?", at=NOON + 1)
+        self.now = NOON + 60
+        self.assertEqual(self.run_once()[0], 0)  # Away: the question goes at once, in the run's topic; the finished line is held.
+        self.assertEqual(self.sent()[-1][1].splitlines()[0], "❓ <b>demo-001 · question</b>")
+        self.assertEqual(self.log.with_name(self.log.name + ".chat").read_text().splitlines()[-1], "-100777|100")
+        self.assertEqual(self.styles()[-1], "HTML|")
+        self.assertEqual([item["reason"] for item in self.state()["held"]], ["away"])
+        self.assertEqual(self.presence("working")[0], 0)
+        self.now = NOON + 120
+        self.assertEqual(self.run_once()[0], 0)  # Back: the held line goes as a formatted digest, without a topic.
+        self.assertEqual(self.sent()[-1][1].splitlines(), ["📬 <b>1 more records</b>", "✅ <b>demo-001</b> finished: feature/demo fast-forwarded to abc: the run is finished."])
+        self.assertEqual(self.log.with_name(self.log.name + ".chat").read_text().splitlines()[-1], "-100777|")
+        self.assertEqual(self.state()["held"], [])
+        self.assertEqual(len(self.state()["sent"]), 2)
+        # The cap: ten sent, the eleventh run's message held; a retry after a refusal repeats nothing (dedupe by key).
+        for index in range(CAP - 2):
+            self.append(f"run-{index:03d}", "question", f"q {index}?", at=NOON + 130 + index)
+        self.append("late-999", "question", "late?", at=NOON + 150)
+        self.now = NOON + 180
+        self.assertEqual(self.run_once()[0], 0)
+        self.assertEqual(len(self.state()["sent"]), CAP)
+        self.assertEqual([item["run_id"] for item in self.state()["held"]], ["late-999"])
+        self.assertEqual(len(self.notified()), CAP)
 
     def test_the_tailer_never_takes_the_feeds_lock(self):
         # A controller appends under the feed's exclusive lock and drops its record after 5 s without it: the tailer reads
