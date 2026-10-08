@@ -1050,6 +1050,83 @@ class AttemptBudget(unittest.TestCase):
         self.assertEqual(read_json(root / "attempts.json")["candidate:ui"], 5)
 
 
+class MemoryKilledAttempts(unittest.TestCase):
+    """An attempt whose packet names a check killed for memory is rerun without spending the budget and never counts as an
+    identical failure; the rerun waits for memory first."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.runtime = Pipeline.__new__(Pipeline)
+        self.runtime.directory, self.runtime.policy, self.runtime.workers = self.root, {"max_verification_attempts": 3}, ["ui"]
+        self.events = []
+        self.runtime.event = lambda node, status, message: self.events.append((node, status, message))
+        self.state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
+
+    def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",)) -> None:
+        folder = self.root / "verification/worker/ui" / str(attempt)
+        folder.mkdir(parents=True)
+        result = {"transient_checks": ["unit"]} if transient else {}
+        save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
+                                           "gate": {"status": "blocked", "reasons": list(reasons)}})
+        save_json(self.root / "attempts.json", {"worker:ui": attempt})
+
+    def test_a_memory_killed_attempt_is_free_and_never_identical(self):
+        with patch("workflow.automatic.mem_available_mb", return_value=2000), patch("workflow.automatic.time.sleep") as slept:
+            for attempt in (1, 2, 3):  # Three memory kills in a row with identical reasons: each is rerun.
+                self.packet(attempt, transient=True)
+                self.assertTrue(advance_failed_checks(self.runtime, self.state))
+            self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 4)
+            # The real failures keep their own budget of three, and the identical-failure rule skips the kills between them.
+            self.packet(4, transient=False)
+            self.assertTrue(advance_failed_checks(self.runtime, self.state))
+            self.packet(5, transient=True)
+            self.assertTrue(advance_failed_checks(self.runtime, self.state))
+            self.packet(6, transient=False)
+            with self.assertRaisesRegex(RuntimeError, "worker/ui failed identically on attempts 4 and 6; not transient"):
+                advance_failed_checks(self.runtime, self.state)
+        self.assertFalse(slept.called)
+        self.assertIn(("controller", "running", "worker/ui killed under memory pressure: transient, rerun without spending an attempt"), self.events)
+
+    def test_a_real_failure_spends_the_budget_as_before(self):
+        for attempt, reasons in ((1, ["a"]), (2, ["b"])):
+            self.packet(attempt, transient=False, reasons=reasons)
+            self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.packet(3, transient=False, reasons=["c"])
+        with self.assertRaisesRegex(RuntimeError, "retry limit exhausted"):
+            advance_failed_checks(self.runtime, self.state)
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+
+    def test_kills_past_the_cap_count_like_any_failure(self):
+        for attempt in range(1, 6):  # Three free kills, then two that spend the budget of three.
+            self.packet(attempt, transient=True, reasons=[f"kill {attempt}"])
+            with patch("workflow.automatic.mem_available_mb", return_value=None):
+                self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.packet(6, transient=True, reasons=["kill 6"])
+        with self.assertRaisesRegex(RuntimeError, "retry limit exhausted"):
+            advance_failed_checks(self.runtime, self.state)
+
+    def test_the_memory_wait_polls_until_the_floor_or_ten_minutes(self):
+        clock = [0.0]
+        readings = iter([300, 400, 500, 600, 700, 1600])
+        slept = []
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        automatic.wait_for_memory(self.runtime, read=lambda: next(readings), clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [15] * 5)
+        # One event a minute at most: at 0 s and 60 s of the 75 s wait.
+        self.assertEqual([message for _, _, message in self.events], ["waiting for memory: 300 MB available", "waiting for memory: 700 MB available"])
+        clock[0], slept[:], self.events[:] = 0.0, [], []
+        automatic.wait_for_memory(self.runtime, read=lambda: 10, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual((sum(slept), len(self.events)), (600, 10))
+        with patch.dict(os.environ, {"WORKFLOW_MEMORY_FLOOR_MB": "5"}):
+            slept[:] = []
+            automatic.wait_for_memory(self.runtime, read=lambda: 10, clock=lambda: clock[0], sleep=sleep)
+            self.assertEqual(slept, [])
+
+
 class CandidateGenerations(RepairFixture):
     automatic = False
 

@@ -1715,6 +1715,19 @@ def same_revision(previous: Path, packet: Path) -> bool:
     return None in commits or commits[0] == commits[1]
 
 
+def previous_failure(runtime, phase: str, node: str, attempt: int) -> Path | None:
+    """The packet of the latest earlier attempt of the lane's revision that was not killed for memory: the identical-failure
+    rule compares real failures only, so a memory kill between two identical failures does not hide them."""
+    from .repair import transient_packet
+    for earlier in range(attempt - 1, 0, -1):  # same_revision, the caller's, tells another revision's attempt apart.
+        path = runtime.directory / "verification" / phase / node / str(earlier) / "packet.json"
+        if not path.exists():
+            return None  # An attempt without a verdict: nothing to compare, as before.
+        if not transient_packet(path):
+            return path
+    return None
+
+
 def gate_reasons(packet: Path) -> list[str]:
     """A packet's gate reasons with its own attempt directory neutralised.
 
@@ -1743,7 +1756,7 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
     """advance_failed_checks' decision, read only: the checks to rerun, as (phase, node), and the `retry` requests to consume;
     None when the failed steps are not all checks it reruns, or one has nothing to rerun. Raises RuntimeError when a check
     failed identically on two attempts of one revision, or the attempt limit is reached."""
-    from .repair import attempt_floor
+    from .repair import attempt_limit, transient_packet
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
     # tasks with errors are failures to classify.
@@ -1765,29 +1778,70 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
             if requests.get(f"{phase}:{node}") == attempt and not folder.exists():
                 stage_requested.append(f"{phase}:{node}")
             elif path.exists() and read_json(path)["gate"]["status"] != "passed":
-                previous = runtime.directory / "verification" / phase / node / str(attempt - 1) / "packet.json"
-                if attempt > 1 and previous.exists() and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
+                previous = previous_failure(runtime, phase, node, attempt)
+                if previous and not transient_packet(path) and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
                     # Retries rerun immutable code; two identical failures mean the cause is
                     # deterministic (code or environment), and more attempts only burn time.
-                    raise RuntimeError(f"{phase}/{node} failed identically on attempts {attempt - 1} and {attempt}; "
+                    raise RuntimeError(f"{phase}/{node} failed identically on attempts {previous.parent.name} and {attempt}; "
                                        f"not transient, inspect {path}. Before review a code fix is a lane repair (RUNBOOK)")
                 stage_targets.append((phase, node))
         if not stage_targets and not stage_requested:
             return None
         targets.extend(stage_targets)
         requested.extend(stage_requested)
-    # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision.
-    if any(runtime.attempt(p, n) >= attempt_floor(runtime.directory, p, n) + runtime.policy.get("max_verification_attempts", 3) - 1 for p, n in targets):
+    # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision, and an attempt
+    # killed for memory does not spend it (repair.attempt_limit).
+    if any(runtime.attempt(p, n) >= attempt_limit(runtime.directory, runtime.policy, p, n, runtime.attempt(p, n)) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
     return targets, requested
 
 
+MEMORY_FLOOR_MB = 1536  # MemAvailable a rerun after a memory kill waits for; WORKFLOW_MEMORY_FLOOR_MB overrides it.
+MEMORY_WAIT_SECONDS = 600
+MEMORY_POLL_SECONDS = 15
+MEMORY_EVENT_SECONDS = 60
+
+
+def mem_available_mb() -> int | None:
+    """/proc/meminfo's MemAvailable in MB; None where it cannot be read (no /proc), which waits for nothing."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def wait_for_memory(runtime, *, read=None, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Before rerunning a check killed for memory: wait until MemAvailable reaches the floor or MEMORY_WAIT_SECONDS pass,
+    polling every MEMORY_POLL_SECONDS, with one `running` event at most once a minute. The rerun follows either way."""
+    read = read or mem_available_mb
+    floor = int(os.environ.get("WORKFLOW_MEMORY_FLOOR_MB", MEMORY_FLOOR_MB))
+    started, said = clock(), None
+    while True:
+        available = read()
+        if available is None or available >= floor or clock() - started >= MEMORY_WAIT_SECONDS:
+            return
+        if said is None or clock() - said >= MEMORY_EVENT_SECONDS:
+            said = clock()
+            runtime.event("controller", "running", f"waiting for memory: {available} MB available")
+        sleep(MEMORY_POLL_SECONDS)
+
+
 def advance_failed_checks(runtime, state) -> bool:
-    """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review."""
+    """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review. A check killed
+    for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget."""
+    from .repair import transient_packet
     retries = check_retries(runtime, state)
     if retries is None:
         return False
     targets, requested = retries
+    killed = [f"{phase}/{node}" for phase, node in targets
+              if transient_packet(runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json")]
+    if killed:
+        runtime.event("controller", "running", f"{', '.join(killed)} killed under memory pressure: transient, rerun without spending an attempt")
+        wait_for_memory(runtime)
     for phase, node in targets:
         runtime.retry_check(phase, node)
     if requested:

@@ -85,6 +85,10 @@
           "log_artifact_id": {
             "type": "string",
             "minLength": 1
+          },
+          "transient": {
+            "type": "string",
+            "const": "memory"
           }
         },
         "required": [
@@ -256,6 +260,13 @@
           "reason"
         ],
         "additionalProperties": false
+      }
+    },
+    "transient_checks": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
       }
     }
   },

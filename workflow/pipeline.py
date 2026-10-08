@@ -611,18 +611,19 @@ class Pipeline:
 
     def attempt(self, phase: str, node: str) -> int:
         """The lane's current attempt: from the floor of its revision (1, or the one a lane repair set) to the run's limit past it."""
-        from .repair import attempt_floor
+        from .repair import attempt_floor, attempt_limit
         path = self.directory / "attempts.json"
         value = read_json(path).get(f"{phase}:{node}", 1) if path.exists() else 1
         floor = attempt_floor(self.directory, phase, node)
-        if type(value) is not int or value < floor or value >= floor + self.policy.get("max_verification_attempts", 3):
+        if type(value) is not int or value < floor or value >= attempt_limit(self.directory, self.policy, phase, node, value - 1):
             raise ValueError("Verification attempt exceeds the run's hard limit")
         return value
 
     def retry_check(self, phase: str, node: str) -> int:
-        from .repair import attempt_floor
+        """The next attempt; an attempt killed for memory (repair.attempt_limit) does not spend the budget."""
+        from .repair import attempt_limit
         value = self.attempt(phase, node) + 1
-        if value >= attempt_floor(self.directory, phase, node) + self.policy.get("max_verification_attempts", 3):
+        if value >= attempt_limit(self.directory, self.policy, phase, node, value - 1):
             raise ValueError("Verification attempt limit reached; inspect evidence and create an explicitly revised run")
         path = self.directory / "attempts.json"
         attempts = read_json(path) if path.exists() else {}

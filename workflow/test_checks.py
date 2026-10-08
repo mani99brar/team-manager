@@ -442,6 +442,41 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in folder.iterdir()), ["browser-0", "browser-1", "packet.json"])
 
 
+class MemoryKilledCheckTests(unittest.TestCase):
+    """A check killed under memory pressure is recorded as transient: the gate still blocks, the packet names the check."""
+
+    setUp, policy, snapshot, verify = FileCaptureTests.setUp, FileCaptureTests.policy, FileCaptureTests.snapshot, FileCaptureTests.verify
+    attempts = 0
+
+    def run_check(self, script: str) -> dict:
+        if not self.attempts:
+            self.commit, self.changed = self.snapshot({"docs/NEW.md": b"# New\n"})
+        self.attempts += 1
+        return self.verify(self.commit, self.changed, policy=self.policy([sys.executable, "-c", script]), attempt=self.attempts)
+
+    def test_a_log_that_says_killed_is_transient(self):
+        packet = self.run_check("import sys; print('Ran 3 tests'); print('Killed'); sys.exit(1)")
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        self.assertEqual(packet["result"]["checks"][0]["transient"], "memory")
+        self.assertEqual(packet["result"]["transient_checks"], ["unit"])
+        validate_schema("workerResult", packet["result"])
+
+    def test_a_signal_exit_and_a_heap_limit_are_transient(self):
+        for script in ("import os, signal; os.kill(os.getpid(), signal.SIGKILL)", "import sys; sys.exit(137)",
+                       "import sys; print('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory'); sys.exit(134)"):
+            with self.subTest(script=script):
+                packet = self.run_check(script)
+                self.assertEqual((packet["gate"]["status"], packet["result"].get("transient_checks")), ("blocked", ["unit"]))
+
+    def test_a_real_failure_and_a_pass_are_not_transient(self):
+        packet = self.run_check("import sys; print('AssertionError: 1 != 2'); sys.exit(1)")
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        self.assertNotIn("transient", packet["result"]["checks"][0])
+        self.assertNotIn("transient_checks", packet["result"])
+        self.assertFalse(checks.memory_killed(0, self.root / "missing.log"))
+        self.assertFalse(checks.memory_killed(124, self.root / "missing.log"))  # A timeout is execute's own kill, never memory.
+
+
 class VitestCountsTests(unittest.TestCase):
     SUMMARY = ("\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m6 passed\x1b[39m\x1b[22m\x1b[90m (6)\x1b[39m\n"
                "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m70 passed\x1b[39m\x1b[22m\x1b[90m (70)\x1b[39m\n\x1b[2m   Start at \x1b[22m 09:20:57\n")

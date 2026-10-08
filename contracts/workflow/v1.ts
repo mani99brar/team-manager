@@ -37,6 +37,8 @@ export const checkSchema = z.strictObject({
   finished_at: timestamp,
   exit_code: z.number().int(),
   log_artifact_id: id,
+  /** "memory": the check's process ended on a signal or its log's tail says the system ran out of memory; absent otherwise. */
+  transient: z.literal('memory').optional(),
 })
 
 /**
@@ -64,6 +66,8 @@ export const workerResultSchema = z.strictObject({
   deferred_checks: z.array(deferredCheckSchema).optional(),
   /** Changed paths the worker-phase capture did not copy as `file` artifacts, with the reason; absent on older results and candidate-phase captures. */
   files_not_captured: z.array(fileNotCapturedSchema).optional(),
+  /** The ids of the gating checks whose failure was transient (killed under memory pressure); absent when none was. */
+  transient_checks: z.array(id).optional(),
 })
 
 export const runSpecSchema = z.strictObject({

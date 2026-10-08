@@ -51,6 +51,28 @@ def execute(argv: list[str], cwd: Path, log: Path, timeout: int, env: dict) -> t
     return code, started, now()
 
 
+# A check killed under memory pressure is no verdict on the code (15 verify failures in 7 pine runs were vitest workers the
+# kernel killed): its process ended on a signal (a negative return code, or 128 + SIGKILL from a shell), or the tail of its
+# log says the system or the JavaScript heap ran out of memory. The gate still blocks; automatic.check_retries reruns it free.
+MEMORY_MARKERS = ("Killed", "SIGKILL", "FATAL ERROR: Reached heap limit", "JavaScript heap out of memory", "ENOMEM", "Cannot allocate memory")
+MEMORY_TAIL_LINES = 200
+
+
+def memory_killed(code: int, log: Path) -> bool:
+    """Whether a failed check's process was killed for memory: a signal exit, or a memory marker in its log's last 200 lines.
+
+    A timeout (exit 124, execute's own kill) and a passing check never are."""
+    if code == 0 or code == 124:
+        return False
+    if code < 0 or code == 128 + signal.SIGKILL:
+        return True
+    try:
+        tail = log.read_text(errors="replace").splitlines()[-MEMORY_TAIL_LINES:]
+    except OSError:
+        return False
+    return any(marker in line for line in tail for marker in MEMORY_MARKERS)
+
+
 def text_test_counts(log: str) -> dict | None:
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
     unit = re.search(r"^Ran (\d+) tests? in .+$", text, re.MULTILINE)
@@ -441,11 +463,13 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
         errors.append("Verification modified the tested source revision")
     expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
                 "output_commit": commit, "verification_cwd": str(worktree)}
+    transient = transient_checks(worker, receipts, executions, phase)
     result = {"contract_version": "1.0.0", **{key: value for key, value in expected.items() if key != "verification_cwd"},
               "session_id": session_id, "status": "succeeded", "changed_files": changed,
               "checks": executions, "open_assumptions": [], "artifacts": capture.artifacts,
               "summary": f"Trusted {phase} check capture; not integration approval", "error": None,
-              **({"files_not_captured": files_not_captured} if files_not_captured is not None else {})}
+              **({"files_not_captured": files_not_captured} if files_not_captured is not None else {}),
+              **({"transient_checks": transient} if transient else {})}
     evidence = {"version": "1.0.0", "policy_sha256": policy_digest(policy),
                 **{key: expected[key] for key in ("run_id", "node_id", "attempt", "output_commit")}, "checks": receipts}
     # The dropped names sit beside the evidence, whose schema is closed: a check that needed one shows why it failed.
@@ -462,6 +486,16 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
             # The evidence is saved and passed; what is left only takes disk. `workflow clean` prunes it later.
             print(f"Warning: passed attempt {directory} was not pruned ({error}); `python -m workflow clean` prunes it", file=sys.stderr)
     return packet
+
+
+def transient_checks(worker: dict, receipts: list, executions: list, phase: str) -> list[str]:
+    """The ids of the checks that gate in this phase and were killed for memory (`transient` on their execution). A deferred
+    worker-phase check's outcome never gates, so its kill makes no attempt transient."""
+    from .verification import DEFERRED_WORKER_KINDS
+    kinds = {check["id"]: check["kind"] for check in worker["checks"]}
+    return [receipt["id"] for receipt in receipts
+            if executions[receipt["worker_check_index"]].get("transient") == "memory"
+            and not (phase == "worker" and kinds[receipt["id"]] in DEFERRED_WORKER_KINDS)]
 
 
 # Secret-like names a check never inherits (C14 slice 1). *_URL names stay, though they may hold a key: pine-chain's fork
@@ -535,7 +569,8 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
                 code, start, finish = execute(argv, worktree, log, check["timeout_seconds"], check_env)
             log_id = capture.add(log, "log")
             executions.append({"command": shlex.join(check["argv"]), "cwd": str(worktree),
-                               "started_at": start, "finished_at": finish, "exit_code": code, "log_artifact_id": log_id})
+                               "started_at": start, "finished_at": finish, "exit_code": code, "log_artifact_id": log_id,
+                               **({"transient": "memory"} if memory_killed(code, log) else {})})
             tests, scenarios = None, []
             try:
                 if check["kind"] == "browser":

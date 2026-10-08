@@ -58,6 +58,29 @@ def attempt_floor(directory: Path, phase: str, node: str) -> int:
     return 1
 
 
+# A check killed under memory pressure (checks.memory_killed) does not spend the attempt budget: up to this many such attempts
+# per lane, phase and revision are added to max_verification_attempts. Past it they count like any failure, so a machine that
+# never frees memory still ends the run.
+MAX_TRANSIENT_RERUNS = 3
+
+
+def transient_packet(path: Path) -> bool:
+    """A blocked packet whose gating checks include one killed for memory (result.transient_checks)."""
+    if not path.is_file():
+        return False
+    packet = read_json(path)
+    return packet.get("gate", {}).get("status") == "blocked" and bool(packet.get("result", {}).get("transient_checks"))
+
+
+def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:
+    """The first attempt past the budget of the lane's current revision: its floor plus max_verification_attempts plus its
+    transient attempts from the floor up to `through` (at most MAX_TRANSIENT_RERUNS)."""
+    floor = attempt_floor(directory, phase, node)
+    folder = directory / "verification" / phase / node
+    transient = sum(transient_packet(folder / str(attempt) / "packet.json") for attempt in range(floor, through + 1))
+    return floor + policy.get("max_verification_attempts", 3) + min(transient, MAX_TRANSIENT_RERUNS)
+
+
 def candidate_paths(directory: Path, generation: int) -> tuple[Path, Path]:
     """`candidate.json` and `candidate/` before any repair; `candidate-<g>.json` and `candidate-<g>/` after g applied repairs."""
     suffix = f"-{generation}" if generation else ""
