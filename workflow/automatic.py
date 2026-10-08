@@ -1314,13 +1314,12 @@ def export_verdict(runtime) -> None:
 
 
 def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
-    """Persist review.json for any verdict and export it (export_verdict); only unanimous approval without blocking findings
-    passes."""
+    """Persist review.json for any verdict and, once the statuses (and a block's event) are saved, export it (export_verdict);
+    only unanimous approval without blocking findings passes."""
     review = combined_review(runtime, bundle, digest, state, decisions)
     save_json(runtime.directory / "review.json", review)
     # When the verdict was written, for the panel's grace (panel.verdict_time); review.json's key set is closed, so it is kept here.
     state.combined["decided_at"] = now()
-    export_verdict(runtime)
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
     if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
@@ -1330,12 +1329,14 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
         runtime.event("review", "blocked", message)
         attention_record(runtime.directory, "review_blocked", f"{message}. Read {runtime.directory / 'review.json'}; review findings are fixed "
                                                               "in a new run.", node="review")  # C44
+        export_verdict(runtime)  # After the statuses and the event, so the export shows them with the verdict.
         raise RuntimeError(blocked_error(blockers or undecided or late, blockers, decisions))
     runtime.validate_review(review)
     for status in state.statuses.values():
         status["status"] = "succeeded"
     state.combined.update(status="succeeded", review=review, accepted_at=now())
     state.save()
+    export_verdict(runtime)
     return review
 
 

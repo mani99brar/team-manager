@@ -3154,7 +3154,8 @@ class ExportAfterVerdictTests(GraphFixture):
             real(runtime)
             exported = read_json(self.fixture.directory / "run-state.json")
             calls.append({"verdict": read_json(self.fixture.directory / "review.json")["verdict"], "events_before": before,
-                          "events_after": self.events(), "exported": (exported["review"] or {}).get("verdict")})
+                          "events_after": self.events(), "exported": (exported["review"] or {}).get("verdict"),
+                          "statuses": self.exported_statuses(exported), "combined": self.combined()["status"]})
         return calls, patch("workflow.automatic.export_verdict", side_effect=spying)
 
     def test_an_approval_is_exported_before_the_step_ends_and_adds_no_event(self):
@@ -3175,6 +3176,21 @@ class ExportAfterVerdictTests(GraphFixture):
         self.assertAlmostEqual(verdict_time(self.fixture.directory), datetime.fromisoformat(decided.replace("Z", "+00:00")).timestamp())
         self.assertLess(abs(verdict_time(self.fixture.directory) - (self.fixture.directory / "review.json").stat().st_mtime), 60)
 
+    @staticmethod
+    def exported_statuses(exported: dict) -> list:
+        return [(entry["reviewer_id"], entry["status"], entry["verdict"]) for entry in exported["review"]["reviewers"]]
+
+    def test_the_exported_reviewer_statuses_are_the_saved_ones(self):
+        """The export runs after the statuses are saved: what it shows is what the step's own export shows at the end."""
+        calls, spying = self.spy()
+        with spying, patch("workflow.automatic.wait_handoffs"):
+            drive(self.fixture.runtime)
+        [call] = calls
+        self.assertEqual(call["combined"], "succeeded")
+        final = read_json(self.fixture.directory / "run-state.json")
+        self.assertEqual(call["statuses"], self.exported_statuses(final))
+        self.assertEqual({status for _, status, _ in call["statuses"]}, {"accepted"})
+
     def test_a_block_is_exported_too(self):
         self.verdict.write_text("blocked")
         self.findings.write_text(json.dumps([{"severity": "P1", "message": "Broken. Consequence: wrong", "disposition": "open", "worker": "ui", "requirement": None}]))
@@ -3183,6 +3199,8 @@ class ExportAfterVerdictTests(GraphFixture):
             drive(self.fixture.runtime)
         [call] = calls
         self.assertEqual((call["verdict"], call["exported"]), ("blocked", "blocked"))
+        self.assertEqual({status for _, status, _ in call["statuses"]}, {"blocked"})  # mark_blockers saved before the export.
+        self.assertEqual(call["events_before"][-1]["status"], "blocked")  # The block's event precedes the export.
         self.assertEqual(call["events_after"], call["events_before"])
         self.assert_decided_at()
 
