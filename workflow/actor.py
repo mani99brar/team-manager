@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import os
 
-ACTORS = ("operator", "maintainer")
+ACTORS = ("operator", "maintainer", "panel")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
 OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean", "tryout",
                            "--allow-untried", "attack-pass", "attack-label"})
+# The operator's decisions the panel may take overnight within the operator's goals (shadow-panel decisions [G2]);
+# every other OPERATOR_ONLY action is refused for --by panel.
+PANEL_ALLOWED = frozenset({"answer", "accept-challenge", "approve"})
 # What every printed next-step command carries: they are addressed to the operator.
 BY_OPERATOR = "--by operator"
 VIA_CLAUDE_CODE = " (via a Claude Code session)"
@@ -41,6 +44,9 @@ def require_actor(args, action: str) -> str:
                          "the operator)")
     if actor == "maintainer" and action in OPERATOR_ONLY:
         raise ValueError(f"{action} is the operator's decision: --by maintainer is refused; the operator runs it with {BY_OPERATOR}")
+    if actor == "panel" and action in OPERATOR_ONLY and action not in PANEL_ALLOWED:
+        raise ValueError(f"{action} is the operator's decision: --by panel is refused (the panel may only "
+                         f"{', '.join(sorted(PANEL_ALLOWED))}); the operator runs it with {BY_OPERATOR}")
     return actor
 
 
