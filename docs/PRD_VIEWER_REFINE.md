@@ -88,7 +88,7 @@ The review node's Diff section renders `review.diff` inline: a file list with ad
 ### 5.7 Runs home (`shell`)
 
 - Order: **Needs you** as cards with cause and next-step label (as today; when zero, one line); **Running** as one compact row per run (id, feature, step, since, lanes as chips), not six-line cards; **Paused** as a separate section of compact rows sorted oldest first with "since <n> days" in the paused tone; **Recent** as today with the day groups. A section header carries its count and, for Running and Paused, a one-line sub-header ("3 at the design challenge, 1 at verify").
-- The Recent filter counts are computed over the filtered set (P2 1). The look switch is gone with Bold; the header's remaining controls meet 44 px under 760 px (P2 3). The feature header labels the definition's review steps as review steps and shows a run's reviewers only where a loaded run detail's review result provides them (P2 2 and 8); the run list carries no reviewers.
+- The Recent filter counts are computed over the filtered set (P2 1). The look switch is gone with Bold; the header's remaining controls meet 44 px under 760 px (P2 3). The feature header fetches the latest reviewed run's review result (one request, cached per feature) and lists its reviewer ids under "Reviewers"; while no run is reviewed, or the fetch is pending or failed, it shows the definition's review steps labelled "Review steps" and never calls them reviewers (P2 2 and 8); the run list itself carries no reviewers.
 - The project rail, the header, search, filters and group-by stay as the revamp built them; the rail's state dots stay.
 
 ### 5.8 The eight P2s
