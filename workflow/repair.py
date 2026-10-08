@@ -673,7 +673,7 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
 
 # The journal keeps a repair session from its launch: `launched` (the receipt and the session), `captured` (stopped, its
 # workspace committed as `source_commit`), then `recorded` and `applied` through the --commit path, or `blocked` with why.
-SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary", "review_round")
+SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary", "review_round", "left_behind")
 LOG_TAIL_LINES = 60
 LOG_LINE_LIMIT = 400  # Characters of one log line in the brief: a minified bundle on one line must not fill the prompt.
 
@@ -838,23 +838,35 @@ def wait_session(runtime, entry: dict, *, clock=None, sleep=None) -> dict:
         sleep(2)
 
 
-def capture_session(runtime, entry: dict) -> str:
-    """The workspace's tree, tracked changes and new files alike (ignored ones are not), as one commit on the workspace's HEAD,
-    built in a private index: the workspace's own index and HEAD are never written. A ref keeps it until the repair's own."""
+def capture_session(runtime, entry: dict) -> tuple[str, list[str]]:
+    """The workspace as one commit on its HEAD, built in a private index (the workspace's own index and HEAD are never
+    written), and the untracked paths it left behind. Every tracked change is taken, so an edit of another lane's file is
+    refused with the round (derive); a new file only under the lane's owned paths: the leftovers of the session's own runs
+    (coverage output, reports, caches git does not ignore) are listed as `left_behind`, never captured. A ref keeps the
+    commit until the repair's own."""
     directory, repo = runtime.directory, Path(runtime.plan["repository"])
     workspace = Path(entry["workspace"])
+    lane = next(iter(entry["lanes"]))
+    prefixes = [safe_path(prefix) for prefix in runtime.worker_policy(lane)["owned_paths"]]
     head = git(workspace, "rev-parse", "HEAD")
+    untracked = sorted(filter(None, subprocess.check_output(["git", "-C", str(workspace), "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")))
+    owned = [path for path in untracked if any(owns(path, prefix) for prefix in prefixes)]
+    left_behind = [path for path in untracked if path not in owned]
     with tempfile.TemporaryDirectory(prefix="workflow-repair-") as scratch:
         env = {**commit_env(), "GIT_INDEX_FILE": str(Path(scratch) / "index")}
         subprocess.run(["git", "-C", str(workspace), "read-tree", head], env=env, check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(workspace), "add", "-A", "--", "."], env=env, check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(workspace), "add", "-u", "--", "."], env=env, check=True, capture_output=True)
+        if owned:
+            subprocess.run(["git", "-C", str(workspace), "--literal-pathspecs", "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                           env=env, input="\0".join(owned).encode() + b"\0", check=True, capture_output=True)
         tree = subprocess.check_output(["git", "-C", str(workspace), "write-tree"], env=env, text=True).strip()
         if tree == git(workspace, "rev-parse", f"{head}^{{tree}}"):
-            raise RepairBlocked("the repair session changed nothing")
+            raise RepairBlocked("the repair session changed nothing" + (f" in lane {lane}'s owned paths (left behind: {', '.join(left_behind)})"
+                                                                         if left_behind else ""))
         commit = subprocess.check_output(["git", "-C", str(workspace), "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", head, "-m",
                                           f"Workflow {runtime.plan['run_id']}: repair session {entry['n']}"], env=env, text=True).strip()
     subprocess.run(["git", "-C", str(repo), "update-ref", f"refs/workflow-repair/{hashlib.sha256(str(directory).encode()).hexdigest()[:16]}/{entry['n']}/capture", commit], check=True)
-    return commit
+    return commit, left_behind
 
 
 def session_reason(entry: dict) -> str:
@@ -899,7 +911,8 @@ def finish_session(runtime, graph, config, entry: dict) -> dict:
     try:
         if entry["status"] == "launched":
             item = session_result(runtime, entry, lane)
-            entry.update(status="captured", source_commit=capture_session(runtime, entry), captured_at=now(), summary=item["summary"])
+            commit, left_behind = capture_session(runtime, entry)
+            entry.update(status="captured", source_commit=commit, captured_at=now(), summary=item["summary"], left_behind=left_behind)
             save_entry(directory, entry)
     except RepairBlocked as error:
         close_session(runtime, entry, "blocked", str(error))

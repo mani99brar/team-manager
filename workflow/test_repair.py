@@ -1249,6 +1249,14 @@ class RepairSession(RepairFixture):
         self.assertIn("Repair 4 supersedes combined revision", " ".join(event["message"] for event in self.events()))
         self.assertIn("candidate-1 is built after the lanes re-verify", " ".join(event["message"] for event in self.events()))
 
+    def test_untracked_leftovers_outside_the_lanes_paths_are_left_behind(self):
+        self.block()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after", "coverage/out.json": "{}", "web/new.txt": "new"}
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["lanes"]["ui"]["fix_files"], entry["left_behind"]), ("applied", ["ui.txt", "web/new.txt"], ["coverage/out.json"]))
+
     def test_the_deadline_ends_the_round(self):
         self.block()
         self.sessions.repair_status, self.sessions.repair_state = None, "working"
