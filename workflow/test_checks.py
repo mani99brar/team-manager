@@ -468,6 +468,19 @@ class MemoryKilledCheckTests(unittest.TestCase):
                 packet = self.run_check(script)
                 self.assertEqual((packet["gate"]["status"], packet["result"].get("transient_checks")), ("blocked", ["unit"]))
 
+    def test_another_signal_and_a_marker_inside_a_longer_line_are_not_transient(self):
+        for script in ("import os, signal; os.kill(os.getpid(), signal.SIGSEGV)",
+                       "import sys; print('FAILED tests/test_x.py::test_killed'); print('expected SIGKILL handling'); sys.exit(1)",
+                       "import sys; print('Killed'); print('\\n'.join(['noise'] * 25)); sys.exit(1)"):  # Killed above the last 20 lines.
+            with self.subTest(script=script):
+                packet = self.run_check(script)
+                self.assertEqual(packet["gate"]["status"], "blocked")
+                self.assertNotIn("transient_checks", packet["result"])
+        for line in ("Out of memory: Killed process 4242 (node)", "Error: ENOMEM: not enough memory"):
+            log = self.root / "kernel.log"
+            log.write_text(f"running\n{line}\n")
+            self.assertTrue(checks.memory_killed(1, log), line)
+
     def test_a_real_failure_and_a_pass_are_not_transient(self):
         packet = self.run_check("import sys; print('AssertionError: 1 != 2'); sys.exit(1)")
         self.assertEqual(packet["gate"]["status"], "blocked")

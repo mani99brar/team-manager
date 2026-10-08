@@ -1067,7 +1067,7 @@ class MemoryKilledAttempts(unittest.TestCase):
     def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",)) -> None:
         folder = self.root / "verification/worker/ui" / str(attempt)
         folder.mkdir(parents=True)
-        result = {"transient_checks": ["unit"]} if transient else {}
+        result = {"transient_checks": ["unit"], "checks": [{"command": "npx vitest run", "transient": "memory"}]} if transient else {}
         save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
                                            "gate": {"status": "blocked", "reasons": list(reasons)}})
         save_json(self.root / "attempts.json", {"worker:ui": attempt})
@@ -1100,11 +1100,23 @@ class MemoryKilledAttempts(unittest.TestCase):
 
     def test_kills_past_the_cap_count_like_any_failure(self):
         for attempt in range(1, 6):  # Three free kills, then two that spend the budget of three.
-            self.packet(attempt, transient=True, reasons=[f"kill {attempt}"])
+            self.packet(attempt, transient=True, reasons=[f"unit: kill {attempt}"])
             with patch("workflow.automatic.mem_available_mb", return_value=None):
                 self.assertTrue(advance_failed_checks(self.runtime, self.state))
-        self.packet(6, transient=True, reasons=["kill 6"])
+        self.packet(6, transient=True, reasons=["unit: kill 6"])
         with self.assertRaisesRegex(RuntimeError, "retry limit exhausted"):
+            advance_failed_checks(self.runtime, self.state)
+
+    def test_a_real_failure_beside_a_kill_is_a_real_failure(self):
+        # Only a packet whose every gate reason is a killed check is transient; another check's failure in it is real.
+        self.packet(1, transient=True, reasons=["Executed check failed: npx vitest run", "unit: exit -9"])
+        self.assertTrue(repair.transient_packet(self.root / "verification/worker/ui/1/packet.json"))
+        self.packet(2, transient=True, reasons=["unit: exit -9", "lint: exit 1"])
+        self.assertFalse(repair.transient_packet(self.root / "verification/worker/ui/2/packet.json"))
+        self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+        self.packet(3, transient=True, reasons=["unit: exit -9", "lint: exit 1"])  # Spent like any failure: the third is the limit.
+        with self.assertRaisesRegex(RuntimeError, "failed identically|retry limit exhausted"):
             advance_failed_checks(self.runtime, self.state)
 
     def test_the_memory_wait_polls_until_the_floor_or_ten_minutes(self):
@@ -1362,7 +1374,7 @@ class FixLoop(RepairFixture):
         state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
         folder = self.directory / "verification/worker/ui/1"
         folder.mkdir(parents=True)
-        packet = {"expected": {"output_commit": "a" * 40}, "result": {"transient_checks": ["ui-build"]}, "gate": {"status": "blocked", "reasons": ["x"]}}
+        packet = {"expected": {"output_commit": "a" * 40}, "result": {"transient_checks": ["ui-build"]}, "gate": {"status": "blocked", "reasons": ["ui-build: exit -9"]}}
         save_json(folder / "packet.json", packet)
         self.assertIsNone(automatic.fix_decision(runtime, state))
         save_json(folder / "packet.json", {**packet, "result": {}})

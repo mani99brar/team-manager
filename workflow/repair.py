@@ -72,11 +72,18 @@ MAX_TRANSIENT_RERUNS = 3
 
 
 def transient_packet(path: Path) -> bool:
-    """A blocked packet whose gating checks include one killed for memory (result.transient_checks)."""
+    """A blocked packet whose every gate reason is a check killed for memory (result.transient_checks): its id's reasons, or
+    `Executed check failed: <its command>`. A real failure beside a kill makes the attempt a real failure; the kill is only listed."""
     if not path.is_file():
         return False
     packet = read_json(path)
-    return packet.get("gate", {}).get("status") == "blocked" and bool(packet.get("result", {}).get("transient_checks"))
+    result, gate = packet.get("result", {}), packet.get("gate", {})
+    killed = result.get("transient_checks") or []
+    if gate.get("status") != "blocked" or not killed or not gate.get("reasons"):
+        return False
+    commands = {f"Executed check failed: {check.get('command')}" for check in result.get("checks", []) if check.get("transient") == "memory"}
+    prefixes = tuple(f"{check_id}{separator}" for check_id in killed for separator in (":", "/"))
+    return all(reason in commands or reason.startswith(prefixes) for reason in gate["reasons"])
 
 
 def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:

@@ -52,25 +52,29 @@ def execute(argv: list[str], cwd: Path, log: Path, timeout: int, env: dict) -> t
 
 
 # A check killed under memory pressure is no verdict on the code (15 verify failures in 7 pine runs were vitest workers the
-# kernel killed): its process ended on a signal (a negative return code, or 128 + SIGKILL from a shell), or the tail of its
-# log says the system or the JavaScript heap ran out of memory. The gate still blocks; automatic.check_retries reruns it free.
-MEMORY_MARKERS = ("Killed", "SIGKILL", "FATAL ERROR: Reached heap limit", "JavaScript heap out of memory", "ENOMEM", "Cannot allocate memory")
-MEMORY_TAIL_LINES = 200
+# kernel killed): its process ended on SIGKILL (-9, or 137 from a shell), or one of the last 20 lines of its log is the
+# shell's bare `Killed` or names an out-of-memory failure. Any other signal (a SIGSEGV) and a marker inside a longer line
+# about something else (a test named test_killed, a log that mentions SIGKILL) are failures like any other. The gate still
+# blocks; automatic.check_retries reruns it free.
+MEMORY_LINE = "Killed"  # The shell's report of a child the kernel killed: the whole line.
+MEMORY_MARKERS = ("FATAL ERROR: Reached heap limit", "JavaScript heap out of memory", "ENOMEM", "Cannot allocate memory",
+                  "Killed process", "out of memory")
+MEMORY_TAIL_LINES = 20
 
 
 def memory_killed(code: int, log: Path) -> bool:
-    """Whether a failed check's process was killed for memory: a signal exit, or a memory marker in its log's last 200 lines.
+    """Whether a failed check's process was killed for memory: SIGKILL, or a memory line in its log's last 20 lines.
 
-    A timeout (exit 124, execute's own kill) and a passing check never are."""
-    if code == 0 or code == 124:
+    A timeout (exit 124, execute's own kill), another signal and a passing check never are."""
+    if code in (0, 124):
         return False
-    if code < 0 or code == 128 + signal.SIGKILL:
+    if code in (-signal.SIGKILL, 128 + signal.SIGKILL):
         return True
     try:
-        tail = log.read_text(errors="replace").splitlines()[-MEMORY_TAIL_LINES:]
+        tail = [line.strip() for line in log.read_text(errors="replace").splitlines()[-MEMORY_TAIL_LINES:]]
     except OSError:
         return False
-    return any(marker in line for line in tail for marker in MEMORY_MARKERS)
+    return any(line == MEMORY_LINE or any(marker in line for marker in MEMORY_MARKERS) for line in tail)
 
 
 def text_test_counts(log: str) -> dict | None:
