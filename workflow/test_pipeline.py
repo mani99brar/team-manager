@@ -1523,6 +1523,34 @@ class RecordTests(unittest.TestCase):
         _, code, err = self.prepare_cli("refused-run", env={"WORKFLOW_WORKER_EFFORT": "med"})
         self.assertIn("not one of low, medium, high, xhigh, max", err)
 
+    def test_prepare_records_each_lanes_worker_pin_and_refuses_a_bad_one_before_anything_is_written(self):
+        # feature.json 2.7.0: --lane-model/--lane-effort <lane>=<value>; every selected lane gets its effective pin in
+        # plan.nodes[<lane>].roles (the lane's field, else the run-wide worker pin); plan.roles keeps only worker and judges.
+        from .sessions import role_flags
+        run, code, err = self.prepare_cli("lane-run", "--worker-effort", "low", "--lane-model", "ui=claude-sonnet-5", "--lane-effort", "adapter=max")
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-4-8", "effort": "low"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["nodes"]["ui"]["roles"], {"model": "claude-sonnet-5", "effort": "low"})
+        self.assertEqual(plan["nodes"]["adapter"]["roles"], {"model": "claude-opus-4-8", "effort": "max"})
+        self.assertEqual(role_flags(plan, "worker", node="adapter"), ["--model", "claude-opus-4-8", "--effort", "max"])
+        run, code, err = self.prepare_cli("plain-run")
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertEqual({node: plan["nodes"][node]["roles"] for node in ("ui", "adapter")},
+                         {node: {"model": "claude-opus-4-8", "effort": None} for node in ("ui", "adapter")})
+        for flags, pattern in ((["--workers", "ui", "--lane-model", "adapter=claude-sonnet-5"], "adapter"),
+                               (["--lane-model", "ui=two words"], "model"), (["--lane-effort", "ui=med"], "not one of"),
+                               (["--lane-model", "ui=a", "--lane-model", "ui=b"], "twice"), (["--lane-effort", "ui"], "<lane>=")):
+            with self.subTest(flags):
+                run, code, err = self.prepare_cli("refused-lane-run", *flags)
+                self.assertNotEqual(code, 0)
+                self.assertIn(pattern, err)
+                self.assertFalse(run.exists(), err)
+        code, _, err = pipeline_cli("start", str(self.fixture.root / "lane-run"), "--lane-model", "ui=claude-sonnet-5")
+        self.assertNotEqual(code, 0)
+        self.assertIn("apply to prepare only", err)
+
     def test_prepare_says_when_a_scrubbed_model_or_effort_override_would_have_chosen_the_model(self):
         # The sessions' environment drops ANTHROPIC_MODEL and the CLI's other overrides (scrub_env): a launch line that relied on
         # one is told which flags pin it now. A role pinned by its flag needs no note.
@@ -2258,6 +2286,20 @@ class PanelLaunchGuards(unittest.TestCase):
         self.assertEqual(flags["2.7.0"], flags["2.6.0"])
         self.write_feature(version="2.7.0", tryout=True)
         self.assertTrue(load_feature(self.folder)["tryout"])
+
+    def test_a_2_7_0_lane_pin_reaches_prepare_for_its_selected_lane_only(self):
+        workers = [{"node_id": "ui", "task": "ui-task.md", "model": "claude-sonnet-5", "effort": "xhigh"},
+                   {"node_id": "adapter", "task": "adapter-task.md", "effort": "low"}]
+        self.write_feature(version="2.7.0", workers=workers)
+        prepare = self.launch()[1][2]
+        lane_flags = [(flag, prepare[index + 1]) for index, flag in enumerate(prepare) if flag in ("--lane-model", "--lane-effort")]
+        self.assertEqual(lane_flags, [("--lane-model", "ui=claude-sonnet-5"), ("--lane-effort", "ui=xhigh"), ("--lane-effort", "adapter=low")])
+        prepare = self.launch(workers="adapter")[1][2]
+        self.assertEqual([prepare[index + 1] for index, flag in enumerate(prepare) if flag.startswith("--lane-")], ["adapter=low"])
+        self.write_feature(version="2.6.0", workers=workers)
+        with self.assertRaisesRegex(ValueError, r"workers\[ui\]\.model needs version 2\.7\.0"):
+            self.launch()
+        self.assertFalse((self.tmp / "runs").exists())
 
     def test_prepare_pins_plan_panels_last_with_the_brief_text_and_sha(self):
         from . import panel

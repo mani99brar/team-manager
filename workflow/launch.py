@@ -20,7 +20,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
                          has_operator_decisions, is_guarded, is_held, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
-from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, validate_node_id, validate_reviewer_id
+from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, role_pin, validate_node_id, validate_reviewer_id
 from . import attack, panel, sidecar
 from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
@@ -37,6 +37,10 @@ FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # browser check names the version it should move to.
 CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0"})
 CRITICAL_VERSION = "2.4.0"
+# The feature versions whose `workers[]` may carry the lane's own worker `model` and `effort` (pinned per lane at prepare).
+LANE_ROLE_VERSION = "2.7.0"
+LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION})
+LANE_ROLE_FIELDS = ("model", "effort")
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -156,14 +160,15 @@ def placeholders(folder: Path) -> list[str]:
 
 
 def load_feature(folder: Path) -> dict:
-    """The feature file as 2.0.0, 2.1.0, 2.2.0, 2.3.0 or 2.4.0; 1.0.0 files are refused.
+    """The feature file as 2.0.0 to 2.7.0; 1.0.0 files are refused.
 
     2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
     A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
     (workflow/guardrails.py) and adds the optional `challenge` and `prd`. 2.3.0 adds the optional review
     `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them. 2.4.0 keeps
     both and adds the optional `critical` (C51): `true` makes an automatic run stop for the operator's approval, and the
-    optional `tryout` (C7): `true` asks the operator to try each integrated run (workflow/tryout.py).
+    optional `tryout` (C7): `true` asks the operator to try each integrated run (workflow/tryout.py). 2.5.0 adds `attack`,
+    2.6.0 `panels`, and 2.7.0 a lane's own worker `model` and `effort` (lane_roles), each refused on an earlier version.
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -172,6 +177,7 @@ def load_feature(folder: Path) -> dict:
         sidecar.declared(manifest)
         attack.declared(manifest)  # Refuses `attack` on a version before 2.5.0, naming the key, before schema validation.
         panel.declared(manifest)  # Refuses `panels` on a version before 2.6.0 (and each per-panel refusal), naming the key.
+        lane_roles(manifest)  # Refuses a lane's `model`/`effort` on a version before 2.7.0, naming the lane and the key.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -193,7 +199,27 @@ def load_feature(folder: Path) -> dict:
             validate_reviewer_id(reviewer_id, ids)
         if len(set(reviewer_ids)) != len(reviewer_ids):
             raise ValueError("feature.json declares a reviewer twice")
+    lane_roles(manifest)  # After the schema: a bad model or level, in the role flags' words.
     return manifest
+
+
+def lane_roles(manifest: dict) -> dict[str, dict]:
+    """The lanes' own worker pins, `{lane: {model?, effort?}}` with only the fields the feature gives (2.7.0). A field on an
+    earlier version is refused naming `workers[<lane>].<field>`, before the schema's plainer additionalProperties refusal."""
+    pins = {}
+    for worker in manifest.get("workers") or []:
+        if not isinstance(worker, dict):
+            continue
+        given = {field: worker[field] for field in LANE_ROLE_FIELDS if field in worker}
+        if not given:
+            continue
+        node = worker.get("node_id")
+        if manifest.get("version") not in LANE_ROLE_VERSIONS:
+            field = next(iter(given))
+            raise ValueError(f"feature.json workers[{node}].{field} needs version {LANE_ROLE_VERSION} or later (this file is {manifest.get('version')})")
+        role_pin(given.get("model"), given.get("effort"), f"feature.json workers[{node}] --worker")
+        pins[node] = given
+    return pins
 
 
 def feature_file(folder: Path, name: str) -> Path:
@@ -392,6 +418,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         preflight.extend(["--panels", ",".join(sorted({provider["transport"] for item in review_panels for provider in item["providers"]}))])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
+    lane_pins = lane_roles(manifest)  # 2.7.0: each selected lane's own worker pin; prepare records every lane's effective pin.
+    for node in selected:
+        for field in LANE_ROLE_FIELDS:
+            if field in lane_pins.get(node, {}):
+                prepare.extend([f"--lane-{field}", f"{node}={lane_pins[node][field]}"])
     for reviewer_id, path in reviewers.items():
         builtin = next(item["prompt"] for item in manifest["reviewers"] if item["reviewer_id"] == reviewer_id).startswith(BUILTIN_PREFIX)
         prepare.extend(["--reviewer", f"{reviewer_id}={path if builtin else in_source(path)}"])

@@ -270,6 +270,47 @@ class RunClaudeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "roles"):
             role_flags({"roles": {"worker": {"model": None}}}, "worker")
 
+    def test_a_lane_pin_gives_that_lane_its_worker_flags_and_a_judge_never_takes_one(self):
+        # feature.json 2.7.0: prepare records each lane's effective worker pin as plan.nodes[<lane>].roles; plan.roles stays closed.
+        from .sessions import lane_pins, pin_roles, plan_roles, role_flags
+        plan = {"roles": pin_roles(worker_model="claude-sonnet-5", worker_effort="low", judge_model="claude-opus-5-5", env={}),
+                "nodes": {"ui": {"roles": {"model": "claude-opus-4-8", "effort": "xhigh"}}, "adapter": {}}}
+        self.assertEqual(role_flags(plan, "worker", node="ui"), ["--model", "claude-opus-4-8", "--effort", "xhigh"])
+        self.assertEqual(lane_pins(plan, "ui"), {"model": "claude-opus-4-8", "effort": "xhigh"})
+        # A lane without a recorded pin (a plan pinned before this change) takes the run-wide worker pin.
+        self.assertEqual(role_flags(plan, "worker", node="adapter"), ["--model", "claude-sonnet-5", "--effort", "low"])
+        self.assertEqual(lane_pins(plan, "adapter"), {"model": "claude-sonnet-5", "effort": "low"})
+        self.assertEqual(role_flags(plan, "worker"), ["--model", "claude-sonnet-5", "--effort", "low"])  # Without node: as before.
+        self.assertEqual(set(plan_roles(plan)), {"worker", "judges"})
+        # The judges never take a lane pin.
+        self.assertEqual(role_flags(plan, "judges"), ["--model", "claude-opus-5-5", "--effort", "high"])
+        with self.assertRaisesRegex(ValueError, "worker"):
+            role_flags(plan, "judges", node="ui")
+        # A plan pinned before roles: the variable for the worker, with or without node.
+        legacy = {"nodes": {"ui": {}}}
+        self.assertEqual(role_flags(legacy, "worker", {"WORKFLOW_WORKER_EFFORT": "medium"}, node="ui"), ["--effort", "medium"])
+        self.assertEqual(lane_pins(legacy, "ui"), {"model": None, "effort": None})
+        for bad in ({"model": "two words", "effort": None}, {"model": None, "effort": "med"}, {"model": None}, "x"):
+            with self.subTest(bad), self.assertRaisesRegex(ValueError, "ui"):
+                role_flags({**plan, "nodes": {"ui": {"roles": bad}}}, "worker", node="ui")
+
+    def test_no_judge_launch_passes_a_lane_and_the_one_worker_launch_does(self):
+        # The design challenge, every reviewer, the sidecar, the attack pass and the panel call role_flags(plan, "judges") with no
+        # node: a lane pin is a worker's only. Every call site in the package, read from its source.
+        import ast
+        calls = []
+        for path in sorted(Path(__file__).resolve().parent.glob("*.py")):
+            if path.name.startswith("test_"):
+                continue
+            for item in ast.walk(ast.parse(path.read_text())):
+                if isinstance(item, ast.Call) and getattr(item.func, "id", getattr(item.func, "attr", None)) == "role_flags":
+                    role = item.args[1].value if len(item.args) > 1 and isinstance(item.args[1], ast.Constant) else None
+                    calls.append((path.name, role, any(keyword.arg == "node" for keyword in item.keywords) or len(item.args) > 3))
+        judges = [(name, node) for name, role, node in calls if role == "judges"]
+        self.assertTrue({"guardrails.py", "sidecar.py", "attack.py", "panel.py", "automatic.py", "interactive.py", "replay.py"} <= {name for name, _ in judges})
+        self.assertFalse([name for name, node in judges if node])
+        self.assertEqual([(name, role, node) for name, role, node in calls if role == "worker"], [("interactive.py", "worker", True)])
+
     def test_a_print_jobs_role_file_records_the_requested_pins_and_the_models_it_used(self):
         from .sessions import pin_roles, record_role
         with tempfile.TemporaryDirectory() as temp:

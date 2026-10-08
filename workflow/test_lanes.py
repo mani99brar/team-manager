@@ -481,6 +481,32 @@ class SubsetSelection(LaneRun):
 class DeclaredReviewers(LaneRun):
     """PRD_PARALLEL_REVIEWERS: the feature file declares the reviewers; prepare pins their briefs; manual mode imports one review per reviewer."""
 
+    def test_a_lanes_worker_model_and_effort_need_feature_2_7_0_and_valid_values(self):
+        from .launch import load_feature
+        folder = self.feature_dir()
+        manifest = read_json(folder / "feature.json")
+        for version in ("2.0.0", "2.2.0", "2.5.0", "2.6.0"):
+            for field, value in (("model", "claude-sonnet-5"), ("effort", "low")):
+                with self.subTest(version=version, field=field):
+                    bad = copy.deepcopy(manifest)
+                    bad["version"] = version
+                    bad["workers"][1][field] = value
+                    save_json(folder / "feature.json", bad)
+                    with self.assertRaisesRegex(ValueError, rf"workers\[{LANES[1]}\]\.{field} needs version 2\.7\.0 or later \(this file is {version}\)"):
+                        load_feature(folder)
+        good = copy.deepcopy(manifest)
+        good["version"] = "2.7.0"
+        good["workers"][0].update(model="claude-opus-4-8", effort="max")
+        save_json(folder / "feature.json", good)
+        self.assertEqual(load_feature(folder)["workers"][0], {"node_id": LANES[0], "task": f"{LANES[0]}-task.md", "model": "claude-opus-4-8", "effort": "max"})
+        for field, value in (("model", "two words"), ("model", "--effort"), ("effort", "med"), ("cost", 1)):
+            with self.subTest(field=field, value=value):
+                bad = copy.deepcopy(good)
+                bad["workers"][0][field] = value
+                save_json(folder / "feature.json", bad)
+                with self.assertRaises((ValidationError, ValueError)):
+                    load_feature(folder)
+
     def test_feature_reviewers_are_validated_and_pinned_into_the_plan(self):
         self.feature_dir(reviewers=["general", "coverage"])
         run, commands, notes = launch_commands(self.repo, "lanes", "lanes-001", self.run_root, herdr=False)

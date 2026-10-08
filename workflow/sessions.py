@@ -381,15 +381,34 @@ def requested_pins(plan: dict, role: str) -> dict:
     return dict(roles[role]) if roles else {"model": None, "effort": None}
 
 
-def role_flags(plan: dict, role: str, env=None) -> list[str]:
+def lane_pins(plan: dict, node: str) -> dict:
+    """The worker pins lane `node` is asked for, `{model, effort}`: plan.nodes[<node>].roles, which prepare records for every
+    lane (the feature.json 2.7.0 lane field, else the run-wide worker pin), or plan.roles.worker for a lane prepared before
+    it; both None for a plan pinned before roles. A lane pin is the workers' only: plan.roles stays {worker, judges}."""
+    info = (plan.get("nodes") or {}).get(node)
+    pins = info.get("roles") if isinstance(info, dict) else None
+    if pins is None:
+        return requested_pins(plan, "worker")
+    if not isinstance(pins, dict) or set(pins) != {"model", "effort"}:
+        raise ValueError(f"Malformed roles of lane {node}: expected model and effort")
+    return role_pin(pins["model"], pins["effort"], f"lane {node} --worker")
+
+
+def role_flags(plan: dict, role: str, env=None, node: str | None = None) -> list[str]:
     """`--model <m>` (when pinned) and `--effort <e>` for one role's claude argv. For a plan pinned before roles the worker
-    takes WORKFLOW_WORKER_EFFORT (worker_effort) and the judges nothing."""
+    takes WORKFLOW_WORKER_EFFORT (worker_effort) and the judges nothing. With `node`, a worker lane's own pin (lane_pins);
+    the judges never take a lane pin, so `node` with any other role is refused."""
     if role not in ROLES:
         raise ValueError(f"Unknown role {role!r}")
+    if node is not None and role != "worker":
+        raise ValueError(f"Only a worker takes a lane pin, not the {role} (lane {node})")
     roles = plan_roles(plan)
-    if roles is None:
+    if node is not None and isinstance((plan.get("nodes") or {}).get(node), dict) and "roles" in plan["nodes"][node]:
+        pins = lane_pins(plan, node)
+    elif roles is None:
         return worker_effort(env) if role == "worker" else []
-    pins = roles[role]
+    else:
+        pins = roles[role]
     return [*(["--model", pins["model"]] if pins["model"] else []), *(["--effort", pins["effort"]] if pins["effort"] else [])]
 
 

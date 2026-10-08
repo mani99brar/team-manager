@@ -165,7 +165,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
@@ -182,6 +182,16 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     [{ ...panelEntry, providers: [{ transport: 'codex' }] }], [{ ...panelEntry, overlap_threshold: 0 }], [{ ...panelEntry, budget_usd: 0 }],
     [{ ...panelEntry, timeout_minutes: 0 }], [{ ...panelEntry, extra: true }], [{ ...panelEntry, requirements: ['../x.md'] }]]) {
     assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.6.0', panels: bad }).success, false, JSON.stringify(bad))
+  }
+  // 2.7.0 adds a lane's own worker model and effort (workflow/launch.py refuses either on an earlier version, naming the lane).
+  const pinned = structuredClone(reviewed)
+  Object.assign(pinned.workers[0], { model: 'claude-sonnet-5', effort: 'low' })
+  feature.parse({ ...pinned, version: '2.7.0', panels: [panelEntry] })
+  feature.parse({ ...structuredClone(reviewed), version: '2.7.0' })
+  for (const bad of [{ model: 'two words' }, { model: '' }, { model: '-x' }, { effort: 'med' }, { cost: 1 }]) {
+    const value = structuredClone(reviewed)
+    Object.assign(value.workers[0], bad)
+    assert.equal(feature.safeParse({ ...value, version: '2.7.0' }).success, false, JSON.stringify(bad))
   }
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })

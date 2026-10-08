@@ -22,7 +22,7 @@ from pathlib import Path
 from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule, released_drops, restore_step
 from .herdr import herdr
 from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, plan_digest, read_json,
-                       review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
+                       review_node, review_nodes, lane_pins, role_flags, run_claude, save_json, worker_settings)
 
 REVIEW = "review"
 # A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
@@ -288,7 +288,9 @@ class InteractiveSessions(ClaudeSessions):
         receipt = {"node_id": node, "session_id": None, "launch_token": info["session_id"], "plan_digest": plan_digest(self.plan),
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"],
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
-                   "launch_requested_at": datetime.now(timezone.utc).isoformat()}
+                   "launch_requested_at": datetime.now(timezone.utc).isoformat(),
+                   # The model and effort this lane is asked for (its plan.nodes pin, else the run-wide worker pin; feature.json 2.7.0).
+                   "requested": lane_pins(self.plan, node)}
         # Built before the receipt is saved, from the launch time it records (so the deadline the prompt states is the one
         # wait_handoffs applies): a prompt too long for argv is refused while nothing is recorded or launched.
         prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
@@ -305,8 +307,10 @@ class InteractiveSessions(ClaudeSessions):
         # The exact prompt is run evidence (the viewer shows it); it is private like the receipts.
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # One --settings for workers only: background_settings with the deny rules and Git variables (worker_settings). The
-        # worker's pinned model and effort (plan.roles; the WORKFLOW_WORKER_EFFORT variable for plans pinned before them).
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory), *role_flags(self.plan, "worker"),
+        # worker's pinned model and effort: its lane's pin (plan.nodes[<lane>].roles), else plan.roles, else the
+        # WORKFLOW_WORKER_EFFORT variable for plans pinned before them.
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory),
+                   *role_flags(self.plan, "worker", node=node),
                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", tools, "--permission-mode", "bypassPermissions" if automatic else "manual"]
         if automatic:

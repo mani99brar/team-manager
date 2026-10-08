@@ -471,6 +471,30 @@ class InteractiveTests(unittest.TestCase):
             self.assertFalse({"CLAUDE_CODE_EFFORT_LEVEL", "ANTHROPIC_MODEL", "CLAUDECODE"} & set(env))
             self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.root / "operator-claude"))
 
+    def test_a_lane_pin_reaches_only_its_worker_and_the_receipt_records_it(self):
+        # feature.json 2.7.0: the worker launch passes its node, so the lane's pin wins over the run-wide one; the native reviewer
+        # is a judge and keeps the judges' pin. The receipt records what the lane was asked to run.
+        from .sessions import pin_roles
+        self.plan["roles"] = pin_roles(worker_model="claude-sonnet-5", worker_effort="low", judge_model="claude-opus-5-5", env={})
+        self.plan["nodes"]["ui"]["roles"] = {"model": "claude-opus-4-8", "effort": "xhigh"}
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+        (self.directory / "review-worktree").mkdir()
+        candidate = self.plan["base_commit"]
+        ids = {row["name"]: row["id"] for row in (self.row(), self.reviewer_row())}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.reviewer_row()]]), patch("workflow.interactive.git", side_effect=[candidate, ""]):
+                self.sessions.run_reviewer("review", "Review this candidate.", self.TOKEN, candidate)
+        worker, reviewer = (call.args[0] for call in launch.call_args_list)
+        self.assertEqual((worker[worker.index("--model") + 1], worker[worker.index("--effort") + 1]), ("claude-opus-4-8", "xhigh"))
+        self.assertEqual((reviewer[reviewer.index("--model") + 1], reviewer[reviewer.index("--effort") + 1]), ("claude-opus-5-5", "high"))
+        self.assertEqual(read_json(self.directory / "ui.interactive.json")["requested"], {"model": "claude-opus-4-8", "effort": "xhigh"})
+
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
         candidate = self.plan["base_commit"]

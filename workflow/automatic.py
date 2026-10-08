@@ -25,7 +25,7 @@ from . import attention as attention_record  # Not `attention`: the waits keep s
 from .checks import now
 from .guardrails import conventions_block, decisions_block, epoch, iso
 from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
-from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, job_env, plan_reviewers, plan_roles, plan_workers, note_role, popen_claude, read_json, record_role,
+from .sessions import (DEFAULT_REVIEWER, TransientInfraError, git, job_env, lane_pins, plan_reviewers, plan_roles, plan_workers, note_role, popen_claude, read_json, record_role,
                        requested_pins, review_node, reviewer_ids, role_flags, run_lock, save_json, terminate)
 from .verification import CONTRACTS
 from .worktrees import git_worktree
@@ -74,7 +74,9 @@ def validate_automatic(plan: dict) -> None:
         raise ValueError("Unsupported reviewer transport; expected native or print")
     if "profile" in settings and settings["profile"] not in PROFILES:
         raise ValueError(f"Unsupported profile {settings['profile']!r}; expected attended or unattended")
-    plan_roles(plan)  # Malformed pinned roles are refused with the rest of the run's configuration.
+    plan_roles(plan)  # Malformed pinned roles are refused with the rest of the run's configuration,
+    for node in plan_workers(plan):  # each lane's own pin (feature.json 2.7.0) included.
+        lane_pins(plan, node)
     if not plan.get("source_branch", "").startswith("feature/"):
         raise ValueError("Automatic completion is restricted to a feature/ branch")
 

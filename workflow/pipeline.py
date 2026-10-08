@@ -35,7 +35,7 @@ from .costs import record_session_cost
 from .export_state import export_state
 from .outcome import outcome_block
 from .interactive import REVIEW, InteractiveSessions, SessionGap, UpdateGaps, attach_panels, attach_reviewer_panel
-from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, override_note, pin_roles, plan_excluded, run_claude, plan_workers,
+from .sessions import (DEFAULT_REVIEWER, EFFORT_LEVELS, TransientInfraError, controller_record, git, override_note, pin_roles, plan_excluded, role_pin, run_claude, plan_workers,
                        prepare, read_json, review_node, reviewer_ids, run_lock, save_json, stale_claude_warning, validate_node_id, validate_reviewer_id,
                        worker_authority, worker_effort)
 from .verification import owns, policy_digest, safe_path, slow_checks, validate_policy
@@ -94,6 +94,22 @@ def parse_lane_files(values: list[str] | None, flag: str) -> dict[str, Path]:
         if node in result:
             raise ValueError(f"{flag} given twice for lane {node}")
         result[node] = Path(path)
+    return result
+
+
+def parse_lane_values(values: list[str] | None, flag: str, selected: list[str]) -> dict[str, str]:
+    """`--lane-model id=model` / `--lane-effort id=level` at prepare (feature.json 2.7.0): once per selected lane at most."""
+    result = {}
+    for item in values or []:
+        node, separator, value = item.partition("=")
+        if not separator or not node or not value:
+            raise ValueError(f"{flag} expects <lane>=<value>, got {item!r}")
+        validate_node_id(node)
+        if node not in selected:
+            raise ValueError(f"{flag} names lane {node}, which this run does not launch ({', '.join(selected)})")
+        if node in result:
+            raise ValueError(f"{flag} given twice for lane {node}")
+        result[node] = value
     return result
 
 
@@ -1351,6 +1367,10 @@ def main():
                                                                 "the run stops after review for approve, whatever the profile")
     parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="prepare: the workers' effort, pinned (default: WORKFLOW_WORKER_EFFORT, read now)")
+    parser.add_argument("--lane-model", action="append", metavar="LANE=MODEL",
+                        help="prepare: one lane's worker model, pinned as plan.nodes[<lane>].roles (feature.json 2.7.0 workers[].model; default: --worker-model)")
+    parser.add_argument("--lane-effort", action="append", metavar="LANE=LEVEL",
+                        help="prepare: one lane's worker effort, pinned likewise (feature.json 2.7.0 workers[].effort; default: --worker-effort)")
     parser.add_argument("--judge-model", help="prepare: the model of the design challenge, the reviewers and the review sidecar, pinned (default: Claude Code's default)")
     parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="prepare: their effort, pinned (default high)")
     parser.add_argument("--herdr", action="store_true")
@@ -1400,7 +1420,8 @@ def main():
     if args.allow_untried is not None and not args.tryout:
         parser.error("--allow-untried applies with --tryout: a launch that asks for no tryout is never held by the limit")
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
-                                                                         args.judge_model, args.judge_effort, args.restore_from)):
+                                                                         args.judge_model, args.judge_effort, args.restore_from,
+                                                                         args.lane_model, args.lane_effort)):
         # Prepare pins them (C52, C12); any other action would ignore them silently, `automatic --live` resuming a run included.
         parser.error("--profile, --restore-from and the role flags apply to prepare only; the pins cannot change after it")
     if args.action != "prepare" and args.critical:
@@ -1549,6 +1570,11 @@ def main():
             reviewers = parse_reviewer_files(args.reviewer, declared)
             # C52: the roles' models and efforts, refused before anything is written; WORKFLOW_WORKER_EFFORT is read here, once.
             roles = pin_roles(args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
+            # feature.json 2.7.0: every selected lane's effective worker pin, its own field else the run-wide one, refused here too.
+            lane_models = parse_lane_values(args.lane_model, "--lane-model", selected)
+            lane_efforts = parse_lane_values(args.lane_effort, "--lane-effort", selected)
+            lane_roles = {node: role_pin(lane_models.get(node, roles["worker"]["model"]), lane_efforts.get(node, roles["worker"]["effort"]),
+                                         f"lane {node} --worker") for node in selected}
             note = override_note(os.environ, args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
             if note:
                 print(f"Note: {note}", file=sys.stderr, flush=True)
@@ -1579,6 +1605,8 @@ def main():
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
                         failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory),
                         roles=roles, controller=controller_record())
+            for node in selected:  # Beside the lane's worktree and task; plan.roles stays {worker, judges} (sessions.plan_roles).
+                plan["nodes"][node]["roles"] = lane_roles[node]
             if args.guardrails:
                 pin_guardrails(plan, directory, {node: task_files[node] for node in selected}, args.decisions, args.prd, not args.no_challenge)
                 # C8: an attended run holds after a passing challenge as --hold-challenge does; one without the challenge holds nothing.
