@@ -6,13 +6,14 @@ import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
 import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
-  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
+  CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, EFFORT_LEVELS, validateFixLoop, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
   RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
-  type AttackRecord, type AttackResult, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  type AttackRecord, type AttackResult, type FixLoop, type RepairEntry, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
+import { archivedRounds, FixLoopError, mapRepairs, mapReviewRounds, REPAIRS_FILE, REPAIR_BYTE_LIMIT, redactDeep, REVIEW_ROUNDS_FILE } from './fixLoop.ts'
 import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConfig, type ProjectsConfig, type WorkflowConfig } from './projectsConfig.ts'
 
 /**
@@ -61,6 +62,13 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
  * Contract 1.9.0 (docs/PRD_MULTI_PROVIDER_PANEL.md Appendix A): the panel's record is served on its own route the same way, read
  * live from `<run>/panel.json` whenever it is readable and valid (no mtime comparison) and else from the export's `panels`
  * section, never parsed with the export. The panel has no graph node this slice, so nothing of the run's activity reads it.
+ *
+ * Export 1.10.0 (docs/PRD_VIEWER_REFINE.md Appendix A): the in-run fix loop. The export's `definition` is unchanged; this
+ * server projects one `repair-<n>` node of kind `worker` per session repair into the run detail's `definition` and `snapshot`
+ * (after the definition hash, so `definition_revision` never moves) from the one `fixLoop` it chose: `repairs.json`,
+ * `review-rounds.json` and the repair receipts read live for every registered project (the export is rewritten only at step
+ * ends, so it lags a running round), each falling back to the export's `fix_loop`. A repair node's status never enters the
+ * run's status; the steps a running repair re-enters read `running`. The review node's attempt is the review round.
  */
 
 /** A rejected or failed project request. `message` is safe to send: it never carries absolute paths. */
@@ -81,7 +89,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
@@ -97,6 +105,8 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const TEXT_LIMIT = 65536
 /** The diff the reviewer saw, registered by the export relative to the run root. */
 const REVIEW_DIFF_FILE = 'review.diff'
+/** The delta against the previous round's candidate (or the followed run's), registered beside `review.diff` at export 1.10.0. */
+const DELTA_DIFF_FILE = 'review.delta.diff'
 const REVIEW_ARTIFACT_PREFIX = 'patch-review-'
 /** The review sidecar's node (export 1.6.0) and the ledger the controller rewrites while the workers run. */
 const SIDECAR_NODE = 'sidecar'
@@ -176,6 +186,10 @@ const reviewSectionSchema = z.strictObject({
   reviewers: z.array(reviewerSectionSchema).min(1).optional(),
   reviewed_at: zonedTimestamp,
   diff: z.strictObject({ path: z.literal(REVIEW_DIFF_FILE), sha256: hex64, bytes: z.number().int().nonnegative() }).nullable(),
+  /** Export 1.10.0: the review round (1 + the archived rounds), the commit the delta starts from and `review.delta.diff`; absent before. */
+  round: z.number().int().positive().optional(),
+  delta_from: commit.nullable().optional(),
+  delta_diff: z.strictObject({ path: z.literal(DELTA_DIFF_FILE), sha256: hex64, bytes: z.number().int().nonnegative() }).nullable().optional(),
 })
 
 const workerInputSchema = z.strictObject({
@@ -229,6 +243,9 @@ const workerInputSchema = z.strictObject({
     answer: z.string().nullable(),
     answered_at: zonedTimestamp.nullable(),
   })).optional(),
+  /** Export 1.10.0: plan.nodes.<lane>.roles and .skills; absent before. */
+  roles: z.strictObject({ model: z.string().min(1).nullable(), effort: z.enum(EFFORT_LEVELS).nullable() }).nullable().optional(),
+  skills: z.array(z.strictObject({ name: z.string().min(1), sha256: hex64 })).optional(),
 })
 
 /** Export 1.5.0: the latest `challenge.json` of a feature.json 2.2.0 run, without `run_id` and `version`, plus `attempts`. */
@@ -275,6 +292,8 @@ const inputsSectionSchema = z.strictObject({
     reviewer_transport: z.enum(['native', 'print']).nullable(),
     /** Export 1.7.0: the pinned profile; absent for plans pinned before it. */
     profile: z.enum(RUN_PROFILES).nullable().optional(),
+    /** Export 1.10.0: plan.automatic.fix_rounds; left out for a plan without it. */
+    fix_rounds: z.number().int().nonnegative().optional(),
   }).nullable(),
   setup: z.array(z.strictObject({ argv: z.array(z.string()), command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
@@ -344,6 +363,8 @@ const exportSchema = z.object({
    * before. Kept as unknown data like the attack's: validated only when the panels route serves it.
    */
   panels: z.unknown().optional(),
+  /** Export 1.10.0: the in-run fix loop as written (a record, the error form or null); kept as unknown data, validated when chosen. */
+  fix_loop: z.unknown().optional(),
 })
 
 const rawEventSchema = z.object({
@@ -398,6 +419,10 @@ export type LoadedRun = {
   /** The projected run inputs, or null when the export carries no inputs section. */
   inputs: RunInputs | null
   reviewDiff: ReviewDiffRegistration | null
+  /** `review.delta.diff` as the export registered it (export 1.10.0); null without the file or before it. */
+  deltaDiff: ReviewDiffRegistration | null
+  /** The fix loop this run's repair nodes and review attempt were projected from (null for a run without session repairs). */
+  fixLoop: FixLoop | null
   /** The export's `sidecar` section as written (export 1.6.0), unvalidated; null or undefined when absent. */
   sidecar: unknown
   /** The export's `attack` section as written (export 1.8.0), unvalidated; undefined when the export predates it. */
@@ -432,6 +457,13 @@ export type LaneMap = {
   verifyNodes: ReadonlySet<string>
   /** Raw event node aliases → graph nodes. Anything else must already be a graph node or is left unattributed. */
   eventAliases: ReadonlyMap<string, string>
+  /** The session repairs of the run's fix loop (export 1.10.0), for mapping a `repair_<lane>` row onto its `repair-<n>` node. */
+  repairs?: readonly { n: number; lane: string; round: number }[]
+}
+
+/** The lane map with the fix loop's session repairs, so the events of a repair session sit on its node. */
+export function withRepairs(map: LaneMap, loop: FixLoop | null): LaneMap {
+  return loop && loop.repairs.length > 0 ? { ...map, repairs: loop.repairs.map(repair => ({ n: repair.n, lane: repair.lane, round: repair.round })) } : map
 }
 
 export function laneMap(lanes: readonly string[]): LaneMap {
@@ -548,6 +580,12 @@ export function compareRuns(a: { updated_at: string; run_id: string }, b: { upda
   const byTime = Date.parse(b.updated_at) - Date.parse(a.updated_at)
   if (byTime !== 0) return byTime
   return a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0
+}
+
+/** Why a fix loop was refused, as a short text without paths: a mapping error's own words, or the schema's first issues. */
+function reason(error: unknown): string {
+  const text = error instanceof z.ZodError ? issueText(error) : error instanceof Error ? error.message : String(error)
+  return redactPaths(text).slice(0, 500) || 'the fix loop is invalid'
 }
 
 function sha256(bytes: Buffer): string {
@@ -715,16 +753,22 @@ function projectReviewers(section: ReviewSection, findings: ReviewFinding[], inp
 }
 
 /** Projects the export's review section onto the review-result contract; the caller applies the cross-field rules. */
-function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null): ReviewResult {
+function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null, loop: FixLoop | null = null): ReviewResult {
   const findings = section.findings.map(finding => projectFinding(finding, inputs))
+  const attempt = reviewAttempt(section, loop)
   return {
-    contract_version: '1.4.0', run_id: runId, node_id: 'review', attempt: section.attempt,
+    contract_version: '1.4.0', run_id: runId, node_id: 'review', attempt,
     reviewer: { session_id: redactPaths(section.reviewer_session_id), transport: section.transport, independent: true },
     bundle_sha256: section.bundle_sha256, candidate_commit: section.candidate_commit, verdict: section.verdict,
     findings,
     reviewers: projectReviewers(section, findings, inputs),
     reviewed_at: utcTimestamp(section.reviewed_at),
     diff: section.diff === null ? null : reviewDiffArtifact(scope, runId, section.diff.sha256),
+    // Export 1.10.0 only: an older export renders exactly as before.
+    ...(section.round !== undefined ? {
+      round: section.round, delta_from: section.delta_from ?? null,
+      delta_diff: section.delta_diff == null ? null : reviewDiffArtifact(scope, runId, section.delta_diff.sha256),
+    } : {}),
   }
 }
 
@@ -771,6 +815,9 @@ function projectInputs(runId: string, definition: WorkflowDefinition, section: I
       n: question.n, question: redactPaths(question.question), asked_at: utcTimestamp(question.asked_at),
       answer: optionalText(question.answer), answered_at: question.answered_at === null ? null : utcTimestamp(question.answered_at),
     })),
+    // Export 1.10.0 only: an older export renders exactly as before.
+    ...(worker.roles !== undefined ? { roles: worker.roles === null ? null : { ...worker.roles } } : {}),
+    ...(worker.skills !== undefined ? { skills: worker.skills.map(skill => ({ ...skill })) } : {}),
   }))
   const challenge = section.challenge ?? null
   return {
@@ -1172,6 +1219,9 @@ export class RunStore {
     if (run.reviewDiff && run.reviewDiff.artifact_id === artifactId) {
       registered.push({ components: [REVIEW_DIFF_FILE], kind: 'patch', sha256: run.reviewDiff.sha256, bytes: run.reviewDiff.bytes })
     }
+    if (run.deltaDiff && run.deltaDiff.artifact_id === artifactId) {
+      registered.push({ components: [DELTA_DIFF_FILE], kind: 'patch', sha256: run.deltaDiff.sha256, bytes: run.deltaDiff.bytes })
+    }
     let untrusted = false
     for (const packet of run.packets) {
       if (!packet.ok) { untrusted = true; continue }
@@ -1233,8 +1283,11 @@ export class RunStore {
     const packets = await this.loadPackets(runId, directory, state.verification_packets)
     const rawEvents = await this.readEvents(runId, directory, state)
     const lanes = runLanes(runId, definition, state.inputs ?? null)
-    const events = normalizeEvents(state.run_id, definition, rawEvents, lanes)
-    const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes)
+    // The one fixLoop every projection of this run reads; repair nodes are added after the definition hash (Appendix A.1 item 13).
+    const loop = await this.fixLoopOf(scope, runId, directory, state, definition)
+    const shown = projectedDefinition(definition, loop)
+    const events = normalizeEvents(state.run_id, shown, rawEvents, withRepairs(lanes, loop))
+    const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes, loop)
     const created_at = state.created_at
     const updated_at = laterTimestamp(laterTimestamp(state.updated_at, rawEvents.at(-1)?.time ?? created_at), created_at)
     const summary: RunSummary = {
@@ -1245,7 +1298,7 @@ export class RunStore {
     // The graph projection is validated on its own first, so a contradictory graph is reported before anything derived from it.
     let detail: RunDetail
     try {
-      detail = validateRunDetail({ summary, definition, snapshot })
+      detail = validateRunDetail({ summary, definition: shown, snapshot, ...(loop ? { fixLoop: loop } : {}) })
     } catch (error) {
       throw contractFailure('projection', error)
     }
@@ -1261,7 +1314,7 @@ export class RunStore {
     let review: ReviewResult | null = null
     if (state.review) {
       try {
-        review = validateReviewResult(projectReview(scope, state.run_id, state.review, state.inputs ?? null))
+        review = validateReviewResult(projectReview(scope, state.run_id, state.review, state.inputs ?? null, loop))
         // A finding names a lane this run had, an attribution (`multiple`, `none`, the legacy `both`) or nothing; anything else is contradictory.
         for (const item of review.findings) {
           if (item.worker !== null && !lanes.lanes.includes(item.worker) && !(FINDING_ATTRIBUTIONS as readonly string[]).includes(item.worker)) {
@@ -1273,14 +1326,96 @@ export class RunStore {
       }
     }
     const reviewDiff = state.review?.diff ? { artifact_id: reviewArtifactId(state.review.diff.sha256), sha256: state.review.diff.sha256, bytes: state.review.diff.bytes } : null
+    const deltaDiff = state.review?.delta_diff ? { artifact_id: reviewArtifactId(state.review.delta_diff.sha256), sha256: state.review.delta_diff.sha256, bytes: state.review.delta_diff.bytes } : null
     const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
     const run_dir = await this.runDirectory(scope, directory)
     try {
-      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition, snapshot, run_dir })
+      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition: shown, snapshot, run_dir, ...(loop ? { fixLoop: loop } : {}) })
     } catch (error) {
       throw contractFailure('run activity', error)
     }
-    return { detail, events, packets, review, inputs, reviewDiff, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels }
+    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels }
+  }
+
+
+  /**
+   * The fix loop of a run (export 1.10.0, Appendix A.1 item 6 and A.2): `repairs.json` read live for every registered project
+   * whenever it is readable and holds valid session entries (`source: "live"`), else the export's `fix_loop` (`"export"`).
+   * `review-rounds.json`, the archived `review.round-<k>.json` and `repair-<n>.interactive.json` are read live too, each falling
+   * back to the export's record on its own without changing `source`. A loop that validates from neither source is served as
+   * the error form with a warning, never a failed run; a run with no session repairs and no export record has none (null).
+   */
+  private async fixLoopOf(scope: Scope, runId: string, directory: FileHandle, state: RunExport, definition: WorkflowDefinition): Promise<FixLoop | null> {
+    const skip = (source: 'live' | 'export', reason: string) => this.options.warn?.('Fix loop skipped', {
+      project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: runId, source, reason,
+    })
+    const read = async (name: string): Promise<unknown> => {
+      try {
+        const bytes = await readBounded(directory, [name], REPAIR_BYTE_LIMIT)
+        return bytes === null ? undefined : JSON.parse(bytes.toString('utf8'))
+      } catch {
+        return undefined
+      }
+    }
+    const header = (source: 'live' | 'export') => ({ contract_version: '1.10.0' as const, source })
+    const check = (candidate: unknown): FixLoop => {
+      const loop = validateFixLoop(redactDeep(candidate, redactPaths))
+      checkLoopGraph(loop, definition)
+      return loop
+    }
+    let exported: FixLoop | null = null
+    let exportFailure: string | null = null
+    if (state.fix_loop !== undefined && state.fix_loop !== null) {
+      try {
+        exported = check({ ...header('export'), ...(state.fix_loop as object) })
+      } catch (error) {
+        exportFailure = reason(error)
+        skip('export', exportFailure)
+      }
+    }
+    const exportedRepairs = exported && 'error' in exported ? [] : exported?.repairs ?? []
+    const exportedRounds = exported && 'error' in exported ? [] : exported?.review_rounds ?? []
+    let liveFailure: string | null = null
+    const journal = await read(REPAIRS_FILE)
+    if (journal !== undefined) {
+      try {
+        const sessions = (Array.isArray((journal as { repairs?: unknown }).repairs) ? (journal as { repairs: unknown[] }).repairs : [])
+          .flatMap(item => (item as { mode?: unknown; n?: unknown } | null)?.mode === 'session' && Number.isInteger((item as { n: unknown }).n) ? [(item as { n: number }).n] : [])
+        const receipts = new Map<number, unknown>()
+        for (const n of sessions) receipts.set(n, await read(`repair-${n}.interactive.json`))
+        const repairs = mapRepairs(journal, n => receipts.get(n) ?? (exportedRepairs.find(repair => repair.n === n)?.requested ? { requested: exportedRepairs.find(repair => repair.n === n)!.requested } : undefined))
+        let rounds: ReturnType<typeof mapReviewRounds>
+        const rawRounds = await read(REVIEW_ROUNDS_FILE)
+        const archives = new Map<number, unknown>()
+        if (rawRounds !== undefined) {
+          for (const item of (rawRounds as { rounds?: unknown[] }).rounds ?? []) {
+            const round = (item as { round?: unknown } | null)?.round
+            if (typeof round === 'number') archives.set(round, await read(`review.round-${round}.json`))
+          }
+        }
+        try {
+          if (rawRounds === undefined) throw new FixLoopError(`${REVIEW_ROUNDS_FILE} is not readable`)
+          rounds = mapReviewRounds(rawRounds, repairs, round => archives.get(round)).map(round => {
+            const kept = exportedRounds.find(other => other.round === round.round)
+            return round.archived && round.reviewers.length === 0 && kept ? { ...round, reviewers: kept.reviewers } : round
+          })
+        } catch (error) {
+          // Unreadable or invalid: the export's rounds (an absent file simply means no round was archived).
+          if (rawRounds !== undefined) skip('live', reason(error))
+          rounds = rawRounds === undefined && exportedRounds.length === 0 ? [] : exportedRounds.map(round => ({ ...round }))
+        }
+        if (repairs.length === 0 && rounds.length === 0 && exported === null && exportFailure === null) return null
+        const configured = exported && !('error' in exported) ? exported.rounds : state.inputs?.automatic?.fix_rounds ?? repairs.at(-1)?.rounds ?? 0
+        return check({ ...header('live'), version: '1.0.0', rounds: configured, repairs, review_rounds: rounds })
+      } catch (error) {
+        liveFailure = reason(error)
+        skip('live', liveFailure)
+      }
+    }
+    if (exported) return exported
+    const failure = liveFailure ?? exportFailure
+    if (failure === null) return null
+    return { ...header('export'), version: '1.0.0', error: failure, rounds: null, repairs: [], review_rounds: [] }
   }
 
   /**
@@ -1441,7 +1576,28 @@ function eventNode(definition: WorkflowDefinition, node: string, map: LaneMap): 
 /** The graph node a raw event concerns. The controller process's own rows concern the run, even beside a lane named `controller`. */
 function eventGraphNode(definition: WorkflowDefinition, event: RawEvent, map: LaneMap): string | null {
   if (event.node === 'controller' && map.lanes.includes('controller') && CONTROLLER_PROCESS_ROWS.some(pattern => pattern.test(event.message))) return null
+  const repair = map.repairs ? repairRowNode(event, map.repairs) : null
+  if (repair !== null) return definition.nodes.some(node => node.node_id === repair) ? repair : null
   return eventNode(definition, event.node, map)
+}
+
+const REPAIR_ROW = /^repair_(.+)$/
+const REPAIR_TOKEN = /\brepair-([1-9][0-9]*)\b/
+const REPAIR_ROUND = /^round (\d+):/
+
+/**
+ * The `repair-<n>` node a `repair_<lane>` timeline row (repair.py) concerns: the row's own `repair-<n>` token first (the launch
+ * row, the stop warnings), else the `round <r>` it opens with, counted per lane. Null for any other row and for a row naming no repair of the loop.
+ */
+function repairRowNode(event: RawEvent, repairs: NonNullable<LaneMap['repairs']>): string | null {
+  const row = REPAIR_ROW.exec(event.node)
+  if (!row) return null
+  const token = REPAIR_TOKEN.exec(event.message)
+  const named = token ? repairs.find(repair => repair.n === Number(token[1])) : undefined
+  if (named) return `repair-${named.n}`
+  const round = REPAIR_ROUND.exec(event.message)
+  const counted = round ? repairs.find(repair => repair.lane === row[1] && repair.round === Number(round[1])) : undefined
+  return counted ? `repair-${counted.n}` : null
 }
 
 function present(value: unknown): boolean {
@@ -1479,7 +1635,9 @@ export function normalizeEvents(runId: string, definition: WorkflowDefinition, r
     }
     // A status only means something for a node in the pinned graph; unattributed records are plain log lines. The
     // controller's own rows keep theirs (blocked is failed, interrupted is paused) as logs, so the viewer can say why it stopped.
-    const status = node_id || event.node === 'controller' ? EVENT_STATUS[event.status] ?? null : null
+    // A repair session's rows (repair.py) end `failed` when the round blocks; no other node's row says `failed`.
+    const repairFailed = node_id !== null && node_id.startsWith('repair-') && event.status === 'failed'
+    const status = node_id || event.node === 'controller' ? EVENT_STATUS[event.status] ?? (repairFailed ? 'failed' : null) : null
     // The combined check reports per lane; its rows are aliased onto `candidate`, so the message keeps the lane.
     const lane = node_id === 'candidate' && event.node !== node_id ? event.node.slice('candidate_'.length) : null
     return eventSchema.parse({
@@ -1507,7 +1665,7 @@ type NodeStatus = RunSnapshot['nodes'][number]['status']
  * only at checkpoints, so after a `freeze succeeded` event the interrupt it still holds is stale: the handoff has
  * succeeded and the rest of the graph is read as usual.
  */
-export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, state: RunExport, rawEvents: readonly RawEvent[], packets: readonly LoadedPacket[], map: LaneMap = laneMap(LEGACY_LANES)): RunSnapshot {
+export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, state: RunExport, rawEvents: readonly RawEvent[], packets: readonly LoadedPacket[], map: LaneMap = laneMap(LEGACY_LANES), loop: FixLoop | null = null): RunSnapshot {
   const lastEvent = new Map<string, RawEvent>()
   const eventAttempt = new Map<string, number>()
   let lastController: RawEvent | undefined
@@ -1562,9 +1720,9 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     if (map.verifyNodes.has(node.node_id)) attempt = Math.max(attempt, eventAttempt.get(node.node_id) ?? 0)
     // The review node names its reviewer and links to the recorded result only from the export's review section, never from `values`.
     if (node.node_id === 'review' && state.review) {
-      attempt = state.review.attempt
+      attempt = reviewAttempt(state.review, loop)
       session_id = redactPaths(state.review.reviewer_session_id)
-      result_uri = reviewRoute(scope, state.run_id, state.review.attempt)
+      result_uri = reviewRoute(scope, state.run_id, attempt)
     }
     let status: NodeStatus
     const event = lastEvent.get(node.node_id)
@@ -1592,6 +1750,8 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     else if (eventStatus) status = eventStatus
     else status = 'pending'
     if (status !== 'pending' && attempt === 0) attempt = 1
+    // While the reviewers of round k > 1 run, review.json is archived and the review section is null: the attempt is the round.
+    if (node.node_id === 'review' && !state.review && status !== 'pending' && archivedRounds(loop) > 0) attempt = 1 + archivedRounds(loop)
     if (status === 'pending') { attempt = 0; session_id = null; result_uri = null }
     // The combined candidate holds one verified result per lane; link each so its evidence (screenshots included) is reachable.
     const lane_results = node.node_id === 'candidate' && status !== 'pending'
@@ -1602,6 +1762,12 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
       : []
     return { node_id: node.node_id, kind: node.kind, depends_on: [...node.depends_on], status, attempt, session_id, result_uri, lane_results }
   })
+  // The steps a running repair re-enters read running (attempt and result unchanged), so the fold below keeps the run alive.
+  const running = (loop?.repairs ?? []).filter(repair => REPAIR_RUNNING.has(repair.status))
+  for (const node of nodes) {
+    if (running.some(repair => repair.reentered_steps.includes(node.node_id))) node.status = 'running'
+  }
+  // A repair node's status never enters the run's status: the fold reads the pinned steps only.
   const statuses = new Set(nodes.map(node => node.status))
   const integrated = hasEvidence(state, 'integrate', map)
   // An abandoned run (its controller `cancelled` row, abandon.py) is closed whatever its steps read: it leaves the running lists.
@@ -1616,7 +1782,51 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   else if (statuses.has('running') || state.next.length > 0) status = 'running'
   else if (statuses.size === 1 && statuses.has('pending')) status = 'pending'
   else status = 'paused'
-  return { contract_version: '1.0.0', run_id: state.run_id, status, last_sequence: rawEvents.at(-1)?.sequence ?? 0, nodes }
+  return { contract_version: '1.0.0', run_id: state.run_id, status, last_sequence: rawEvents.at(-1)?.sequence ?? 0, nodes: insertRepairs(nodes, loop, repairSnapshotNode) }
+}
+
+const REPAIR_RUNNING: ReadonlySet<RepairEntry['status']> = new Set(['launched', 'captured', 'recorded'])
+
+/** The review attempt: the export's review round, else one plus the fix loop's archived rounds (a 1.9.0 export read live). */
+function reviewAttempt(review: ReviewSection, loop: FixLoop | null): number {
+  return review.round ?? 1 + archivedRounds(loop)
+}
+
+/** A repair node's status from its journal entry: launched, captured and recorded run; applied succeeded; blocked failed. */
+function repairStatus(repair: RepairEntry): NodeStatus {
+  return REPAIR_RUNNING.has(repair.status) ? 'running' : repair.status === 'applied' ? 'succeeded' : 'failed'
+}
+
+function repairSnapshotNode(repair: RepairEntry): RunSnapshot['nodes'][number] {
+  const session = repair.session_id !== null && ID_PATTERN.test(repair.session_id) ? repair.session_id : null
+  return { node_id: repair.node_id, kind: 'worker', depends_on: [repair.blocked_step], status: repairStatus(repair), attempt: 1, session_id: session, result_uri: null, lane_results: [] }
+}
+
+function repairDefinitionNode(repair: RepairEntry): WorkflowDefinition['nodes'][number] {
+  return { node_id: repair.node_id, label: `Repair ${repair.lane} ${repair.n}`, kind: 'worker', depends_on: [repair.blocked_step] }
+}
+
+/** Inserts each repair node right after the step it answers (repairs of one step in journal order); nothing depends on them. */
+function insertRepairs<T extends { node_id: string }>(nodes: readonly T[], loop: FixLoop | null, make: (repair: RepairEntry) => T): T[] {
+  if (!loop || loop.repairs.length === 0) return [...nodes]
+  return nodes.flatMap(node => [node, ...[...loop.repairs].sort((a, b) => a.n - b.n).filter(repair => repair.blocked_step === node.node_id).map(make)])
+}
+
+/** The definition with the loop's repair nodes; its revision is the pinned definition's, hashed before any round existed. */
+function projectedDefinition(definition: WorkflowDefinition, loop: FixLoop | null): WorkflowDefinition {
+  return loop && loop.repairs.length > 0 ? { ...definition, nodes: insertRepairs(definition.nodes, loop, repairDefinitionNode) } : definition
+}
+
+/** A loop is projectable only when every step it answers is a node of the pinned definition and no repair id collides with one. */
+function checkLoopGraph(loop: FixLoop, definition: WorkflowDefinition): void {
+  const known = new Set(definition.nodes.map(node => node.node_id))
+  for (const repair of loop.repairs) {
+    if (!known.has(repair.blocked_step)) throw new FixLoopError(`repair ${repair.n} answers ${repair.blocked_step}, which is not a step of this run`)
+    if (known.has(repair.node_id)) throw new FixLoopError(`repair ${repair.n} collides with a node of this run`)
+    for (const step of repair.reentered_steps) {
+      if (!known.has(step)) throw new FixLoopError(`repair ${repair.n} re-enters ${step}, which is not a step of this run`)
+    }
+  }
 }
 
 // ---- The review sidecar's ledger (contract 1.6.0) --------------------------------------------------------------

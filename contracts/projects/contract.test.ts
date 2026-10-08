@@ -9,7 +9,7 @@ import {
   ATTACK_ATTACKER_STATUSES, ATTACK_FINDING_STATUSES, ATTACK_PASS_STATUSES, ATTACK_RERUN_REASONS, ATTACK_SKEPTIC_STATUSES, attackRecordSchema,
   ATTENTION_KINDS, CONTROLLER_STATES, isBlockingFinding, PANEL_PROVIDER_STATUSES, PANEL_SEVERITIES, PANEL_STAGES, PANEL_STATUSES, PANEL_TRANSPORTS, panelRecordSchema, schemas,
   sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult,
-  validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelResults,
+  validateFixLoop, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelResults,
 } from './v1.js'
 
 test('project examples and generated schemas agree', () => {
@@ -740,4 +740,94 @@ test('panel results 1.9.0: Appendix A field rules, every enum value, threshold "
     mutate(value)
     assert.throws(() => validatePanelResults(value), label)
   }
+})
+
+// ---- Export 1.10.0: the in-run fix loop (docs/PRD_VIEWER_REFINE.md Appendix A) ----
+
+const FIX_LOOP_EXPECTED = new URL('./examples/fix-loop/expected.json', import.meta.url)
+
+test('fix loop 1.10.0: Appendix A\'s records validate verbatim and are the committed examples, with the real run\'s expected record', () => {
+  for (const loop of [examples.fixLoop, examples.fixLoopLaunched, examples.fixLoopRestored, examples.fixLoopError]) validateFixLoop(loop)
+  const expected = JSON.parse(readFileSync(FIX_LOOP_EXPECTED, 'utf8'))
+  const real = validateFixLoop({ contract_version: '1.10.0', source: 'live', ...expected })
+  assert.deepEqual(real.repairs.map(repair => [repair.n, repair.node_id, repair.status, repair.blocked_step]), [[1, 'repair-1', 'applied', 'verify_engine'], [2, 'repair-2', 'applied', 'review']])
+  assert.equal(examples.fixLoop.source, 'live')
+  assert.ok('repairs' in examples.fixLoop && examples.fixLoop.repairs.every(repair => repair.mode === 'session' && repair.reentered_steps.length > 0))
+  assert.ok('review_rounds' in examples.fixLoopRestored && examples.fixLoopRestored.review_rounds[0].restored_at !== null && !examples.fixLoopRestored.review_rounds[0].archived)
+  assert.equal(examples.launchedRepair.session_id, null)
+  assert.equal(examples.launchedRepair.status, 'launched')
+})
+
+type Loose = { repairs: Record<string, unknown>[]; review_rounds: (Record<string, unknown> & { reviewers: Record<string, unknown>[] })[]; [key: string]: unknown }
+
+test('fix loop 1.10.0: the schema is strict and carries the record facts', () => {
+  const cases: [string, (loop: Loose) => void][] = [
+    ['an unknown key on the loop', loop => { loop.extra = 1 }],
+    ['an unknown key on a repair', loop => { loop.repairs[0].blocked = {} }],
+    ['a repair without a field of its status (every field is present in every status)', loop => { delete loop.repairs[0].gate_reasons }],
+    ['a round reviewer verdict that is a status word', loop => { loop.review_rounds[0].reviewers[0].verdict = 'accepted' }],
+    ['a finding with a file and a line', loop => { const finding = (loop.repairs[1].findings as Record<string, unknown>[])[0]; finding.file = 'a.ts'; finding.line = 3 }],
+    ['an actor the journal does not write', loop => { loop.repairs[0].by = 'engine' }],
+    ['a status the journal does not write', loop => { loop.repairs[0].status = 'done' }],
+    ['a mode other than session', loop => { loop.repairs[0].mode = 'commit' }],
+    ['a node id other than repair-<n>', loop => { loop.repairs[0].node_id = 'verify_viewer' }],
+    ['a node id that is not the entry\'s n', loop => { loop.repairs[0].node_id = 'repair-9' }],
+    ['a blocked step the trigger does not give', loop => { loop.repairs[0].blocked_step = 'candidate' }],
+    ['a review repair that re-enters another step', loop => { loop.repairs[1].reentered_steps = ['candidate'] }],
+    ['duplicate repair numbers', loop => { loop.repairs[1].n = 1; loop.repairs[1].node_id = 'repair-1' }],
+    ['a round both archived and restored', loop => { loop.review_rounds[0].restored_at = '2026-10-09T11:40:12Z' }],
+    ['a round naming a repair that is not listed', loop => { loop.review_rounds[0].repair_n = 7 }],
+    ['an applied repair without its time', loop => { loop.repairs[0].applied_at = null }],
+  ]
+  for (const [name, mutate] of cases) {
+    const loop = structuredClone(examples.fixLoop) as unknown as Loose
+    mutate(loop)
+    assert.throws(() => validateFixLoop(loop), undefined, name)
+  }
+  // The facts the records hold: operator and maintainer repairs with `via`, a plan pinned before roles, gaps in `n`, no receipt yet.
+  const loop = structuredClone(examples.fixLoop) as unknown as Loose
+  Object.assign(loop.repairs[0], { by: 'operator', via: 'claude-code', requested: { model: null, effort: null } })
+  Object.assign(loop.repairs[1], { n: 4, node_id: 'repair-4', by: 'maintainer', requested: null })
+  loop.review_rounds[0].repair_n = 4
+  validateFixLoop(loop)
+  // The error form carries neither repairs nor rounds.
+  assert.throws(() => validateFixLoop({ ...examples.fixLoopError, repairs: (examples.fixLoop as unknown as Loose).repairs }))
+  assert.throws(() => validateFixLoop({ ...examples.fixLoopError, rounds: 2 }))
+  // The error form carries `version` as the controller writes it.
+  validateFixLoop(examples.fixLoopError)
+  assert.throws(() => validateFixLoop(Object.fromEntries(Object.entries(examples.fixLoopError).filter(([key]) => key !== 'version'))))
+})
+
+test('run details with repair nodes: the DAG check passes, the key is optional and strict, and 1.9.0 shaped values validate unchanged', () => {
+  const detail = structuredClone(examples.runDetail)
+  const after = detail.definition.nodes.findIndex(node => node.node_id === 'review')
+  const repair = { node_id: 'repair-2', kind: 'worker' as const, depends_on: ['review'] }
+  detail.definition.nodes.splice(after + 1, 0, { ...repair, label: 'Repair viewer 2' })
+  const review = detail.snapshot.nodes.findIndex(node => node.node_id === 'review')
+  detail.snapshot.nodes.splice(review + 1, 0, { ...repair, status: 'succeeded', attempt: 1, session_id: '0c9b8a7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d', result_uri: null, lane_results: [] })
+  validateRunDetail(detail)
+  validateRunDetail({ ...detail, fixLoop: examples.fixLoop })
+  validateRunDetail({ ...detail, fixLoop: null })
+  assert.throws(() => validateRunDetail({ ...detail, fixLoop: { ...examples.fixLoop, extra: true } }))
+  assert.throws(() => validateRunDetail({ ...detail, other: null }))
+  // A repair node that closes a cycle is still refused.
+  const cyclic = structuredClone(detail)
+  cyclic.definition.nodes.find(node => node.node_id === 'review')!.depends_on.push('repair-2')
+  assert.throws(() => validateRunDetail(cyclic))
+  // 1.9.0 shaped review results and inputs (none of the 1.10.0 keys) validate; so do they with every key.
+  validateReviewResult(examples.reviewResult)
+  const result = structuredClone(examples.reviewResult)
+  Object.assign(result, { round: 2, delta_from: '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f', delta_diff: null })
+  validateReviewResult(result)
+  assert.throws(() => validateReviewResult({ ...result, round: 0 }))
+  const inputs = structuredClone(examples.runInputs)
+  assert.equal('skills' in inputs.workers[0], false)
+  inputs.workers[0].roles = { model: 'claude-opus-4-8', effort: null }
+  inputs.workers[0].skills = [{ name: 'impeccable', sha256: 'a'.repeat(64) }]
+  inputs.automatic!.fix_rounds = 2
+  validateRunInputs(inputs)
+  inputs.workers[0].roles = null
+  inputs.workers[0].skills = []
+  validateRunInputs(inputs)
+  assert.throws(() => validateRunInputs({ ...inputs, workers: [{ ...inputs.workers[0], skills: [{ name: 'x' }] }] }))
 })

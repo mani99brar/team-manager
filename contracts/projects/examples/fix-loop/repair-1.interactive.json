@@ -1,0 +1,24 @@
+{
+  "node_id": "repair-1",
+  "session_id": "47cfd666-feb1-4f4a-a527-05bb8798f8dd",
+  "launch_token": "68df547c-f4c2-4cfb-aeae-8036c0be79e2",
+  "plan_digest": "4dd230f0be5b9cd126efdd7cde1106759ce4b3aa7664f2e7431ba07b9dc9e5fb",
+  "worktree": "/home/agentops/.local/state/md-manager-workflows/worker-skills/worker-skills-001/repair-workspace-1",
+  "base_commit": "74e1e36d5fd5179251b32d8f8dd9b50144106741",
+  "workspace_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+  "status": "attached_session_available",
+  "attempt": 1,
+  "launcher_invocations": 1,
+  "launch_requested_at": "2026-10-08T13:26:48.176091+00:00",
+  "requested": {
+    "model": "claude-opus-4-8",
+    "effort": null
+  },
+  "lane": "engine",
+  "round": 1,
+  "trigger": "verify",
+  "repair": 1,
+  "background_id": "47cfd666",
+  "observed_state": "working",
+  "native_started_at": 1791466011319
+}

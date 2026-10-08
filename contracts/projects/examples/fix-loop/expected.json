@@ -1,0 +1,178 @@
+{
+  "version": "1.0.0",
+  "rounds": 2,
+  "repairs": [
+    {
+      "n": 1,
+      "node_id": "repair-1",
+      "mode": "session",
+      "lane": "engine",
+      "trigger": "verify",
+      "round": 1,
+      "rounds": 2,
+      "status": "applied",
+      "by": "controller",
+      "recorded_at": "2026-10-08T13:26:48.172656Z",
+      "applied_at": "2026-10-08T14:00:56.942847Z",
+      "blocked_step": "verify_engine",
+      "reentered_steps": [
+        "verify_engine"
+      ],
+      "reason": "repair session round 1: verify",
+      "workspace_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+      "session_id": "47cfd666-feb1-4f4a-a527-05bb8798f8dd",
+      "review_round": null,
+      "findings": [],
+      "delta": false,
+      "fix_files": [
+        "workflow/test_pipeline.py",
+        "workflow/test_portable.py"
+      ],
+      "left_behind": [],
+      "requested": {
+        "model": "claude-opus-4-8",
+        "effort": null
+      },
+      "gate_reasons": [
+        "Executed check failed: /home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests",
+        "workflow-unit: no passing test evidence or failed tests",
+        "workflow-unit: exit 1"
+      ]
+    },
+    {
+      "n": 2,
+      "node_id": "repair-2",
+      "mode": "session",
+      "lane": "engine",
+      "trigger": "review",
+      "round": 2,
+      "rounds": 2,
+      "status": "applied",
+      "by": "controller",
+      "recorded_at": "2026-10-08T14:28:01.496698Z",
+      "applied_at": "2026-10-08T15:03:38.835627Z",
+      "blocked_step": "review",
+      "reentered_steps": [
+        "review"
+      ],
+      "reason": "repair session round 2: review",
+      "workspace_commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+      "session_id": "2a16e9fa-a209-449a-b2f9-7297e9dd25d4",
+      "review_round": 1,
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "The skills lane's pinned plugin gets an Edit deny but no Write deny, which contradicts the task's Constraints line and decisions.md [L1](g) (\"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\"). Input: any lane with `skills`, e.g. `worker_settings(run, skills_lane=\"ui\", advisor_model=\"fable\")`. Expected: both an `Edit(//<run>/skills/ui/**)` and a `Write(//<run>/skills/ui/**)` rule. Actual: workflow/sessions.py:302-304 appends only the `Edit(...)` rule. The tests also require the Write rule to be absent: workflow/test_skills.py:108 and workflow/test_interactive.py:529 assert that no deny rule starts with `Write(`. workflow/RUNBOOK.md (\"The pinned plugin\" bullet) documents the Edit-only deny. The worker followed advisory challenge note 6, which argues that a `Write(...)` rule never matches (interactive.py:421-424). That argument does not show the bullet cannot hold: adding the rule costs nothing. The departure is not named with its bullet id ([L1] g) in the completion's open_assumptions, which list only the CLAUDE_CONFIG_DIR and the ~/.claude.json trust write. The handoff says \"No departures from decisions.md Operator decisions or grill defaults\", but [L1] is a Changes-after-launch bullet. The worker's prompt (line 144) also required a `question` completion before building on a reading that departs from a task line's plain words, and none was written. Fix: add the `Write(...)` deny beside the Edit rule and adjust the two tests and the RUNBOOK sentence, or get the operator's decision recorded. Consequence: the merged controller's settings bytes, its skills_settings_sha256 and its RUNBOOK differ from what the operator decided for every skills lane in viewer-refine and later runs, through an unrecorded departure. The operator, who decided [L1](g), is not told it was overridden.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+          "reviewer": "general"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted task Constraint and [L1](g) (case 2, also disclosed in the completion, case 3). The task says a skills lane \"gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g)\". decisions.md [L1](g) says the same: \"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\". The candidate adds only `Edit(/<run>/skills/<lane>/**)` (workflow/sessions.py:305). Tests assert that no Write rule exists: workflow/test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today (`assertFalse(any(rule.startswith(\"Write(\") ...))`) and workflow/test_skills.py::WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_only_an_edit_deny_and_the_advisor. The RUNBOOK says the same. The worker's summary discloses it: \"one Edit deny on the lane's own plugin, note 6: Edit only never Write\", and its Proof table row reads \"[L1]g Edit-only plugin deny\". decisions.md lets a worker depart from a change after launch to apply a design-challenge note, but only when the departure is \"named, with the bullet's id, in the completion's open_assumptions\". The two open_assumptions entries (CLAUDE_CONFIG_DIR, the ~/.claude.json trust write) do not name [L1](g), so this is an unnamed departure, which the rule calls a contradicted requirement. Inputs: any plan with a skills lane. Expected: both Edit and Write denies on <run>/skills/<lane>/**. Actual: Edit only. Fix: either add the Write rule, or have the operator amend [L1](g) and the task line. Consequence: a requirement the operator settled is silently replaced, and the plan's skills_settings_sha256 pins settings bytes that differ from the ones the operator approved.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+          "reviewer": "coverage"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted [L1](b), which the task's Design (settled) adopts (\"Follow them as the task\") (case 2). [L1](b): \"every launch, `launch --dry-run` and a repair session hours later read the plan, never the file.\" The candidate's dry run reads the operator's file: workflow/launch.py:659 `printed[\"advisor_model\"] = {\"value\": advisor_model(), \"note\": \"read again at prepare from ~/.claude/settings.json\"}`. workflow/test_pipeline.py::PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor asserts this file read. The change follows design-challenge note 3, but the completion's open_assumptions does not name [L1](b), so under decisions.md's rule (\"An unnamed or out-of-lane departure is a contradicted requirement\") it contradicts the requirement. Inputs: `launch <feature> --dry-run` on a 2.8.0 feature with a skills lane. Expected: no read of ~/.claude/settings.json. Actual: the file is read and its advisorModel printed. Fix: either stop the dry run from reading the file, or name the departure in open_assumptions and have the operator settle it. Consequence: the dry run reads the operator's settings file, which the operator ruled out, and no decision records the change.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+          "reviewer": "coverage"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted Design (settled) Prepare line (case 2). The line says \"each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)\". workflow/skills.py:75-80 resolves only the folder (`(Path(root) / name).resolve()`), then refuses `manifest.is_symlink()` as \"not a regular file\". Inputs: ~/.claude/skills/foo/SKILL.md is a symlink to a regular file, for example foo/SKILL.md -> ../../shared/foo.md, or a link to a file inside the folder. Expected: the symlink is followed and the skill resolves. Actual: launch and prepare raise \"Blocked: lane <lane> skill foo: .../SKILL.md is not a regular file\" (skills.py:79-80). The inline comment \"resolve() left a real file\" is wrong: resolve() was applied to the folder, not to SKILL.md. No test covers a symlinked SKILL.md: test_resolve_refuses_a_missing_or_irregular_skill_md_naming_the_lane_and_skill uses a directory, and test_copy_preserves_an_executable_bit_and_follows_a_symlinked_folder links only the folder. Consequence: an operator whose skill keeps SKILL.md as a symlink (common when skills live in a shared clone, as impeccable does) has every launch and prepare of that lane refused.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)",
+          "reviewer": "coverage"
+        }
+      ],
+      "delta": false,
+      "fix_files": [
+        "docs/handoff/worker-skills.md",
+        "workflow/README.md",
+        "workflow/RUNBOOK.md",
+        "workflow/launch.py",
+        "workflow/sessions.py",
+        "workflow/skills.py",
+        "workflow/test_interactive.py",
+        "workflow/test_pipeline.py",
+        "workflow/test_skills.py"
+      ],
+      "left_behind": [],
+      "requested": {
+        "model": "claude-opus-4-8",
+        "effort": null
+      },
+      "gate_reasons": []
+    }
+  ],
+  "review_rounds": [
+    {
+      "round": 1,
+      "verdict": "blocked",
+      "candidate": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+      "lane": "engine",
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "The skills lane's pinned plugin gets an Edit deny but no Write deny, which contradicts the task's Constraints line and decisions.md [L1](g) (\"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\"). Input: any lane with `skills`, e.g. `worker_settings(run, skills_lane=\"ui\", advisor_model=\"fable\")`. Expected: both an `Edit(//<run>/skills/ui/**)` and a `Write(//<run>/skills/ui/**)` rule. Actual: workflow/sessions.py:302-304 appends only the `Edit(...)` rule. The tests also require the Write rule to be absent: workflow/test_skills.py:108 and workflow/test_interactive.py:529 assert that no deny rule starts with `Write(`. workflow/RUNBOOK.md (\"The pinned plugin\" bullet) documents the Edit-only deny. The worker followed advisory challenge note 6, which argues that a `Write(...)` rule never matches (interactive.py:421-424). That argument does not show the bullet cannot hold: adding the rule costs nothing. The departure is not named with its bullet id ([L1] g) in the completion's open_assumptions, which list only the CLAUDE_CONFIG_DIR and the ~/.claude.json trust write. The handoff says \"No departures from decisions.md Operator decisions or grill defaults\", but [L1] is a Changes-after-launch bullet. The worker's prompt (line 144) also required a `question` completion before building on a reading that departs from a task line's plain words, and none was written. Fix: add the `Write(...)` deny beside the Edit rule and adjust the two tests and the RUNBOOK sentence, or get the operator's decision recorded. Consequence: the merged controller's settings bytes, its skills_settings_sha256 and its RUNBOOK differ from what the operator decided for every skills lane in viewer-refine and later runs, through an unrecorded departure. The operator, who decided [L1](g), is not told it was overridden.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+          "reviewer": "general"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted task Constraint and [L1](g) (case 2, also disclosed in the completion, case 3). The task says a skills lane \"gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g)\". decisions.md [L1](g) says the same: \"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\". The candidate adds only `Edit(/<run>/skills/<lane>/**)` (workflow/sessions.py:305). Tests assert that no Write rule exists: workflow/test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today (`assertFalse(any(rule.startswith(\"Write(\") ...))`) and workflow/test_skills.py::WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_only_an_edit_deny_and_the_advisor. The RUNBOOK says the same. The worker's summary discloses it: \"one Edit deny on the lane's own plugin, note 6: Edit only never Write\", and its Proof table row reads \"[L1]g Edit-only plugin deny\". decisions.md lets a worker depart from a change after launch to apply a design-challenge note, but only when the departure is \"named, with the bullet's id, in the completion's open_assumptions\". The two open_assumptions entries (CLAUDE_CONFIG_DIR, the ~/.claude.json trust write) do not name [L1](g), so this is an unnamed departure, which the rule calls a contradicted requirement. Inputs: any plan with a skills lane. Expected: both Edit and Write denies on <run>/skills/<lane>/**. Actual: Edit only. Fix: either add the Write rule, or have the operator amend [L1](g) and the task line. Consequence: a requirement the operator settled is silently replaced, and the plan's skills_settings_sha256 pins settings bytes that differ from the ones the operator approved.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+          "reviewer": "coverage"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted [L1](b), which the task's Design (settled) adopts (\"Follow them as the task\") (case 2). [L1](b): \"every launch, `launch --dry-run` and a repair session hours later read the plan, never the file.\" The candidate's dry run reads the operator's file: workflow/launch.py:659 `printed[\"advisor_model\"] = {\"value\": advisor_model(), \"note\": \"read again at prepare from ~/.claude/settings.json\"}`. workflow/test_pipeline.py::PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor asserts this file read. The change follows design-challenge note 3, but the completion's open_assumptions does not name [L1](b), so under decisions.md's rule (\"An unnamed or out-of-lane departure is a contradicted requirement\") it contradicts the requirement. Inputs: `launch <feature> --dry-run` on a 2.8.0 feature with a skills lane. Expected: no read of ~/.claude/settings.json. Actual: the file is read and its advisorModel printed. Fix: either stop the dry run from reading the file, or name the departure in open_assumptions and have the operator settle it. Consequence: the dry run reads the operator's settings file, which the operator ruled out, and no decision records the change.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+          "reviewer": "coverage"
+        },
+        {
+          "severity": "P1",
+          "message": "Contradicted Design (settled) Prepare line (case 2). The line says \"each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)\". workflow/skills.py:75-80 resolves only the folder (`(Path(root) / name).resolve()`), then refuses `manifest.is_symlink()` as \"not a regular file\". Inputs: ~/.claude/skills/foo/SKILL.md is a symlink to a regular file, for example foo/SKILL.md -> ../../shared/foo.md, or a link to a file inside the folder. Expected: the symlink is followed and the skill resolves. Actual: launch and prepare raise \"Blocked: lane <lane> skill foo: .../SKILL.md is not a regular file\" (skills.py:79-80). The inline comment \"resolve() left a real file\" is wrong: resolve() was applied to the folder, not to SKILL.md. No test covers a symlinked SKILL.md: test_resolve_refuses_a_missing_or_irregular_skill_md_naming_the_lane_and_skill uses a directory, and test_copy_preserves_an_executable_bit_and_follows_a_symlinked_folder links only the folder. Consequence: an operator whose skill keeps SKILL.md as a symlink (common when skills live in a shared clone, as impeccable does) has every launch and prepare of that lane refused.",
+          "disposition": "open",
+          "worker": "engine",
+          "requirement": "each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)",
+          "reviewer": "coverage"
+        }
+      ],
+      "reviewer_sessions": [
+        "887c094a-6e62-4992-94b1-75a2e065ae04",
+        "b3934f2b-6c5d-493d-9503-4bbbf83b6933"
+      ],
+      "started_at": "2026-10-08T14:28:01.303841Z",
+      "archived": true,
+      "restored_at": null,
+      "repair_n": 2,
+      "reviewers": [
+        {
+          "reviewer_id": "general",
+          "verdict": "blocked",
+          "session_id": "887c094a-6e62-4992-94b1-75a2e065ae04"
+        },
+        {
+          "reviewer_id": "coverage",
+          "verdict": "blocked",
+          "session_id": "b3934f2b-6c5d-493d-9503-4bbbf83b6933"
+        }
+      ]
+    }
+  ]
+}

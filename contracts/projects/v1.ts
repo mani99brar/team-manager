@@ -10,7 +10,11 @@ const version = z.literal('1.0.0')
  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
  * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
  * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29). 1.8.0 adds the attack pass's
- * record (`attackResult`). 1.9.0 adds the multi-provider panel's record (`panelResults`).
+ * record (`attackResult`). 1.9.0 adds the multi-provider panel's record (`panelResults`). 1.10.0 adds the in-run fix loop
+ * (docs/PRD_VIEWER_REFINE.md Appendix A): the run detail's optional `fixLoop` (its own `contract_version: "1.10.0"`; the
+ * summary's version stays 1.0.0 | 1.5.0), the review result's `round`, `delta_from` and `delta_diff`, the run inputs'
+ * `automatic.fix_rounds` and each worker's `roles` and `skills`. Every key added at 1.10.0 is `.nullable().optional()` inside
+ * its strict object, so values built before it validate unchanged; the server always sends them.
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -104,6 +108,8 @@ export const runDetailSchema = z.strictObject({
   snapshot: runSnapshotSchema,
   /** 1.5.0: the run directory, `~`-relative, for projects the registry lists in `viewer.expose_run_dir`; null otherwise. */
   run_dir: z.string().regex(RUN_DIR_PATTERN).nullable().optional(),
+  /** 1.10.0: the in-run fix loop the repair nodes of `definition` and `snapshot` are projected from; null without one. */
+  fixLoop: z.lazy(() => fixLoopSchema).nullable().optional(),
 })
 
 // ---- Review results (1.1.0, finding links 1.2.0, lanes from configuration 1.3.0, parallel reviewers 1.4.0) ----
@@ -191,6 +197,12 @@ export const reviewResultSchema = z.strictObject({
   reviewed_at: timestamp,
   /** The diff the reviewers saw (`review.diff`), registered as a bounded patch artifact of the run, when present. */
   diff: artifactSchema.nullable(),
+  /** 1.10.0: the review round (1 + the archived rounds of the fix loop); equals `attempt`. Absent from a server before it. */
+  round: z.number().int().positive().nullable().optional(),
+  /** 1.10.0: the commit the round's delta diff starts from (the previous round's candidate, or the followed run's); null without a delta. */
+  delta_from: commit.nullable().optional(),
+  /** 1.10.0: `review.delta.diff` as a bounded patch artifact, served as `diff` is; null without the file. */
+  delta_diff: artifactSchema.nullable().optional(),
 })
 
 // ---- Run inputs (1.2.0, worker lanes from configuration in 1.3.0, guardrails in 1.4.0) --------------------------
@@ -273,6 +285,12 @@ export const runChallengeSchema = z.strictObject({
   })).optional(),
 })
 
+/** How hard a role's sessions think: Claude Code's `--effort` levels. */
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** One role's pins: a model (null: Claude Code's default, no `--model` passed) and an effort (null: none passed). */
+const rolePinSchema = z.strictObject({ model: z.string().min(1).nullable(), effort: z.enum(EFFORT_LEVELS).nullable() })
+
 export const runInputWorkerSchema = z.strictObject({
   /** Logical worker lane (`ui`, `adapter`, `docs`, ...): the ID its results are served under. */
   node_id: laneId,
@@ -327,15 +345,14 @@ export const runInputWorkerSchema = z.strictObject({
   stop: z.strictObject({ stopped: z.boolean(), confirmed_at: timestamp.nullable() }).nullable(),
   /** Every question the worker asked, oldest first; `[]` when it asked none and for runs before 1.4.0. */
   questions: z.array(workerQuestionSchema),
+  /** 1.10.0: the lane's model and effort pins (plan.nodes.<lane>.roles); null for a plan pinned before lane pins. */
+  roles: rolePinSchema.nullable().optional(),
+  /** 1.10.0: the skills the lane was pinned with (feature.json 2.8.0), each with its digest; `[]` for a lane without. */
+  skills: z.array(z.strictObject({ name: z.string().min(1), sha256: revision })).nullable().optional(),
 })
 
-/** How hard a role's sessions think: Claude Code's `--effort` levels. */
-export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 /** The profile of an automatic run (1.7.0): unattended when the launch named none. */
 export const RUN_PROFILES = ['attended', 'unattended'] as const
-
-/** One role's pins: a model (null: Claude Code's default, no `--model` passed) and an effort (null: none passed). */
-const rolePinSchema = z.strictObject({ model: z.string().min(1).nullable(), effort: z.enum(EFFORT_LEVELS).nullable() })
 
 /**
  * The roles a run pinned at prepare (1.7.0): the workers, and the judges (the design challenge, every reviewer and the review
@@ -386,6 +403,8 @@ export const runInputsSchema = z.strictObject({
     reviewer_transport: z.enum(['native', 'print']).nullable(),
     /** 1.7.0: the profile the run pinned; null (or absent, from a server before 1.7.0) for runs pinned before profiles. */
     profile: z.enum(RUN_PROFILES).nullable().optional(),
+    /** 1.10.0: the repair sessions each lane gets in this run (plan.automatic.fix_rounds); absent for a plan without the setting. */
+    fix_rounds: z.number().int().nonnegative().nullable().optional(),
   }).nullable(),
   setup: z.array(z.strictObject({ command: z.string().min(1), timeout_seconds: z.number().int().positive() })),
   max_verification_attempts: z.number().int().positive(),
@@ -753,6 +772,103 @@ export const panelResultsSchema = panelRecordSchema.extend({
   source: z.enum(['live', 'export']),
 })
 
+// ---- The in-run fix loop (1.10.0, docs/PRD_VIEWER_REFINE.md Appendix A) ------------------------------------------------
+
+export const REPAIR_STATUSES = ['launched', 'captured', 'recorded', 'applied', 'blocked'] as const
+export const REPAIR_TRIGGERS = ['verify', 'candidate', 'review'] as const
+export const REPAIR_ACTORS = ['controller', 'operator', 'maintainer'] as const
+export const FIX_LOOP_SOURCES = ['live', 'export'] as const
+
+/** A finding as the controller writes it (`contracts/workflow/reviewCompletion.schema.json`) plus the `reviewer` the combine step adds; no file or line. */
+export const fixLoopFindingSchema = z.strictObject({
+  severity: z.enum(['P0', 'P1', 'P2']),
+  message: z.string().min(1),
+  disposition: z.enum(['open', 'resolved', 'accepted']),
+  worker: laneId.nullable(),
+  requirement: z.string().min(1).nullable(),
+  reviewer: reviewerId,
+})
+
+/** One session repair; every field is present in every status, the ones not written yet are null or empty. */
+export const repairEntrySchema = z.strictObject({
+  n: z.number().int().positive(),
+  node_id: z.string().regex(/^repair-[1-9][0-9]*$/),
+  mode: z.literal('session'),
+  lane: laneId,
+  trigger: z.enum(REPAIR_TRIGGERS),
+  /** The lane's repair sessions so far, from 1, of `rounds` the run allows each lane. */
+  round: z.number().int().positive(),
+  rounds: z.number().int().nonnegative(),
+  status: z.enum(REPAIR_STATUSES),
+  by: z.enum(REPAIR_ACTORS),
+  via: z.literal('claude-code').optional(),
+  recorded_at: timestamp,
+  applied_at: timestamp.nullable(),
+  /** The one pinned step the repair answers (`verify_<lane>`, `candidate` or `review`), derived from `trigger` and `lane`. */
+  blocked_step: id,
+  /** Every pinned step of the block the repair re-enters while it runs (all failed `verify_<lane>` of a superstep, `candidate` or `review`). */
+  reentered_steps: z.array(id).min(1),
+  reason: z.string().min(1).nullable(),
+  workspace_commit: commit,
+  session_id: z.string().min(1).nullable(),
+  review_round: z.number().int().positive().nullable(),
+  findings: z.array(fixLoopFindingSchema),
+  /** True only when the brief named a `review.delta*.diff`. */
+  delta: z.boolean(),
+  fix_files: z.array(z.string().min(1)),
+  left_behind: z.array(z.string().min(1)),
+  /** The repair receipt's pins (`{model: null, effort: null}` for a plan pinned before roles); null only while the receipt is missing. */
+  requested: rolePinSchema.nullable(),
+  gate_reasons: z.array(z.string().min(1)),
+})
+
+export const fixLoopReviewerSchema = z.strictObject({
+  reviewer_id: reviewerId,
+  /** As the controller derives it; never a status word such as `accepted`. */
+  verdict: z.enum(['approved', 'blocked']).nullable(),
+  session_id: z.string().min(1).nullable(),
+})
+
+/** One review round the fix loop archived (or restored): `review-rounds.json` plus the repair it fed and the archived reviewers. */
+export const fixLoopReviewRoundSchema = z.strictObject({
+  round: z.number().int().positive(),
+  verdict: z.enum(['approved', 'blocked']),
+  candidate: commit,
+  lane: laneId,
+  findings: z.array(fixLoopFindingSchema),
+  reviewer_sessions: z.array(z.string().min(1)),
+  started_at: timestamp,
+  archived: z.boolean(),
+  /** Set when a blocked review-round repair restored the round (`archived` is then false); null otherwise. */
+  restored_at: timestamp.nullable(),
+  repair_n: z.number().int().positive().nullable(),
+  reviewers: z.array(fixLoopReviewerSchema),
+})
+
+const fixLoopHeader = { contract_version: z.literal('1.10.0'), source: z.enum(FIX_LOOP_SOURCES) }
+
+/**
+ * The fix loop served on the run detail: `<run>/repairs.json` read live when valid, else the export's `fix_loop` (`source`).
+ * The error form is served when neither projects a valid loop: no repairs, no rounds, no repair nodes.
+ */
+export const fixLoopSchema = z.union([
+  z.strictObject({
+    ...fixLoopHeader,
+    version: z.literal('1.0.0'),
+    rounds: z.number().int().nonnegative(),
+    repairs: z.array(repairEntrySchema),
+    review_rounds: z.array(fixLoopReviewRoundSchema),
+  }),
+  z.strictObject({
+    ...fixLoopHeader,
+    version: z.literal('1.0.0'),
+    error: z.string().min(1),
+    rounds: z.null(),
+    repairs: z.array(repairEntrySchema).length(0),
+    review_rounds: z.array(fixLoopReviewRoundSchema).length(0),
+  }),
+])
+
 export const schemas = {
   projectList: z.strictObject({ projects: z.array(projectSchema) }),
   workflowList: z.strictObject({ workflows: z.array(definitionSchema) }),
@@ -763,6 +879,7 @@ export const schemas = {
   sidecarLedger: sidecarLedgerSchema,
   attackResult: attackResultSchema,
   panelResults: panelResultsSchema,
+  fixLoop: fixLoopSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>
@@ -789,6 +906,10 @@ export type AttackResult = z.infer<typeof attackResultSchema>
 export type AttackAttacker = z.infer<typeof attackAttackerSchema>
 export type AttackFinding = z.infer<typeof attackFindingSchema>
 export type AttackLabel = z.infer<typeof attackLabelSchema>
+export type FixLoop = z.infer<typeof fixLoopSchema>
+export type RepairEntry = z.infer<typeof repairEntrySchema>
+export type FixLoopReviewRound = z.infer<typeof fixLoopReviewRoundSchema>
+export type FixLoopFinding = z.infer<typeof fixLoopFindingSchema>
 export type PanelRecord = z.infer<typeof panelRecordSchema>
 export type PanelResults = z.infer<typeof panelResultsSchema>
 export type PanelEntry = z.infer<typeof panelEntrySchema>
@@ -839,6 +960,33 @@ export function validateRunDetail(input: unknown): RunDetail {
     if (activity.attention?.node_id && !definitions.has(activity.attention.node_id)) throw new Error('Attention names a node of the run')
   }
   return detail
+}
+
+/**
+ * The fix loop's cross-field rules: unique repair numbers (gaps are allowed: `n` counts operator commit repairs too), a node id,
+ * blocked step and re-entered steps that follow from the entry, a lane's rounds counted from 1 without gaps, unique review rounds
+ * with their repair named, and a restored round that is not archived.
+ */
+export function validateFixLoop(input: unknown): FixLoop {
+  const loop = fixLoopSchema.parse(input)
+  const unique = (values: readonly (string | number)[], what: string) => {
+    if (new Set(values).size !== values.length) throw new Error(`Duplicate ${what}`)
+  }
+  unique(loop.repairs.map(repair => repair.n), 'repair numbers')
+  unique(loop.review_rounds.map(round => round.round), 'review rounds')
+  for (const repair of loop.repairs) {
+    if (repair.node_id !== `repair-${repair.n}`) throw new Error(`Repair ${repair.n} names the node ${repair.node_id}`)
+    const step = repair.trigger === 'verify' ? `verify_${repair.lane}` : repair.trigger
+    if (repair.blocked_step !== step) throw new Error(`Repair ${repair.n} answers ${step}, not ${repair.blocked_step}`)
+    if (repair.trigger !== 'verify' && (repair.reentered_steps.length !== 1 || repair.reentered_steps[0] !== step)) throw new Error(`Repair ${repair.n} re-enters only ${step}`)
+    if (repair.trigger === 'verify' && !repair.reentered_steps.every(entered => entered.startsWith('verify_'))) throw new Error(`Repair ${repair.n} re-enters verify steps only`)
+    if ((repair.status === 'applied') !== (repair.applied_at !== null)) throw new Error(`Repair ${repair.n}: applied_at is set exactly when the repair is applied`)
+  }
+  for (const round of loop.review_rounds) {
+    if (round.archived && round.restored_at !== null) throw new Error(`Review round ${round.round} is both archived and restored`)
+    if (round.repair_n !== null && !loop.repairs.some(repair => repair.n === round.repair_n)) throw new Error(`Review round ${round.round} names repair ${round.repair_n}, which is not listed`)
+  }
+  return loop
 }
 
 /** A finding blocks integration unless it is resolved; a review cannot be approved while such a finding is open or merely accepted. */
