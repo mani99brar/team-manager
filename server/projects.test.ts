@@ -1283,6 +1283,18 @@ test('a blocked review is served with its verdict while the review node projects
   })
 })
 
+test('a retried lane whose newest packet passed is not failed by the error its checkpoint task still holds', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    // The first attempt failed (the task keeps its error until the graph moves on) and the retry passed: the packet decides.
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'retried', values: reviewedValues(), next: [], events: [...reviewedEvents],
+      tasks: [{ node_id: 'verify_adapter', error: 'RuntimeError(platform verification blocked; retry raised the attempt)', interrupts: [], result: null }],
+      packets: reviewedPackets, review: null, inputs: inputsSection(), diffFile: DIFF, updatedAt: T2 })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'retried'))).json())
+    const node = detail.snapshot.nodes.find(item => item.node_id === 'verify_adapter')!
+    assert.equal(node.status, 'succeeded')
+  })
+})
+
 test('exports without a section are served without it: 1.0.0 has neither, 1.1.0 has the review only, explicit nulls mean not recorded', async () => {
   await harness(async ({ app, runsRoot, root }) => {
     const rootDir = runsRoot('alpha', 'main')

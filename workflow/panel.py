@@ -206,14 +206,32 @@ def brief_path(folder: Path, prompt: str) -> Path:
 
 # ---- Launch guards (PRD 4.2) ----------------------------------------------------------------------------------------
 
-def deepseek_guard(environ=None, fingerprint: Path | None = None) -> None:
+PI_AUTH_STORE = "~/.pi/agent/auth.json"
+
+
+def pi_store_key(provider: str, store: Path | None = None) -> str | None:
+    """The provider's key from pi's own login store (`/login` in pi): the key pi itself uses when the variable is unset."""
+    path = Path(PI_AUTH_STORE).expanduser() if store is None else Path(store)
+    try:
+        value = json.loads(path.read_text()).get(provider, {}).get("key")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def deepseek_guard(environ=None, fingerprint: Path | None = None, pi_store: Path | None = None) -> None:
     """A `deepseek/*` provider runs only when WORKFLOW_PANEL_ALLOW_DEEPSEEK=1 and the live key's SHA-256 equals the 0600
-    fingerprint file's content (the rotated key's digest). Refused otherwise, with one message (PRD 4.2)."""
+    fingerprint file's content (the rotated key's digest). The live key is DEEPSEEK_API_KEY, else (real environment, or an
+    explicit `pi_store`) the key pi holds in its own login store, so it need not be exported in every shell. Refused otherwise,
+    with one message (PRD 4.2)."""
+    real_environment = environ is None
     environ = os.environ if environ is None else environ
     path = Path(DEEPSEEK_FINGERPRINT).expanduser() if fingerprint is None else Path(fingerprint)
     if environ.get(DEEPSEEK_ENV) != "1":
         raise ValueError(DEEPSEEK_REFUSAL)
     key = environ.get(CREDENTIALS["deepseek"])
+    if not key and (real_environment or pi_store is not None):
+        key = pi_store_key("deepseek", pi_store)
     if not key:
         raise ValueError(DEEPSEEK_REFUSAL)
     try:
@@ -225,7 +243,7 @@ def deepseek_guard(environ=None, fingerprint: Path | None = None) -> None:
         raise ValueError(DEEPSEEK_REFUSAL)
 
 
-def check_launch(panels: list[dict], environ=None, fingerprint: Path | None = None) -> None:
+def check_launch(panels: list[dict], environ=None, fingerprint: Path | None = None, pi_store: Path | None = None) -> None:
     """The launch refusals that need no binary: the stage this slice runs, and the DeepSeek key guard."""
     for item in panels:
         if item["stage"] not in LIVE_STAGES:
@@ -233,7 +251,7 @@ def check_launch(panels: list[dict], environ=None, fingerprint: Path | None = No
                              "(the challenge stage is the follow-up slice, PRD_MULTI_PROVIDER_PANEL 5)")
         for provider in item["providers"]:
             if provider["transport"] == "pi" and provider["model"].split("/", 1)[0] == "deepseek":
-                deepseek_guard(environ, fingerprint)
+                deepseek_guard(environ, fingerprint, pi_store)
 
 
 def resolve_pi(environ=None, which=shutil.which) -> Path | None:
@@ -400,6 +418,11 @@ def git_text(worktree: Path, *args: str) -> str:
     return completed.stdout.decode("utf-8", errors="replace")
 
 
+def added_file(worktree: Path, base: str, path: str) -> bool:
+    """True when the file does not exist at the base, so its diff against the base is its whole text."""
+    return subprocess.run(["git", "-C", str(worktree), "cat-file", "-e", f"{base}:{path}"], capture_output=True).returncode != 0
+
+
 def review_sections(worktree: Path, base: str, candidate: str) -> list[tuple[str, str]]:
     """One section per touched text file of the frozen candidate: its diff hunks against the base, then its full text at the
     candidate (`git show`), under the file's repository-relative path as the label. Binary files are skipped; a deleted file
@@ -416,7 +439,10 @@ def review_sections(worktree: Path, base: str, candidate: str) -> list[tuple[str
         except subprocess.CalledProcessError:
             body += "\n--- deleted at the candidate ---\n"
         else:
-            body += "\n--- full file at the candidate ---\n" + full
+            if added_file(worktree, base, path):
+                body += "\n--- new file: the diff above is its whole text ---\n"  # Its full text would repeat the diff and double the context.
+            else:
+                body += "\n--- full file at the candidate ---\n" + full
         sections.append((path, body))
     return sections
 

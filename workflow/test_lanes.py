@@ -295,7 +295,7 @@ class ThreeLaneRun(LaneRun):
             save_json(self.directory / "candidate.json", {"commit": commit, "worktree": str(self.directory / "candidate")})
             made["commit"] = commit
         messages = self.candidate_step(seed)
-        self.assertEqual(messages, [f"Combined revision {made['commit']}"])
+        self.assertEqual(messages, [f"Attempt 1; combined revision {made['commit']}", f"Combined revision {made['commit']}"])
         packet = read_json(self.directory / "verification/candidate/adapter/1/packet.json")
         self.assertNotIn("reused_from", packet)
         self.assertEqual((packet["gate"]["status"], packet["expected"]["output_commit"]), ("passed", made["commit"]))

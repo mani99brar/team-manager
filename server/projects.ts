@@ -1575,7 +1575,9 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     // A passed attempt the plan holds (C8) is paused until `resume --launch` records its release; challenge.json stays passed.
     if (challenge?.status === 'paused' || (challenge?.status === 'passed' && challenge.hold && challenge.hold.released_at === null)) status = 'paused'
     else if (challenge) status = 'succeeded'
-    else if (task?.error) status = 'failed'
+    // A retried lane keeps the failed attempt's error on its checkpoint task until the graph moves on, while its newest packet
+    // passed: a verified lane is not failed (the run showed `failed` through the whole candidate check after a retry).
+    else if (task?.error && !(map.verifyNodes.has(node.node_id) && workerPacket?.ok && workerPacket.gate.status === 'passed')) status = 'failed'
     else if (frozen && node.node_id === 'handoff') status = 'succeeded'
     else if (handoffOpen && automatic && node.node_id === 'handoff') status = waitingHandoff()
     else if (task && task.interrupts.length > 0) status = 'awaiting_approval'

@@ -42,6 +42,8 @@ from .verification import owns, policy_digest, safe_path, slow_checks, validate_
 from .worktrees import SHARED_GIT_CHANGED, controller_git_config, git_worktree, shared_git_changes, shared_git_state
 
 # The gate actions of this CLI: each requires --by (actor.require_actor) and records who ran it in one `controller` event.
+
+STOP_TERMINATION_GRACE_SECONDS = 15  # How long a stopped session's process may take to exit before its stop is refused.
 GATE_ACTIONS = frozenset({"start", "automatic", "retry", "reconcile", "approve"})
 REVIEW_KEYS = frozenset({"run_id", "bundle_sha256", "candidate_commit", "reviewer", "independent", "verdict", "findings"})
 # The combined record of a run with declared reviewers lists them; reviews recorded before parallel reviewers have no list.
@@ -459,10 +461,17 @@ class Pipeline:
                     intent["issued"] = False
                     save_json(marker, intent)
                     raise
-            # Recover stop-before-receipt without issuing another stop command.
-            rows = self.sessions.inventory()
-            if any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"]):
-                raise RuntimeError(f"{node} termination is not established; retry after reconciliation")
+            # Recover stop-before-receipt without issuing another stop command. `claude stop` returns before the session's
+            # process has finished exiting, so one look right after it can still see the old PID (run 004 and 005 of
+            # gateway-balancer-bot, every freeze): look again for a short grace, and only a process that outlives it is not terminated.
+            deadline = time.monotonic() + STOP_TERMINATION_GRACE_SECONDS
+            while True:
+                rows = self.sessions.inventory()
+                if not (any(row.get("sessionId") == intent["session_id"] and row.get("pid") for row in rows) or pid_alive(intent["pid"])):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"{node} termination is not established; retry after reconciliation")
+                time.sleep(1)
             intent["stopped"] = True
             save_json(marker, intent)
             record_session_cost(self.directory, node, intent["session_id"])  # C49: what the session cost, at its confirmed stop.
@@ -559,6 +568,13 @@ class Pipeline:
             env["GIT_INDEX_FILE"] = str(index)
             subprocess.run(["git", "-C", str(cwd), "read-tree", self.plan["base_commit"]], env=env, check=True)
             subprocess.run(["git", "-C", str(cwd), "add", "-A", "--", "."], env=env, check=True)
+            # A deleted path is already staged by `add -A` above, and Git refuses a pathspec that matches nothing (exit 128).
+            present = [name for name in changed if os.path.lexists(cwd / name)]
+            if present:
+                # `add -A` skips a gitignored path even when the lane's index tracks it (a `--restore-from` run restores a file
+                # such as `.env.example`, which `.env*` ignores): add exactly the changed paths, ignored or not, never `add -f .`.
+                subprocess.run(["git", "-C", str(cwd), "--literal-pathspecs", "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                               env=env, input="\0".join(present).encode() + b"\0", check=True)
             tree = subprocess.check_output(["git", "-C", str(cwd), "write-tree"], env=env, text=True).strip()
             # Validate paths from the actual captured tree, including staged renames/deletes. NUL-separated, as changed_files
             # reads them: without -z Git quotes a name with a non-ASCII byte, a double quote or a backslash.
@@ -693,6 +709,8 @@ class Pipeline:
                 note = (f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
                         if "reused_from" in packet else self.slow_note(node, packet))
             else:
+                # The checks take minutes (a fresh install per lane): say so, as verify_<lane> does, or the viewer reads the gap as a pause.
+                self.event(f"candidate_{node}", "running", f"Attempt {attempt}; combined revision {candidate['commit']}")
                 packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
                                          changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
                                          state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
