@@ -148,6 +148,19 @@ class Config(unittest.TestCase):
             panel.check_launch([item], {**good, "DEEPSEEK_API_KEY": "sk-old"}, fingerprint)  # mismatch
         with self.assertRaisesRegex(ValueError, "Blocked: the DeepSeek key"):
             panel.check_launch([item], {"DEEPSEEK_API_KEY": key}, fingerprint)  # variable unset
+        # The key may live only in pi's own login store: the same fingerprint check applies to it.
+        store = tmp / "auth.json"
+        store.write_text(json.dumps({"deepseek": {"type": "api_key", "key": key}}))
+        only_flag = {"WORKFLOW_PANEL_ALLOW_DEEPSEEK": "1"}
+        panel.check_launch([item], only_flag, fingerprint, store)  # unset variable, store key matches
+        store.write_text(json.dumps({"deepseek": {"type": "api_key", "key": "sk-old"}}))
+        with self.assertRaisesRegex(ValueError, "Blocked: the DeepSeek key"):
+            panel.check_launch([item], only_flag, fingerprint, store)  # store key does not match the fingerprint
+        store.write_text("not json")
+        with self.assertRaisesRegex(ValueError, "Blocked: the DeepSeek key"):
+            panel.check_launch([item], only_flag, fingerprint, store)  # unreadable store
+        with self.assertRaisesRegex(ValueError, "Blocked: the DeepSeek key"):
+            panel.check_launch([item], only_flag, fingerprint)  # a plain environment never reads the real store
         # A non-DeepSeek pi provider never consults the guard.
         panel.check_launch(panel.declared({"version": "2.6.0", "panels": [FEATURE_PANEL]}), {}, fingerprint)
 
@@ -534,6 +547,8 @@ class ReviewStep(Harness):
         self.assertEqual(labels, ["docs/req.md", "workflow/new.py", "workflow/x.py", "docs/req.md"])
         self.assertNotIn("logo.bin", context)  # Binary skipped.
         self.assertIn("--- full file at the candidate ---\ndef withdraw", context)
+        self.assertEqual(context.count("--- full file at the candidate ---"), 2)  # The two files that existed at the base; ...
+        self.assertIn("--- new file: the diff above is its whole text ---", context)  # ... a new file is not sent twice.
         self.assertIn("REQ-1: the pinned requirements text", context)  # The pinned text, not the candidate's edit.
         self.assertIn("edited by the candidate", context)  # The candidate's own edit of the file appears as a touched file.
         self.assertNotIn("userEmail", context)  # Never the operator identity or a credential.
