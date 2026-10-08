@@ -79,9 +79,44 @@ class Seam(unittest.TestCase):
         schema = json.loads(panel.SCHEMA.read_text())
         appendix = {"id", "stage", "status", "overlap_threshold", "context_bytes", "providers", "findings", "started_at", "ended_at", "budget_usd", "error"}
         self.assertEqual(set(schema["$defs"]["panel"]["required"]), appendix)
-        self.assertEqual(set(schema["$defs"]["panel"]["properties"]), appendix | {"delta_from"})  # Optional, added within 1.0.0.
+        self.assertEqual(set(schema["$defs"]["panel"]["properties"]), appendix | {"delta_from", "context_truncated"})  # Optional, added within 1.0.0.
         self.assertEqual(set(schema["$defs"]["provider"]["properties"]), {"transport", "model", "effort", "status", "cost_usd", "context_bytes", "finding_ids", "error"})
         self.assertEqual(schema["$defs"]["output"]["type"], "object")  # The claude provider's --json-schema needs an object root.
+
+
+class ContextCap(unittest.TestCase):
+    """cap_sections' order on small caps: bodies largest first, then file diffs largest first, then the documents."""
+
+    def sections(self):
+        return [panel.Section("a.py", "--- diff ---\n" + "a\n" * 200, body="A" * 3000), panel.Section("b.py", "--- diff ---\n" + "b\n" * 100, body="B" * 1000),
+                panel.Section("docs/prd.md", "P\n" * 2000, document=True)]
+
+    def render(self, sections):
+        return "".join(section.render() for section in sections)
+
+    def test_dropping_the_largest_body_is_enough(self):
+        sections = self.sections()
+        original = len(self.render(sections).encode())
+        truncated = panel.cap_sections(sections, original - 2000)
+        self.assertEqual(truncated, {"original_bytes": original, "omitted_bodies": ["a.py"], "truncated": []})
+        self.assertIn("--- full file omitted: 3000 bytes, over the context cap ---", self.render(sections))
+        self.assertIn("--- full file at the candidate ---\nBBB", self.render(sections))
+        self.assertIn("P\n" * 2000, self.render(sections))
+
+    def test_the_documents_are_cut_only_after_every_body_and_diff(self):
+        sections = self.sections()
+        truncated = panel.cap_sections(sections, 2500)
+        self.assertEqual((truncated["omitted_bodies"], truncated["truncated"]), (["a.py", "b.py"], ["a.py", "b.py", "docs/prd.md"]))
+        text = self.render(sections)
+        self.assertLessEqual(len(text.encode()), 2500)
+        self.assertEqual(len(re.findall(r"^=== truncated: kept \d+ of \d+ bytes ===$", text, re.M)), 3)
+        self.assertEqual(panel.context_labels(text), ["a.py", "b.py", "docs/prd.md"])
+
+    def test_a_context_under_the_cap_is_untouched(self):
+        sections = self.sections()
+        before = self.render(sections)
+        self.assertIsNone(panel.cap_sections(sections, len(before.encode())))
+        self.assertEqual(self.render(sections), before)
 
 
 # ---- configuration and the launch guards (PRD 3, 4.2) ---------------------------------------------------------------
@@ -645,6 +680,68 @@ class ReviewStep(Harness):
         context = (self.run / "panel" / "review-panel" / "context.txt").read_text()
         self.assertEqual(panel.context_labels(context), ["docs/req.md", "workflow/new.py", "workflow/x.py", "docs/req.md"])
         self.assertIsNone(self.record()["panels"][0]["delta_from"])
+        self.decide()
+        panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
+
+    def test_a_context_over_the_cap_drops_full_bodies_first_then_cuts_diffs_and_never_the_requirements(self):
+        """A 1 MB generated file rewritten line by line: about 3 MB of context. Every full body goes (largest first), then the
+        largest diff is cut to fit; the pinned requirement text stays whole and context_truncated records it all."""
+        lines = [f"line {index:06d} of the generated module, padded to fifty\n" for index in range(20000)]
+        (self.repo / "big.txt").write_text("".join(lines))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "base with a large file")
+        base = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "big.txt").write_text("".join(line.replace("line", "LINE") for line in lines))
+        x_py = "def withdraw(balance, amount, caller, owner):\n    return balance - amount  # no owner check\n"
+        (self.repo / "workflow" / "x.py").write_text(x_py)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "candidate rewriting it")
+        save_json(self.run / "review-bundle.json", {"run_id": "panel-001", "candidate_commit": git(self.repo, "rev-parse", "HEAD")})
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        plan = self.plan()
+        plan["base_commit"] = base
+        save_json(self.run / "plan.json", plan)
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        data = (self.run / "panel" / "review-panel" / "context.txt").read_bytes()
+        context = data.decode()
+        self.assertLessEqual(len(data), panel.MAX_CONTEXT_BYTES)
+        self.assertEqual(panel.context_labels(context), ["big.txt", "workflow/x.py", "docs/req.md"])  # The marker is no label.
+        def has(text):  # assertIn would print three megabytes on a failure.
+            return text in context
+        self.assertFalse(has("--- full file at the candidate ---"))
+        self.assertTrue(has("=== big.txt ===\n--- diff ---\n"))
+        self.assertTrue(has(f"--- full file omitted: {len(''.join(lines).encode())} bytes, over the context cap ---"))
+        self.assertTrue(has(f"--- full file omitted: {len(x_py.encode())} bytes, over the context cap ---"))  # x.py's body too: still over the cap.
+        [(kept, total)] = re.findall(r"^=== truncated: kept (\d+) of (\d+) bytes ===$", context, re.M)
+        big = context[context.index("=== big.txt ===\n") + len("=== big.txt ===\n"):context.index("=== truncated")]
+        self.assertEqual(int(kept), len(big.encode()))
+        self.assertTrue(big.endswith("\n") and int(total) > 2_000_000)
+        self.assertTrue(big.startswith("--- diff ---\ndiff --git a/big.txt b/big.txt\n"))  # Kept from the start, cut at a line break.
+        self.assertTrue(has("=== docs/req.md ===\nREQ-1: the pinned requirements text\n"))  # Requirements whole.
+        self.assertTrue(has("+    return balance - amount  # no owner check"))  # The smaller diff is whole: the big one's cut was enough.
+        entry = self.record()["panels"][0]
+        self.assertEqual(entry["context_bytes"], len(data))
+        truncated = entry["context_truncated"]
+        self.assertEqual((truncated["omitted_bodies"], truncated["truncated"]), (["big.txt", "workflow/x.py"], ["big.txt"]))
+        self.assertGreater(truncated["original_bytes"], 3_000_000)
+        self.decide()
+        panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
+        self.assertEqual(self.record()["panels"][0]["context_truncated"], truncated)
+        again = self.runtime(plan)  # A resume reuses the file and keeps what the first assembly recorded.
+        record = self.record()
+        record["panels"][0]["status"] = "running"
+        record["panels"][0]["providers"][0]["status"] = "running"
+        save_json(self.run / "panel.json", record)
+        panel.ensure_started(again)
+        self.assertEqual(self.record()["panels"][0]["context_truncated"], truncated)
+        panel.collect(again, None, sleep=lambda _: time.sleep(0.05))
+
+    def test_a_context_under_the_cap_records_no_truncation(self):
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        runtime = self.runtime(self.plan())
+        panel.ensure_started(runtime)
+        self.assertIsNone(self.record()["panels"][0]["context_truncated"])
         self.decide()
         panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
 

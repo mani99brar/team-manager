@@ -163,6 +163,41 @@
               "pattern": "^[0-9a-f]{7,64}$"
             }
           ]
+        },
+        "context_truncated": {
+          "description": "Optional (added within 1.0.0): null when the assembled context fit the cap (MAX_CONTEXT_BYTES, 1.5 MB); otherwise its size before the cap, the files whose full bodies were omitted (largest first) and the sections whose text was cut (file diffs largest first, then the PRD and requirement documents), each cut ending in `=== truncated: kept <k> of <n> bytes ===`. `context_bytes` is the size after the cap. Absent in a record written before it.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "original_bytes",
+                "omitted_bodies",
+                "truncated"
+              ],
+              "properties": {
+                "original_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "omitted_bodies": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                },
+                "truncated": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                }
+              }
+            }
+          ]
         }
       }
     },

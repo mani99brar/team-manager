@@ -50,6 +50,12 @@ SCHEMA = CONTRACTS / "panel.schema.json"
 RECORD = "panel.json"
 DIR = "panel"  # `<run>/panel/<id>/`: the context file, each provider's prompt/output/stderr files and the pi scratch dirs.
 CONTEXT = "context.txt"
+# The context cap (PRD 4.3): a 2.4 MB context was about 1.04M tokens, over one provider's 1M limit; 1.5 MB leaves headroom.
+MAX_CONTEXT_BYTES = 1_500_000
+FULL_FILE = "\n--- full file at the candidate ---\n"
+OMITTED = "\n--- full file omitted: {size} bytes, over the context cap ---\n"
+TRUNCATED = "=== truncated: kept {kept} of {total} bytes ==="
+TRUNCATED_LINE = re.compile(r"truncated: kept \d+ of \d+ bytes")  # Shaped like a label line; never one (context_labels).
 NO_FILE = "(no file)"  # The record's `file` placeholder for a finding a provider returned with no file: the viewer pins `file` min length 1, so an empty string would drop the whole panel section (P1).
 STAGES = ("challenge", "review")
 LIVE_STAGES = ("review",)  # This slice; `challenge` is refused at launch (PRD 4.2, [L3]).
@@ -413,8 +419,8 @@ def label_line(label: str) -> str:
 
 
 def context_labels(text: str) -> list[str]:
-    """The canonical labels of a context file: one per `=== <label> ===` line, in order."""
-    return re.findall(r"^=== (.+) ===$", text, re.M)
+    """The canonical labels of a context file: one per `=== <label> ===` line, in order; a truncation marker is none."""
+    return [label for label in re.findall(r"^=== (.+) ===$", text, re.M) if not TRUNCATED_LINE.fullmatch(label)]
 
 
 def git_text(worktree: Path, *args: str) -> str:
@@ -427,7 +433,23 @@ def added_file(worktree: Path, base: str, path: str) -> bool:
     return subprocess.run(["git", "-C", str(worktree), "cat-file", "-e", f"{base}:{path}"], capture_output=True).returncode != 0
 
 
-def review_sections(worktree: Path, base: str, candidate: str, paths: list[str] | None = None) -> list[tuple[str, str]]:
+class Section:
+    """One labelled section of a context file: a touched file (`diff` is `--- diff ---` and its hunks, `tail` a new/deleted/
+    omitted note, `body` its full text at the candidate or None) or a document (`diff` its text). Kept apart until the file
+    is written so the cap (cap_sections) can drop bodies and cut texts."""
+
+    def __init__(self, label: str, diff: str, tail: str = "", body: str | None = None, document: bool = False):
+        self.label, self.diff, self.tail, self.body, self.document = label, diff, tail, body, document
+
+    def render(self) -> str:
+        text = self.diff + self.tail + (FULL_FILE + self.body if self.body is not None else "")
+        return label_line(self.label) + text.rstrip("\n") + "\n\n"
+
+    def size(self) -> int:
+        return len(self.render().encode())
+
+
+def review_sections(worktree: Path, base: str, candidate: str, paths: list[str] | None = None) -> list[Section]:
     """One section per touched text file of the frozen candidate: its diff hunks against the base, then its full text at the
     candidate (`git show`), under the file's repository-relative path as the label. Binary files are skipped; a deleted file
     carries its diff only. Read from the review worktree's Git objects, never from its working files. `paths` (a follow-up's
@@ -439,18 +461,60 @@ def review_sections(worktree: Path, base: str, candidate: str, paths: list[str] 
         if len(parts) != 3 or parts[0] == "-" or parts[1] == "-":
             continue  # A binary file (numstat prints `-`), or a line that is no numstat row.
         path = parts[2]
-        body = "--- diff ---\n" + git_text(worktree, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", base, candidate, "--", path)
+        diff = "--- diff ---\n" + git_text(worktree, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", base, candidate, "--", path)
         try:
             full = git_text(worktree, "show", f"{candidate}:{path}")
         except subprocess.CalledProcessError:
-            body += "\n--- deleted at the candidate ---\n"
+            sections.append(Section(path, diff, "\n--- deleted at the candidate ---\n"))
         else:
             if added_file(worktree, base, path):
-                body += "\n--- new file: the diff above is its whole text ---\n"  # Its full text would repeat the diff and double the context.
+                sections.append(Section(path, diff, "\n--- new file: the diff above is its whole text ---\n"))  # Its full text would repeat the diff and double the context.
             else:
-                body += "\n--- full file at the candidate ---\n" + full
-        sections.append((path, body))
+                sections.append(Section(path, diff, body=full))
     return sections
+
+
+def truncate(section: Section, excess: int) -> None:
+    """Cut the section's text (a file's diff, a document's text) by at least `excess` bytes plus the marker, at a line break,
+    ending in `=== truncated: kept <k> of <n> bytes ===`; never below nothing kept."""
+    data = section.diff.encode()
+    keep = max(0, len(data) - excess - len(TRUNCATED.format(kept=len(data), total=len(data))) - 2)
+    cut = data[:keep]
+    if b"\n" in cut:
+        cut = cut[:cut.rindex(b"\n") + 1]  # At a line break; one long line (a minified file) keeps its prefix instead.
+    text = cut.decode("utf-8", errors="ignore")  # Never half a character.
+    section.diff = text + ("" if not text or text.endswith("\n") else "\n") + TRUNCATED.format(kept=len(text.encode()), total=len(data)) + "\n"
+
+
+def cap_sections(sections: list[Section], cap: int = None) -> dict | None:
+    """Bring the context under `cap` bytes (MAX_CONTEXT_BYTES), in this order: drop the files' full bodies, largest first,
+    each replaced by one `--- full file omitted ---` line; then cut the files' diffs, largest first; then, only once every
+    body is gone and every diff cut, the PRD and requirement documents, largest first. Stops as soon as the context fits.
+    Returns `context_truncated` ({original_bytes, omitted_bodies, truncated}) or None when nothing was cut."""
+    cap = MAX_CONTEXT_BYTES if cap is None else cap
+    sizes = [section.size() for section in sections]
+    original = total = sum(sizes)
+    if total <= cap:
+        return None
+    omitted, cut = [], []
+    for index in sorted((i for i, s in enumerate(sections) if s.body is not None), key=lambda i: -len(sections[i].body.encode())):
+        if total <= cap:
+            break
+        section = sections[index]
+        section.tail += OMITTED.format(size=len(section.body.encode()))
+        section.body = None
+        total += section.size() - sizes[index]
+        sizes[index] = section.size()
+        omitted.append(section.label)
+    for documents in (False, True):
+        for index in sorted((i for i, s in enumerate(sections) if s.document is documents), key=lambda i: -len(sections[i].diff.encode())):
+            if total <= cap:
+                break
+            truncate(sections[index], total - cap)
+            total += sections[index].size() - sizes[index]
+            sizes[index] = sections[index].size()
+            cut.append(sections[index].label)
+    return {"original_bytes": original, "omitted_bodies": omitted, "truncated": cut}
 
 
 def delta_from(directory: Path, plan: dict) -> tuple[str, list[str]] | None:
@@ -460,23 +524,23 @@ def delta_from(directory: Path, plan: dict) -> tuple[str, list[str]] | None:
     return delta_base(SimpleNamespace(directory=Path(directory), plan=plan), Path(directory) / "review-worktree")
 
 
-def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Path, int]:
+def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Path, int, dict | None]:
     """`<run>/panel/<id>/context.txt`: the candidate's touched files (diff + full text, from the frozen candidate; on a
     follow-up only the files the delta touches, diffed from the followed candidate: delta_from), then the pinned PRD copy and
-    the pinned requirement documents, each section headed by one canonical label. The same bytes go to every provider; an
-    existing file is reused (the candidate is frozen), so a resumed rerun reads what the first run read."""
+    the pinned requirement documents, each section headed by one canonical label, capped at MAX_CONTEXT_BYTES (cap_sections).
+    Returns the path, its size and `{delta_from, context_truncated}`. The same bytes go to every provider; an existing file
+    is reused (the candidate is frozen), so a resumed rerun reads what the first run read, and the third value is None: the
+    record keeps what the first assembly recorded."""
     panel_dir = directory / DIR / item["id"]
     panel_dir.mkdir(parents=True, exist_ok=True)
     path = panel_dir / CONTEXT
     if path.is_file() and path.stat().st_size > 0:
-        return path, path.stat().st_size
+        return path, path.stat().st_size, None
     bundle = read_json(directory / "review-bundle.json")
     worktree = directory / "review-worktree"
     delta = delta_from(directory, plan)
     base, paths = delta if delta else (plan["base_commit"], None)
-    parts = []
-    for label, body in review_sections(worktree, base, bundle["candidate_commit"], paths):
-        parts.append(label_line(label) + body.rstrip("\n") + "\n\n")
+    sections = review_sections(worktree, base, bundle["candidate_commit"], paths)
     prd = plan.get("prd")
     if isinstance(prd, dict) and prd.get("copy") and item.get("prd_label"):
         try:
@@ -484,15 +548,16 @@ def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Pa
         except OSError:
             text = None
         if text:
-            parts.append(label_line(item["prd_label"]) + text.rstrip("\n") + "\n\n")
+            sections.append(Section(item["prd_label"], text, document=True))
     for rel, text in (item.get("requirement_docs") or {}).items():
-        parts.append(label_line(rel) + text.rstrip("\n") + "\n\n")
-    data = "".join(parts).encode()
+        sections.append(Section(rel, text, document=True))
+    truncated = cap_sections(sections)
+    data = "".join(section.render() for section in sections).encode()
     temporary = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
     temporary.write_bytes(data)
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
-    return path, len(data)
+    return path, len(data), {"delta_from": delta[0] if delta else None, "context_truncated": truncated}
 
 
 # ---- The transport adapter: one command-builder and one output-parser per transport -----------------------------------
@@ -896,16 +961,15 @@ def ensure_started(runtime, *, clock=time.time) -> None:
                 _finalize(directory, plan, panel_index, record, {}, now)
                 continue
             try:
-                context, size = assemble_review_context(directory, plan, item)
+                context, size, assembled = assemble_review_context(directory, plan, item)
             except Exception as error:  # noqa: BLE001 - recorded, never raised into the review step.
                 for index in owed:
                     entry["providers"][index].update(status="error", error=clip(f"context assembly failed: {type(error).__name__}: {error}", 4000))
                 entry.update(status="failed", started_at=entry["started_at"] or now, ended_at=now,
                              error=clip(f"context assembly failed: {type(error).__name__}: {error}", 4000))
                 continue
-            delta = delta_from(directory, plan)
             entry.update(status="running", started_at=entry["started_at"] or now, context_bytes=size, ended_at=None, error=None,
-                         delta_from=delta[0] if delta else None)
+                         **(assembled or {}))  # A reused context file keeps what its first assembly recorded.
             for index in owed:
                 provider = entry["providers"][index]
                 try:
