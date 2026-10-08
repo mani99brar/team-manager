@@ -2291,6 +2291,16 @@ class ActorTests(unittest.TestCase):
                     else:
                         self.assertNotIn("--by maintainer is refused", output)
 
+    def test_the_panel_may_only_answer_accept_a_challenge_and_approve(self):
+        from .actor import require_actor
+        for action in ("answer", "accept-challenge", "approve"):
+            self.assertEqual(require_actor(SimpleNamespace(by="panel"), action), "panel")
+        for action in ("resume --launch", "repair", "launch", "abandon", "clean", "tryout", "--allow-untried", "attack-pass",
+                       "attack-label", "resume", "retry", "note", "automatic"):
+            with self.subTest(action=action), self.assertRaises(ValueError) as caught:
+                require_actor(SimpleNamespace(by="panel"), action)
+            self.assertIn("refused for --by panel", str(caught.exception))
+
     def test_the_actor_text_names_a_claude_code_session_without_refusing_it(self):
         from .actor import actor_text, require_actor
         with patch.dict(os.environ, {"CLAUDECODE": "1"}):
