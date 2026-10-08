@@ -300,6 +300,20 @@ def fork_point(graph, config, runtime, previous: dict, checkpoint_id: str | None
     return fork
 
 
+def session_refusals(runtime, graph, config) -> None:
+    """The refusals of a controller round that need no blocked step: a recorded repair, the repair limit, an applied repair
+    not continued from, a moved or dirty source. The fix loop runs them before it archives a review round."""
+    directory = runtime.directory
+    refuse_recorded(directory, controller_ok=True)
+    applied = applied_repairs(directory)
+    state = graph.get_state(config)
+    if len(applied) >= MAX_REPAIRS:
+        raise ValueError(f"{len(applied)} repairs are already applied to this run (at most {MAX_REPAIRS}); start a revised run")
+    if applied and state.config["configurable"]["checkpoint_id"] == applied[-1]["head_after"] and not any(task.error for task in state.tasks):
+        raise ValueError(f"Repair {applied[-1]['n']} is applied and the run has not continued from it")
+    check_source(runtime)
+
+
 def blocked_run(runtime, graph, config, applied: list[dict], after_review: bool = False) -> tuple:
     """Every state refusal. Returns the head, the blocked step, the fork point and the effective snapshots. `after_review` is
     the controller's fix loop on a review block: the round's review files are archived by then, so check_before_review

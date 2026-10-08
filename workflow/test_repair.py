@@ -1473,6 +1473,22 @@ class ReviewFixLoop(FixLoop):
         self.assertFalse((self.directory / "review.round-1.json").exists())
         self.assertFalse(read_json(self.directory / "review-rounds.json")["rounds"][0]["archived"])
 
+    def test_a_refused_round_leaves_the_review_in_place(self):
+        self.sessions.reviewer_mutate = self.reviewer
+        self.start()
+        with patch("workflow.repair.MAX_REPAIRS", 0):
+            for _ in range(2):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.drive()
+                message = str(raised.exception)
+                self.assertTrue(message.startswith("fix loop exhausted for lane ui after 0 rounds: P1 (review): ui.txt says after"), message)
+                self.assertIn("the round could not start: 0 repairs are already applied to this run (at most 0)", message)
+                self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
+                self.assertFalse((self.directory / "review.round-1.json").exists())
+                self.assertFalse((self.directory / "review-rounds.json").exists())
+        self.assertNotIn("repair-1", self.sessions.starts)
+        self.assertTrue(any(text.startswith("fix loop exhausted for lane ui") for kind, text in self.attention() if kind == "controller_blocked"))
+
     def test_findings_on_two_lanes_end_the_run_as_before(self):
         def two_lanes(completion):
             return {**completion, "verdict": "blocked", "findings": [self.P1, {**self.P1, "worker": "adapter", "message": "adapter too."}]}

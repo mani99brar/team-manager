@@ -2010,7 +2010,7 @@ def pending_review_round(runtime) -> dict | None:
     """The newest review round the fix loop started (archive_review) whose repair session is not launched yet."""
     from .repair import session_entries
     rounds = review_rounds(runtime.directory)
-    if not rounds or any(entry.get("review_round") == rounds[-1]["round"] for entry in session_entries(runtime.directory)):
+    if not rounds or rounds[-1].get("restored_at") or any(entry.get("review_round") == rounds[-1]["round"] for entry in session_entries(runtime.directory)):
         return None
     return rounds[-1]
 
@@ -2058,7 +2058,7 @@ def start_review_round(runtime, lane: str, findings: list[dict]) -> dict:
     P0/P1 findings verbatim, the reviewers' sessions), then archived (archive_review), its review_blocked attention resolved."""
     directory = runtime.directory
     rounds = review_rounds(directory)
-    record = rounds[-1] if rounds and not rounds[-1].get("archived") else None
+    record = rounds[-1] if rounds and not rounds[-1].get("archived") and not rounds[-1].get("restored_at") else None
     if record is None:
         record = pending_review_round(runtime)
         if record is not None:
@@ -2130,29 +2130,47 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
 
 def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
     """One controller round of the fix loop (repair.repair_session, `by: controller`): True once its repair is applied and
-    the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start."""
-    from .repair import open_session, repair_session
-    keys = {}
-    if trigger == "review" and open_session(runtime.directory) is None:
-        block = review_block(runtime, graph.get_state(config))
-        record = start_review_round(runtime, lane, block[1] if block else pending_review_round(runtime)["findings"])
-        delta = runtime.directory / f"review.delta.round-{record['round']}.diff"
-        keys = {"findings": record["findings"], "review_round": record["round"],
-                "delta": delta if delta.exists() else runtime.directory / f"review.round-{record['round']}.diff"}
+    the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start. A review round
+    is archived only after the round's refusals passed (repair.session_refusals), and restored whenever no repair applies."""
+    from .repair import open_session, repair_session, session_refusals
+    keys, archived = {}, False
     try:
+        if trigger == "review" and open_session(runtime.directory) is None:
+            session_refusals(runtime, graph, config)  # A fourth repair, a moved source: refused before anything is archived.
+            block = review_block(runtime, graph.get_state(config))
+            pending = pending_review_round(runtime)
+            findings = block[1] if block else pending["findings"]
+            archived = True
+            record = start_review_round(runtime, lane, findings)
+            delta = runtime.directory / f"review.delta.round-{record['round']}.diff"
+            keys = {"findings": record["findings"], "review_round": record["round"],
+                    "delta": delta if delta.exists() else runtime.directory / f"review.round-{record['round']}.diff"}
         entry = repair_session(runtime, graph, config, lane, actor="controller", trigger=trigger, **keys)
     except ValueError as error:  # A state the round refuses (the repair limit, a run that moved): no session ran.
-        raise exhausted(runtime, lane, [str(error)]) from error
+        if trigger != "review":
+            raise exhausted(runtime, lane, [str(error)]) from error
+        rounds = review_rounds(runtime.directory)
+        if archived or (rounds and rounds[-1].get("archived")):
+            unarchive_round(runtime)
+        findings = rounds[-1]["findings"] if archived and rounds else (review_block(runtime, graph.get_state(config)) or (None, []))[1]
+        raise exhausted(runtime, lane, finding_lines(findings) + [f"the round could not start: {error}"], "review") from error
     if entry["status"] != "applied":
         if trigger == "review":
-            rounds = review_rounds(runtime.directory)
-            restore_review(runtime, rounds[-1]["round"])  # The round's block is the run's record again.
-            rounds[-1].update(archived=False, restored_at=now())
-            save_json(runtime.directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": rounds})
-            raise exhausted(runtime, lane, finding_lines(rounds[-1]["findings"]))
+            rounds = unarchive_round(runtime)
+            raise exhausted(runtime, lane, finding_lines(rounds[-1]["findings"]), "review")
         path = entry["blocked"]["packets"][0]["path"] if entry.get("blocked", {}).get("packets") else None
         raise exhausted(runtime, lane, gate_reasons(runtime.directory / path) if path else [])
     return True
+
+
+def unarchive_round(runtime) -> list[dict]:
+    """The newest review round restored (restore_review) and marked so: its block is the run's record again, and no later
+    round reuses it."""
+    rounds = review_rounds(runtime.directory)
+    restore_review(runtime, rounds[-1]["round"])
+    rounds[-1].update(archived=False, restored_at=now())
+    save_json(runtime.directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": rounds})
+    return rounds
 
 
 def controller_session_open(runtime) -> bool:
