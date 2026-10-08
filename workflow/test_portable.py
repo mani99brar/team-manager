@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -711,6 +712,8 @@ class PortablePrompts(unittest.TestCase):
             prompts = [protocol, review_prompt(runtime, directory / "review.diff"), completion_prompt(directory, plan, "app"),
                        BUILTIN_REVIEW_BRIEF.read_text(), *[path.read_text() for path in (TOOL / "workflow/prompts/reviewers").glob("*.md")]]
             for text in prompts:
-                text = text.replace(str(TOOL), "<tool>")  # The tool's own path may name md-manager; the wording may not.
+                # The tool's own path and the interpreter run-report names (the controller's venv, which a run worktree
+                # shares with the canonical checkout) may name md-manager; the wording may not.
+                text = text.replace(shlex.quote(sys.executable), "<python>").replace(sys.executable, "<python>").replace(str(TOOL), "<tool>")
                 for wording in ("this checkout", "this repository", "md-manager", "MD Manager", "Playwright", "npm"):
                     self.assertNotIn(wording, text)
