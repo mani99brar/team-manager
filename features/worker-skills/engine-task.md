@@ -16,13 +16,14 @@ A feature.json 2.8.0 lane may declare `skills: ["<name>", ...]`. Its worker sess
 - Schema: `contracts/workflow/feature.schema.json` gains version `2.8.0` and, on a worker, `skills` (1 to 8 unique names matching `^[a-z][a-z0-9-]{0,63}$`); a 2.8.0 example under `contracts/workflow/examples/` that `test:contracts` validates. `init` keeps writing 2.4.0.
 - Prepare: each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed); the controller copies the folder to `<run>/skills/<lane>/skills/<name>/` and writes `<run>/skills/<lane>/.claude-plugin/plugin.json` `{"name": "workflow-<lane>", "description": "Skills pinned for lane <lane> of run <run id>", "version": "1.0.0"}`; `plan.nodes[<lane>].skills = [{name, sha256}]` and `plan.worker_authority.skills_sha256[<lane>]` record the digest (PRD 4.2). Refusals (PRD 4.5) happen before anything is written and name the lane and the skill.
 - Launch: for a lane with `skills`, `--safe-mode` becomes `--setting-sources ""`; add `--plugin-dir <run>/skills/<lane>`; `Skill` joins `--tools`; `worker_settings` gains `advisorModel` when the operator's settings file has it (only that key is read). Same for `run_repair` of that lane. The receipt gains `skills: [{name, sha256}]` (`[]` without).
+- The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.
 - Docs: RUNBOOK section "Skills for a lane (feature.json 2.8.0)" (what loads, what does not, the `CLAUDE.md` guarantee, the advisor, the pinned copy, the refusals) and the README's feature.json table and "What a worker can reach" paragraph. `docs/handoff/worker-skills.md`: what changed, the probes you ran with their exact commands and answers, every open P2.
 - `workflow/test_verification.py` `PolicyLintTests` already counts 13 feature policies (`worker-skills` and `viewer-refine` are committed); keep it right if you add a feature fixture under `features/`.
 
 ## Constraints
 
 - Owned paths only: `workflow`, `contracts/workflow`, `docs/handoff/worker-skills.md`. Do not touch `contracts/projects`, `server`, `src` or the export (`workflow/export_state.py` stays as it is: the export of skills is `viewer-refine`'s adapter lane, PRD_VIEWER_REFINE Appendix A).
-- Judges (reviewers, challenge, sidecar, attack, panel) stay in safe mode. No fetching or installing of skills. No change to the deny list's content.
+- Judges (reviewers, challenge, sidecar, attack, panel) stay in safe mode and keep today's settings bytes. No fetching or installing of skills. The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).
 - Module docstrings cite the RUNBOOK section they implement; one behaviour per commit is not required of you (the controller captures your worktree), but keep the diff readable.
 
 ## Acceptance
