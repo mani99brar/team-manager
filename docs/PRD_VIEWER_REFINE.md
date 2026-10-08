@@ -56,7 +56,7 @@ The skill is available through the `Skill` tool as `workflow-<lane>:impeccable` 
 
 ### 5.1 The run page's first screen (`pages`)
 
-Order, top to bottom at 1440: the breadcrumb and the run title on one line (the feature name truncated, the run id in full); the **state line**: one sentence in the state's colour with its glyph, built from the existing Now derivation (`contracts/projects/triage.ts` `focus`, `attention`): "Paused at the design challenge: attempt 4 found 1 P1, no worker launched" / "Running: repair 2 of viewer (round 2 of 2) after verify blocked" / "Succeeded: integrated as a90624d"; the **cause** (the P1's title, the gate reason, the question) as one quoted line with its "open" link; the **next step** as one command with Copy, the other commands in a disclosure "Other routes" (the banner's three commands today); then the lanes strip with each lane's model pin and round count; then the graph. The metadata strip (branch, commit, mode, durations, definition hash, "Details") moves into a disclosure under the title, closed by default, with the durations kept as two chips (worker, review) beside the state line. Nothing on the first screen is a paragraph.
+Order, top to bottom at 1440, inside the run view (the breadcrumb line above it is the shell's): the run title on the first line (the feature name truncated, the run id in full); the **state line**: one sentence in the state's colour with its glyph, built from the existing Now derivation (`contracts/projects/triage.ts` `focus`, `attention`): "Paused at the design challenge: attempt 4 found 1 P1, no worker launched" / "Running: repair 2 of viewer (round 2 of 2) after verify blocked" / "Succeeded: integrated as a90624d"; the **cause** (the P1's title, the gate reason, the question) as one quoted line with its "open" link; the **next step**: its first command with Copy and its remaining steps, in their order, in a closed disclosure "All steps" (the steps of a next step are a sequence, never alternatives); then the lanes strip with each lane's model pin and round count; then the graph. The metadata strip (branch, commit, mode, durations, definition hash, "Details") moves into a disclosure under the title, closed by default, with the durations kept as two chips (worker, review) beside the state line. Nothing on the first screen is a paragraph.
 
 ### 5.2 The graph with the loop (`pages`, data from `adapter`)
 
@@ -68,7 +68,7 @@ Order, top to bottom at 1440: the breadcrumb and the run title on one line (the 
 
 ### 5.3 Steps and activity (`pages`)
 
-- The Steps table groups rows by phase (Challenge, Work, Verify, Candidate, Review, Integrate) with a one-line phase header carrying the phase's outcome and duration; a repair session is a row under the step it answers, indented, with its round; a review round is a row under Review. The 0-of-11 counter becomes "<done> of <steps>, <rounds> repair rounds".
+- The Steps table groups rows by phase (Challenge, Work, Verify, Candidate, Review, Integrate) with a one-line phase header carrying the phase's outcome and duration; a repair session is a row under the step it answers, indented, with its round; a review round is a row under Review. The 0-of-11 counter becomes "<done> of <steps>, <rounds> repair rounds", counting the pinned steps only (never the projected `repair-*` nodes).
 - Activity groups by phase in `<details>` (all open) as the revamp specified, and additionally folds each challenge attempt and each repair round into its own sub-group with a one-line summary (attempt, outcome, duration), so a four-attempt challenge is four lines until opened. The operator-time gaps stay as rows. "Newest first" and "Collapse all" stay.
 
 ### 5.4 Node pages (`pages`)
@@ -79,7 +79,7 @@ Order, top to bottom at 1440: the breadcrumb and the run title on one line (the 
 
 ### 5.5 Assignment (`pages`, S7 section 4.10 of PRD_VIEWER_UX)
 
-One setup line (feature, mode, profile, base commit, reviewers, `fix_rounds`, the follows link when the run follows another), then one table row per lane (lane, role, model and effort, skills, owned paths count, checks count, task length) before any long text; each lane's task, prompt and decisions in disclosures below, closed by default except the one a requirement link hands over a quote to.
+One setup line (feature, mode, profile, base commit, `fix_rounds`, and the reviewers from the latest review result, "reviewers not recorded" before a review; no follows link: the contract carries no follows field, an adapter follow-up), then one table row per lane (lane, role, model and effort, skills, owned paths count, checks count, task length) before any long text; each lane's task, prompt and decisions in disclosures below, closed by default except the one a requirement link hands over a quote to.
 
 ### 5.6 The review diff inline (`pages`, S7's Diff part of PRD_VIEWER_UX 4.7)
 
@@ -88,7 +88,7 @@ The review node's Diff section renders `review.diff` inline: a file list with ad
 ### 5.7 Runs home (`shell`)
 
 - Order: **Needs you** as cards with cause and next-step label (as today; when zero, one line); **Running** as one compact row per run (id, feature, step, since, lanes as chips), not six-line cards; **Paused** as a separate section of compact rows sorted oldest first with "since <n> days" in the paused tone; **Recent** as today with the day groups. A section header carries its count and, for Running and Paused, a one-line sub-header ("3 at the design challenge, 1 at verify").
-- The Recent filter counts are computed over the filtered set (P2 1). The look switch is gone with Bold; the header's remaining controls meet 44 px under 760 px (P2 3). The feature header lists the run's actual reviewers from the export, not the definition's review steps (P2 2 and 8).
+- The Recent filter counts are computed over the filtered set (P2 1). The look switch is gone with Bold; the header's remaining controls meet 44 px under 760 px (P2 3). The feature header labels the definition's review steps as review steps and shows a run's reviewers only where a loaded run detail's review result provides them (P2 2 and 8); the run list carries no reviewers.
 - The project rail, the header, search, filters and group-by stay as the revamp built them; the rail's state dots stay.
 
 ### 5.8 The eight P2s
