@@ -1349,7 +1349,7 @@ def main():
     parser.add_argument("--profile", choices=["attended", "unattended"], help="prepare --automatic: the run's profile (default unattended), pinned")
     parser.add_argument("--critical", action="store_true", help="prepare --automatic: the feature is marked critical (feature.json 2.4.0); "
                                                                 "the run stops after review for approve, whatever the profile")
-    parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: Claude Code's default; no --model is passed)")
+    parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="prepare: the workers' effort, pinned (default: WORKFLOW_WORKER_EFFORT, read now)")
     parser.add_argument("--judge-model", help="prepare: the model of the design challenge, the reviewers and the review sidecar, pinned (default: Claude Code's default)")
     parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="prepare: their effort, pinned (default high)")

@@ -497,7 +497,7 @@ class FeatureLaunchTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
             main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--worker-model", "claude-opus-5-5"])
         note = ("ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: pin it with "
-                "--judge-model; unpinned, a session runs Claude Code's default model.")
+                "--judge-model; unpinned, the judges run Claude Code's default model.")
         self.assertIn(note, json.loads(output.getvalue())["notes"])
         self.assertIn(f"Note: {note}", errors.getvalue())
         with patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-opus-5-5"}), patch("workflow.launch.run_command"), \

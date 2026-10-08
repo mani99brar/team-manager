@@ -335,11 +335,13 @@ def worker_effort(env=None, plan: dict | None = None) -> list[str]:
 
 
 # Run roles (C52): prepare pins the model and effort of the workers and of the judges (the design challenge, every reviewer
-# of either transport and the review sidecar) as plan.roles, and nothing changes them after. A model left unset means Claude
-# Code's default, and no --model is passed. The judges default to high effort, the workers to WORKFLOW_WORKER_EFFORT read
-# once at prepare. Plans pinned before roles keep today's behaviour: the variable for workers, nothing for the judges.
+# of either transport and the review sidecar) as plan.roles, and nothing changes them after. The workers' model defaults to
+# DEFAULT_WORKER_MODEL; a judge model left unset means Claude Code's default, and no --model is passed. The judges default to
+# high effort, the workers to WORKFLOW_WORKER_EFFORT read once at prepare. Plans pinned before roles keep today's behaviour:
+# the variable for workers, nothing for the judges.
 ROLES = ("worker", "judges")
 JUDGE_EFFORT = "high"
+DEFAULT_WORKER_MODEL = "claude-opus-4-8"
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9]\S{0,127}")
 
 
@@ -353,8 +355,10 @@ def role_pin(model, effort, flag: str) -> dict:
 
 def pin_roles(worker_model: str | None = None, worker_effort: str | None = None, judge_model: str | None = None,
               judge_effort: str | None = None, env=None) -> dict:
-    """plan.roles from prepare's flags: the worker effort defaults to WORKFLOW_WORKER_EFFORT in `env`, the judges' to high."""
-    return {"worker": role_pin(worker_model, env_effort(env) if worker_effort is None else worker_effort, "--worker"),
+    """plan.roles from prepare's flags: the worker model defaults to DEFAULT_WORKER_MODEL, the worker effort to
+    WORKFLOW_WORKER_EFFORT in `env`, the judges' effort to high; the judges' model stays unset (Claude Code's default)."""
+    return {"worker": role_pin(DEFAULT_WORKER_MODEL if worker_model is None else worker_model,
+                               env_effort(env) if worker_effort is None else worker_effort, "--worker"),
             "judges": role_pin(judge_model, JUDGE_EFFORT if judge_effort is None else judge_effort, "--judge")}
 
 
@@ -436,7 +440,8 @@ def override_note(env, worker_model=None, worker_effort=None, judge_model=None, 
     run's sessions and no role flag pins in its place: launch lines written before C52 relied on ANTHROPIC_MODEL."""
     models = [key for key in sorted(env) if env[key] and (key in {"ANTHROPIC_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} or re.fullmatch(r"ANTHROPIC_DEFAULT_.+_MODEL", key))]
     efforts = [key for key in ("CLAUDE_CODE_EFFORT_LEVEL",) if env.get(key)]
-    model_flags = [flag for flag, value in (("--worker-model", worker_model), ("--judge-model", judge_model)) if not value] if models else []
+    # The workers always run a pinned model (DEFAULT_WORKER_MODEL when --worker-model is left out): only the judges' can be unset.
+    model_flags = ["--judge-model"] if models and not judge_model else []
     effort_flags = [flag for flag, value in (("--worker-effort", worker_effort), ("--judge-effort", judge_effort)) if not value] if efforts else []
     names = (models if model_flags else []) + (efforts if effort_flags else [])
     if not names:
@@ -444,7 +449,7 @@ def override_note(env, worker_model=None, worker_effort=None, judge_model=None, 
     flags = model_flags + effort_flags
     joined = flags[0] if len(flags) == 1 else f"{', '.join(flags[:-1])} and {flags[-1]}"
     one = len(names) == 1
-    unpinned = (["a session runs Claude Code's default model"] if model_flags else []) + (
+    unpinned = (["the judges run Claude Code's default model"] if model_flags else []) + (
         ["the workers take WORKFLOW_WORKER_EFFORT and the judges high effort"] if effort_flags else [])
     return (f"{', '.join(names)} {'is' if one else 'are'} set here but never {'reaches' if one else 'reach'} the run's sessions, which the "
             f"workflow starts without {'it' if one else 'them'}: pin {'it' if one else 'them'} with {joined}; unpinned, {', '.join(unpinned)}.")

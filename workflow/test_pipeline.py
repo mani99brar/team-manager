@@ -1496,7 +1496,7 @@ class RecordTests(unittest.TestCase):
         run, code, err = self.prepare_cli("pinned-run", env={"WORKFLOW_WORKER_EFFORT": "medium"})
         self.assertEqual(code, 0, err)
         plan = read_json(run / "plan.json")
-        self.assertEqual(plan["roles"], {"worker": {"model": None, "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-4-8", "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
         self.assertEqual(plan["controller"], {"commit": git(CONTROLLER, "rev-parse", "HEAD"),
                                               "dirty": bool(git(CONTROLLER, "status", "--porcelain", "--untracked-files=no")),
                                               "claude_version": "2.1.288 (Claude Code)"})
@@ -1530,10 +1530,10 @@ class RecordTests(unittest.TestCase):
         _, code, err = self.prepare_cli("model-run", env=overrides)
         self.assertEqual(code, 0, err)
         self.assertIn("Note: ANTHROPIC_MODEL is set here but never reaches the run's sessions, which the workflow starts without it: "
-                      "pin it with --worker-model and --judge-model; unpinned, a session runs Claude Code's default model.", err)
+                      "pin it with --judge-model; unpinned, the judges run Claude Code's default model.", err)
         _, code, err = self.prepare_cli("pinned-model-run", "--worker-model", "claude-opus-5-5", env={**overrides, "CLAUDE_CODE_EFFORT_LEVEL": "low"})
         self.assertIn("Note: ANTHROPIC_MODEL, CLAUDE_CODE_EFFORT_LEVEL are set here but never reach the run's sessions, which the workflow starts "
-                      "without them: pin them with --judge-model, --worker-effort and --judge-effort; unpinned, a session runs Claude Code's "
+                      "without them: pin them with --judge-model, --worker-effort and --judge-effort; unpinned, the judges run Claude Code's "
                       "default model, the workers take WORKFLOW_WORKER_EFFORT and the judges high effort.", err)
         _, code, err = self.prepare_cli("all-pinned-run", "--worker-model", "a", "--judge-model", "b", env=overrides)
         self.assertNotIn("never reach", err)

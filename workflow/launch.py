@@ -508,7 +508,7 @@ def main(argv=None):
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m, max 24h)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="Automatic mode: the run's profile (default unattended), pinned at prepare")
-    parser.add_argument("--worker-model", help="The workers' model, pinned at prepare (default: Claude Code's default)")
+    parser.add_argument("--worker-model", help="The workers' model, pinned at prepare (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="The workers' effort, pinned at prepare (default: WORKFLOW_WORKER_EFFORT)")
     parser.add_argument("--judge-model", help="The model of the design challenge, the reviewers and the review sidecar, pinned at prepare "
                                               "(default: Claude Code's default)")
