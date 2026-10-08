@@ -3135,6 +3135,54 @@ class PrintDeltaReviewGraphTests(DeltaReviewTests, GraphFixture):
     reviewers = ["general", "coverage"]
 
 
+class ExportAfterVerdictTests(GraphFixture):
+    """run-state.json carries the verdict as soon as review.json is written, while the review step is still open (the panel
+    and the attack pass finish after it); the export writes no timeline event."""
+
+    transport = "print"
+
+    def spy(self):
+        """Wrap export_verdict: at each call, review.json's verdict, the events before and after, and the exported review."""
+        from . import automatic
+        calls, real = [], automatic.export_verdict
+
+        def spying(runtime):
+            before = self.events()
+            real(runtime)
+            exported = read_json(self.fixture.directory / "run-state.json")
+            calls.append({"verdict": read_json(self.fixture.directory / "review.json")["verdict"], "events_before": before,
+                          "events_after": self.events(), "exported": (exported["review"] or {}).get("verdict")})
+        return calls, patch("workflow.automatic.export_verdict", side_effect=spying)
+
+    def test_an_approval_is_exported_before_the_step_ends_and_adds_no_event(self):
+        calls, spying = self.spy()
+        with spying, patch("workflow.automatic.wait_handoffs"):
+            drive(self.fixture.runtime)
+        [call] = calls
+        self.assertEqual((call["verdict"], call["exported"]), ("approved", "approved"))
+        self.assertEqual(call["events_after"], call["events_before"])
+
+    def test_a_block_is_exported_too(self):
+        self.verdict.write_text("blocked")
+        self.findings.write_text(json.dumps([{"severity": "P1", "message": "Broken. Consequence: wrong", "disposition": "open", "worker": "ui", "requirement": None}]))
+        calls, spying = self.spy()
+        with spying, patch("workflow.automatic.wait_handoffs"), self.assertRaises(RuntimeError):
+            drive(self.fixture.runtime)
+        [call] = calls
+        self.assertEqual((call["verdict"], call["exported"]), ("blocked", "blocked"))
+        self.assertEqual(call["events_after"], call["events_before"])
+
+    def test_a_failed_export_is_one_stderr_line_and_the_verdict_stands(self):
+        errors = io.StringIO()
+        with patch("workflow.pipeline.ExportRuntime", side_effect=ValueError("checkpoint unreadable")), contextlib.redirect_stderr(errors), \
+                patch("workflow.automatic.wait_handoffs"):
+            from .automatic import export_verdict
+            before = self.events()
+            export_verdict(self.fixture.runtime)
+        self.assertEqual(self.events(), before)
+        self.assertEqual(errors.getvalue(), "Export after the review verdict failed; the step exports again when it ends: ValueError: checkpoint unreadable\n")
+
+
 class PrintReviewerTests(SharedGraphTests):
     """The headless fallback, with one and with two reviewers."""
 

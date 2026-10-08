@@ -17,6 +17,9 @@ A report-only, configurable panel of providers beside the review of an automatic
   abandon") the touched files and their diffs come from the followed run's candidate to this one, restricted to the lanes'
   owned paths as the reviewers' `review.delta.diff` is (`automatic.delta_base`), and `panel.json` records that commit as
   each panel's `delta_from` (null otherwise).
+- The context is capped at MAX_CONTEXT_BYTES (cap_sections: full bodies dropped first, then diffs cut, the PRD and
+  requirement documents last), recorded as `context_truncated`; once review.json exists a provider still running gets at
+  most PANEL_GRACE_AFTER_VERDICT_SECONDS from the verdict (RUNBOOK "Multi-provider panel (feature.json 2.6.0)").
 - Never raises into the review step: `ensure_started` and `collect` swallow every failure into the record (`failed` with
   its `error`); the only thing that propagates is a KeyboardInterrupt, which terminates the jobs and leaves the record
   non-terminal so `resume` reruns the non-terminal providers (each from its own start, into a new numbered output file).
@@ -74,6 +77,9 @@ SEVERITY_MAP = {"critical": "P0", "high": "P1"}  # Anything else a provider free
 LINE_WINDOW = 5
 TITLE_JACCARD = 0.6
 POLL_SECONDS = 1.0
+# After the review verdict (review.json) a still-running provider gets this long, the reviewers' REVIEW_GRACE_SECONDS, then it
+# is terminated: a 30-minute provider once held the review step 23 minutes after the verdict.
+PANEL_GRACE_AFTER_VERDICT_SECONDS = 600
 THINKING_EVENTS = frozenset({"thinking", "thinking_start", "thinking_end"})
 # The DeepSeek key guard (PRD 4.2, [G12]): the variable the operator sets, and the 0600 file holding the rotated key's SHA-256.
 DEEPSEEK_ENV = "WORKFLOW_PANEL_ALLOW_DEEPSEEK"
@@ -1055,10 +1061,23 @@ def _finalize(directory: Path, plan: dict, panel_index: int, record: dict, reape
                                     f"{responding} responding provider(s): read {directory / RECORD}")
 
 
+def verdict_time(directory: Path) -> float:
+    """When the review decided: review.json's `decided_at` when it has one, else the file's modification time."""
+    path = Path(directory) / "review.json"
+    try:
+        decided = read_json(path).get("decided_at")
+        if isinstance(decided, str):
+            return datetime.fromisoformat(decided.replace("Z", "+00:00")).timestamp()
+    except (OSError, ValueError, AttributeError):
+        pass
+    return path.stat().st_mtime
+
+
 def collect(runtime, error: BaseException | None = None, *, clock=time.time, sleep=time.sleep) -> None:
     """Every exit of review_candidate goes through this, after `close_or_wait_attack` (its own try/finally). `collect_print`
     semantics: every exited provider is reaped from its output file first (findings kept whatever the clock), then a provider
-    still running past its own `timeout_minutes` (from its launch) is terminated and `timed_out`; the panel status derives from
+    still running past its own `timeout_minutes` (from its launch) or past PANEL_GRACE_AFTER_VERDICT_SECONDS from the verdict
+    (verdict_time), whichever ends first, is terminated and `timed_out`; the panel status derives from
     the providers and the terminal record is written. The attack split on a non-decided exit (no review.json): a
     KeyboardInterrupt/TransientInfraError terminates the jobs and leaves the record non-terminal (resume reruns them);
     any other exit terminates them and records the panel `failed` with the error. A KeyboardInterrupt raised inside the wait
@@ -1116,18 +1135,21 @@ def collect(runtime, error: BaseException | None = None, *, clock=time.time, sle
                 _finalize(directory, plan, panel_index, record, reaped.get(panel_index, {}), now, error=reason)
             save_record(directory, record)
             return
+        grace_end = verdict_time(directory) + PANEL_GRACE_AFTER_VERDICT_SECONDS
         try:
             while True:
                 reap_exited()
                 running = [job for items in jobs.values() for job in items if job.result is None]
                 for job in running:
-                    if clock() >= job.launched + job.timeout:
+                    own_end = job.launched + job.timeout
+                    if clock() >= min(own_end, grace_end):
                         terminate(job.process)
                         job.result = {"timed_out": True}
                         provider = record["panels"][job.panel_index]["providers"][job.provider_index]
                         cost = job.transport.parse(job.stdout, job.process.returncode, job.session_id)["cost_usd"]
-                        provider.update(status="timed_out", cost_usd=cost,
-                                        error=clip(f"timed_out after {job.timeout:.0f} s ({record['panels'][job.panel_index]['context_bytes'] or 0} context bytes)", 4000))
+                        reason = (f"timed_out after {job.timeout:.0f} s ({record['panels'][job.panel_index]['context_bytes'] or 0} context bytes)"
+                                  if own_end <= grace_end else f"timed_out after the review verdict: {PANEL_GRACE_AFTER_VERDICT_SECONDS} s grace")
+                        provider.update(status="timed_out", cost_usd=cost, error=clip(reason, 4000))
                 if not any(job.result is None for items in jobs.values() for job in items):
                     break
                 sleep(POLL_SECONDS)

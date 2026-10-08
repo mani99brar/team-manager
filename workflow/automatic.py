@@ -1301,10 +1301,24 @@ def mark_blockers(state: ReviewStatus, decisions: dict) -> list[str]:
     return blockers
 
 
+def export_verdict(runtime) -> None:
+    """Right after review.json is written: run-state.json again from the persisted checkpoint (`export_run`), so the dashboard
+    shows the verdict while the panel and the attack pass finish; the step's own export comes only when the step ends.
+    Idempotent (the same inputs give the same file) and best effort: a failure is one stderr line, never a timeline event
+    (an event here leaked into the timeline's exact assertions)."""
+    try:
+        from .pipeline import ExportRuntime, export_run
+        export_run(ExportRuntime(Path(runtime.directory)))
+    except Exception as error:  # noqa: BLE001 - the verdict stands; the step exports again when it ends.
+        print(f"Export after the review verdict failed; the step exports again when it ends: {type(error).__name__}: {error}", file=sys.stderr)
+
+
 def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
-    """Persist review.json for any verdict; only unanimous approval without blocking findings passes."""
+    """Persist review.json for any verdict and export it (export_verdict); only unanimous approval without blocking findings
+    passes."""
     review = combined_review(runtime, bundle, digest, state, decisions)
     save_json(runtime.directory / "review.json", review)
+    export_verdict(runtime)
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
     if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
@@ -1342,6 +1356,7 @@ def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> 
         runtime.event("review", NOTE, f"The verdicts accepted so far are not recorded (no review.json): {error}")
         return
     save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
+    export_verdict(runtime)
 
 
 def requested(plan: dict) -> dict:

@@ -804,6 +804,63 @@ class ReviewStep(Harness):
         self.assertEqual((entry["status"], [p["status"] for p in entry["providers"]]), ("succeeded", ["ok", "ok"]))
         self.assertEqual(len(entry["findings"]), 3)
 
+    def collect_hung_pi(self, timeout_minutes: int, decided_at: float, start: float = 1000.0) -> tuple[dict, list]:
+        """The claude provider exits on its own, the pi one hangs; the verdict's time is `decided_at` on the fake clock (the
+        review.json mtime); each poll is a minute. The record's pi provider and the sleeps the collect took."""
+        self.set_control(claude={"findings": CLAUDE_FINDINGS}, pi={"hang": True})
+        plan = self.plan(timeout_minutes=timeout_minutes)
+        runtime = self.runtime(plan)
+        clock = {"now": start}
+        panel.ensure_started(runtime, clock=lambda: clock["now"])
+        claude = [job for job in runtime.panel_jobs["review-panel"] if job.entry["transport"] == "claude"][0]
+        claude.process.wait(timeout=30)
+        self.decide()
+        os.utime(self.run / "review.json", (decided_at, decided_at))
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(clock["now"])
+            clock["now"] += 60
+        panel.collect(runtime, None, clock=lambda: clock["now"], sleep=sleep)
+        entry = self.record()["panels"][0]
+        self.assertEqual([p["status"] for p in entry["providers"]], ["ok", "timed_out"])
+        self.assertEqual(entry["status"], "succeeded")
+        return entry["providers"][1], sleeps
+
+    def test_a_provider_still_running_ten_minutes_after_the_verdict_is_terminated(self):
+        """A 30-minute provider no longer holds the review step: 600 s after the verdict it is timed_out, its own bound unused."""
+        provider, sleeps = self.collect_hung_pi(timeout_minutes=30, decided_at=1000.0)
+        self.assertEqual(provider["error"], f"timed_out after the review verdict: {panel.PANEL_GRACE_AFTER_VERDICT_SECONDS} s grace")
+        self.assertEqual(panel.PANEL_GRACE_AFTER_VERDICT_SECONDS, 600)
+        self.assertEqual(len(sleeps), 10)  # Ten one-minute polls from the verdict, then terminated at 1600.
+
+    def test_the_providers_own_timeout_still_applies_when_it_ends_before_the_grace(self):
+        provider, sleeps = self.collect_hung_pi(timeout_minutes=2, decided_at=1000.0)
+        self.assertIn("timed_out after 120 s (", provider["error"])
+        self.assertEqual(len(sleeps), 2)
+
+    def test_a_verdict_older_than_the_grace_ends_the_wait_at_once(self):
+        """The attack wait may have used the grace already: the first pass terminates the provider."""
+        provider, sleeps = self.collect_hung_pi(timeout_minutes=30, decided_at=1000.0 - 700, start=1000.0)
+        self.assertEqual(provider["error"], "timed_out after the review verdict: 600 s grace")
+        self.assertEqual(sleeps, [])
+
+    def test_the_grace_counts_from_decided_at_when_review_json_has_one(self):
+        self.set_control(claude={"findings": []}, pi={"hang": True})
+        runtime = self.runtime(self.plan(timeout_minutes=30))
+        clock = {"now": 1000.0}
+        panel.ensure_started(runtime, clock=lambda: clock["now"])
+        (self.run / "review.json").write_text(json.dumps({"verdict": "approved", "reviewers": [], "decided_at": panel.iso(1300.0)}))
+        os.utime(self.run / "review.json", (1000.0, 1000.0))
+        sleeps = []
+
+        def sleep(_):
+            sleeps.append(clock["now"])
+            clock["now"] += 60
+        panel.collect(runtime, None, clock=lambda: clock["now"], sleep=sleep)
+        self.assertEqual(len(sleeps), 15)  # 1300 + 600: fifteen one-minute polls from 1000.
+        self.assertEqual(self.record()["panels"][0]["providers"][1]["error"], "timed_out after the review verdict: 600 s grace")
+
     def test_a_non_json_reply_is_parse_failed_with_its_raw_text_and_every_provider_timing_out_is_timed_out(self):
         self.set_control(claude={"not_json": True}, pi={"not_json": True})
         plan = self.plan()
