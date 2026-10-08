@@ -314,5 +314,19 @@ class HaikuTests(Isolated):
         self.assertIn("summary (haiku): unavailable", out)
 
 
+class PromptTests(unittest.TestCase):
+    def test_the_automatic_worker_prompt_names_run_report_after_the_default_check_line(self):
+        from .automatic import DEFAULTS, completion_prompt
+        from .guardrails import CHECKS_DEFAULT, RUN_REPORT
+        with tempfile.TemporaryDirectory() as temp:
+            plan = {"run_id": "test", "automatic": dict(DEFAULTS), "nodes": {"ui": {"session_id": "token"}}}
+            prompt = completion_prompt(Path(temp), plan, "ui")
+        sentence = (f"Run tests through `{RUN_REPORT} -- <command>` so only a summary enters your context; "
+                    "the full log path is printed.")
+        self.assertIn(f"Unless your task says otherwise: {CHECKS_DEFAULT} {sentence}", prompt)
+        self.assertIn("-m workflow run-report", RUN_REPORT)
+        self.assertNotIn("run-report", CHECKS_DEFAULT)
+
+
 if __name__ == "__main__":
     unittest.main()

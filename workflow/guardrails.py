@@ -192,6 +192,10 @@ def refusals(target: Path, folder: Path, manifest: dict, tasks: dict[str, Path])
 # sessions.prepare puts each lane's worktree at <run>/worktree-<lane>, beside <run>/policy.json.
 CHECK_REPORT = (f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[1]))} {shlex.quote(sys.executable)} "
                 '-m workflow check-report "$(git rev-parse --show-toplevel)/../policy.json"')
+# The run-report command spelled out the same way: an automatic worker runs its tests through it, so only a bounded summary
+# of their output enters its context (run_report.py).
+RUN_REPORT = (f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[1]))} {shlex.quote(sys.executable)} "
+              "-m workflow run-report")
 # The worker's own Playwright run goes through the machine's browser queue (browser_queue): it waits for a slot while
 # the queue is on and all slots are held, and runs at once while it is off.
 BROWSER_QUEUE = (f"PYTHONSAFEPATH=1 PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[1]))} {shlex.quote(sys.executable)} "

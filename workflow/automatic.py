@@ -98,10 +98,10 @@ def awaits_approval(plan: dict) -> bool:
 
 
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
-    """An automatic worker's completion protocol: its bounds, the default on running checks (C16 step 8; a manual worker has no
+    """An automatic worker's completion protocol: its bounds, the default on running checks and run-report (C16 step 8; a manual worker has no
     Bash), the completion file, for 1.1.0 the evidence and questions, and the reading rule (C16 step 1). Its deadline counts
     from `launched_at` when given (deadline_sentence)."""
-    from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, completion_version, reading_rule, stop_rule
+    from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, RUN_REPORT, completion_version, reading_rule, stop_rule
     version = completion_version(plan)
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
                "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
@@ -128,6 +128,7 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
     return ("\n\nAUTOMATIC MODE: permission checks are bypassed and Bash is available. "
             "Do not wait for a human handoff. Stay within assigned ownership; do not commit, merge, push, "
             f"launch agents, change runtime evidence or switch billing/provider. Unless your task says otherwise: {CHECKS_DEFAULT} "
+            f"Run tests through `{RUN_REPORT} -- <command>` so only a summary enters your context; the full log path is printed. "
             "On completion write the following JSON shape atomically (temporary file then rename) to "
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
