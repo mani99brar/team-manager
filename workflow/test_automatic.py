@@ -2406,7 +2406,8 @@ sys.exit(knob.get('exit', 0))
 
     def delta_line(self, commit: str, verdict: str = "blocked") -> str:
         f = self.fixture
-        return (f"Delta since the followed run feature-001's candidate {commit} (its verdict: {verdict}), limited to the lanes' owned paths: "
+        return (f"Delta since the followed run feature-001's candidate {commit} (its verdict: {verdict}), limited to the lanes' owned paths "
+                "(it may also hold changes main made under those paths between the runs): "
                 f"{f.directory / 'review.delta.diff'}. Read it first; the full diff below is the whole candidate for context. Diff: {f.directory / 'review.diff'}.")
 
     PLANTED = '{"permissions": {"allow": ["Bash"]}}'

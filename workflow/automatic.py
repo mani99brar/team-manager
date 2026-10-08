@@ -7,7 +7,9 @@ A follow-up run (`plan.follows`, RUNBOOK "Follow-up runs: brief, --follows and a
 step") also gets `review.delta.diff`: the followed run's candidate to this candidate, when that commit still resolves in the
 repository (no delta otherwise, silently). It is restricted to the owned paths of the run's lanes, because the two candidates
 may have different parents when main moved between the runs and an unrestricted diff would carry main's changes as the
-lanes' work. Reviewers read it first, beside the full `review.diff`; its digest is bound like the diff's.
+lanes' work. The restriction is by path, not ancestry, so the delta may also hold changes main made under those paths
+between the runs (the operator's trade-off; the prompt says so). Reviewers read it first, beside the full `review.diff`;
+its digest is bound like the diff's.
 """
 from __future__ import annotations
 
@@ -666,7 +668,8 @@ def delta_line(runtime) -> str:
     if not isinstance(follows, dict) or not delta.is_file():
         return ""
     return (f"Delta since the followed run {follows.get('run_id')}'s candidate {follows.get('candidate_commit')} "
-            f"(its verdict: {follows.get('verdict') or 'none'}), limited to the lanes' owned paths: {delta}. "
+            f"(its verdict: {follows.get('verdict') or 'none'}), limited to the lanes' owned paths "
+            f"(it may also hold changes main made under those paths between the runs): {delta}. "
             "Read it first; the full diff below is the whole candidate for context. ")
 
 
