@@ -17,8 +17,9 @@ A report-only, configurable panel of providers beside the review of an automatic
   abandon") the touched files and their diffs come from the followed run's candidate to this one, restricted to the lanes'
   owned paths as the reviewers' `review.delta.diff` is (`automatic.delta_base`), and `panel.json` records that commit as
   each panel's `delta_from` (null otherwise).
-- The context is capped at MAX_CONTEXT_BYTES (cap_sections: full bodies dropped first, then diffs cut, the PRD and
-  requirement documents last), recorded as `context_truncated`; once review.json exists a provider still running gets at
+- The context is capped at MAX_CONTEXT_BYTES (cap_sections: full bodies dropped first, then the PRD and requirement
+  documents cut to half the cap, then diffs cut, then whole file sections dropped; still over is refused, never sent),
+  recorded as `context_truncated`; once review.json exists a provider still running gets at
   most PANEL_GRACE_AFTER_VERDICT_SECONDS from the verdict (RUNBOOK "Multi-provider panel (feature.json 2.6.0)").
 - Never raises into the review step: `ensure_started` and `collect` swallow every failure into the record (`failed` with
   its `error`); the only thing that propagates is a KeyboardInterrupt, which terminates the jobs and leaves the record
@@ -58,6 +59,7 @@ MAX_CONTEXT_BYTES = 1_500_000
 FULL_FILE = "\n--- full file at the candidate ---\n"
 OMITTED = "\n--- full file omitted: {size} bytes, over the context cap ---\n"
 TRUNCATED = "=== truncated: kept {kept} of {total} bytes ==="
+SECTION_OMITTED = "--- section omitted: {label}, {size} bytes, over the context cap ---"
 TRUNCATED_LINE = re.compile(r"truncated: kept \d+ of \d+ bytes")  # Shaped like a label line; never one (context_labels).
 NO_FILE = "(no file)"  # The record's `file` placeholder for a finding a provider returned with no file: the viewer pins `file` min length 1, so an empty string would drop the whole panel section (P1).
 STAGES = ("challenge", "review")
@@ -446,8 +448,11 @@ class Section:
 
     def __init__(self, label: str, diff: str, tail: str = "", body: str | None = None, document: bool = False):
         self.label, self.diff, self.tail, self.body, self.document = label, diff, tail, body, document
+        self.omitted = None  # The one line a whole section dropped by the cap leaves (no label line: it is no longer a label).
 
     def render(self) -> str:
+        if self.omitted is not None:
+            return self.omitted + "\n\n"
         text = self.diff + self.tail + (FULL_FILE + self.body if self.body is not None else "")
         return label_line(self.label) + text.rstrip("\n") + "\n\n"
 
@@ -493,34 +498,71 @@ def truncate(section: Section, excess: int) -> None:
 
 
 def cap_sections(sections: list[Section], cap: int = None) -> dict | None:
-    """Bring the context under `cap` bytes (MAX_CONTEXT_BYTES), in this order: drop the files' full bodies, largest first,
-    each replaced by one `--- full file omitted ---` line; then cut the files' diffs, largest first; then, only once every
-    body is gone and every diff cut, the PRD and requirement documents, largest first. Stops as soon as the context fits.
-    Returns `context_truncated` ({original_bytes, omitted_bodies, truncated}) or None when nothing was cut."""
+    """Bring the context under `cap` bytes (MAX_CONTEXT_BYTES), stopping as soon as it fits, in this order:
+    1. drop the files' full bodies, largest first, each replaced by one `--- full file omitted ---` line;
+    2. cut the PRD and requirement documents, largest first, until together they take at most half the cap (so pinned
+       documents over the cap never cost the diffs everything);
+    3. cut the files' diffs, largest first;
+    4. drop whole file sections, largest first, each replaced by one `--- section omitted: <label>, <n> bytes ---` line
+       (when labels, notes and markers alone are over the cap).
+    Raises ValueError when the context is still over the cap (the caller records the panel failed rather than send it).
+    Returns `context_truncated` ({original_bytes, omitted_bodies, truncated, omitted_sections}) or None when nothing was cut."""
     cap = MAX_CONTEXT_BYTES if cap is None else cap
     sizes = [section.size() for section in sections]
-    original = total = sum(sizes)
-    if total <= cap:
+    original = sum(sizes)
+    if original <= cap:
         return None
-    omitted, cut = [], []
+    omitted, cut, dropped = [], [], []
+
+    def total() -> int:
+        return sum(sizes)
+
+    def resize(index: int) -> None:
+        sizes[index] = sections[index].size()
+
+    def shorten(index: int, excess: int) -> None:
+        """truncate, kept only when it makes the section smaller (a short text plus the marker can be longer than the text)."""
+        section, before = sections[index], sections[index].diff
+        truncate(section, excess)
+        if section.size() >= sizes[index]:
+            section.diff = before
+            return
+        resize(index)
+        if section.label not in cut:
+            cut.append(section.label)
+
     for index in sorted((i for i, s in enumerate(sections) if s.body is not None), key=lambda i: -len(sections[i].body.encode())):
-        if total <= cap:
+        if total() <= cap:
             break
         section = sections[index]
         section.tail += OMITTED.format(size=len(section.body.encode()))
         section.body = None
-        total += section.size() - sizes[index]
-        sizes[index] = section.size()
+        resize(index)
         omitted.append(section.label)
-    for documents in (False, True):
-        for index in sorted((i for i, s in enumerate(sections) if s.document is documents), key=lambda i: -len(sections[i].diff.encode())):
-            if total <= cap:
-                break
-            truncate(sections[index], total - cap)
-            total += sections[index].size() - sizes[index]
-            sizes[index] = sections[index].size()
-            cut.append(sections[index].label)
-    return {"original_bytes": original, "omitted_bodies": omitted, "truncated": cut}
+    documents = [i for i, s in enumerate(sections) if s.document]
+    for index in sorted(documents, key=lambda i: -len(sections[i].diff.encode())):
+        over = sum(sizes[i] for i in documents) - cap // 2
+        if total() <= cap or over <= 0:
+            break
+        shorten(index, over)
+    files = [i for i, s in enumerate(sections) if not s.document]
+    for index in sorted(files, key=lambda i: -len(sections[i].diff.encode())):
+        if total() <= cap:
+            break
+        shorten(index, total() - cap)
+    for index in sorted(files, key=lambda i: -sizes[i]):
+        if total() <= cap:
+            break
+        section = sections[index]
+        section.omitted = SECTION_OMITTED.format(label=section.label, size=sizes[index])
+        if section.size() >= sizes[index]:  # Its one line would be no shorter than what is left of it.
+            section.omitted = None
+            continue
+        resize(index)
+        dropped.append(section.label)
+    if total() > cap:
+        raise ValueError(f"context still {total()} bytes after the cap of {cap} (from {original}): not sent")
+    return {"original_bytes": original, "omitted_bodies": omitted, "truncated": cut, "omitted_sections": dropped}
 
 
 def delta_from(directory: Path, plan: dict) -> tuple[str, list[str]] | None:
@@ -559,6 +601,8 @@ def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Pa
         sections.append(Section(rel, text, document=True))
     truncated = cap_sections(sections)
     data = "".join(section.render() for section in sections).encode()
+    if len(data) > MAX_CONTEXT_BYTES:  # cap_sections raises first; never send an oversized context whatever happens above.
+        raise ValueError(f"context is {len(data)} bytes, over the cap of {MAX_CONTEXT_BYTES}: not sent")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
     temporary.write_bytes(data)
     os.chmod(temporary, 0o600)

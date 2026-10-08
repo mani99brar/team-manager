@@ -98,19 +98,59 @@ class ContextCap(unittest.TestCase):
         sections = self.sections()
         original = len(self.render(sections).encode())
         truncated = panel.cap_sections(sections, original - 2000)
-        self.assertEqual(truncated, {"original_bytes": original, "omitted_bodies": ["a.py"], "truncated": []})
+        self.assertEqual(truncated, {"original_bytes": original, "omitted_bodies": ["a.py"], "truncated": [], "omitted_sections": []})
         self.assertIn("--- full file omitted: 3000 bytes, over the context cap ---", self.render(sections))
         self.assertIn("--- full file at the candidate ---\nBBB", self.render(sections))
         self.assertIn("P\n" * 2000, self.render(sections))
 
-    def test_the_documents_are_cut_only_after_every_body_and_diff(self):
+    def test_the_documents_are_cut_to_half_the_cap_after_the_bodies_and_before_any_diff(self):
         sections = self.sections()
         truncated = panel.cap_sections(sections, 2500)
-        self.assertEqual((truncated["omitted_bodies"], truncated["truncated"]), (["a.py", "b.py"], ["a.py", "b.py", "docs/prd.md"]))
+        self.assertEqual((truncated["omitted_bodies"], truncated["truncated"], truncated["omitted_sections"]), (["a.py", "b.py"], ["docs/prd.md"], []))
         text = self.render(sections)
         self.assertLessEqual(len(text.encode()), 2500)
-        self.assertEqual(len(re.findall(r"^=== truncated: kept \d+ of \d+ bytes ===$", text, re.M)), 3)
+        self.assertLessEqual(sections[2].size(), 1250)
+        self.assertEqual(len(re.findall(r"^=== truncated: kept \d+ of \d+ bytes ===$", text, re.M)), 1)
+        self.assertIn("a\n" * 200, text)  # Both diffs whole.
+        self.assertIn("b\n" * 100, text)
         self.assertEqual(panel.context_labels(text), ["a.py", "b.py", "docs/prd.md"])
+
+    def test_documents_alone_over_the_cap_leave_the_diffs_intact(self):
+        sections = [panel.Section("a.py", "--- diff ---\n" + "a\n" * 200), panel.Section("docs/prd.md", "P\n" * 3000, document=True),
+                    panel.Section("docs/req.md", "R\n" * 2000, document=True)]
+        truncated = panel.cap_sections(sections, 4000)
+        self.assertEqual((truncated["omitted_bodies"], truncated["truncated"], truncated["omitted_sections"]), ([], ["docs/prd.md", "docs/req.md"], []))
+        self.assertEqual(sections[0].diff, "--- diff ---\n" + "a\n" * 200)
+        self.assertLessEqual(sections[1].size() + sections[2].size(), 2000)
+        self.assertLessEqual(len(self.render(sections).encode()), 4000)
+
+    def test_an_overflow_of_labels_and_notes_alone_drops_whole_sections_largest_first(self):
+        """Many touched files with tiny diffs: once every body is omitted (each leaving its note) and no diff can shrink, the
+        labels and notes alone are over the cap, so whole sections go, largest first, each leaving one line."""
+        def build():
+            sections = [panel.Section(f"pkg/m{index:03d}.py", "--- diff ---\n+x\n", body="y" * 100) for index in range(40)]
+            sections.append(panel.Section("pkg/the_biggest_module.py", "--- diff ---\n+x\n", body="y" * 120))
+            return sections
+        floor = build()
+        for section in floor:  # What is left once every body is omitted: the diffs are too short to cut.
+            section.tail += panel.OMITTED.format(size=len(section.body))
+            section.body = None
+        cap = len(self.render(floor).encode()) - 300
+        sections = build()
+        truncated = panel.cap_sections(sections, cap)
+        text = self.render(sections)
+        self.assertLessEqual(len(text.encode()), cap)
+        self.assertEqual((len(truncated["omitted_bodies"]), truncated["truncated"]), (41, []))
+        self.assertTrue(truncated["omitted_sections"])
+        self.assertEqual(truncated["omitted_sections"][0], "pkg/the_biggest_module.py")
+        self.assertIn("--- section omitted: pkg/the_biggest_module.py, ", text)
+        self.assertNotIn("pkg/the_biggest_module.py", panel.context_labels(text))
+        self.assertEqual(len(panel.context_labels(text)), 41 - len(truncated["omitted_sections"]))
+
+    def test_a_context_that_cannot_fit_is_refused_not_sent(self):
+        sections = [panel.Section("docs/prd.md", "P\n", document=True)]
+        with self.assertRaisesRegex(ValueError, "after the cap of 5"):
+            panel.cap_sections(sections, 5)
 
     def test_a_context_under_the_cap_is_untouched(self):
         sections = self.sections()
