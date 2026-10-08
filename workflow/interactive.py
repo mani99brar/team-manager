@@ -21,8 +21,8 @@ from pathlib import Path
 
 from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule, released_drops, restore_step
 from .herdr import herdr
-from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, plan_digest, read_json,
-                       review_node, review_nodes, lane_pins, role_flags, run_claude, save_json, worker_settings)
+from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, lane_pins, plan_digest,
+                       read_json, review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
 
 REVIEW = "review"
 # A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
