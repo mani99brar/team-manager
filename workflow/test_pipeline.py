@@ -111,6 +111,7 @@ class FakeSessions:
         self.repair_edits = {}             # Per-lane {path: content} a fake repair session writes in its workspace (None deletes; a callable gets the node).
         self.repair_status = "completed"   # The fake repair session's completion status, or None to write no completion file.
         self.repair_state = "idle"         # The native state the registry lists for a repair session.
+        self.repair_listed = True          # False: the registry no longer lists a repair session (it ended, its row is gone).
         self.repair_prompts = {}           # The prompt each repair session was launched with.
 
     def reviewer_nodes(self):
@@ -232,7 +233,7 @@ class FakeSessions:
         for node in (*self.workers, *self.reviewer_nodes(), *repairs):
             if (self.directory / f"{node}.interactive.json").exists():
                 if node.startswith("repair-"):
-                    if not (self.directory / f"{node}.stop.json").exists():
+                    if self.repair_listed and not (self.directory / f"{node}.stop.json").exists():
                         rows.append({"id": self.background_id(node), "sessionId": self.native_id(node), "state": self.repair_state,
                                      "pid": os.getpid(), "kind": "background"})
                     continue
@@ -1949,6 +1950,14 @@ class AbandonTests(unittest.TestCase):
         self.assertIn("already abandoned", output)
         self.assertEqual(read_json(self.directory / "abandon.json")["reason"], self.REASON)
         self.assertEqual(len([event for event in self.events() if event["status"] == "cancelled"]), 1)
+
+    def test_a_repair_session_is_stopped_too(self):
+        save_json(self.directory / "repair-1.interactive.json", {"node_id": "repair-1", "background_id": "id-repair-1", "session_id": "session-repair-1"})
+        self.live["repair-1"] = {"id": "id-repair-1", "sessionId": "session-repair-1", "pid": os.getpid(), "state": "working"}
+        code, output, stops = self.abandon("--reason", self.REASON, "--by", "operator")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(stops, [["claude", "stop", "id-ui"], ["claude", "stop", "id-review"], ["claude", "stop", "id-repair-1"]])
+        self.assertEqual(read_json(self.directory / "abandon.json")["stopped"], ["ui", "review", "repair-1"])
 
     def test_a_session_whose_launch_receipt_was_never_bound_is_stopped(self):
         # The settle step failed (Claude Code unavailable, or Ctrl-C): the receipt has no ids, but the launch log names the

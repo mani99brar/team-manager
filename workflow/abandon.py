@@ -57,8 +57,11 @@ def refuse_abandoned(directory: Path) -> None:
 
 
 def recorded_nodes(plan: dict, directory: Path) -> list[str]:
-    """Every worker and native reviewer session the run launched or began to launch, in lane then reviewer order."""
-    return [node for node in (*plan_workers(plan), *review_nodes(plan)) if (directory / f"{node}.interactive.json").exists()]
+    """Every worker, native reviewer and repair session (`repair-<n>`, repair --session and the in-run fix loop) the run launched
+    or began to launch, in lane, reviewer, then repair order."""
+    repairs = sorted((path.name.removesuffix(".interactive.json") for path in directory.glob("repair-*.interactive.json")),
+                     key=lambda node: int(node.removeprefix("repair-")) if node.removeprefix("repair-").isdigit() else 0)
+    return [node for node in (*plan_workers(plan), *review_nodes(plan), *repairs) if (directory / f"{node}.interactive.json").exists()]
 
 
 def listed_live(rows: list[dict], *records: dict) -> bool:

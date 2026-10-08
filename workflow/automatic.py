@@ -2639,6 +2639,8 @@ def drive(runtime, *, single_step=False) -> str | None:
         raise resumable_stop(runtime, source_branch_note(runtime, branch))
     note_controller_drift(runtime)
     runtime.event("controller", "running", f"Automatic checkpoint controller PID {os.getpid()}")
+    from .repair import retry_stops
+    retry_stops(runtime)  # A repair session stop a round left unconfirmed is issued again before anything else.
     config = graph_config(runtime)
     while True:
         with SqliteSaver.from_conn_string(str(runtime.directory / "pipeline.sqlite")) as saver:

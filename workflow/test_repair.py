@@ -1257,6 +1257,102 @@ class RepairSession(RepairFixture):
         [entry] = self.entries()
         self.assertEqual((entry["status"], entry["lanes"]["ui"]["fix_files"], entry["left_behind"]), ("applied", ["ui.txt", "web/new.txt"], ["coverage/out.json"]))
 
+    def test_a_launch_that_failed_after_claude_bg_ran_is_stopped(self):
+        self.block()
+        real = self.sessions.run_repair
+        def unsettled(*args):
+            real(*args)  # `claude --bg` ran and the receipt is saved; then settle fails.
+            raise RuntimeError("No exact matching background session after launch")
+        self.sessions.run_repair = unsettled
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 1)
+        entry = self.entries()[-1]
+        self.assertEqual(entry["reason"], "the repair session did not launch: No exact matching background session after launch; its session was stopped")
+        self.assertTrue(read_json(self.directory / "repair-1.stop.json")["stopped"])
+        self.assertNotIn("stop_pending", entry)
+        # A stop that is not confirmed is recorded and owed.
+        with patch.object(self.runtime, "stop_repair", side_effect=RuntimeError("Stop failed for repair-2")):
+            self.session_cli("ui", "--session", "--live")
+        entry = self.entries()[-1]
+        self.assertTrue(entry["reason"].endswith("; stop not confirmed: Stop failed for repair-2"), entry["reason"])
+        self.assertTrue(entry["stop_pending"])
+
+    def test_an_unconfirmed_stop_captures_nothing_and_is_retried(self):
+        self.block()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        with patch.object(self.runtime, "stop_repair", side_effect=RuntimeError("Stop failed for repair-1")):
+            code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 1)
+        self.assertIn("its completion was accepted but the session's stop not confirmed: Stop failed for repair-1; nothing was captured", err)
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["stop_pending"], "source_commit" in entry), ("blocked", True, False))
+        self.assertFalse((self.directory / "repair-1.stop.json").exists())
+        repair.retry_stops(self.runtime)  # What the next automatic --live (or repair command) does first.
+        [entry] = self.entries()
+        self.assertNotIn("stop_pending", entry)
+        self.assertEqual(entry["stop_retried"], "its session was stopped")
+        self.assertTrue(read_json(self.directory / "repair-1.stop.json")["stopped"])
+
+    def test_a_session_that_ended_on_its_own_is_judged_by_its_completion(self):
+        import time
+        self.block()
+        clock = [time.time()]  # Well inside the 45-minute deadline: only the session's end decides.
+        timing = (patch("workflow.repair.time.time", side_effect=lambda: clock[0]),
+                  patch("workflow.repair.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + 60)))
+        # A terminal row without a completion file, and a row gone past the respawn gap: the round ends blocked.
+        for knobs in ({"repair_state": "stopped"}, {"repair_listed": False}):
+            with self.subTest(knobs=knobs), timing[0], timing[1]:
+                self.sessions.repair_status = None
+                for key, value in knobs.items():
+                    setattr(self.sessions, key, value)
+                code, _, err = self.session_cli("ui", "--session", "--live")
+                self.assertEqual(code, 1)
+                self.assertIn("ended without a completion file", self.entries()[-1]["reason"])
+                self.sessions.repair_state, self.sessions.repair_listed = "idle", True
+        # A failed row with a completed file is accepted; its stop is recorded as ended, nothing is stopped.
+        self.sessions.repair_status, self.sessions.repair_state = "completed", "failed"
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        n = self.entries()[-1]["n"]
+        self.assertEqual(read_json(self.directory / f"repair-{n}.stop.json")["ended"], True)
+
+    def test_a_round_resumes_across_both_crash_points_of_its_launch(self):
+        self.block()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        real = self.sessions.run_repair
+        # The controller dies before the receipt exists: the next command completes the launch.
+        def before(*args):
+            self.sessions.run_repair = real
+            raise KeyboardInterrupt
+        self.sessions.run_repair = before
+        with self.assertRaises(KeyboardInterrupt):
+            self.session_cli("ui", "--session", "--live")
+        self.assertEqual((self.entries()[0]["status"], (self.directory / "repair-1.interactive.json").exists()), ("launched", False))
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.entries()[0]["status"], self.sessions.starts.count("repair-1")), ("applied", 1))
+
+    def test_a_writer_bound_after_a_crash_joins_prior_session_ids(self):
+        self.block()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        real = self.sessions.run_repair
+        def after(*args):
+            real(*args)  # The receipt holds the session id; the journal never got it.
+            self.sessions.run_repair = real
+            raise KeyboardInterrupt
+        self.sessions.run_repair = after
+        with self.assertRaises(KeyboardInterrupt):
+            self.session_cli("ui", "--session", "--live")
+        self.assertIsNone(self.entries()[0]["session"]["session_id"])
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        session_id = read_json(self.directory / "repair-1.interactive.json")["session_id"]
+        self.assertEqual(self.entries()[0]["session"]["session_id"], session_id)
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(self.runtime)
+        self.assertEqual(read_json(self.directory / "review-bundle.json")["snapshots"]["ui"]["prior_session_ids"], [session_id])
+
     def test_the_deadline_ends_the_round(self):
         self.block()
         self.sessions.repair_status, self.sessions.repair_state = None, "working"
@@ -1503,7 +1599,7 @@ class ReviewFixLoop(FixLoop):
                 with self.assertRaises(RuntimeError) as raised:
                     self.drive()
                 message = str(raised.exception)
-                self.assertTrue(message.startswith("fix loop exhausted for lane ui after 0 rounds: P1 (review): ui.txt says after"), message)
+                self.assertRegex(message, r"^fix loop exhausted for lane ui after 0 rounds: P1 \(\w+\): ui.txt says after")
                 self.assertIn("the round could not start: 0 repairs are already applied to this run (at most 0)", message)
                 self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
                 self.assertFalse((self.directory / "review.round-1.json").exists())

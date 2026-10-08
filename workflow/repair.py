@@ -673,7 +673,8 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
 
 # The journal keeps a repair session from its launch: `launched` (the receipt and the session), `captured` (stopped, its
 # workspace committed as `source_commit`), then `recorded` and `applied` through the --commit path, or `blocked` with why.
-SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary", "review_round", "left_behind")
+SESSION_KEYS = ("by", "via", "trigger", "round", "rounds", "workspace", "workspace_commit", "what", "brief", "session", "captured_at", "summary",
+                "review_round", "left_behind", "stop_pending", "stop_retried")
 LOG_TAIL_LINES = 60
 LOG_LINE_LIMIT = 400  # Characters of one log line in the brief: a minified bundle on one line must not fill the prompt.
 
@@ -763,8 +764,7 @@ def session_brief(runtime, lane: str, entry: dict, rounds: int, deadline: str, f
 def launch_session(runtime, graph, config, lane: str, actor: str, trigger: str, *, findings: list[dict] | None = None,
                    delta: Path | None = None, review_round: int | None = None) -> dict:
     """S-1: the round's journal entry (`launched`), its workspace at the failing base, and one native session in it."""
-    from .automatic import fix_rounds, repair_timeout
-    from .guardrails import epoch, iso
+    from .automatic import fix_rounds
     directory = runtime.directory
     refuse_recorded(directory)
     applied = applied_repairs(directory)
@@ -776,28 +776,72 @@ def launch_session(runtime, graph, config, lane: str, actor: str, trigger: str, 
     n = len(load_repairs(directory)) + 1
     rounds = fix_rounds(runtime.plan) if actor == "controller" else max(fix_rounds(runtime.plan), len(session_entries(directory, lane)) + 1)
     entry = {"n": n, "status": "launched", "mode": "session", **({"by": "controller"} if actor == "controller" else actor_record(actor)),
-             "trigger": trigger, "round": len(session_entries(directory, lane)) + 1, "lanes": {lane: {}}, "recorded_at": now(),
-             "blocked": blocked, "workspace": str(path), "workspace_commit": base,
+             "trigger": trigger, "round": len(session_entries(directory, lane)) + 1, "rounds": rounds, "lanes": {lane: {}}, "recorded_at": now(),
+             "blocked": blocked, "workspace": str(path), "workspace_commit": base, "what": what,
              **({"review_round": review_round} if review_round else {}),
+             **({"brief": {"findings": findings, "delta": str(delta) if delta else None}} if findings is not None else {}),
              "session": {"node": f"repair-{n}", "launch_token": str(uuid.uuid4()), "session_id": None}}
     save_entry(directory, entry)
+    return start_session(runtime, entry)
+
+
+def start_session(runtime, entry: dict) -> dict:
+    """The launch of a journaled round's session (a resumed controller completes one that died before its receipt): the brief,
+    then run_repair. A launch that fails after `claude --bg` ran (its receipt exists) is stopped by identity before the round
+    closes blocked, and the stop's outcome is recorded; an unconfirmed one stays owed (`stop_pending`)."""
+    from .automatic import fix_rounds, repair_timeout
+    from .guardrails import epoch, iso
+    lane = next(iter(entry["lanes"]))
+    node, path = entry["session"]["node"], Path(entry["workspace"])
+    rounds = entry.get("rounds") or max(fix_rounds(runtime.plan), entry["round"])
     launched_at = datetime.now(timezone.utc).isoformat()
     timeout = repair_timeout(runtime.plan)
     deadline = (f" Your deadline is {iso(int(epoch(launched_at) + timeout))} (UTC), {timeout // 60} minutes after this launch: write your "
                 "completion file before it; past it the controller stops this session and applies nothing.")
-    prompt = session_brief(runtime, lane, entry, rounds, deadline, findings, delta)
-    node = entry["session"]["node"]
+    brief = entry.get("brief") or {}
+    prompt = session_brief(runtime, lane, entry, rounds, deadline, brief.get("findings"), Path(brief["delta"]) if brief.get("delta") else None)
     try:
         receipt = runtime.sessions.run_repair(node, prompt, entry["session"]["launch_token"], path, launched_at,
-                                              {"lane": lane, "round": entry["round"], "trigger": trigger, "repair": n})
+                                              {"lane": lane, "round": entry["round"], "trigger": entry["trigger"], "repair": entry["n"]})
     except Exception as error:
-        close_session(runtime, entry, "blocked", f"the repair session did not launch: {error}")
+        reason = f"the repair session did not launch: {error}"
+        if (runtime.directory / f"{node}.interactive.json").exists():  # `claude --bg` ran: a session may exist.
+            reason += "; " + stop_outcome(runtime, entry, node)
+        close_session(runtime, entry, "blocked", reason)
         runtime.event(f"repair_{lane}", "failed", f"round {entry['round']}: {entry['reason']}")
         return entry
     entry["session"]["session_id"] = receipt["session_id"]
-    save_entry(directory, entry)
-    runtime.event(f"repair_{lane}", "running", f"round {entry['round']}: repair session launched ({node}, {what} {base[:8]}, {trigger} block)")
+    save_entry(runtime.directory, entry)
+    runtime.event(f"repair_{lane}", "running", f"round {entry['round']}: repair session launched ({node}, {entry.get('what', 'at')} "
+                                               f"{entry['workspace_commit'][:8]}, {entry['trigger']} block)")
     return entry
+
+
+def stop_outcome(runtime, entry: dict, node: str) -> str:
+    """Stop the round's session by its recorded identity and say how it went; an unconfirmed stop is owed (`stop_pending`), and
+    retry_stops issues it again before the next controller goes on."""
+    try:
+        runtime.stop_repair(node)
+    except Exception as error:
+        if "missing before stop" in str(error):
+            return "no session of it was listed to stop"
+        entry["stop_pending"] = True
+        runtime.event(f"repair_{next(iter(entry['lanes']))}", "warning", f"repair session {node} stop not confirmed: {error}")
+        return f"stop not confirmed: {error}"
+    entry.pop("stop_pending", None)
+    return "its session was stopped"
+
+
+def retry_stops(runtime) -> None:
+    """Issue again every repair session stop that was not confirmed (a round closed with `stop_pending`), as a reviewer stop is
+    retried: before the controller (or a repair command) goes on. A stop still unconfirmed stays owed and is said again."""
+    for entry in session_entries(runtime.directory):
+        if entry.get("stop_pending"):
+            outcome = stop_outcome(runtime, entry, entry["session"]["node"])
+            entry["stop_retried"] = outcome
+            save_entry(runtime.directory, entry)
+            if not entry.get("stop_pending"):
+                runtime.event(f"repair_{next(iter(entry['lanes']))}", "stopped", f"repair session {entry['session']['node']}: {outcome} (retried)")
 
 
 def close_session(runtime, entry: dict, status: str, reason: str) -> None:
@@ -805,34 +849,49 @@ def close_session(runtime, entry: dict, status: str, reason: str) -> None:
     save_entry(runtime.directory, entry)
 
 
-def wait_session(runtime, entry: dict, *, clock=None, sleep=None) -> dict:
-    """The repair session's accepted completion, as wait_handoffs accepts a lane's: a valid file once its turn is over. RepairBlocked
-    for a completion that is blocked or asks a question, a session gone, or the deadline."""
+def wait_session(runtime, entry: dict, *, clock=None, sleep=None) -> tuple[dict, bool]:
+    """The repair session's accepted completion, as wait_handoffs accepts a lane's: a valid file once its turn is over, and
+    whether the session had already ended on its own. A session that ended (its row in a terminal state, gone past an update's
+    respawn gap, or never bound) is judged by its completion file. RepairBlocked for a completion that is blocked or asks a
+    question, a session that ended without one, or the deadline."""
     from .automatic import read_signal, repair_timeout, turn_over
     from .guardrails import epoch
-    from .interactive import SessionGap, UpdateGaps
+    from .interactive import TERMINAL_STATES, SessionGap, UpdateGaps
+    from .sessions import TransientInfraError
     clock, sleep = clock or time.time, sleep or time.sleep
     directory, node = runtime.directory, entry["session"]["node"]
     receipt = read_json(directory / f"{node}.interactive.json")
     deadline = epoch(receipt["launch_requested_at"]) + repair_timeout(runtime.plan)
     gaps = UpdateGaps(runtime.sessions, directory, clock)
     path = directory / f"{node}.completion.json"
+
+    def judged(ended: bool) -> tuple[dict, bool]:
+        try:
+            item = read_signal(runtime, node, launch_token=entry["session"]["launch_token"])
+        except ValueError as error:
+            raise RepairBlocked(f"its completion file was refused: {error}") from error
+        if item["status"] == "completed":
+            return item, ended
+        raise RepairBlocked(f"the repair session ended {item['status']}: {item.get('question') or item['summary']}")
     while True:
         rows = runtime.sessions.inventory()
-        try:
-            row = gaps.row(node, rows)
-        except SessionGap:
-            row = {}  # An update is respawning it: no verdict.
-        if row is None:
-            raise RepairBlocked(f"the repair session {node} is gone without a completion file")
-        if row and (turn_over(row) or row.get("state") == "blocked") and path.exists():
+        bound = read_json(directory / f"{node}.interactive.json").get("background_id")
+        ended = bool(bound) and any(row.get("id") == bound and row.get("state") in TERMINAL_STATES for row in rows)
+        row = None
+        if not ended:
             try:
-                item = read_signal(runtime, node, launch_token=entry["session"]["launch_token"])
-            except ValueError as error:
-                raise RepairBlocked(f"its completion file was refused: {error}") from error
-            if item["status"] == "completed":
-                return item
-            raise RepairBlocked(f"the repair session ended {item['status']}: {item.get('question') or item['summary']}")
+                row = gaps.row(node, rows)
+            except SessionGap:
+                row = {}  # An update is respawning it: no verdict yet.
+            except TransientInfraError:
+                ended = True  # Not listed live past the respawn gap: it ended.
+            ended = ended or row is None
+        if ended:
+            if path.exists():
+                return judged(True)
+            raise RepairBlocked(f"the repair session {node} ended without a completion file")
+        if row and (turn_over(row) or row.get("state") == "blocked") and path.exists():
+            return judged(False)
         if clock() >= deadline:
             raise RepairBlocked(f"the repair session's deadline ({repair_timeout(runtime.plan) // 60} minutes) passed without a completion file")
         sleep(2)
@@ -873,16 +932,21 @@ def session_reason(entry: dict) -> str:
     return f"repair session round {entry['round']}: {entry['trigger']}"
 
 
-def stop_and_report(runtime, lane: str, node: str) -> None:
-    try:
-        runtime.stop_repair(node)
-    except Exception as error:  # Its verdict stands; a stop never relaunches, and the operator inspects the session.
-        runtime.event(f"repair_{lane}", "warning", f"repair session {node} stop not confirmed: {error}")
+class StopNotConfirmed(RepairBlocked):
+    """The round's session could not be stopped: nothing is captured, and the stop stays owed (retry_stops)."""
+
+
+def ended_stop(runtime, node: str) -> None:
+    """A session that ended on its own needs no `claude stop`: its stop is recorded confirmed, so nothing retries it."""
+    receipt = read_json(runtime.directory / f"{node}.interactive.json")
+    save_json(runtime.directory / f"{node}.stop.json", {"background_id": receipt.get("background_id"), "session_id": receipt.get("session_id"),
+                                                        "pid": None, "stopped": True, "ended": True})
 
 
 def session_result(runtime, entry: dict, lane: str) -> dict:
     """The completion of a launched session: waited for, then the session is stopped. A stop already confirmed (a controller died
-    before the capture) reads the file again. An interruption or an outage leaves the session running for the next controller."""
+    before the capture) reads the file again. An interruption or an outage leaves the session running for the next controller.
+    A stop that is not confirmed captures nothing (StopNotConfirmed)."""
     directory, node = runtime.directory, entry["session"]["node"]
     stop = directory / f"{node}.stop.json"
     if stop.exists() and read_json(stop).get("stopped") is True:
@@ -895,12 +959,38 @@ def session_result(runtime, entry: dict, lane: str) -> dict:
             raise RepairBlocked(f"the repair session ended {item['status']}: {item.get('question') or item['summary']}")
         return item
     try:
-        item = wait_session(runtime, entry)
-    except RepairBlocked:
-        stop_and_report(runtime, lane, node)
+        item, ended = wait_session(runtime, entry)
+    except RepairBlocked as blocked:
+        outcome = stop_outcome(runtime, entry, node)
+        if entry.get("stop_pending"):
+            raise StopNotConfirmed(f"{blocked}; {outcome}") from blocked
         raise
-    stop_and_report(runtime, lane, node)
+    if ended:
+        ended_stop(runtime, node)
+        return item
+    outcome = stop_outcome(runtime, entry, node)
+    if entry.get("stop_pending"):
+        raise StopNotConfirmed(f"its completion was accepted but the session's {outcome}; nothing was captured")
     return item
+
+
+def bind_session(runtime, entry: dict) -> None:
+    """A round whose controller died between the receipt and the journal: the receipt's session id (reconciled when the launch
+    never bound one) joins the journal, so the repaired snapshot names its writer (prior_session_ids)."""
+    path = runtime.directory / f"{entry['session']['node']}.interactive.json"
+    if entry["session"].get("session_id") or not path.exists():
+        return
+    session_id = read_json(path).get("session_id")
+    if not session_id:
+        try:
+            session_id = runtime.sessions.reconcile(entry["session"]["node"], path, read_json(path))["session_id"]
+        except RuntimeError as error:
+            from .sessions import TransientInfraError
+            if isinstance(error, TransientInfraError):
+                raise
+            raise RepairBlocked(f"its launch never bound a session and none can be reconciled: {error}") from error
+    entry["session"]["session_id"] = session_id
+    save_entry(runtime.directory, entry)
 
 
 def finish_session(runtime, graph, config, entry: dict) -> dict:
@@ -910,6 +1000,11 @@ def finish_session(runtime, graph, config, entry: dict) -> dict:
     lane = next(iter(entry["lanes"]))
     try:
         if entry["status"] == "launched":
+            if not (directory / f"{entry['session']['node']}.interactive.json").exists():
+                entry = start_session(runtime, entry)  # The controller died before the launch: complete it.
+                if entry["status"] == "blocked":
+                    return entry
+            bind_session(runtime, entry)
             item = session_result(runtime, entry, lane)
             commit, left_behind = capture_session(runtime, entry)
             entry.update(status="captured", source_commit=commit, captured_at=now(), summary=item["summary"], left_behind=left_behind)
@@ -955,6 +1050,7 @@ def run_session_command(runtime, graph, config, lanes: list[str], actor: str) ->
         raise ValueError("A repair session completes like an automatic worker: --session needs an automatic run; use --workspace")
     if len(lanes) != 1:
         raise ValueError("A repair session repairs one lane; name one")
+    retry_stops(runtime)  # A stop a round left unconfirmed is issued again first.
     entry = repair_session(runtime, graph, config, lanes[0], actor=actor, trigger=blocked_trigger(runtime, graph, config))
     if entry["status"] != "applied":
         raise ValueError(f"Repair session {entry['n']} (round {entry['round']} of lane {lanes[0]}) ended blocked: {entry['reason']}. "
