@@ -2236,6 +2236,29 @@ class PanelLaunchGuards(unittest.TestCase):
         self.assertEqual(printed["guardrails"]["feature_version"], "2.6.0")
         self.assertFalse((self.tmp / "runs").exists())
 
+    def test_a_2_7_0_feature_keeps_every_gate_a_2_6_0_feature_has(self):
+        # The version gates are sets, not ranges: a 2.4.0 bump once silently dropped every guardrail. A 2.7.0 feature (per-lane
+        # worker pins) keeps the guardrails, the sidecar, the attack pass, the panels and `critical` exactly as 2.6.0 does.
+        from . import attack, guardrails, panel, sidecar
+        from .launch import load_feature
+        flags = {}
+        for version in ("2.6.0", "2.7.0"):
+            self.write_feature(version=version)
+            manifest = load_feature(self.folder)
+            self.assertTrue(guardrails.is_guarded(manifest), version)
+            self.assertEqual(sidecar.declared(manifest)["prompt"], "builtin:senior-review")
+            self.assertEqual(attack.declared(manifest)["angles"], ["auth-funds"])
+            self.assertEqual(panel.declared(manifest)[0]["id"], "review-panel")
+            _, commands, _ = self.launch()
+            preflight, prepare = commands[0], commands[2]
+            flags[version] = ({flag for flag in preflight if flag.startswith("--")},
+                              {flag for flag in prepare if flag.startswith("--")})
+            for flag in ("--guardrails", "--decisions", "--prd", "--critical", "--sidecar-brief", "--attack-settings", "--panel-settings"):
+                self.assertIn(flag, prepare, version)
+        self.assertEqual(flags["2.7.0"], flags["2.6.0"])
+        self.write_feature(version="2.7.0", tryout=True)
+        self.assertTrue(load_feature(self.folder)["tryout"])
+
     def test_prepare_pins_plan_panels_last_with_the_brief_text_and_sha(self):
         from . import panel
         from .sidecar import BUILTIN_BRIEFS

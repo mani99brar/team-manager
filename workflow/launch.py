@@ -33,8 +33,9 @@ BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # The feature versions that may declare `critical` (C51): the operator confirmed at the grill that the feature's code is
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
-# and 2.6.0 (the multi-provider panel) keep both. The migration hint for an earlier feature with a browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0"})
+# 2.6.0 (the multi-provider panel) and 2.7.0 (per-lane worker pins) keep both. The migration hint for an earlier feature with a
+# browser check names the version it should move to.
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0"})
 CRITICAL_VERSION = "2.4.0"
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")

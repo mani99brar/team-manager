@@ -47,8 +47,9 @@ from .verification import CONTRACTS, validate_schema
 
 SIDECAR = "sidecar"
 SIDECAR_VERSION = "2.3.0"
-# The feature versions that may declare a sidecar: 2.3.0, 2.4.0 (adds `critical`, C51) and 2.5.0 (adds `attack`).
-SIDECAR_VERSIONS = frozenset({SIDECAR_VERSION, "2.4.0", "2.5.0", "2.6.0"})
+# The feature versions that may declare a sidecar: 2.3.0, 2.4.0 (adds `critical`, C51), 2.5.0 (adds `attack`), 2.6.0 (adds
+# `panels`) and 2.7.0 (adds the per-lane worker `model` and `effort`).
+SIDECAR_VERSIONS = frozenset({SIDECAR_VERSION, "2.4.0", "2.5.0", "2.6.0", "2.7.0"})
 LEDGER_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "sidecar.schema.json"
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "sidecar"

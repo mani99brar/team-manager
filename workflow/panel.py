@@ -40,7 +40,7 @@ from .verification import CONTRACTS, validate_schema
 
 PANEL = "panel"
 PANEL_VERSION = "2.6.0"  # The feature version that may declare `panels`.
-PANEL_VERSIONS = frozenset({PANEL_VERSION})
+PANEL_VERSIONS = frozenset({PANEL_VERSION, "2.7.0"})  # 2.7.0 (per-lane worker pins) keeps the panels.
 RECORD_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "panel.schema.json"
 RECORD = "panel.json"
@@ -169,7 +169,7 @@ def declared(manifest: dict) -> list[dict] | None:
     if value is None:
         return None
     if manifest.get("version") not in PANEL_VERSIONS:
-        raise ValueError(f"feature.json panels needs version {PANEL_VERSION} (this file is {manifest.get('version')})")
+        raise ValueError(f"feature.json panels needs version {PANEL_VERSION} or later (this file is {manifest.get('version')})")
     if not isinstance(value, list) or not value:
         raise ValueError("feature.json panels must be a non-empty list of panel objects")
     panels = [settings(item, f"feature.json panels[{index}].") for index, item in enumerate(value)]

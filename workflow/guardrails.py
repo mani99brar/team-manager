@@ -63,8 +63,9 @@ from .worktrees import git_worktree
 
 GUARDED_VERSION = "2.2.0"
 # 2.3.0 keeps every guardrail and adds the optional review sidecar (workflow/sidecar.py); 2.4.0 adds the optional `critical`
-# (C51), keeping both.
-GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0", "2.4.0", "2.5.0", "2.6.0"})
+# (C51), keeping both; 2.5.0 (attack), 2.6.0 (panels) and 2.7.0 (per-lane worker pins) keep every one. A set, not a range:
+# every new feature version joins it, or its features silently lose their guardrails.
+GUARDED_VERSIONS = frozenset({GUARDED_VERSION, "2.3.0", "2.4.0", "2.5.0", "2.6.0", "2.7.0"})
 REQUIRED_HEADINGS = ("Goal", "Acceptance", "Stop")
 # The one default line init's Acceptance template keeps (C16 step 8). It says how a lane runs its checks, not what the lane
 # delivers, so a section that holds nothing else is empty (brief_problems), as it was before the line existed (1943ea8).
