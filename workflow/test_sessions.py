@@ -309,7 +309,8 @@ class RunClaudeTests(unittest.TestCase):
         judges = [(name, node) for name, role, node in calls if role == "judges"]
         self.assertTrue({"guardrails.py", "sidecar.py", "attack.py", "panel.py", "automatic.py", "interactive.py", "replay.py"} <= {name for name, _ in judges})
         self.assertFalse([name for name, node in judges if node])
-        self.assertEqual([(name, role, node) for name, role, node in calls if role == "worker"], [("interactive.py", "worker", True)])
+        # The lane's worker and its repair session (repair --session, the in-run fix loop): both a worker of that lane.
+        self.assertEqual([(name, role, node) for name, role, node in calls if role == "worker"], [("interactive.py", "worker", True)] * 2)
 
     def test_a_print_jobs_role_file_records_the_requested_pins_and_the_models_it_used(self):
         from .sessions import pin_roles, record_role

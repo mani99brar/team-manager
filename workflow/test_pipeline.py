@@ -21,6 +21,7 @@ from .actor import OPERATOR_ONLY
 from .automatic import automatic_settings
 from .checks import execute, now
 from .costs import record_session_cost
+from .guardrails import completion_version
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
 from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json
 from .verification import CONTRACTS, policy_digest
@@ -107,6 +108,10 @@ class FakeSessions:
         self.reviewer_states = {}          # Per-reviewer native state instead of idle: {"general": "working"}.
         self.reviewer_after_file = None    # Callable run right after a completion file is written (dirty the worktree, rewrite the diff).
         self.reviewer_row_after_file = None  # Once a completion file exists: a dict merged into the located reviewer row, or "missing" for None.
+        self.repair_edits = {}             # Per-lane {path: content} a fake repair session writes in its workspace (None deletes; a callable gets the node).
+        self.repair_status = "completed"   # The fake repair session's completion status, or None to write no completion file.
+        self.repair_state = "idle"         # The native state the registry lists for a repair session.
+        self.repair_prompts = {}           # The prompt each repair session was launched with.
 
     def reviewer_nodes(self):
         return [review_node(reviewer_id) for reviewer_id in reviewer_ids(self.plan)]
@@ -121,6 +126,8 @@ class FakeSessions:
         """The UUID the native registry reports for a session; receipts record it, they do not define it."""
         if node in self.plan["nodes"]:
             return self.plan["nodes"][node]["session_id"]
+        if node.startswith("repair-"):
+            return f"{int(node[len('repair-'):]):08d}-4444-4444-8444-444444444444"
         reviewer_id = node[len("review-"):] if node.startswith("review-") else "review"
         override = self.per_reviewer(self.reviewer_session_id, reviewer_id)
         if override:
@@ -176,6 +183,35 @@ class FakeSessions:
                 self.reviewer_after_file()
         return receipt
 
+    def run_repair(self, node, prompt, launch_token, cwd, launched_at, extra):
+        """A repair session: writes repair_edits[lane] in its workspace, then its completion file (repair_status)."""
+        path = self.directory / f"{node}.interactive.json"
+        if path.exists():
+            return self.reconcile(node, path, read_json(path))
+        self.record(node)
+        self.repair_prompts[node] = prompt
+        receipt = {"node_id": node, "session_id": self.native_id(node), "launch_token": launch_token, "background_id": self.background_id(node),
+                   "worktree": str(cwd), "base_commit": self.plan["base_commit"], "workspace_commit": git(Path(cwd), "rev-parse", "HEAD"),
+                   "status": "attached_session_available", "attempt": 1, "launcher_invocations": 1, "launch_requested_at": launched_at,
+                   "observed_state": "idle", "native_started_at": None, **extra}
+        save_json(path, receipt)
+        (self.directory / f"{node}.prompt.txt").write_text(prompt)
+        for name, content in self.repair_edits.get(extra["lane"], {}).items():
+            target = Path(cwd) / name
+            if content is None:
+                target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content(node) if callable(content) else content)
+        if self.repair_status:
+            completion = {"version": completion_version(self.plan), "run_id": self.plan["run_id"], "node_id": node, "launch_token": launch_token,
+                          "status": self.repair_status, "summary": f"Synthetic repair ({self.repair_status})", "open_assumptions": []}
+            if completion["version"] == "1.1.0":
+                done = self.repair_status == "completed"
+                completion.update(untested=[], falsifying_check="unit" if done else None, verify_yourself="the fix" if done else None, question=None)
+            save_json(self.directory / f"{node}.completion.json", completion)
+        return receipt
+
     def reconcile(self, node, path, receipt):
         """Mirror of InteractiveSessions.reconcile: bind the one surviving session; never launch."""
         row = self.locate(node, self.inventory())
@@ -189,8 +225,14 @@ class FakeSessions:
     def inventory(self):
         """The native registry: one row per session this fake launched, whatever its receipt recorded so far."""
         rows = []
-        for node in (*self.workers, *self.reviewer_nodes()):
+        repairs = sorted(path.name.removesuffix(".interactive.json") for path in self.directory.glob("repair-*.interactive.json"))
+        for node in (*self.workers, *self.reviewer_nodes(), *repairs):
             if (self.directory / f"{node}.interactive.json").exists():
+                if node.startswith("repair-"):
+                    if not (self.directory / f"{node}.stop.json").exists():
+                        rows.append({"id": self.background_id(node), "sessionId": self.native_id(node), "state": self.repair_state,
+                                     "pid": os.getpid(), "kind": "background"})
+                    continue
                 reviewer_id = node[len("review-"):] if node.startswith("review-") else node
                 rows.append({"id": self.background_id(node), "sessionId": self.native_id(node), "state": self.reviewer_states.get(reviewer_id, "idle"),
                              "pid": os.getpid(), "kind": "background"})
@@ -208,6 +250,12 @@ class FakeSessions:
 class OfflinePipeline(Pipeline):
     def stop_workers(self):
         self.event("freeze", "stopped", "Fake workers have no background processes")
+
+    def stop_repair(self, node):
+        # A fake repair session has no process either: the stop intent the real path persists, confirmed.
+        receipt = read_json(self.directory / f"{node}.interactive.json")
+        save_json(self.directory / f"{node}.stop.json", {"background_id": receipt["background_id"], "session_id": receipt["session_id"],
+                                                         "pid": None, "stopped": True, "synthetic": True})
 
     def stop_reviewer(self, reviewer_id="review"):
         # Fake sessions have no process to stop; record the intent the real path would persist.

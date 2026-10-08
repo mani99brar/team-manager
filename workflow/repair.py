@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -116,15 +119,28 @@ def repair_note(directory: Path) -> str:
 
 
 def repaired_snapshot(previous: dict, entry: dict, lane: str) -> dict:
-    """The lane's snapshot after `entry`: the new commit and files, the worker's own session and handoff, the provenance."""
+    """The lane's snapshot after `entry`: the new commit and files, the worker's own session and handoff, the provenance.
+
+    A repair session's id joins `prior_session_ids`, the other sessions that wrote the lane's code: no reviewer may be one."""
     item = entry["lanes"][lane]
-    summary = (f"{previous['summary']}\n\nOperator repair {entry['n']}: {entry['reason']} (files {', '.join(item['fix_files'])}; "
-               f"source {entry['source_commit']} on {entry['base_kind']} {entry['base_commit'][:8]})")
-    return {"commit": item["commit"], "changed_files": item["changed_files"], "session_id": previous["session_id"],
-            "summary": summary, "open_assumptions": previous["open_assumptions"],
-            "repair": {"n": entry["n"], "mode": entry["mode"], "base_kind": entry["base_kind"], "base_commit": entry["base_commit"],
-                       "previous_commit": item["previous_commit"], "source_commit": entry["source_commit"], "fix_files": item["fix_files"],
-                       "reason": entry["reason"], "recorded_at": entry["recorded_at"]}}
+    summary = (f"{previous['summary']}\n\n{entry.get('by', 'operator').capitalize()} repair {entry['n']}: {entry['reason']} "
+               f"(files {', '.join(item['fix_files'])}; source {entry['source_commit']} on {entry['base_kind']} {entry['base_commit'][:8]})")
+    snapshot = {"commit": item["commit"], "changed_files": item["changed_files"], "session_id": previous["session_id"],
+                "summary": summary, "open_assumptions": previous["open_assumptions"],
+                "repair": {"n": entry["n"], "mode": entry["mode"], "base_kind": entry["base_kind"], "base_commit": entry["base_commit"],
+                           "previous_commit": item["previous_commit"], "source_commit": entry["source_commit"], "fix_files": item["fix_files"],
+                           "reason": entry["reason"], "recorded_at": entry["recorded_at"]}}
+    prior = list(previous.get("prior_session_ids", []))
+    if entry.get("session", {}).get("session_id"):
+        prior.append(entry["session"]["session_id"])
+    if prior:
+        snapshot["prior_session_ids"] = prior
+    return snapshot
+
+
+def writer_ids(snapshots: dict) -> set:
+    """Every session that wrote a lane's code: each lane's worker and its repair sessions (prior_session_ids)."""
+    return {item["session_id"] for item in snapshots.values()} | {sid for item in snapshots.values() for sid in item.get("prior_session_ids", [])}
 
 
 def effective_snapshots(directory: Path, entries: list[dict]) -> dict:
@@ -466,6 +482,7 @@ def fork_run(graph, config, runtime, entry: dict, fork, snapshots: dict) -> str:
 def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
     """S6: the timeline, the entry `applied`, then the report and run-state.json. Events a crash duplicated are harmless."""
     directory, n = runtime.directory, entry["n"]
+    generation = len(applied_repairs(directory))  # Of the candidate this repair supersedes: blocked repair sessions take no generation.
     answers = " ".join(f"Answers {packet['phase']}/{packet['node_id']} attempt {packet['attempt']}: {'; '.join(packet['reasons'])}."
                        for packet in entry["blocked"]["packets"])
     for lane, item in entry["lanes"].items():
@@ -473,10 +490,10 @@ def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
                                                   f"{entry['source_commit'][:8]} on {entry['base_kind']} {entry['base_commit'][:8]} "
                                                   f"({', '.join(item['fix_files'])}). Reason: {entry['reason']}. {answers} "
                                                   f"Continue with {continuation(runtime, 'python')}")
-    superseded = candidate_paths(directory, n - 1)[0]
+    superseded = candidate_paths(directory, generation)[0]
     if superseded.exists():
         runtime.event("candidate", "paused", f"Repair {n} supersedes combined revision {read_json(superseded)['commit'][:8]}; "
-                                             f"candidate-{n} is built after the lanes re-verify")
+                                             f"candidate-{generation + 1} is built after the lanes re-verify")
     runtime.event("controller", "running", f"Repair {n} applied: checkpoint forked from {entry['fork_from'][:8]} (after handoff); attempts "
                                            + ", ".join(f"{key} {value}" for key, value in entry["attempt_targets"].items()))
     entry.update(status="applied", applied_at=now(), head_after=head_after)
@@ -484,7 +501,10 @@ def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
     report(runtime, graph.get_state(config))
 
 
-def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: str, dry_run: bool, actor: str = "operator") -> None:
+def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: str, dry_run: bool, actor: str = "operator",
+                 session: dict | None = None) -> dict | None:
+    """S0 to S6 for a fix commit. `session` is a repair session's journal entry (status `captured`): the repair keeps its number,
+    its actor and its session fields."""
     directory, repo = runtime.directory, Path(runtime.plan["repository"])
     source = resolve_commit(repo, commit)
     entries = load_repairs(directory)
@@ -504,7 +524,9 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
     derived = derive(runtime, lanes, source, blocked["packets"][0]["phase"], previous)
     if recorded is None:
         targets = attempt_targets(directory, lanes, runtime.workers)
-        entry = {"n": len(entries) + 1, "status": "recorded", "mode": "commit", "reason": reason, **actor_record(actor), "recorded_at": now(), "blocked": blocked,
+        entry = {"n": session["n"] if session else len(entries) + 1, "status": "recorded", "mode": "session" if session else "commit", "reason": reason,
+                 **({key: session[key] for key in SESSION_KEYS if key in session} if session else actor_record(actor)),
+                 "recorded_at": session["recorded_at"] if session else now(), "blocked": blocked,
                  "source_commit": source, "base_kind": derived["base_kind"], "base_commit": derived["base_commit"],
                  "expected_candidate_tree": derived["expected_candidate_tree"],
                  "lanes": {lane: {"previous_commit": item["previous_commit"], "fix_files": item["fix_files"]} for lane, item in derived["lanes"].items()},
@@ -518,7 +540,7 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
     if dry_run:
         print(f"Dry run of repair {entry['n']} (nothing written): {reason}\n{describe(entry, derived, dry_run)}\n"
               f"  fork from checkpoint {entry['fork_from']} (after handoff)\nApply: the same command without --dry-run. Then continue with: {continuation(runtime)}")
-        return
+        return None
     if recorded is None:
         record_repair(directory, entry)                                                   # S1
     commit_snapshots(runtime, entry, derived)                                             # S2
@@ -526,8 +548,10 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
     raise_attempts(directory, entry)                                                      # S4
     snapshots = effective_snapshots(directory, applied + [entry])
     finish_repair(runtime, graph, config, entry, fork_run(graph, config, runtime, entry, fork, snapshots))  # S5, S6
-    print(f"Repair {entry['n']} applied: {reason}\n{describe(entry, derived, dry_run)}\n  checkpoint forked from {entry['fork_from']} "
-          f"(after handoff); nothing launched, no check run\nContinue with: {continuation(runtime)}")
+    if entry.get("by") != "controller":  # The fix loop's own rounds are on the timeline; the controller continues by itself.
+        print(f"Repair {entry['n']} applied: {reason}\n{describe(entry, derived, dry_run)}\n  checkpoint forked from {entry['fork_from']} "
+              f"(after handoff); {'no check run' if session else 'nothing launched, no check run'}\nContinue with: {continuation(runtime)}")
+    return entry
 
 
 def describe(entry: dict, derived: dict, dry_run: bool) -> str:
@@ -546,34 +570,51 @@ BROWSER_RULES = ("Every required scenario id appears in exactly one test title a
                  "attaches exactly one `image/png` named `screenshot:<id>` (other attachments never count). RUNBOOK: Playwright evidence convention.")
 
 
-def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None) -> None:
-    """A detached worktree at the base the fix belongs on, with a brief of what blocked the run. No journal, no graph state."""
-    directory, repo = runtime.directory, Path(runtime.plan["repository"])
-    refuse_recorded(directory)
-    applied = applied_repairs(directory)
-    _, blocked, _, previous = blocked_run(runtime, graph, config, applied)
+def workspace_base(runtime, blocked: dict, previous: dict, lanes: list[str]) -> tuple[str, str]:
+    """The commit a fix belongs on and what it is: the failing candidate for a candidate block, the lane's snapshot for a
+    worker-phase one."""
     if blocked["packets"][0]["phase"] == "candidate":
-        base = read_json(candidate_paths(directory, len(applied))[0])["commit"]
-        what = "the combined candidate that failed"
-    elif len(lanes) == 1:
-        base, what = previous[lanes[0]]["commit"], f"the {lanes[0]} snapshot"
-    else:
-        raise ValueError("A worker-phase block has no combined candidate: a fix on a lane snapshot repairs one lane only; name one lane")
+        return read_json(candidate_paths(runtime.directory, len(applied_repairs(runtime.directory)))[0])["commit"], "the combined candidate that failed"
+    if len(lanes) == 1:
+        return previous[lanes[0]]["commit"], f"the {lanes[0]} snapshot"
+    raise ValueError("A worker-phase block has no combined candidate: a fix on a lane snapshot repairs one lane only; name one lane")
+
+
+def add_workspace(runtime, base: str) -> tuple[int, Path]:
+    """A new detached worktree `repair-workspace-<m>` of the run at `base`."""
+    directory = runtime.directory
     number = 1
     while (directory / f"repair-workspace-{number}").exists() or (directory / f"repair-workspace-{number}.brief.md").exists():
         number += 1
     path = directory / f"repair-workspace-{number}"
-    git_worktree(repo, "add", "--detach", str(path), base)
+    git_worktree(Path(runtime.plan["repository"]), "add", "--detach", str(path), base)
+    return number, path
+
+
+def packet_evidence(directory: Path, packet: dict) -> tuple[Path, list[Path]]:
+    """A blocked packet's attempt folder and its evidence files. A reused candidate packet (C28) holds only packet.json: its logs
+    and reports are the worker packet's."""
+    reused = read_json(directory / packet["path"]).get("reused_from")
+    folder = (directory / (reused["path"] if reused else packet["path"])).parent
+    evidence = ([folder / "packet.json"] if reused else []) + sorted(folder.glob("setup-*.log")) + sorted(folder.glob("check-*.log")) + sorted(folder.glob("browser-report-*.json"))
+    return folder, evidence
+
+
+def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None) -> None:
+    """A detached worktree at the base the fix belongs on, with a brief of what blocked the run. No journal, no graph state."""
+    directory = runtime.directory
+    refuse_recorded(directory)
+    applied = applied_repairs(directory)
+    _, blocked, _, previous = blocked_run(runtime, graph, config, applied)
+    base, what = workspace_base(runtime, blocked, previous, lanes)
+    number, path = add_workspace(runtime, base)
     command = (f"{sys.executable} -m workflow repair {shlex.quote(str(directory))} {','.join(lanes)} --commit $(git -C {shlex.quote(str(path))} rev-parse HEAD) "
                f"--reason {shlex.quote(reason or '<why the fix is needed>')} {BY_OPERATOR}")
     brief = [f"# Repair workspace {number} of run {runtime.plan['run_id']}", "",
              f"Detached at {base}, {what}. Commit the fix here, never on the source branch {runtime.plan['source_branch']}: "
              f"integration needs it at the run's base {runtime.plan['base_commit']}.", "", f"## Blocked: {blocked['step']}"]
     for packet in blocked["packets"]:
-        # A reused candidate packet (C28) holds only packet.json: its logs and reports are the worker packet's.
-        reused = read_json(directory / packet["path"]).get("reused_from")
-        folder = (directory / (reused["path"] if reused else packet["path"])).parent
-        evidence = ([folder / "packet.json"] if reused else []) + sorted(folder.glob("setup-*.log")) + sorted(folder.glob("check-*.log")) + sorted(folder.glob("browser-report-*.json"))
+        _, evidence = packet_evidence(directory, packet)
         brief += ["", f"{packet['phase']}/{packet['node_id']} attempt {packet['attempt']} at {packet['output_commit']}, gate reasons verbatim:",
                   *(f"- {item}" for item in packet["reasons"]), "", "Evidence:", f"- {directory / packet['path']}", *(f"- {item}" for item in evidence)]
     brief += ["", "## Lanes to repair"]
@@ -589,16 +630,309 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
           f"Commit the fix there, never on the source branch, then:\n  {command}")
 
 
+# ---- --session: a narrowed worker session repairs one lane ---------------------------------------------------------
+
+# The journal keeps a repair session from its launch: `launched` (the receipt and the session), `captured` (stopped, its
+# workspace committed as `source_commit`), then `recorded` and `applied` through the --commit path, or `blocked` with why.
+SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary")
+LOG_TAIL_LINES = 60
+LOG_LINE_LIMIT = 400  # Characters of one log line in the brief: a minified bundle on one line must not fill the prompt.
+
+
+class RepairBlocked(RuntimeError):
+    """A repair session ended without a fix the run takes: its completion said blocked, its deadline passed, it changed
+    nothing, or its change was refused. The round is recorded `blocked`; nothing is applied."""
+
+
+def session_entries(directory: Path, lane: str | None = None) -> list[dict]:
+    """The journal's repair sessions, of one lane when given."""
+    return [entry for entry in load_repairs(directory) if entry.get("mode") == "session" and (lane is None or lane in entry["lanes"])]
+
+
+def open_session(directory: Path) -> dict | None:
+    """The repair session the journal says is not finished (launched, captured or recorded), if any."""
+    return next((entry for entry in session_entries(directory) if entry["status"] in {"launched", "captured", "recorded"}), None)
+
+
+def log_tail(path: Path, lines: int = LOG_TAIL_LINES) -> str:
+    try:
+        tail = path.read_text(errors="replace").splitlines()[-lines:]
+    except OSError as error:
+        return f"(log unreadable: {error})"
+    return "\n".join(line if len(line) <= LOG_LINE_LIMIT else line[:LOG_LINE_LIMIT] + " [line cut]" for line in tail)
+
+
+def failing_checks(runtime, lane: str, packet: dict) -> list[str]:
+    """The brief's lines for a blocked packet's failing checks: id, kind, argv and the last LOG_TAIL_LINES of its log."""
+    directory = runtime.directory
+    folder, _ = packet_evidence(directory, packet)
+    saved = read_json(folder / "packet.json")
+    executions = saved.get("result", {}).get("checks", [])
+    reasons = " ".join(packet["reasons"])
+    lines = []
+    for index, check in enumerate(runtime.worker_policy(lane)["checks"]):
+        failed = index < len(executions) and executions[index]["exit_code"] != 0
+        if not (failed or f"{check['id']}:" in reasons or f"{check['id']}/" in reasons):
+            continue
+        log = folder / f"check-{index}.log"
+        exit_code = executions[index]["exit_code"] if index < len(executions) else "none"
+        lines += ["", f"### {check['id']} ({check['kind']}), exit {exit_code}: {shlex.join(check['argv'])}", "",
+                  f"Last {LOG_TAIL_LINES} lines of {log}:", "```", log_tail(log), "```"]
+    for log in sorted(folder.glob("setup-*.log")) if any(reason.startswith("Setup ") for reason in packet["reasons"]) else []:
+        lines += ["", f"### Setup log {log.name}", "", f"Last {LOG_TAIL_LINES} lines of {log}:", "```", log_tail(log), "```"]
+    return lines
+
+
+def session_brief(runtime, lane: str, entry: dict, rounds: int, deadline: str, findings: list[dict] | None = None,
+                  delta: Path | None = None) -> str:
+    """A repair session's prompt: the fixed worker rules and the failure case only, never the lane's whole task."""
+    from .automatic import completion_prompt
+    from .guardrails import RUN_REPORT, conventions_block, stop_rule
+    from .interactive import setup_note
+    directory, plan = runtime.directory, runtime.plan
+    worker = runtime.worker_policy(lane)
+    node = entry["session"]["node"]
+    lines = [("You are a workflow worker in your own worktree. A human can type directly into this terminal. Do not launch agents, commit, "
+              "merge, push or modify shared contracts. Stay within this worktree. Report changed files, checks actually executed, and "
+              "open assumptions. Completion of a turn is not workflow approval." + setup_note(directory)), "",
+             f"# Repair of lane {lane}, run {plan['run_id']}, round {entry['round']} of {rounds}", "",
+             f"You are repairing lane {lane} of run {plan['run_id']}, round {entry['round']} of {rounds}: fix only what follows, inside your "
+             f"owned paths; do not widen scope. Run targeted tests through `{RUN_REPORT} -- <command>`; the controller reruns the lane's "
+             f"checks after you. This worktree is detached at {entry['workspace_commit']}; leave your changes uncommitted, the controller "
+             "captures them. When done, write the completion file below."]
+    if findings is None:
+        for packet in entry["blocked"]["packets"]:
+            lines += ["", f"## Gate reasons: {packet['phase']}/{packet['node_id']} attempt {packet['attempt']} at {packet['output_commit']} (verbatim)", "",
+                      *(f"- {reason}" for reason in packet["reasons"]), "", "## Failing checks", *failing_checks(runtime, lane, packet)]
+    else:
+        lines += ["", "## Review findings on this lane (P0/P1, verbatim)", "", *(f"- {json.dumps(finding, ensure_ascii=False)}" for finding in findings)]
+        if delta is not None:
+            lines += ["", f"The reviewers read the candidate; the diff of this lane's owned paths is {delta}."]
+    lines += ["", "## Owned paths", "", f"{lane} owns: {', '.join(worker['owned_paths'])}. Change nothing outside them: another lane's "
+              "paths are not yours, and a change there is refused with the whole round.", "", "Checks:",
+              *(f"- {check['id']} ({check['kind']}): {shlex.join(check['argv'])}" for check in worker["checks"])]
+    if any(check["kind"] == "browser" for check in worker["checks"]):
+        lines += ["", "## Browser evidence", "", BROWSER_RULES]
+    stop = stop_rule(plan["nodes"][lane]["task"])
+    if stop:
+        lines += ["", "## Stop (from the lane's task)", "", stop]
+    return ("\n".join(lines) + conventions_block(plan)
+            + completion_prompt(directory, plan, node, launch_token=entry["session"]["launch_token"], task=plan["nodes"][lane]["task"],
+                                deadline=deadline))
+
+
+def launch_session(runtime, graph, config, lane: str, actor: str, trigger: str, *, findings: list[dict] | None = None,
+                   delta: Path | None = None) -> dict:
+    """S-1: the round's journal entry (`launched`), its workspace at the failing base, and one native session in it."""
+    from .automatic import fix_rounds, repair_timeout
+    from .guardrails import epoch, iso
+    directory = runtime.directory
+    refuse_recorded(directory)
+    applied = applied_repairs(directory)
+    _, blocked, _, previous = blocked_run(runtime, graph, config, applied)
+    if lane not in {packet["node_id"] for packet in blocked["packets"]}:
+        raise ValueError(f"Lane {lane} has no blocked packet at {blocked['step']}; repair a lane whose checks blocked the run")
+    base, what = workspace_base(runtime, blocked, previous, [lane])
+    number, path = add_workspace(runtime, base)
+    n = len(load_repairs(directory)) + 1
+    rounds = fix_rounds(runtime.plan) if actor == "controller" else max(fix_rounds(runtime.plan), len(session_entries(directory, lane)) + 1)
+    entry = {"n": n, "status": "launched", "mode": "session", **({"by": "controller"} if actor == "controller" else actor_record(actor)),
+             "trigger": trigger, "round": len(session_entries(directory, lane)) + 1, "lanes": {lane: {}}, "recorded_at": now(),
+             "blocked": blocked, "workspace": str(path), "workspace_commit": base,
+             "session": {"node": f"repair-{n}", "launch_token": str(uuid.uuid4()), "session_id": None}}
+    save_entry(directory, entry)
+    launched_at = datetime.now(timezone.utc).isoformat()
+    timeout = repair_timeout(runtime.plan)
+    deadline = (f" Your deadline is {iso(int(epoch(launched_at) + timeout))} (UTC), {timeout // 60} minutes after this launch: write your "
+                "completion file before it; past it the controller stops this session and applies nothing.")
+    prompt = session_brief(runtime, lane, entry, rounds, deadline, findings, delta)
+    node = entry["session"]["node"]
+    try:
+        receipt = runtime.sessions.run_repair(node, prompt, entry["session"]["launch_token"], path, launched_at,
+                                              {"lane": lane, "round": entry["round"], "trigger": trigger, "repair": n})
+    except Exception as error:
+        close_session(runtime, entry, "blocked", f"the repair session did not launch: {error}")
+        runtime.event(f"repair_{lane}", "failed", f"round {entry['round']}: {entry['reason']}")
+        return entry
+    entry["session"]["session_id"] = receipt["session_id"]
+    save_entry(directory, entry)
+    runtime.event(f"repair_{lane}", "running", f"round {entry['round']}: repair session launched ({node}, {what} {base[:8]}, {trigger} block)")
+    return entry
+
+
+def close_session(runtime, entry: dict, status: str, reason: str) -> None:
+    entry.update(status=status, reason=reason, closed_at=now())
+    save_entry(runtime.directory, entry)
+
+
+def wait_session(runtime, entry: dict, *, clock=None, sleep=None) -> dict:
+    """The repair session's accepted completion, as wait_handoffs accepts a lane's: a valid file once its turn is over. RepairBlocked
+    for a completion that is blocked or asks a question, a session gone, or the deadline."""
+    from .automatic import read_signal, repair_timeout, turn_over
+    from .guardrails import epoch
+    from .interactive import SessionGap, UpdateGaps
+    clock, sleep = clock or time.time, sleep or time.sleep
+    directory, node = runtime.directory, entry["session"]["node"]
+    receipt = read_json(directory / f"{node}.interactive.json")
+    deadline = epoch(receipt["launch_requested_at"]) + repair_timeout(runtime.plan)
+    gaps = UpdateGaps(runtime.sessions, directory, clock)
+    path = directory / f"{node}.completion.json"
+    while True:
+        rows = runtime.sessions.inventory()
+        try:
+            row = gaps.row(node, rows)
+        except SessionGap:
+            row = {}  # An update is respawning it: no verdict.
+        if row is None:
+            raise RepairBlocked(f"the repair session {node} is gone without a completion file")
+        if row and (turn_over(row) or row.get("state") == "blocked") and path.exists():
+            try:
+                item = read_signal(runtime, node, launch_token=entry["session"]["launch_token"])
+            except ValueError as error:
+                raise RepairBlocked(f"its completion file was refused: {error}") from error
+            if item["status"] == "completed":
+                return item
+            raise RepairBlocked(f"the repair session ended {item['status']}: {item.get('question') or item['summary']}")
+        if clock() >= deadline:
+            raise RepairBlocked(f"the repair session's deadline ({repair_timeout(runtime.plan) // 60} minutes) passed without a completion file")
+        sleep(2)
+
+
+def capture_session(runtime, entry: dict) -> str:
+    """The workspace's tree, tracked changes and new files alike (ignored ones are not), as one commit on the workspace's HEAD,
+    built in a private index: the workspace's own index and HEAD are never written. A ref keeps it until the repair's own."""
+    directory, repo = runtime.directory, Path(runtime.plan["repository"])
+    workspace = Path(entry["workspace"])
+    head = git(workspace, "rev-parse", "HEAD")
+    with tempfile.TemporaryDirectory(prefix="workflow-repair-") as scratch:
+        env = {**commit_env(), "GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        subprocess.run(["git", "-C", str(workspace), "read-tree", head], env=env, check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(workspace), "add", "-A", "--", "."], env=env, check=True, capture_output=True)
+        tree = subprocess.check_output(["git", "-C", str(workspace), "write-tree"], env=env, text=True).strip()
+        if tree == git(workspace, "rev-parse", f"{head}^{{tree}}"):
+            raise RepairBlocked("the repair session changed nothing")
+        commit = subprocess.check_output(["git", "-C", str(workspace), "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", head, "-m",
+                                          f"Workflow {runtime.plan['run_id']}: repair session {entry['n']}"], env=env, text=True).strip()
+    subprocess.run(["git", "-C", str(repo), "update-ref", f"refs/workflow-repair/{hashlib.sha256(str(directory).encode()).hexdigest()[:16]}/{entry['n']}/capture", commit], check=True)
+    return commit
+
+
+def session_reason(entry: dict) -> str:
+    return f"repair session round {entry['round']}: {entry['trigger']}"
+
+
+def stop_and_report(runtime, lane: str, node: str) -> None:
+    try:
+        runtime.stop_repair(node)
+    except Exception as error:  # Its verdict stands; a stop never relaunches, and the operator inspects the session.
+        runtime.event(f"repair_{lane}", "warning", f"repair session {node} stop not confirmed: {error}")
+
+
+def session_result(runtime, entry: dict, lane: str) -> dict:
+    """The completion of a launched session: waited for, then the session is stopped. A stop already confirmed (a controller died
+    before the capture) reads the file again. An interruption or an outage leaves the session running for the next controller."""
+    directory, node = runtime.directory, entry["session"]["node"]
+    stop = directory / f"{node}.stop.json"
+    if stop.exists() and read_json(stop).get("stopped") is True:
+        from .automatic import read_signal
+        try:
+            item = read_signal(runtime, node, launch_token=entry["session"]["launch_token"])
+        except ValueError as error:
+            raise RepairBlocked(f"its completion file was refused: {error}") from error
+        if item["status"] != "completed":
+            raise RepairBlocked(f"the repair session ended {item['status']}: {item.get('question') or item['summary']}")
+        return item
+    try:
+        item = wait_session(runtime, entry)
+    except RepairBlocked:
+        stop_and_report(runtime, lane, node)
+        raise
+    stop_and_report(runtime, lane, node)
+    return item
+
+
+def finish_session(runtime, graph, config, entry: dict) -> dict:
+    """From a launched (or captured, or recorded) session to its applied repair or its blocked round: wait, stop, capture, then
+    the --commit path S1 to S6. Each step is resumable: a controller that died mid-round continues it here."""
+    directory = runtime.directory
+    lane = next(iter(entry["lanes"]))
+    try:
+        if entry["status"] == "launched":
+            item = session_result(runtime, entry, lane)
+            entry.update(status="captured", source_commit=capture_session(runtime, entry), captured_at=now(), summary=item["summary"])
+            save_entry(directory, entry)
+    except RepairBlocked as error:
+        close_session(runtime, entry, "blocked", str(error))
+        runtime.event(f"repair_{lane}", "failed", f"round {entry['round']}: {error}")
+        return entry
+    try:
+        applied = apply_repair(runtime, graph, config, [lane], entry["source_commit"], session_reason(entry), False, entry.get("by", "operator"),
+                               session=None if entry["status"] == "recorded" else entry)
+    except (ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        if load_entry(directory, entry["n"])["status"] != "captured":
+            raise  # S1 is written: only the identical command completes it (refuse_recorded says which).
+        close_session(runtime, entry, "blocked", f"its change was refused: {error}")
+        runtime.event(f"repair_{lane}", "failed", f"round {entry['round']}: its change was refused: {error}")
+        return entry
+    runtime.event(f"repair_{lane}", "passed", f"round {entry['round']}: repair {applied['n']} applied; {lane} is verified again")
+    return applied
+
+
+def load_entry(directory: Path, n: int) -> dict:
+    return next(entry for entry in load_repairs(directory) if entry["n"] == n)
+
+
+def repair_session(runtime, graph, config, lane: str, *, actor: str, trigger: str, findings: list[dict] | None = None,
+                   delta: Path | None = None) -> dict:
+    """One round: launch a narrowed session for `lane` (or continue the one the journal has open), wait, stop, capture, apply.
+    Returns the journal entry: `applied`, or `blocked` with its reason. Never invokes the graph; the caller holds the locks."""
+    entry = open_session(runtime.directory)
+    if entry is not None and next(iter(entry["lanes"])) != lane:
+        raise ValueError(f"Repair session {entry['n']} of lane {next(iter(entry['lanes']))} is not finished; it is continued first")
+    if entry is None:
+        entry = launch_session(runtime, graph, config, lane, actor, trigger, findings=findings, delta=delta)
+        if entry["status"] == "blocked":
+            return entry
+    return finish_session(runtime, graph, config, entry)
+
+
+def run_session_command(runtime, graph, config, lanes: list[str], actor: str) -> None:
+    """`repair <run> <lane> --session --live`: one round for one lane, then the continuation; never the graph itself."""
+    if not runtime.plan.get("automatic"):
+        raise ValueError("A repair session completes like an automatic worker: --session needs an automatic run; use --workspace")
+    if len(lanes) != 1:
+        raise ValueError("A repair session repairs one lane; name one")
+    entry = repair_session(runtime, graph, config, lanes[0], actor=actor, trigger=blocked_trigger(runtime, graph, config))
+    if entry["status"] != "applied":
+        raise ValueError(f"Repair session {entry['n']} (round {entry['round']} of lane {lanes[0]}) ended blocked: {entry['reason']}. "
+                         f"Its workspace stays at {entry['workspace']}; commit a fix there by hand: repair {runtime.directory} {lanes[0]} --commit <sha> "
+                         f"--reason <why> {BY_OPERATOR}")
+    print(f"Repair session {entry['n']} applied (round {entry['round']} of lane {lanes[0]}). Continue with: {continuation(runtime)}")
+
+
+def blocked_trigger(runtime, graph, config) -> str:
+    """What a session repairs from: `candidate` or `verify` (a continued session keeps its own)."""
+    entry = open_session(runtime.directory)
+    if entry is not None:
+        return entry["trigger"]
+    state = graph.get_state(config)
+    return "candidate" if tuple(state.next) == ("candidate",) else "verify"
+
+
 def repair_main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m workflow repair", description="Turn an operator's fix commit into new snapshots of "
-                                     "frozen lanes blocked at their checks or at the combined candidate, before review. Launches nothing and "
-                                     "runs no check; automatic --live (or retry for a manual run) re-verifies.")
+                                     "frozen lanes blocked at their checks or at the combined candidate, before review. --commit and "
+                                     "--workspace launch nothing and run no check; --session --live launches one narrowed worker session "
+                                     "for the lane and applies what it changes. automatic --live (or retry for a manual run) re-verifies.")
     parser.add_argument("directory", type=Path)
     parser.add_argument("lanes", help="The lane the fix belongs to, or comma-separated lanes for a fix on the combined candidate")
     parser.add_argument("--commit", metavar="SHA", help="The fix commit, on the failing candidate or on the lane's snapshot")
     parser.add_argument("--reason", help="Why: recorded in the journal, the timeline, the snapshot summary and the reviewer prompt")
     parser.add_argument("--workspace", action="store_true", help="Create a detached worktree at the right base, with a brief, to commit the fix in")
     parser.add_argument("--dry-run", action="store_true", help="Validate and print what --commit would do; write nothing")
+    parser.add_argument("--session", action="store_true", help="Launch one repair session for the lane, narrowed to what blocked it, in a "
+                                                                "repair workspace; wait for it, stop it and apply its change (needs --live)")
+    parser.add_argument("--live", action="store_true", help="--session: really launch the native session")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
@@ -606,8 +940,15 @@ def repair_main(argv=None):
         actor = require_actor(args, "repair")
         from .abandon import refuse_abandoned
         refuse_abandoned(directory)
-        if bool(args.commit) == args.workspace:
-            raise ValueError("Give exactly one of --commit <sha> (apply a fix) and --workspace (make a worktree to commit one in)")
+        if [bool(args.commit), args.workspace, args.session].count(True) != 1:
+            raise ValueError("Give exactly one of --commit <sha> (apply a fix), --workspace (make a worktree to commit one in) and "
+                             "--session --live (a repair session makes the fix)")
+        if args.session and not args.live:
+            raise ValueError("--session launches a native Claude session for the lane: add --live")
+        if args.live and not args.session:
+            raise ValueError("--live applies to --session")
+        if args.session and args.reason:
+            raise ValueError("--reason applies to --commit: a repair session's reason is its round and what blocked the lane")
         if args.commit and not (args.reason or "").strip():
             raise ValueError("--reason is required with --commit and must not be empty")
         if args.dry_run and args.workspace:
@@ -623,6 +964,8 @@ def repair_main(argv=None):
                 graph, config = build_pipeline(saver, runtime), graph_config(runtime)
                 if args.workspace:
                     make_workspace(runtime, graph, config, lanes, args.reason)
+                elif args.session:
+                    run_session_command(runtime, graph, config, lanes, actor)
                 else:
                     apply_repair(runtime, graph, config, lanes, args.commit, args.reason.strip(), args.dry_run, actor)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:

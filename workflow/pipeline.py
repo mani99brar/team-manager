@@ -172,7 +172,8 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
     if (not isinstance(review, dict) or not REVIEW_KEYS <= set(review) <= REVIEW_KEYS | {"reviewers"} or review["run_id"] != bundle["run_id"]
             or review["bundle_sha256"] != digest or review["candidate_commit"] != bundle["candidate_commit"]):
         raise ValueError("Review must reference this exact run, bundle hash and candidate")
-    worker_ids = {item["session_id"] for item in bundle["snapshots"].values()}
+    from .repair import writer_ids
+    worker_ids = writer_ids(bundle["snapshots"])  # The workers' sessions and their lanes' repair sessions.
     if review["independent"] is not True or not isinstance(review["reviewer"], str) or not review["reviewer"].strip() or review["reviewer"] in worker_ids:
         raise ValueError("Independent reviewer identity required")
     if review["verdict"] not in {"approved", "blocked"} or not isinstance(review["findings"], list):
@@ -511,6 +512,10 @@ class Pipeline:
         if any(row.get("sessionId") in stopped_ids and row.get("pid") for row in self.sessions.inventory()):
             raise RuntimeError("A stopped worker was restarted; reconcile before snapshot capture")
         self.event("freeze", "stopped", f"Native workers stopped before snapshot capture: {', '.join(self.workers)}")
+
+    def stop_repair(self, node: str) -> None:
+        """Stop a lane repair session (`repair-<n>`) by its recorded identity, as every other session; its transcript stays."""
+        self.stop_session(node)
 
     def stop_reviewer(self, reviewer_id: str = DEFAULT_REVIEWER):
         self.stop_session(review_node(reviewer_id))
@@ -1302,7 +1307,8 @@ def run_status(directory: Path) -> tuple[dict, str]:
             status.update(challenge="held", challenge_attempt=record["attempt"])
     if (directory / "repairs.json").exists():
         from .repair import load_repairs
-        status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry["source_commit"]}
+        status["repairs"] = [{"n": entry["n"], "status": entry["status"], "lanes": list(entry["lanes"]), "commit": entry.get("source_commit"),
+                              **({"by": entry["by"], "round": entry["round"], "trigger": entry["trigger"]} if entry.get("mode") == "session" else {})}
                              for entry in load_repairs(directory)]
     workspaces = sorted(path.name for path in directory.glob("repair-workspace-*") if path.is_dir())
     if workspaces:

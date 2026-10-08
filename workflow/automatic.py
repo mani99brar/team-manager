@@ -39,7 +39,13 @@ from .verification import CONTRACTS
 from .worktrees import git_worktree
 
 DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermissions",
-            "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native", "profile": "unattended"}
+            "worker_timeout_seconds": 4 * 3600, "review_timeout_seconds": 1800, "reviewer_transport": "native", "profile": "unattended",
+            "repair_timeout_seconds": 45 * 60}
+# The in-run fix loop (RUNBOOK, In-run fix loop): repair sessions per lane before attention. Pinned at prepare (`--fix-rounds`,
+# default FIX_ROUNDS); a plan pinned without it has no loop, as before.
+FIX_ROUNDS = 2
+MAX_FIX_ROUNDS = 5
+OPTIONAL_KEYS = ("fix_rounds",)
 TIMEOUT_KEYS = ("worker_timeout_seconds", "review_timeout_seconds")
 REVIEWER_TRANSPORTS = ("native", "print")
 # C52 (decisions 1 and 3): `launch --automatic --profile attended|unattended`, unattended when omitted. Pinned here, exported,
@@ -47,7 +53,7 @@ REVIEWER_TRANSPORTS = ("native", "print")
 PROFILES = ("attended", "unattended")
 # Plans pinned before the native reviewer existed lack reviewer_transport; they mean native. Plans pinned before profiles lack
 # profile; they mean unattended.
-REQUIRED_KEYS = frozenset(DEFAULTS) - {"reviewer_transport", "profile"}
+REQUIRED_KEYS = frozenset(DEFAULTS) - {"reviewer_transport", "profile", "repair_timeout_seconds"}
 # C51 (decision 3): "approval" stops after review for the operator's `approve`, as a manual run does; prepare pins it for an
 # attended profile or a feature marked critical (feature.json 2.4.0 `critical: true`). Every other run fast-forwards its
 # feature branch itself, as before.
@@ -55,10 +61,14 @@ FINISHES = ("verified-feature-branch", "approval")
 
 
 def automatic_settings(worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
-                       reviewer_transport: str | None = None, profile: str | None = None, critical: bool = False) -> dict:
+                       reviewer_transport: str | None = None, profile: str | None = None, critical: bool = False,
+                       fix_rounds: int | None = None) -> dict:
     """Run-scoped automatic configuration; deadlines, transport, profile and finish are pinned into plan.json at prepare.
-    The finish is "approval" when the profile is attended or the feature is marked critical (`critical`)."""
+    The finish is "approval" when the profile is attended or the feature is marked critical (`critical`). `fix_rounds` is
+    pinned only when given (prepare gives FIX_ROUNDS by default); without it the run has no fix loop."""
     settings = dict(DEFAULTS)
+    if fix_rounds is not None:
+        settings["fix_rounds"] = fix_rounds
     for key, value in (("worker_timeout_seconds", worker_timeout_seconds), ("review_timeout_seconds", review_timeout_seconds),
                        ("reviewer_transport", reviewer_transport), ("profile", profile)):
         if value is not None:
@@ -89,6 +99,19 @@ def validate_automatic(plan: dict) -> None:
         raise ValueError("Automatic completion is restricted to a feature/ branch")
 
 
+def fix_rounds(plan: dict) -> int:
+    """The repair sessions a lane gets in this run before attention: plan.automatic.fix_rounds; 0 for a plan pinned before the
+    loop and for a manual run."""
+    automatic = plan.get("automatic")
+    return automatic.get("fix_rounds", 0) if isinstance(automatic, dict) else 0
+
+
+def repair_timeout(plan: dict) -> int:
+    """One repair session's deadline in seconds: plan.automatic.repair_timeout_seconds, 45 minutes for a plan pinned before it."""
+    automatic = plan.get("automatic")
+    return automatic.get("repair_timeout_seconds", DEFAULTS["repair_timeout_seconds"]) if isinstance(automatic, dict) else DEFAULTS["repair_timeout_seconds"]
+
+
 def reviewer_transport(plan: dict) -> str:
     """Effective transport: plans that predate the setting are native, though they never launch a new reviewer."""
     return plan["automatic"].get("reviewer_transport", "native")
@@ -107,20 +130,34 @@ def awaits_approval(plan: dict) -> bool:
     return isinstance(automatic, dict) and automatic.get("finish") == "approval"
 
 
-def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None) -> str:
+def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None, *, launch_token: str | None = None,
+                      task: str | None = None, deadline: str | None = None) -> str:
     """An automatic worker's completion protocol: its bounds, the default on running checks and run-report (C16 step 8; a manual worker has no
     Bash), the completion file, for 1.1.0 the evidence and questions, and the reading rule (C16 step 1). Its deadline counts
-    from `launched_at` when given (deadline_sentence)."""
+    from `launched_at` when given (deadline_sentence).
+
+    A repair session (`repair-<n>`, not a lane) passes its own `launch_token`, the lane's `task` (for its ## Stop) and its
+    `deadline` sentence; it asks no questions, so its protocol says to write status blocked instead."""
     from .guardrails import CHECKS_DEFAULT, COMPLETION_VERSION, MAX_QUESTIONS, RUN_REPORT, completion_version, reading_rule, stop_rule
     version = completion_version(plan)
+    repair = launch_token is not None
     example = {"version": version, "run_id": plan["run_id"], "node_id": node,
-               "launch_token": plan["nodes"][node]["session_id"], "status": "completed",
+               "launch_token": launch_token or plan["nodes"][node]["session_id"], "status": "completed",
                "summary": "Describe actual work and checks executed", "open_assumptions": []}
-    evidence = "\n" + reading_rule(plan)  # A 1.0.0 run gets the reading rule alone.
+    no_questions = ("No questions in a repair: when a decision you cannot make yourself blocks the fix, or the failure is not the "
+                    "code's (a flaky or environmental failure), change nothing more and write status blocked with the reason in summary.\n")
+    evidence = "\n" + (no_questions if repair else "") + reading_rule(plan)  # A 1.0.0 run gets the reading rule alone.
     if version == COMPLETION_VERSION:
         example.update(untested=["A behaviour no executed check covers"], falsifying_check="The check id (or exact command) that would fail if this were wrong",
                        verify_yourself="One assumption the operator should verify independently", question=None)
-        stop = stop_rule(plan["nodes"][node]["task"])
+        stop = stop_rule(task if task is not None else plan["nodes"][node]["task"])
+        questions = ("Questions: when a decision you cannot make yourself blocks the work, write the same file with status question, "
+                     "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
+                     "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
+                     f"At most {MAX_QUESTIONS} questions for this lane: after the third, decide yourself and record an open assumption; "
+                     "a fourth question is treated as blocked.\n")
+        if repair:
+            questions = no_questions
         evidence = ("\nCompletion 1.1.0 evidence: for status completed, untested lists the behaviours no executed check covers (it may "
                     "be empty), falsifying_check names the check that would fail if your implementation were wrong (a check id from "
                     "your approved checks, or the exact command), verify_yourself names one assumption the operator should verify "
@@ -128,12 +165,7 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
                     "evidence by themselves: the controller reruns the checks. End your summary with a Proof table: one row per line of "
                     "your task's ## Acceptance section and per line under ## Design (settled) in the documents your task cites, each "
                     "naming its proof: a test (file::name), a check id, a self-report, or none. Keep the rows short: a completion "
-                    "file over 64 KiB is refused.\n"
-                    "Questions: when a decision you cannot make yourself blocks the work, write the same file with status question, "
-                    "the question text in question (the evidence fields may be empty) and end your turn; the controller pauses your "
-                    "deadline and the operator's answer arrives in this terminal. Then continue and finish with a new completion file. "
-                    f"At most {MAX_QUESTIONS} questions for this lane: after the third, decide yourself and record an open assumption; "
-                    "a fourth question is treated as blocked.\n" + reading_rule(plan)
+                    "file over 64 KiB is refused.\n" + questions + reading_rule(plan)
                     + (f"\nStop (from your task, the bound on this work): {' '.join(stop.split())}" if stop else ""))
     return ("\n\nAUTOMATIC MODE: permission checks are bypassed and Bash is available. "
             "Do not wait for a human handoff. Stay within assigned ownership; do not commit, merge, push, "
@@ -143,7 +175,8 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
             "then finish your turn and do not modify more files. Controller checks and independent review "
-            "still determine acceptance." + deadline_sentence(directory, plan, node, launched_at) + "\n" + json.dumps(example) + evidence)
+            "still determine acceptance." + (deadline if deadline is not None else deadline_sentence(directory, plan, node, launched_at))
+            + "\n" + json.dumps(example) + evidence)
 
 
 def duration(seconds: int) -> str:
@@ -179,8 +212,9 @@ def text_or_none(value, required: bool) -> bool:
     return isinstance(value, str) and bool(value.strip()) if required else value is None or isinstance(value, str)
 
 
-def read_signal(runtime, node: str) -> dict:
-    """The worker's completion file, validated against the version the run pinned: 1.0.0 before slice 2, 1.1.0 for 2.2.0 features."""
+def read_signal(runtime, node: str, launch_token: str | None = None) -> dict:
+    """The worker's completion file, validated against the version the run pinned: 1.0.0 before slice 2, 1.1.0 for 2.2.0 features.
+    `launch_token` binds a session that is not a lane (a repair session, `repair-<n>`); a lane's is its plan token."""
     from .guardrails import COMPLETION_VERSION, completion_version
     path = runtime.directory / f"{node}.completion.json"
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
@@ -194,7 +228,7 @@ def read_signal(runtime, node: str) -> dict:
     if not isinstance(item, dict) or set(item) != expected:
         raise ValueError("Malformed completion signal" + (": version 1.1.0 needs untested, falsifying_check, verify_yourself and question" if evidence else ""))
     if (item["version"] != version or item["run_id"] != runtime.plan["run_id"] or item["node_id"] != node
-            or item["launch_token"] != runtime.plan["nodes"][node]["session_id"]):
+            or item["launch_token"] != (launch_token or runtime.plan["nodes"][node]["session_id"])):
         raise ValueError("Stale or foreign worker completion signal")
     statuses = {"completed", "blocked", "question"} if evidence else {"completed", "blocked"}
     if item["status"] not in statuses or not isinstance(item["summary"], str) or not item["summary"].strip():
@@ -1440,7 +1474,8 @@ def check_recorded_identity(bundle: dict, state: ReviewStatus) -> None:
     record with a worker's or a shared one, so this is checked before any record is written, whatever the verdict: a failure
     refuses the verdict and leaves no review.json, blocked or not.
     """
-    worker_ids = {item["session_id"] for item in bundle["snapshots"].values()}
+    from .repair import writer_ids
+    worker_ids = writer_ids(bundle["snapshots"])  # The workers' sessions and their lanes' repair sessions.
     seen = set()
     for reviewer_id in state.ids:
         session_id = state.statuses[reviewer_id].get("session_id")

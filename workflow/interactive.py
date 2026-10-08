@@ -34,8 +34,14 @@ def is_review_node(node: str) -> bool:
     return node == REVIEW or node.startswith("review-")
 
 
+def is_repair_node(node: str) -> bool:
+    """A lane repair session (`repair-<n>`, repair.repair_session): its worktree is the repair workspace its receipt names."""
+    return node.startswith("repair-")
+
+
 def launch_name(run_id: str, node: str) -> str:
-    """`workflow-<run>-<lane>`, `workflow-<run>-reviewer` for the default reviewer, `workflow-<run>-reviewer-<id>` otherwise."""
+    """`workflow-<run>-<lane>`, `workflow-<run>-reviewer` for the default reviewer, `workflow-<run>-reviewer-<id>` otherwise,
+    `workflow-<run>-repair-<n>` for a repair session."""
     if node == REVIEW:
         return f"workflow-{run_id}-reviewer"
     if node.startswith("review-"):
@@ -49,7 +55,10 @@ def refuse_long_prompt(node: str, prompt: str) -> None:
     records any launch error so), and reviewers launched before it keep running."""
     size = len(prompt.encode())
     if size > PROMPT_ARGV_LIMIT:
-        if is_review_node(node):
+        if is_repair_node(node):
+            remedy = ("The repair brief is bounded (log tails, verbatim reasons and findings); shorten the lane's task ## Stop section, "
+                      "CLAUDE.md above its operator-notes heading or the findings, or repair by hand (repair <run> <lane> --workspace).")
+        elif is_review_node(node):
             remedy = ("Shorten what fills it (the reviewer's brief, the worker claims, CLAUDE.md above its operator-notes heading, "
                       "decisions.md). The review is left needing reconciliation, and reviewers launched before this one keep running: "
                       "stop them, then prepare a new run.")
@@ -66,6 +75,8 @@ def pane_label(node: str) -> str:
         return "Claude: reviewer"
     if node.startswith("review-"):
         return f"Claude: reviewer {node[len('review-'):]}"
+    if is_repair_node(node):
+        return f"Claude: repair {node[len('repair-'):]}"
     return f"Claude: {node}"
 
 
@@ -161,9 +172,12 @@ class InteractiveSessions(ClaudeSessions):
             trust_workspace(cwd, claude_config_path())
 
     def node_worktree(self, node: str) -> Path:
-        """Workers live in the plan's worktrees; every reviewer in the run's shared candidate checkout."""
+        """Workers live in the plan's worktrees; every reviewer in the run's shared candidate checkout; a repair session in the
+        repair workspace its receipt names."""
         if is_review_node(node):
             return self.directory / "review-worktree"
+        if is_repair_node(node):
+            return Path(read_json(self.directory / f"{node}.interactive.json")["worktree"])
         return Path(self.plan["nodes"][node]["worktree"])
 
     def locate(self, node: str, rows: list[dict]) -> dict | None:
@@ -316,6 +330,35 @@ class InteractiveSessions(ClaudeSessions):
         if automatic:
             command.append("--dangerously-skip-permissions")
         command.append(prompt)
+        return self.launch(node, path, receipt, command, cwd)
+
+    def run_repair(self, node: str, prompt: str, launch_token: str, cwd: Path, launched_at: str, extra: dict) -> dict:
+        """Launch (or reconcile) one lane repair session `repair-<n>` in its repair workspace (repair.repair_session).
+
+        A worker of the lane in all but its task: the worker settings and deny rules, the lane's own pinned model and effort,
+        automatic mode's tools and permissions. The receipt is a lane receipt plus `extra` (lane, round, trigger, repair).
+        """
+        path = self.directory / f"{node}.interactive.json"
+        if path.exists():
+            return self.reconcile(node, path, read_json(path))
+        if not is_repair_node(node) or self.plan.get("mode") != "interactive" or not self.plan.get("automatic"):
+            raise ValueError("Expected a repair session of an automatic interactive run")
+        if git(cwd, "status", "--porcelain"):
+            raise RuntimeError("Repair workspace is not clean")
+        if any(row.get("name") == self.launch_name(node) for row in self.inventory()):
+            raise RuntimeError("Unowned session already exists with this launch name")
+        receipt = {"node_id": node, "session_id": None, "launch_token": launch_token, "plan_digest": plan_digest(self.plan),
+                   "worktree": str(cwd), "base_commit": self.plan["base_commit"], "workspace_commit": git(cwd, "rev-parse", "HEAD"),
+                   "status": "launching", "attempt": 1, "launcher_invocations": 1, "launch_requested_at": launched_at,
+                   "requested": lane_pins(self.plan, extra["lane"]), **extra}
+        refuse_long_prompt(node, prompt)  # Before the receipt: nothing is recorded or launched.
+        self.trust(cwd)
+        save_json(path, receipt)
+        write_private(self.directory / f"{node}.prompt.txt", prompt)
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory),
+                   *role_flags(self.plan, "worker", node=extra["lane"]),
+                   "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                   "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", prompt]
         return self.launch(node, path, receipt, command, cwd)
 
     def run_reviewer(self, reviewer_id: str, prompt: str, launch_token: str, candidate_commit: str) -> dict:
@@ -552,6 +595,8 @@ def node_title(node: str) -> str:
     """`Worker <lane>`, `Reviewer review` for the default reviewer, `Reviewer <id>` for a declared one."""
     if node.startswith("review-"):
         return f"Reviewer {node[len('review-'):]}"
+    if is_repair_node(node):
+        return f"Repair session {node[len('repair-'):]}"
     return f"Reviewer {node}" if is_review_node(node) else f"Worker {node}"
 
 
@@ -781,7 +826,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["attach-one"])
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--node", help="attach-one: a worker lane of the run, or a reviewer node (review, or review-<id>)")
+    parser.add_argument("--node", help="attach-one: a worker lane of the run, a reviewer node (review, or review-<id>) or a repair session (repair-<n>)")
     args = parser.parse_args()
     directory = args.directory.resolve()
     # Every `claude` this process starts (the listing, `claude attach`) inherits the auto-updater off.
@@ -792,8 +837,10 @@ def main():
             parser.error("Not an interactive run; prepare a new run instead of converting print-mode sessions")
         if not args.node or not sys.stdin.isatty():
             parser.error("attach-one requires --node and an interactive terminal")
-        if args.node not in sessions.workers and args.node not in review_nodes(sessions.plan):
-            parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or {', '.join(review_nodes(sessions.plan))}")
+        repair = is_repair_node(args.node) and (directory / f"{args.node}.interactive.json").is_file()
+        if args.node not in sessions.workers and args.node not in review_nodes(sessions.plan) and not repair:
+            parser.error(f"--node must be a lane of this run ({', '.join(sessions.workers)}) or {', '.join(review_nodes(sessions.plan))} "
+                         "(or a launched repair session, repair-<n>)")
         receipt = read_json(directory / f"{args.node}.interactive.json")
         if receipt["plan_digest"] != plan_digest(sessions.plan):
             raise RuntimeError("Plan changed; cannot attach")

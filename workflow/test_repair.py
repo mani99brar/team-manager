@@ -1152,8 +1152,121 @@ class CandidateGenerations(RepairFixture):
         self.assertEqual(self.tree(self.candidate_commit(1)), self.tree(fix))
 
 
+class RepairSession(RepairFixture):
+    """`repair <run> <lane> --session --live`: a narrowed session for the lane in a repair workspace, its receipt, the stop, the
+    capture through a private index and the --commit apply path; a blocked round applies nothing."""
+
+    def session_cli(self, *arguments: str) -> tuple[int, str, str]:
+        with patch("workflow.repair.Pipeline", side_effect=lambda directory: self.runtime):
+            return self.cli(*arguments)
+
+    def block(self):
+        self.start()
+        with patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "candidate/ui failed identically"):
+            drive(self.runtime)
+
+    def test_a_session_repairs_the_candidate_and_the_run_reaches_its_feature_branch(self):
+        directory = self.directory
+        self.block()
+        candidate = self.candidate_commit()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        code, out, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"Repair session 1 applied (round 1 of lane ui). Continue with: {sys.executable} -m workflow automatic {directory} --live --by operator", out)
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["mode"], entry["by"], entry["round"], entry["trigger"], entry["base_kind"], entry["base_commit"]),
+                         ("applied", "session", "operator", 1, "candidate", "candidate", candidate))
+        self.assertEqual(entry["reason"], "repair session round 1: candidate")
+        self.assertEqual(entry["lanes"]["ui"]["fix_files"], ["ui.txt"])
+        # The receipt is a lane receipt plus the lane, round and trigger; the session was stopped by its recorded identity.
+        receipt = read_json(directory / "repair-1.interactive.json")
+        self.assertEqual((receipt["node_id"], receipt["lane"], receipt["round"], receipt["trigger"], receipt["repair"], receipt["worktree"]),
+                         ("repair-1", "ui", 1, "candidate", 1, str(directory / "repair-workspace-1")))
+        self.assertEqual(read_json(directory / "repair-1.stop.json")["session_id"], receipt["session_id"])
+        self.assertEqual(entry["session"]["session_id"], receipt["session_id"])
+        # The capture went through a private index: the workspace's own HEAD and index are untouched.
+        workspace = directory / "repair-workspace-1"
+        self.assertEqual(git(workspace, "rev-parse", "HEAD"), candidate)
+        self.assertEqual(git(workspace, "status", "--porcelain"), "M ui.txt")
+        self.assertEqual(self.tree(entry["source_commit"]), self.tree(self.commit_on(candidate, {"ui.txt": "after"})))
+        # The brief is the failure case, never the lane's whole task.
+        prompt = self.sessions.repair_prompts["repair-1"]
+        failing = directory / "verification/candidate/ui/2"
+        for expected in ("You are repairing lane ui of run", "round 1 of 1: fix only what follows, inside your owned paths; do not widen scope",
+                         "## Gate reasons: candidate/ui attempt 2", "- ui-build: exit 1", "## Failing checks", "### ui-build (build), exit 1",
+                         f"Last 60 lines of {failing / 'check-0.log'}:", "## Owned paths", "ui owns: ui.txt, web", "run-report",
+                         str(directory / "repair-1.completion.json"), entry["session"]["launch_token"], "No questions in a repair"):
+            self.assertIn(expected, prompt)
+        self.assertNotIn("Write the final text.", prompt)
+        self.assertNotIn("screenshot:<id>", prompt)
+        self.assertIn(("repair_ui", "running"), [(event["node"], event["status"]) for event in self.events()])
+        self.assertIn(("repair_ui", "passed", "round 1: repair 1 applied; ui is verified again"),
+                      [(event["node"], event["status"], event["message"]) for event in self.events()])
+        with patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        self.assertEqual(self.tree(commit), self.tree(entry["source_commit"]))
+        bundle = read_json(directory / "review-bundle.json")
+        # The repair session wrote ui's code: no reviewer may be it.
+        self.assertEqual(bundle["snapshots"]["ui"]["prior_session_ids"], [receipt["session_id"]])
+        self.assertIn(f"Operator repair 1: repair session round 1: candidate", bundle["snapshots"]["ui"]["summary"])
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "repair-1", "review", "ui"])
+
+    def test_a_blocked_round_applies_nothing(self):
+        self.block()
+        before = self.head()
+        cases = (("blocked", {"ui.txt": "after"}, "the repair session ended blocked: Synthetic repair (blocked)"),
+                 ("completed", {}, "the repair session changed nothing"),
+                 ("completed", {"backend.py": "VALUE = 3\n"}, "its change was refused: The fix changes backend.py, owned by lane adapter"))
+        for number, (status, edits, reason) in enumerate(cases, 1):
+            with self.subTest(status=status, edits=edits):
+                self.sessions.repair_status, self.sessions.repair_edits["ui"] = status, edits
+                code, _, err = self.session_cli("ui", "--session", "--live")
+                self.assertEqual(code, 1)
+                self.assertIn(f"Repair session {number} (round {number} of lane ui) ended blocked: {reason}", err)
+                entry = self.entries()[-1]
+                self.assertEqual((entry["n"], entry["status"], entry["reason"][:len(reason)]), (number, "blocked", reason))
+                self.assertTrue((self.directory / f"repair-{number}.stop.json").exists())
+                self.assertEqual(self.head(), before)
+                self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", f"refs/workflow-repair/*/{number}/ui"), "")
+                self.assertEqual(read_json(self.directory / "attempts.json"), {"candidate:ui": 2})
+        # A blocked round takes no candidate generation: the next applied repair is generation 1, whatever its number.
+        self.sessions.repair_status, self.sessions.repair_edits["ui"] = "completed", {"ui.txt": "after"}
+        code, out, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.entries()[-1]["n"], 4)
+        self.assertIn("Repair 4 supersedes combined revision", " ".join(event["message"] for event in self.events()))
+        self.assertIn("candidate-1 is built after the lanes re-verify", " ".join(event["message"] for event in self.events()))
+
+    def test_the_deadline_ends_the_round(self):
+        self.block()
+        self.sessions.repair_status, self.sessions.repair_state = None, "working"
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        clock = [1e10]
+        with patch("workflow.repair.time.time", side_effect=lambda: clock[0]), \
+                patch("workflow.repair.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + 3000)):
+            code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 1)
+        self.assertIn("the repair session's deadline (45 minutes) passed without a completion file", err)
+        self.assertEqual(self.entries()[-1]["status"], "blocked")
+        self.assertTrue((self.directory / "repair-1.stop.json").exists())
+
+    def test_session_refusals(self):
+        self.block()
+        for arguments, message in (((("ui", "--session")), "--session launches a native Claude session for the lane: add --live"),
+                                   (("ui", "--session", "--live", "--commit", "abc"), "Give exactly one of"),
+                                   (("ui,adapter", "--session", "--live"), "A repair session repairs one lane; name one"),
+                                   (("adapter", "--session", "--live"), "Lane adapter has no blocked packet at candidate")):
+            with self.subTest(arguments=arguments):
+                code, _, err = self.session_cli(*arguments)
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+        code, _, err = self.session_cli("ui", "--session", "--live", "--by", "maintainer")
+        self.assertIn("repair is the operator's decision: --by maintainer is refused", err)
+        self.assertEqual(self.sessions.starts.count("repair-1"), 0)
+
+
 class RepairCommandLine(RepairFixture):
-    """The real command in its own process: a dry run writes nothing, and nothing ever calls claude."""
+    """The real command in its own process: a dry run writes nothing, and --commit never calls claude (--session is RepairSession's)."""
 
     def listing(self) -> dict:
         return {str(path.relative_to(self.directory)): path.read_bytes() if path.is_file() and not path.is_symlink() else None
