@@ -1,0 +1,22 @@
+{
+  "version": "2.7.0",
+  "name": "Worker prompt, final turn (BACKLOG 3): a worker ends its final turn without addressing the operator, putting operator steps in verify_yourself, so Claude Code never lists a finished worker as blocked",
+  "branch_prefix": "feature/worker-final-turn",
+  "prd": "docs/BACKLOG.md",
+  "policy": "policy.json",
+  "challenge": false,
+  "workers": [
+    {
+      "node_id": "prompt",
+      "task": "prompt-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    }
+  ],
+  "critical": false,
+  "tryout": false
+}

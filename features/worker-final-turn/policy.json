@@ -1,0 +1,77 @@
+{
+  "version": "1.2.0",
+  "feature": "Worker prompt, final turn (BACKLOG 3); pilot C: a memory-capped controller with a browser check",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "prompt",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "workflow",
+        "docs/BACKLOG.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser-regression",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "completion-evidence-shown",
+              "description": "Regression only (this lane changes no viewer code): a lane's completion evidence still shows on its node page"
+            },
+            {
+              "id": "decisions-shown",
+              "description": "Regression only: the feature's decisions still show on the run page"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

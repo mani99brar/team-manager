@@ -1,0 +1,31 @@
+{
+  "version": "2.7.0",
+  "name": "Accepted by the operator (BACKLOG 1): `workflow accept` records that the operator merged a blocked or abandoned run's candidate by hand, and the export, ledger and viewer show it as an operator override",
+  "branch_prefix": "feature/accept-override",
+  "prd": "docs/PRD_ACCEPT_OVERRIDE.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critical": false,
+  "tryout": false
+}
