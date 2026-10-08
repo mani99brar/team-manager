@@ -28,7 +28,12 @@
         "contracts/projects",
         "server",
         "tests/unit/triage.test.ts",
-        "docs/handoff/refine-adapter.md"
+        "docs/handoff/refine-adapter.md",
+        "workflow/test_pipeline.py",
+        "workflow/test_lanes.py",
+        "workflow/test_guardrails.py",
+        "workflow/test_panel.py",
+        "workflow/test_sidecar.py"
       ],
       "checks": [
         {
