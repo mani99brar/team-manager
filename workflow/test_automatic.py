@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -2319,6 +2320,7 @@ class GraphFixture(unittest.TestCase):
         executable = f.root / "fake-reviewer"
         executable.write_text(f'''#!/usr/bin/env python3
 import json, re, sys, time
+from datetime import datetime
 from pathlib import Path
 args = sys.argv
 assert args[args.index('--tools') + 1] == 'Read,Glob,Grep'
@@ -2459,6 +2461,7 @@ class SharedGraphTests:
     def test_recovery_in_actual_new_controller_processes(self):
         f = self.fixture
         script = '''import sys
+from datetime import datetime
 from pathlib import Path
 from workflow import automatic
 from workflow.sessions import read_json
@@ -3161,6 +3164,16 @@ class ExportAfterVerdictTests(GraphFixture):
         [call] = calls
         self.assertEqual((call["verdict"], call["exported"]), ("approved", "approved"))
         self.assertEqual(call["events_after"], call["events_before"])
+        self.assert_decided_at()
+
+    def assert_decided_at(self):
+        """The verdict's time, which the panel's grace counts from, is saved beside it (review.json's key set is closed)."""
+        from .panel import verdict_time
+        decided = self.combined()["decided_at"]
+        self.assertRegex(decided, r"^\d{4}-\d\d-\d\dT.*Z$")
+        self.assertNotIn("decided_at", read_json(self.fixture.directory / "review.json"))
+        self.assertAlmostEqual(verdict_time(self.fixture.directory), datetime.fromisoformat(decided.replace("Z", "+00:00")).timestamp())
+        self.assertLess(abs(verdict_time(self.fixture.directory) - (self.fixture.directory / "review.json").stat().st_mtime), 60)
 
     def test_a_block_is_exported_too(self):
         self.verdict.write_text("blocked")
@@ -3171,6 +3184,7 @@ class ExportAfterVerdictTests(GraphFixture):
         [call] = calls
         self.assertEqual((call["verdict"], call["exported"]), ("blocked", "blocked"))
         self.assertEqual(call["events_after"], call["events_before"])
+        self.assert_decided_at()
 
     def test_a_failed_export_is_one_stderr_line_and_the_verdict_stands(self):
         errors = io.StringIO()
@@ -3421,6 +3435,7 @@ class NativeReviewerTests:
         marker = f.root / "interrupt-once"
         marker.touch()
         script = '''import sys
+from datetime import datetime
 from pathlib import Path
 from workflow import automatic
 from workflow.sessions import read_json

@@ -1062,22 +1062,26 @@ def _finalize(directory: Path, plan: dict, panel_index: int, record: dict, reape
 
 
 def verdict_time(directory: Path) -> float:
-    """When the review decided: review.json's `decided_at` when it has one, else the file's modification time."""
+    """When the review decided: the `decided_at` the controller saves beside the verdict in automatic-review.json (review.json
+    itself has a closed key set, pipeline.check_review; one there is read first all the same), else review.json's
+    modification time (a run decided before decided_at existed)."""
     path = Path(directory) / "review.json"
-    try:
-        decided = read_json(path).get("decided_at")
-        if isinstance(decided, str):
-            return datetime.fromisoformat(decided.replace("Z", "+00:00")).timestamp()
-    except (OSError, ValueError, AttributeError):
-        pass
+    for source in (path, Path(directory) / "automatic-review.json"):
+        try:
+            decided = read_json(source).get("decided_at")
+            if isinstance(decided, str):
+                return datetime.fromisoformat(decided.replace("Z", "+00:00")).timestamp()
+        except (OSError, ValueError, AttributeError):
+            continue
     return path.stat().st_mtime
 
 
 def collect(runtime, error: BaseException | None = None, *, clock=time.time, sleep=time.sleep) -> None:
     """Every exit of review_candidate goes through this, after `close_or_wait_attack` (its own try/finally). `collect_print`
     semantics: every exited provider is reaped from its output file first (findings kept whatever the clock), then a provider
-    still running past its own `timeout_minutes` (from its launch) or past PANEL_GRACE_AFTER_VERDICT_SECONDS from the verdict
-    (verdict_time), whichever ends first, is terminated and `timed_out`; the panel status derives from
+    still running past its own `timeout_minutes` (from its launch) or past PANEL_GRACE_AFTER_VERDICT_SECONDS from the later of
+    the verdict (verdict_time) and its own launch, whichever ends first, is terminated and `timed_out`. The grace is applied
+    here, once the attack pass's decided wait (close_or_wait_attack, its own overall bound) has ended; the panel status derives from
     the providers and the terminal record is written. The attack split on a non-decided exit (no review.json): a
     KeyboardInterrupt/TransientInfraError terminates the jobs and leaves the record non-terminal (resume reruns them);
     any other exit terminates them and records the panel `failed` with the error. A KeyboardInterrupt raised inside the wait
@@ -1135,13 +1139,16 @@ def collect(runtime, error: BaseException | None = None, *, clock=time.time, sle
                 _finalize(directory, plan, panel_index, record, reaped.get(panel_index, {}), now, error=reason)
             save_record(directory, record)
             return
-        grace_end = verdict_time(directory) + PANEL_GRACE_AFTER_VERDICT_SECONDS
+        decided_at = verdict_time(directory)
         try:
             while True:
                 reap_exited()
                 running = [job for items in jobs.values() for job in items if job.result is None]
                 for job in running:
                     own_end = job.launched + job.timeout
+                    # From the verdict, or from the provider's own launch when it was (re)launched after it (a resume of a
+                    # decided review): a relaunched provider gets a fresh grace, never the old verdict's.
+                    grace_end = max(decided_at, job.launched) + PANEL_GRACE_AFTER_VERDICT_SECONDS
                     if clock() >= min(own_end, grace_end):
                         terminate(job.process)
                         job.result = {"timed_out": True}

@@ -1318,6 +1318,8 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
     passes."""
     review = combined_review(runtime, bundle, digest, state, decisions)
     save_json(runtime.directory / "review.json", review)
+    # When the verdict was written, for the panel's grace (panel.verdict_time); review.json's key set is closed, so it is kept here.
+    state.combined["decided_at"] = now()
     export_verdict(runtime)
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
     if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
@@ -1356,6 +1358,8 @@ def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> 
         runtime.event("review", NOTE, f"The verdicts accepted so far are not recorded (no review.json): {error}")
         return
     save_json(runtime.directory / "review.json", combined_review(runtime, bundle, digest, state, state.decisions))
+    state.combined["decided_at"] = now()  # The panel's grace counts from it (panel.verdict_time).
+    state.save()
     export_verdict(runtime)
 
 

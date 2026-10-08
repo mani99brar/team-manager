@@ -804,9 +804,10 @@ class ReviewStep(Harness):
         self.assertEqual((entry["status"], [p["status"] for p in entry["providers"]]), ("succeeded", ["ok", "ok"]))
         self.assertEqual(len(entry["findings"]), 3)
 
-    def collect_hung_pi(self, timeout_minutes: int, decided_at: float, start: float = 1000.0) -> tuple[dict, list]:
-        """The claude provider exits on its own, the pi one hangs; the verdict's time is `decided_at` on the fake clock (the
-        review.json mtime); each poll is a minute. The record's pi provider and the sleeps the collect took."""
+    def collect_hung_pi(self, timeout_minutes: int, decided_at: float, start: float = 1000.0, collect_at: float | None = None) -> tuple[dict, list]:
+        """The claude provider exits on its own, the pi one hangs; both launch at `start` on the fake clock, the verdict's time
+        is `decided_at` (the review.json mtime) and the collect begins at `collect_at` (default: `start`); each poll is a
+        minute. The record's pi provider and the sleeps the collect took."""
         self.set_control(claude={"findings": CLAUDE_FINDINGS}, pi={"hang": True})
         plan = self.plan(timeout_minutes=timeout_minutes)
         runtime = self.runtime(plan)
@@ -816,6 +817,7 @@ class ReviewStep(Harness):
         claude.process.wait(timeout=30)
         self.decide()
         os.utime(self.run / "review.json", (decided_at, decided_at))
+        clock["now"] = start if collect_at is None else collect_at
         sleeps = []
 
         def sleep(seconds):
@@ -840,18 +842,27 @@ class ReviewStep(Harness):
         self.assertEqual(len(sleeps), 2)
 
     def test_a_verdict_older_than_the_grace_ends_the_wait_at_once(self):
-        """The attack wait may have used the grace already: the first pass terminates the provider."""
-        provider, sleeps = self.collect_hung_pi(timeout_minutes=30, decided_at=1000.0 - 700, start=1000.0)
+        """The attack wait (before the collect) may have used the grace already: the first pass terminates the provider."""
+        provider, sleeps = self.collect_hung_pi(timeout_minutes=30, decided_at=1050.0, start=1000.0, collect_at=1700.0)
         self.assertEqual(provider["error"], "timed_out after the review verdict: 600 s grace")
         self.assertEqual(sleeps, [])
 
-    def test_the_grace_counts_from_decided_at_when_review_json_has_one(self):
+    def test_a_provider_relaunched_after_the_verdict_gets_a_fresh_grace(self):
+        """A resume of a decided review relaunches the non-terminal providers long after the verdict: their grace counts from
+        their own launch, so they are not killed at once."""
+        provider, sleeps = self.collect_hung_pi(timeout_minutes=30, decided_at=1000.0, start=5000.0)
+        self.assertEqual(provider["error"], "timed_out after the review verdict: 600 s grace")
+        self.assertEqual(len(sleeps), 10)  # 5000 + 600, not at once.
+
+    def test_the_grace_counts_from_the_decided_at_the_controller_saved(self):
+        """automatic-review.json's decided_at (review.json's key set is closed), not the file's mtime."""
         self.set_control(claude={"findings": []}, pi={"hang": True})
         runtime = self.runtime(self.plan(timeout_minutes=30))
         clock = {"now": 1000.0}
         panel.ensure_started(runtime, clock=lambda: clock["now"])
-        (self.run / "review.json").write_text(json.dumps({"verdict": "approved", "reviewers": [], "decided_at": panel.iso(1300.0)}))
+        self.decide()
         os.utime(self.run / "review.json", (1000.0, 1000.0))
+        save_json(self.run / "automatic-review.json", {"status": "succeeded", "decided_at": panel.iso(1300.0)})
         sleeps = []
 
         def sleep(_):
