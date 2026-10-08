@@ -43,7 +43,7 @@ from .verification import CONTRACTS, validate_schema
 
 ATTACK = "attack"
 ATTACK_VERSION = "2.5.0"  # The feature version that may declare `attack`.
-ATTACK_VERSIONS = frozenset({ATTACK_VERSION, "2.6.0", "2.7.0"})  # 2.6.0 (the panel) and 2.7.0 (per-lane pins) keep the attack pass.
+ATTACK_VERSIONS = frozenset({ATTACK_VERSION, "2.6.0", "2.7.0", "2.8.0"})  # 2.6.0 (panel), 2.7.0 (per-lane pins) and 2.8.0 (per-lane skills) keep the attack pass.
 RECORD_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "attack.schema.json"
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "attack"

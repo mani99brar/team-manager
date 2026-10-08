@@ -33,14 +33,19 @@ BUILTIN_PREFIX = "builtin:"
 FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # The feature versions that may declare `critical` (C51): the operator confirmed at the grill that the feature's code is
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
-# 2.6.0 (the multi-provider panel) and 2.7.0 (per-lane worker pins) keep both. The migration hint for an earlier feature with a
-# browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0"})
+# 2.6.0 (the multi-provider panel), 2.7.0 (per-lane worker pins) and 2.8.0 (per-lane skills) keep both. The migration hint for
+# an earlier feature with a browser check names the version it should move to.
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0"})
 CRITICAL_VERSION = "2.4.0"
 # The feature versions whose `workers[]` may carry the lane's own worker `model` and `effort` (pinned per lane at prepare).
+# A set, not a range: the next bump must join it (shared learning version-gates-are-sets-add-a-keeps-everything-test).
 LANE_ROLE_VERSION = "2.7.0"
-LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION})
+LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0"})
 LANE_ROLE_FIELDS = ("model", "effort")
+# The feature versions whose `workers[]` may carry the lane's own `skills` (feature.json 2.8.0, PRD_WORKER_SKILLS section 3).
+# One more set the next bump must move.
+SKILLS_VERSION = "2.8.0"
+SKILLS_VERSIONS = frozenset({SKILLS_VERSION})
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -160,7 +165,7 @@ def placeholders(folder: Path) -> list[str]:
 
 
 def load_feature(folder: Path) -> dict:
-    """The feature file as 2.0.0 to 2.7.0; 1.0.0 files are refused.
+    """The feature file as 2.0.0 to 2.8.0; 1.0.0 files are refused.
 
     2.1.0 adds `reviewers`: one entry per reviewer with its brief, a feature-relative file or `builtin:<id>`.
     A file without `reviewers` runs the single built-in reviewer. 2.2.0 turns on the guardrails
@@ -168,7 +173,8 @@ def load_feature(folder: Path) -> dict:
     `sidecar` (workflow/sidecar.py); its key and bounds are checked first, so a refusal names them. 2.4.0 keeps
     both and adds the optional `critical` (C51): `true` makes an automatic run stop for the operator's approval, and the
     optional `tryout` (C7): `true` asks the operator to try each integrated run (workflow/tryout.py). 2.5.0 adds `attack`,
-    2.6.0 `panels`, and 2.7.0 a lane's own worker `model` and `effort` (lane_roles), each refused on an earlier version.
+    2.6.0 `panels`, 2.7.0 a lane's own worker `model` and `effort` (lane_roles), and 2.8.0 a lane's own `skills`
+    (lane_skills, workflow/skills.py), each refused on an earlier version.
     """
     manifest = read_json(folder / "feature.json")
     if isinstance(manifest, dict) and manifest.get("version") == "1.0.0":
@@ -178,6 +184,7 @@ def load_feature(folder: Path) -> dict:
         attack.declared(manifest)  # Refuses `attack` on a version before 2.5.0, naming the key, before schema validation.
         panel.declared(manifest)  # Refuses `panels` on a version before 2.6.0 (and each per-panel refusal), naming the key.
         lane_roles(manifest)  # Refuses a lane's `model`/`effort` on a version before 2.7.0, naming the lane and the key.
+        lane_skills(manifest)  # Refuses a lane's `skills` on a version before 2.8.0, naming the lane and the key.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -220,6 +227,23 @@ def lane_roles(manifest: dict) -> dict[str, dict]:
         role_pin(given.get("model"), given.get("effort"), f"feature.json workers[{node}] --worker")
         pins[node] = given
     return pins
+
+
+def lane_skills(manifest: dict) -> dict[str, list[str]]:
+    """The lanes' declared skills, `{lane: [name, ...]}` for each lane that gives `skills` (feature.json 2.8.0). The key
+    on an earlier version is refused naming `workers[<lane>].skills`, before the schema's plainer refusal; the names
+    themselves are validated (pattern, 1 to 8, unique) by the schema and again by workflow.skills before anything is
+    written. A feature without any skills returns {}."""
+    from .skills import validate_names
+    result = {}
+    for worker in manifest.get("workers") or []:
+        if not isinstance(worker, dict) or "skills" not in worker:
+            continue
+        node = worker.get("node_id")
+        if manifest.get("version") not in SKILLS_VERSIONS:
+            raise ValueError(f"feature.json workers[{node}].skills needs version {SKILLS_VERSION} or later (this file is {manifest.get('version')})")
+        result[node] = validate_names(node, worker["skills"])
+    return result
 
 
 def feature_file(folder: Path, name: str) -> Path:
@@ -424,6 +448,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         for field in LANE_ROLE_FIELDS:
             if field in lane_pins.get(node, {}):
                 prepare.extend([f"--lane-{field}", f"{node}={lane_pins[node][field]}"])
+    # 2.8.0: each selected lane's skills, resolved and checked on this host here (naming the lane and the skill), before any
+    # Git action; prepare re-resolves, copies and pins. Nothing is fetched or installed.
+    from .skills import check_skill, skills_root
+    lane_skill_names = lane_skills(manifest)
+    for node in selected:
+        for name in lane_skill_names.get(node, []):
+            check_skill(node, name, skills_root())
+        if node in lane_skill_names:
+            prepare.extend(["--lane-skills", f"{node}={','.join(lane_skill_names[node])}"])
     for reviewer_id, path in reviewers.items():
         builtin = next(item["prompt"] for item in manifest["reviewers"] if item["reviewer_id"] == reviewer_id).startswith(BUILTIN_PREFIX)
         prepare.extend(["--reviewer", f"{reviewer_id}={path if builtin else in_source(path)}"])
@@ -617,6 +650,15 @@ def main(argv=None):
             if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
                 printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
                                      "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
+            feature_skills = lane_skills(manifest)  # 2.8.0: each selected lane's skills and the plugin dir prepare would write.
+            if feature_skills:
+                from .skills import plugin_dir
+                printed["skills"] = {node: {"skills": names, "plugin_dir": str(plugin_dir(run, node))}
+                                     for node, names in feature_skills.items() if node in selected}
+                # [L1] b: `advisor_model` is read once at prepare and pinned as plan.nodes[<lane>].advisor_model; every
+                # launch and `launch --dry-run` read the plan, never the file. The dry run runs no prepare and has no
+                # plan yet, so it names what prepare will do without reading ~/.claude/settings.json.
+                printed["advisor_model"] = {"note": "read at prepare from ~/.claude/settings.json, pinned as plan.nodes[<lane>].advisor_model"}
             print(json.dumps(printed, indent=2))
             for note in notes + ([migration] if migration else []):
                 print(f"Note: {note}", file=sys.stderr)

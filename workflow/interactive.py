@@ -21,8 +21,9 @@ from pathlib import Path
 
 from .guardrails import challenge_block, conventions_block, decisions_block, reading_rule, released_drops, restore_step
 from .herdr import herdr
-from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, lane_pins, plan_digest,
-                       read_json, review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
+from .sessions import (CLAUDE_MISSING_GRACE_SECONDS, ClaudeSessions, TransientInfraError, background_settings, claude_env, git, job_env, lane_pins, lane_skills,
+                       plan_digest, read_json, review_node, review_nodes, role_flags, run_claude, save_json, worker_settings)
+from .skills import plugin_dir
 
 REVIEW = "review"
 # A native session's prompt travels as one argv string, which Linux caps at 128 KiB (MAX_ARG_STRLEN): a longer one fails at
@@ -292,6 +293,19 @@ class InteractiveSessions(ClaudeSessions):
             save_json(path, receipt)
         return receipt
 
+    def worker_launch_flags(self, lane: str, tools: str) -> tuple[list[str], list[str], str]:
+        """The `--settings`, the launch flags that replace `--safe-mode`, and the `--tools` string for a worker-class
+        launch (the worker and a repair session of `lane`). A skills lane (feature.json 2.8.0, RUNBOOK "Skills for a
+        lane") drops `--safe-mode` for `--setting-sources ""` and `--plugin-dir <run>/skills/<lane>`, adds the `Skill`
+        tool, and restores the advisor the plan pinned (plan.nodes[<lane>].advisor_model, never the operator's file);
+        every other lane is byte for byte today's launch."""
+        if lane_skills(self.plan, lane):
+            advisor = self.plan["nodes"][lane].get("advisor_model")
+            settings = worker_settings(self.directory, skills_lane=lane, advisor_model=advisor)
+            # --setting-sources "" and --plugin-dir go where --safe-mode was, before --tools ([L1] d).
+            return settings, ["--setting-sources", "", "--plugin-dir", str(plugin_dir(self.directory, lane))], tools + ",Skill"
+        return worker_settings(self.directory), ["--safe-mode"], tools
+
     def run(self, node: str) -> dict:
         if node not in self.workers or self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive worker plan")
@@ -310,7 +324,9 @@ class InteractiveSessions(ClaudeSessions):
                    "status": "launching", "attempt": 1, "launcher_invocations": 1,
                    "launch_requested_at": datetime.now(timezone.utc).isoformat(),
                    # The model and effort this lane is asked for (its plan.nodes pin, else the run-wide worker pin; feature.json 2.7.0).
-                   "requested": lane_pins(self.plan, node)}
+                   "requested": lane_pins(self.plan, node),
+                   # The skills this lane loads, name and pinned digest (feature.json 2.8.0); [] for a lane without them.
+                   "skills": lane_skills(self.plan, node)}
         # Built before the receipt is saved, from the launch time it records (so the deadline the prompt states is the one
         # wait_handoffs applies): a prompt too long for argv is refused while nothing is recorded or launched.
         prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
@@ -328,10 +344,12 @@ class InteractiveSessions(ClaudeSessions):
         write_private(self.directory / f"{node}.prompt.txt", prompt)
         # One --settings for workers only: background_settings with the deny rules and Git variables (worker_settings). The
         # worker's pinned model and effort: its lane's pin (plan.nodes[<lane>].roles), else plan.roles, else the
-        # WORKFLOW_WORKER_EFFORT variable for plans pinned before them.
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory),
+        # WORKFLOW_WORKER_EFFORT variable for plans pinned before them. A skills lane (feature.json 2.8.0) drops --safe-mode
+        # for --setting-sources "" and --plugin-dir, adds the Skill tool and the advisor; every other lane is unchanged.
+        settings_args, mode_flags, tools = self.worker_launch_flags(node, tools)
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *settings_args,
                    *role_flags(self.plan, "worker", node=node),
-                   "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                   *mode_flags, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                    "--tools", tools, "--permission-mode", "bypassPermissions" if automatic else "manual"]
         if automatic:
             command.append("--dangerously-skip-permissions")
@@ -356,15 +374,20 @@ class InteractiveSessions(ClaudeSessions):
         receipt = {"node_id": node, "session_id": None, "launch_token": launch_token, "plan_digest": plan_digest(self.plan),
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"], "workspace_commit": git(cwd, "rev-parse", "HEAD"),
                    "status": "launching", "attempt": 1, "launcher_invocations": 1, "launch_requested_at": launched_at,
-                   "requested": lane_pins(self.plan, extra["lane"]), **extra}
+                   "requested": lane_pins(self.plan, extra["lane"]),
+                   # The lane's skills, read exactly as the worker's; a repair session is a worker of the lane in all but its task.
+                   "skills": lane_skills(self.plan, extra["lane"]), **extra}
         refuse_long_prompt(node, prompt)  # Before the receipt: nothing is recorded or launched.
         self.trust(cwd)
         save_json(path, receipt)
         write_private(self.directory / f"{node}.prompt.txt", prompt)
-        command = [self.executable, "--bg", "--name", self.launch_name(node), *worker_settings(self.directory),
+        # The lane's skills reach its repair session the same way (feature.json 2.8.0): --setting-sources "", --plugin-dir
+        # and the Skill tool for a skills lane, --safe-mode otherwise.
+        settings_args, mode_flags, tools = self.worker_launch_flags(extra["lane"], "Read,Glob,Grep,Edit,Write,Bash")
+        command = [self.executable, "--bg", "--name", self.launch_name(node), *settings_args,
                    *role_flags(self.plan, "worker", node=extra["lane"]),
-                   "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                   "--tools", "Read,Glob,Grep,Edit,Write,Bash", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", prompt]
+                   *mode_flags, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                   "--tools", tools, "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", prompt]
         return self.launch(node, path, receipt, command, cwd)
 
     def run_reviewer(self, reviewer_id: str, prompt: str, launch_token: str, candidate_commit: str) -> dict:

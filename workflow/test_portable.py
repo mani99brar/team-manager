@@ -199,7 +199,7 @@ class NoTargetSchema(LaneRun):
         # Preflight needs a Claude CLI; a stand-in answers --help and auth status, nothing else.
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --tools --permission-mode --settings --effort'; "
+        (bin_dir / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --setting-sources --plugin-dir --tools --permission-mode --settings --effort'; "
                                         "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
         (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
         for item in bin_dir.iterdir():
@@ -236,8 +236,9 @@ class PreflightClaudeFlags(Isolated):
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
         env.pop("WORKFLOW_WORKER_EFFORT", None)  # an operator-level effort setting must not reach the pinned roles; the stub knows --effort
         preflight = [PY, "-m", "workflow", "preflight", str(run), "--repo", str(target), "--policy", str(target / "features/skeleton/policy.json")]
-        for flags, code in (("--bg --safe-mode --tools --permission-mode --settings --effort", 0), ("--bg --safe-mode --tools --permission-mode --effort", 1),
-                            ("--bg --safe-mode --tools --permission-mode --settings", 1)):
+        for flags, code in (("--bg --safe-mode --setting-sources --plugin-dir --tools --permission-mode --settings --effort", 0),
+                            ("--bg --safe-mode --setting-sources --plugin-dir --tools --permission-mode --effort", 1),
+                            ("--bg --safe-mode --setting-sources --plugin-dir --tools --permission-mode --settings", 1)):
             # A stand-in answers --help with exactly these flags, and auth status; nothing else.
             (bin_dir / "claude").write_text(f"#!/bin/sh\nif [ \"$1\" = --help ]; then echo '{flags}'; "
                                             "elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
@@ -711,6 +712,6 @@ class PortablePrompts(unittest.TestCase):
             prompts = [protocol, review_prompt(runtime, directory / "review.diff"), completion_prompt(directory, plan, "app"),
                        BUILTIN_REVIEW_BRIEF.read_text(), *[path.read_text() for path in (TOOL / "workflow/prompts/reviewers").glob("*.md")]]
             for text in prompts:
-                text = text.replace(str(TOOL), "<tool>")  # The tool's own path may name md-manager; the wording may not.
+                text = text.replace(PY, "<python>").replace(str(TOOL), "<tool>")  # The tool's own path, and the interpreter's, may name md-manager; the wording may not.
                 for wording in ("this checkout", "this repository", "md-manager", "MD Manager", "Playwright", "npm"):
                     self.assertNotIn(wording, text)

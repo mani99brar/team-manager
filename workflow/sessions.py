@@ -281,29 +281,63 @@ WORKER_DENY = ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git
 WORKER_ENV = {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"}
 
 
-def worker_settings(directory: Path) -> list[str]:
-    """`--settings` for a worker's `claude --bg` (InteractiveSessions.run only): background_settings plus HUSKY=0 and
-    GIT_TERMINAL_PROMPT=0 in its environment and the deny rules above, one JSON argument.
+def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_model: str | None = None) -> list[str]:
+    """`--settings` for a worker's `claude --bg` (InteractiveSessions.run and run_repair only): background_settings plus
+    HUSKY=0 and GIT_TERMINAL_PROMPT=0 in its environment and the deny rules above, one JSON argument.
 
     Edit is also denied on the controller checkout (the directory holding this package), unless the run directory
     `directory` lies inside it: a rule never covers a worker's own worktree or completion file. prepare pins the digest
     of this exact argument (worker_authority).
+
+    The plain call (no `skills_lane`) is byte for byte today's. For a skills lane (RUNBOOK "Skills for a lane",
+    feature.json 2.8.0) `skills_lane` adds `Edit` and `Write` denies on the lane's own pinned plugin so the session
+    cannot alter what it loads (decisions.md [L1] g), and `advisor_model` restores the advisor the operator's settings
+    give (lost under `--setting-sources ""`); advisorModel is added only when the plan pins a value. prepare pins this
+    variant's digest beside the plain one (worker_authority).
     """
     controller = Path(__file__).resolve().parents[1]
     deny = [*(f"{tool}({path})" for path in WORKER_SECRETS for tool in ("Read", "Edit")), *(f"Read({path})" for path in WORKER_TRANSCRIPTS),
             *(f"Edit({path})" for path in WORKER_PROTECTED)]
     if not Path(directory).resolve().is_relative_to(controller):
         deny.append(f"Edit(/{controller}/**)")
+    if skills_lane is not None:
+        # The lane's own pinned plugin, under the run directory: a skills session must not alter what it loads, so both
+        # the Edit and the Write rule families are denied (decisions.md [L1] g; nothing is removed from the list).
+        plugin = Path(directory).resolve() / "skills" / skills_lane
+        deny.append(f"Edit(/{plugin}/**)")
+        deny.append(f"Write(/{plugin}/**)")
     deny.extend(WORKER_DENY)
-    return ["--settings", json.dumps({**BACKGROUND_SETTINGS, "env": {**BACKGROUND_ENV, **WORKER_ENV}, "permissions": {"deny": deny}})]
+    settings = {**BACKGROUND_SETTINGS, "env": {**BACKGROUND_ENV, **WORKER_ENV}, "permissions": {"deny": deny}}
+    if skills_lane is not None and advisor_model is not None:
+        settings["advisorModel"] = advisor_model
+    return ["--settings", json.dumps(settings)]
 
 
-def worker_authority(directory: Path) -> dict:
+def worker_authority(directory: Path, skills: dict[str, dict] | None = None) -> dict:
     """What prepare pins as plan.worker_authority: the digest of the workers' --settings, no sandbox, the operator's account.
 
     Every launch runs this way; there is no per-launch choice. A sandboxed profile is a later change (C14 slice 2).
+    `worker_settings_sha256` stays the plain worker settings' digest (the judges and every plain lane keep today's bytes,
+    [L1] a). `skills` maps each skills lane to `{plugin_sha256, advisor_model}`; the authority then records that lane's
+    pinned-plugin digest as `skills_sha256[<lane>]` and the digest of its skills --settings variant as
+    `skills_settings_sha256[<lane>]`, so a reviewer sees exactly what a skills session loaded.
     """
-    return {"worker_settings_sha256": hashlib.sha256(worker_settings(directory)[1].encode()).hexdigest(), "sandbox": False, "authority": "account"}
+    authority = {"worker_settings_sha256": hashlib.sha256(worker_settings(directory)[1].encode()).hexdigest(),
+                 "sandbox": False, "authority": "account"}
+    if skills:
+        authority["skills_sha256"] = {lane: info["plugin_sha256"] for lane, info in skills.items()}
+        authority["skills_settings_sha256"] = {
+            lane: hashlib.sha256(worker_settings(directory, skills_lane=lane, advisor_model=info["advisor_model"])[1].encode()).hexdigest()
+            for lane, info in skills.items()}
+    return authority
+
+
+def lane_skills(plan: dict, node: str) -> list[dict]:
+    """The skills lane `node` is pinned to load, `[{name, sha256}, ...]` from plan.nodes[<node>].skills, or [] for a lane
+    without the key (every feature before 2.8.0). A skills session launches without `--safe-mode` (interactive.py)."""
+    info = (plan.get("nodes") or {}).get(node)
+    skills = info.get("skills") if isinstance(info, dict) else None
+    return skills if isinstance(skills, list) else []
 
 
 WORKER_EFFORT_ENV = "WORKFLOW_WORKER_EFFORT"
@@ -634,6 +668,10 @@ class ClaudeSessions:
     def run(self, node: str) -> dict:
         if node not in self.workers:
             raise ValueError("Unknown worker")
+        # A skills lane loads its plugin only through a native `--setting-sources ""` session (interactive.py); the print
+        # transport keeps `--safe-mode`, which ignores `--plugin-dir`, so it never runs a lane the plan pinned skills for.
+        if lane_skills(self.plan, node):
+            raise RuntimeError(f"Lane {node} declares skills, which only an interactive session loads; the print transport cannot")
         if self.cancelled.is_set():
             raise RuntimeError("Controller cancelled before launch")
         info = self.plan["nodes"][node]
