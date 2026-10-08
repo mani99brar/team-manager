@@ -195,6 +195,16 @@ class SummaryTests(Isolated):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(log.read_text()), [str(self.cwd.resolve()), "1", "0", "1"])
 
+    def test_a_workers_playwright_report_path_reaches_the_command(self):
+        # check_environment drops PLAYWRIGHT_JSON_OUTPUT_* (the verifier's runner owns capture); a worker's own run before
+        # check-report sets it, so run-report keeps it.
+        report = str(self.tmp / "report.json")
+        log = self.tmp / "probe.log"
+        probe = "import os; print(os.environ.get('PLAYWRIGHT_JSON_OUTPUT_FILE'))"
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_JSON_OUTPUT_FILE": report}):
+            self.run_main("--log", str(log), "--", sys.executable, "-c", probe)
+        self.assertEqual(log.read_text().strip(), report)
+
     def test_the_default_log_lies_under_the_temporary_directory_never_inside_the_cwd(self):
         code, out = self.run_main("--", *emit("hello\n"))
         log = Path(out.rsplit("full log: ", 1)[1].split(" (", 1)[0])

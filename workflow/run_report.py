@@ -2,9 +2,9 @@
 (RUNBOOK.md, "run-report: test output for workers").
 
 A worker that runs its tests through Bash reads their whole output into its context. `run-report -- <argv...>` runs the
-command instead (argv, no shell, the current directory as cwd, the verifier's check environment plus
-`NO_COLOR=1 FORCE_COLOR=0 CI=1`), writes its combined stdout and stderr to a log and prints at most `--max-lines`
-lines (default 60) and about 6 KB: the command, exit code and duration, the counts the verifier's own parser reads
+command instead (argv, no shell, the current directory as cwd, the verifier's check environment with the caller's
+`PLAYWRIGHT_JSON_OUTPUT_*` kept, plus `NO_COLOR=1 FORCE_COLOR=0 CI=1`), writes its combined stdout and stderr to a log
+and prints at most `--max-lines` lines (default 60) and about 6 KB: the command, exit code and duration, the counts the verifier's own parser reads
 (checks.text_test_counts) or `no summary parsed`, each failing test with its first assertion or error line (unittest
 `FAIL:`/`ERROR:` headers with the exception line, vitest `FAIL` lines with the first `Error:`, TAP `not ok` lines with
 their `error:`), else the log's last lines when the command failed, then `full log: <path> (<n> bytes)`. Its exit code
@@ -216,6 +216,8 @@ def main(argv=None):
     log = (args.log if args.log is not None else default_log(cwd)).absolute()
     log.parent.mkdir(parents=True, exist_ok=True)
     env, _ = check_environment(os.environ)
+    # The verifier's runner owns Playwright's JSON capture, so check_environment drops these; a worker's own run sets them.
+    env.update({key: value for key, value in os.environ.items() if key.startswith("PLAYWRIGHT_JSON_OUTPUT")})
     env.update(NO_COLOR="1", FORCE_COLOR="0", CI="1")
     began = time.monotonic()
     try:
