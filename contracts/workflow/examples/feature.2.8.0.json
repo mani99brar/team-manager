@@ -1,0 +1,19 @@
+{
+  "version": "2.8.0",
+  "name": "Worker skills example",
+  "branch_prefix": "feature/worker-skills",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "pages",
+      "task": "pages-task.md",
+      "skills": ["impeccable"]
+    },
+    {
+      "node_id": "adapter",
+      "task": "adapter-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    }
+  ]
+}

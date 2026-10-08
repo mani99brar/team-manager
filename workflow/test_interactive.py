@@ -495,6 +495,76 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual((reviewer[reviewer.index("--model") + 1], reviewer[reviewer.index("--effort") + 1]), ("claude-opus-5-5", "high"))
         self.assertEqual(read_json(self.directory / "ui.interactive.json")["requested"], {"model": "claude-opus-4-8", "effort": "xhigh"})
 
+    def _pin_skills(self, lane="ui", names=("impeccable",), advisor="fable"):
+        """Pin a feature.json 2.8.0 skills lane into the plan as prepare would, and rebuild the sessions object."""
+        self.plan["nodes"][lane]["skills"] = [{"name": name, "sha256": "f" * 64} for name in names]
+        self.plan["nodes"][lane]["advisor_model"] = advisor
+        save_json(self.directory / "plan.json", self.plan)
+        self.sessions = InteractiveSessions(self.directory, executable="claude")
+
+    def test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today(self):
+        # PRD_WORKER_SKILLS acceptance 1: the skills lane launches with --setting-sources "", --plugin-dir and the Skill tool,
+        # the advisor and the Edit and Write denies on its plugin; the plain lane's argv is exactly today's.
+        from .sessions import worker_settings
+        self._pin_skills("ui", ("impeccable",), "fable")
+        ids = {row["name"]: row["id"] for row in (self.row("ui"), self.row("adapter"))}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {ids[command[command.index('--name') + 1]]}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": ""}), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row("ui")]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("ui")
+            with patch.object(self.sessions, "inventory", side_effect=[[], [self.row("adapter")]]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]):
+                self.sessions.run("adapter")
+        ui_cmd, adapter_cmd = (call.args[0] for call in launch.call_args_list)
+        plugin = str(self.directory / "skills" / "ui")
+        self.assertNotIn("--safe-mode", ui_cmd)
+        index = ui_cmd.index("--setting-sources")
+        self.assertEqual(ui_cmd[index:index + 4], ["--setting-sources", "", "--plugin-dir", plugin])
+        self.assertLess(index, ui_cmd.index("--tools"))  # where --safe-mode was, before --tools ([L1] d)
+        self.assertEqual(ui_cmd[ui_cmd.index("--tools") + 1], "Read,Glob,Grep,Skill")
+        settings = json.loads(ui_cmd[ui_cmd.index("--settings") + 1])
+        self.assertEqual(settings["advisorModel"], "fable")
+        self.assertIn(f"Edit(/{plugin}/**)", settings["permissions"]["deny"])
+        self.assertIn(f"Write(/{plugin}/**)", settings["permissions"]["deny"])  # decisions.md [L1] g: both denies
+        # The plain lane is byte for byte today's launch: plain worker_settings, --safe-mode, no Skill, no skills flags.
+        expected = ["claude", "--bg", "--name", self.sessions.launch_name("adapter"), *worker_settings(self.directory),
+                    "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                    "--tools", "Read,Glob,Grep", "--permission-mode", "manual", adapter_cmd[-1]]
+        self.assertEqual(adapter_cmd, expected)
+        self.assertNotIn("--setting-sources", adapter_cmd)
+        self.assertNotIn("--plugin-dir", adapter_cmd)
+        self.assertEqual(read_json(self.directory / "ui.interactive.json")["skills"], [{"name": "impeccable", "sha256": "f" * 64}])
+        self.assertEqual(read_json(self.directory / "adapter.interactive.json")["skills"], [])
+
+    def test_a_repair_session_of_a_skills_lane_gets_the_same_flags(self):
+        # PRD_WORKER_SKILLS acceptance 2: run_repair of the skills lane launches with the same three flag changes and the Skill tool.
+        from .automatic import automatic_settings
+        self.plan["automatic"] = automatic_settings()
+        self._pin_skills("ui", ("impeccable",), "fable")
+        workspace = self.directory / "repair-workspace-1"
+        workspace.mkdir()
+        node, lane = "repair-1", "ui"
+        native = "33333333-3333-4333-8333-333333333333"
+        row = {"sessionId": native, "id": native[:8], "name": self.sessions.launch_name(node),
+               "kind": "background", "cwd": str(workspace), "state": "idle", "pid": os.getpid()}
+        def started(command, **kwargs):
+            kwargs["stdout"].write(f"claude attach {row['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.dict(os.environ, {"WORKFLOW_WORKER_EFFORT": ""}), patch("workflow.interactive.subprocess.run", side_effect=started) as launch, \
+                patch.object(self.sessions, "inventory", side_effect=[[], [row]]), patch("workflow.interactive.git", side_effect=["", "abc1234"]):
+            self.sessions.run_repair(node, "Repair the lane.", self.plan["nodes"]["ui"]["session_id"], workspace,
+                                     "2026-10-08T12:00:00+00:00", {"lane": lane, "round": 1, "trigger": "review"})
+        command = launch.call_args.args[0]
+        plugin = str(self.directory / "skills" / "ui")
+        self.assertNotIn("--safe-mode", command)
+        index = command.index("--setting-sources")
+        self.assertEqual(command[index:index + 4], ["--setting-sources", "", "--plugin-dir", plugin])
+        self.assertLess(index, command.index("--tools"))
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash,Skill")
+        self.assertEqual(json.loads(command[command.index("--settings") + 1])["advisorModel"], "fable")
+        self.assertEqual(read_json(self.directory / "repair-1.interactive.json")["skills"], [{"name": "impeccable", "sha256": "f" * 64}])
+
     def test_reviewer_launch_waits_for_native_pid_then_gives_up_without_relaunch(self):
         (self.directory / "review-worktree").mkdir()
         candidate = self.plan["base_commit"]
