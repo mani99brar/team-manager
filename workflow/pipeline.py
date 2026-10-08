@@ -1370,6 +1370,8 @@ def main():
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="prepare --automatic: the run's profile (default unattended), pinned")
+    parser.add_argument("--fix-rounds", type=int, metavar="N", help="prepare --automatic: repair sessions per lane in the in-run fix loop before "
+                                                                    "attention (default 2, 0 disables), pinned")
     parser.add_argument("--critical", action="store_true", help="prepare --automatic: the feature is marked critical (feature.json 2.4.0); "
                                                                 "the run stops after review for approve, whatever the profile")
     parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
@@ -1431,6 +1433,8 @@ def main():
                                                                          args.lane_model, args.lane_effort)):
         # Prepare pins them (C52, C12); any other action would ignore them silently, `automatic --live` resuming a run included.
         parser.error("--profile, --restore-from and the role flags apply to prepare only; the pins cannot change after it")
+    if args.action != "prepare" and args.fix_rounds is not None:
+        parser.error("--fix-rounds applies to prepare only; the fix loop's rounds are pinned at prepare")
     if args.action != "prepare" and args.critical:
         parser.error("--critical applies to prepare only; the finish it pins cannot change after it")
     if args.action != "prepare" and args.hold_challenge:
@@ -1647,10 +1651,10 @@ def main():
             if restore:
                 pin_restore(plan, directory, policy, restore)
             if args.automatic:
-                from .automatic import automatic_settings
+                from .automatic import FIX_ROUNDS, automatic_settings
                 plan["automatic"] = automatic_settings(args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.profile,
-                                                       critical=args.critical)
-            elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport:
+                                                       critical=args.critical, fix_rounds=FIX_ROUNDS if args.fix_rounds is None else args.fix_rounds)
+            elif args.worker_timeout_seconds or args.review_timeout_seconds or args.reviewer_transport or args.fix_rounds is not None:
                 parser.error("Timeouts and the reviewer transport apply to --automatic runs only; manual runs have operator-controlled lifetimes and review")
             # C45: what the base holds that no approved run reviewed, pinned and printed. It changes nothing else, and a
             # registry or run it cannot read only costs the record.

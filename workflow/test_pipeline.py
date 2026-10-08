@@ -1635,6 +1635,21 @@ class RecordTests(unittest.TestCase):
         self.pin()
         Pipeline(f.directory, f.sessions)  # An automatic plan without profile validates.
 
+    def test_the_fix_rounds_are_pinned_bounded_and_absent_from_older_plans(self):
+        from .automatic import FIX_ROUNDS, fix_rounds, repair_timeout, validate_automatic
+        self.assertEqual(FIX_ROUNDS, 2)
+        settings = automatic_settings(fix_rounds=0)
+        self.assertEqual((settings["fix_rounds"], settings["repair_timeout_seconds"]), (0, 2700))
+        self.assertNotIn("fix_rounds", automatic_settings())  # Only prepare pins it (FIX_ROUNDS when --fix-rounds is not given).
+        plan = {"automatic": automatic_settings(fix_rounds=2), "source_branch": "feature/x"}
+        self.assertEqual((fix_rounds(plan), repair_timeout(plan)), (2, 2700))
+        older = {"automatic": {key: value for key, value in automatic_settings().items() if key != "repair_timeout_seconds"}, "source_branch": "feature/x"}
+        validate_automatic(older)
+        self.assertEqual((fix_rounds(older), repair_timeout(older), fix_rounds({})), (0, 2700, 0))
+        for value in (-1, 6, "2", True):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "fix_rounds must be a whole number from 0 to 5"):
+                validate_automatic({"automatic": {**automatic_settings(), "fix_rounds": value}, "source_branch": "feature/x"})
+
     def test_the_role_flags_and_the_profile_are_refused_on_every_action_but_prepare(self):
         # The pins never change after prepare: a role flag or --profile on another action would be ignored silently, so it is
         # refused before the run is read (`automatic --live` resumes a run; an operator who passes a pin believes it changed).
@@ -1653,7 +1668,9 @@ class RecordTests(unittest.TestCase):
                               (["automatic", str(f.directory), "--live", "--hold-challenge"],
                                "--hold-challenge applies to prepare only: the hold is pinned there (launch --hold-challenge, or prepare --hold-challenge)"),
                               (["automatic", str(f.directory), "--live", "--critical"],
-                               "--critical applies to prepare only; the finish it pins cannot change after it")):
+                               "--critical applies to prepare only; the finish it pins cannot change after it"),
+                              (["automatic", str(f.directory), "--live", "--fix-rounds", "0"],
+                               "--fix-rounds applies to prepare only; the fix loop's rounds are pinned at prepare")):
             with self.subTest(argv):
                 code, _, err = pipeline_cli(*argv)
                 self.assertEqual(code, 2, err)

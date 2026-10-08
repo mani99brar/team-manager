@@ -81,8 +81,13 @@ def automatic_settings(worker_timeout_seconds: int | None = None, review_timeout
 
 def validate_automatic(plan: dict) -> None:
     settings = plan.get("automatic")
-    if not isinstance(settings, dict) or not REQUIRED_KEYS <= set(settings) <= set(DEFAULTS):
+    if not isinstance(settings, dict) or not REQUIRED_KEYS <= set(settings) <= set(DEFAULTS) | set(OPTIONAL_KEYS):
         raise ValueError("Malformed automatic run configuration")
+    if "repair_timeout_seconds" in settings and (type(settings["repair_timeout_seconds"]) is not int
+                                                 or not 1 <= settings["repair_timeout_seconds"] <= 86400):
+        raise ValueError("Automatic timeouts must be bounded positive seconds (at most 86400)")
+    if "fix_rounds" in settings and (type(settings["fix_rounds"]) is not int or not 0 <= settings["fix_rounds"] <= MAX_FIX_ROUNDS):
+        raise ValueError(f"fix_rounds must be a whole number from 0 to {MAX_FIX_ROUNDS}")
     if settings["finish"] not in FINISHES or settings["permission_mode"] != "bypassPermissions":
         raise ValueError("Unsupported automatic authority")
     for key in TIMEOUT_KEYS:
@@ -1891,9 +1896,95 @@ def advance_failed_checks(runtime, state) -> bool:
     return True
 
 
-def advance_or_block(runtime, state) -> bool:
-    """advance_failed_checks; when it stops the run (identical failures, the attempt limit) the timeline says why."""
+def blocked_lanes(runtime, phase: str, nodes: list[str]) -> list[tuple[str, Path]] | None:
+    """The lanes of `nodes` whose packet at their current attempt is blocked, with the packet; None when one has no verdict yet
+    (an interrupted check, a raised attempt) or was killed for memory: those are the retry path's."""
+    from .repair import transient_packet
+    found = []
+    for node in nodes:
+        path = runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"
+        if not path.exists():
+            if phase == "worker":
+                return None
+            continue  # The candidate gate stops at its first blocked lane: the later ones have no packet at this attempt.
+        if transient_packet(path):
+            return None
+        if read_json(path)["gate"]["status"] == "blocked":
+            found.append((node, path))
+    return found
+
+
+def exhausted(runtime, lane: str, reasons: list[str]) -> RuntimeError:
+    """The stop once a lane's fix loop is spent: its rounds used, or its last round ended blocked."""
+    from .repair import session_entries
+    sessions = session_entries(runtime.directory, lane)
+    last = sessions[-1] if sessions else None
+    ended = f"; round {last['round']} ended blocked: {last['reason']}" if last and last["status"] == "blocked" else ""
+    directory = shlex.quote(str(runtime.directory))
+    return RuntimeError(f"fix loop exhausted for lane {lane} after {len(sessions)} round{'' if len(sessions) == 1 else 's'}: "
+                        f"{'; '.join(reasons)}{ended}. A hand fix: python -m workflow repair {directory} {lane} --workspace --by operator, "
+                        f"then repair --commit; or python -m workflow brief {directory} and a --follows run")
+
+
+def fix_decision(runtime, state) -> tuple[str, str] | None:
+    """The in-run fix loop's decision, read only: `(lane, trigger)` when a repair session repairs that lane now (the one the
+    journal has open first); None when the loop does not apply (no rounds pinned, a step it does not repair, a memory kill or
+    an unverified check, which retry, a candidate block that names no single lane). RuntimeError (exhausted) once the lane
+    blocked again after its rounds, or its last round ended blocked."""
+    from .repair import open_session, session_entries
+    rounds = fix_rounds(runtime.plan)
+    if not rounds:
+        return None
+    entry = open_session(runtime.directory)
+    if entry is not None and entry.get("by") == "controller":
+        return next(iter(entry["lanes"])), entry["trigger"]
+    workers = lanes(runtime)
+    failures = [task.name for task in state.tasks if task.error and task.name in state.next]
+    if not failures or (runtime.directory / RETRY_REQUESTS).exists():
+        return None
+    if failures == ["candidate"]:
+        trigger, found = "candidate", blocked_lanes(runtime, "candidate", workers)
+    elif all(name.startswith("verify_") and name.removeprefix("verify_") in workers for name in failures):
+        trigger, found = "verify", blocked_lanes(runtime, "worker", [node for node in workers if f"verify_{node}" in failures])
+    else:
+        return None
+    if not found or (trigger == "candidate" and len(found) != 1):
+        return None
+    lane, path = found[0]
+    sessions = session_entries(runtime.directory, lane)
+    if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
+        raise exhausted(runtime, lane, gate_reasons(path))
+    return lane, trigger
+
+
+def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
+    """One controller round of the fix loop (repair.repair_session, `by: controller`): True once its repair is applied and
+    the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start."""
+    from .repair import repair_session
     try:
+        entry = repair_session(runtime, graph, config, lane, actor="controller", trigger=trigger)
+    except ValueError as error:  # A state the round refuses (the repair limit, a run that moved): no session ran.
+        raise exhausted(runtime, lane, [str(error)]) from error
+    if entry["status"] != "applied":
+        path = entry["blocked"]["packets"][0]["path"] if entry.get("blocked", {}).get("packets") else None
+        raise exhausted(runtime, lane, gate_reasons(runtime.directory / path) if path else [])
+    return True
+
+
+def controller_session_open(runtime) -> bool:
+    """A fix-loop round the journal has open (launched, captured or recorded) by the controller."""
+    from .repair import open_session
+    entry = open_session(runtime.directory)
+    return entry is not None and entry.get("by") == "controller"
+
+
+def advance_or_block(runtime, state, graph=None, config=None) -> bool:
+    """The in-run fix loop's round when it applies (fix_decision, fix_round), else advance_failed_checks; when either stops
+    the run (identical failures, the attempt limit, a spent fix loop) the timeline says why."""
+    try:
+        decision = fix_decision(runtime, state) if graph is not None else None
+        if decision is not None:
+            return fix_round(runtime, graph, config, *decision)
         return advance_failed_checks(runtime, state)
     except RuntimeError as error:
         runtime.event("controller", "blocked", str(error))
@@ -2270,9 +2361,9 @@ def final_stop(runtime, state) -> tuple[str, bool] | None:
     if not any(task.error for task in state.tasks):
         return None
     try:
-        if check_retries(runtime, state) is not None:
+        if fix_decision(runtime, state) is not None or check_retries(runtime, state) is not None:
             return None
-    except RuntimeError as error:  # Identical failures or the attempt limit: advance_or_block's stop.
+    except RuntimeError as error:  # Identical failures, the attempt limit or a spent fix loop: advance_or_block's stop.
         return str(error), True
     if reviewer_stop_pending(runtime, state) or review_interrupted(runtime, state):
         return None
@@ -2328,7 +2419,7 @@ def drive(runtime, *, single_step=False) -> str | None:
     from .pipeline import advance, build_pipeline, graph_config, report
     from .repair import refuse_recorded
     validate_automatic(runtime.plan)
-    refuse_recorded(runtime.directory)
+    refuse_recorded(runtime.directory, controller_ok=True)  # The fix loop completes its own (advance_or_block).
     branch = git(Path(runtime.plan["repository"]), "symbolic-ref", "--short", "HEAD")
     if branch != runtime.plan["source_branch"]:
         try:
@@ -2399,7 +2490,9 @@ def drive(runtime, *, single_step=False) -> str | None:
                 value = Command(resume={"freeze": True})
             elif pending:
                 raise stop_error(runtime, MANUAL_GATE)
-            elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state) or reviewer_stop_pending(runtime, state)
+            elif controller_session_open(runtime):
+                advance_or_block(runtime, state, graph, config)  # A round a controller left: finished first, whatever the head shows.
+            elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state, graph, config) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
                 if not restart_review(runtime, state):
                     record_blocked(runtime, state)

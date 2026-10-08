@@ -1265,6 +1265,127 @@ class RepairSession(RepairFixture):
         self.assertEqual(self.sessions.starts.count("repair-1"), 0)
 
 
+class FixLoop(RepairFixture):
+    """The controller's in-run fix loop: a verify or candidate block narrows the lane's worker to the failure in a repair
+    session, re-verifies inside the run, and after `fix_rounds` rounds (or a blocked one) raises attention."""
+
+    rounds = 2
+
+    def prepare(self, name: str) -> OfflinePipeline:
+        runtime = super().prepare(name)
+        runtime.plan["automatic"]["fix_rounds"] = self.rounds
+        save_json(self.directory / "plan.json", runtime.plan)
+        self.sessions.plan = runtime.plan
+        return runtime
+
+    def drive(self):
+        with patch("workflow.automatic.wait_handoffs"):
+            return drive(self.runtime)
+
+    def attention(self) -> list:
+        from .attention import load_record, states
+        return [(item["kind"], item["text"]) for item in states(load_record(self.directory))]
+
+    def test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch(self):
+        directory = self.directory
+        self.start()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        commit = self.drive()
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["by"], entry["round"], entry["trigger"], entry["base_kind"]),
+                         ("applied", "controller", 1, "candidate", "candidate"))
+        self.assertNotIn("via", entry)
+        # The failing revision was never rerun: its next candidate attempt checked the repaired candidate.
+        self.assertEqual(read_json(directory / "verification/candidate/ui/2/packet.json")["expected"]["output_commit"], self.candidate_commit(1))
+        self.assertEqual(self.tree(commit), self.tree(self.candidate_commit(1)))
+        self.assertEqual(git(self.repo, "show", f"{commit}:ui.txt"), "after")
+        prompt = self.sessions.repair_prompts["repair-1"]
+        self.assertIn("round 1 of 2: fix only what follows", prompt)
+        events = [(event["node"], event["status"], event["message"]) for event in self.events()]
+        self.assertIn(("repair_ui", "passed", "round 1: repair 1 applied; ui is verified again"), events)
+        self.assertTrue(any(node == "repair_ui" and status == "running" and message.startswith("round 1: repair session launched")
+                            for node, status, message in events))
+        self.assertTrue(any(message.startswith("Repair 1 by the controller: snapshot ") for _, _, message in events))
+        self.assertIn("Controller repair 1: repair session round 1: candidate", read_json(directory / "review-bundle.json")["snapshots"]["ui"]["summary"])
+        self.assertEqual(sorted(self.sessions.starts), ["adapter", "repair-1", "review", "ui"])
+
+    def test_a_verify_block_is_repaired_on_the_lane_snapshot(self):
+        directory = self.directory
+        self.sessions.edits.update(adapter=("backend.py", "VALUE = 3\n"), ui=("ui.txt", "after"))
+        self.start()
+        self.sessions.repair_edits["adapter"] = {"backend.py": "VALUE = 2\n"}
+        commit = self.drive()
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["trigger"], entry["base_kind"], entry["base_commit"]),
+                         ("applied", "verify", "snapshot", self.snapshot("adapter")))
+        prompt = self.sessions.repair_prompts["repair-1"]
+        self.assertIn("## Gate reasons: worker/adapter attempt 1", prompt)
+        self.assertIn("### unit (unit), exit 1", prompt)
+        self.assertIn("AssertionError: 3 != 2", prompt)
+        # The repaired lane got a fresh worker attempt; the other lane's packet is reused, not rerun.
+        self.assertEqual(read_json(directory / "verification/worker/adapter/2/packet.json")["gate"]["status"], "passed")
+        self.assertFalse((directory / "verification/worker/ui/2").exists())
+        self.assertEqual(git(self.repo, "show", f"{commit}:backend.py"), "VALUE = 2")
+
+    def test_two_failed_rounds_raise_attention(self):
+        self.start()
+        self.sessions.repair_edits["ui"] = {"ui.txt": lambda node: f"still wrong after {node}"}
+        with self.assertRaises(RuntimeError) as raised:
+            self.drive()
+        message = str(raised.exception)
+        self.assertTrue(message.startswith("fix loop exhausted for lane ui after 2 rounds: Executed check failed: python -c "), message)
+        self.assertIn("ui-build: exit 1. A hand fix: python -m workflow repair ", message)
+        self.assertIn(" ui --workspace --by operator, then repair --commit; or python -m workflow brief ", message)
+        self.assertEqual([(entry["status"], entry["round"]) for entry in self.entries()], [("applied", 1), ("applied", 2)])
+        [(kind, text)] = self.attention()
+        self.assertEqual(kind, "controller_blocked")
+        self.assertTrue(text.startswith("fix loop exhausted for lane ui after 2 rounds: "), text)
+        self.assertEqual(self.events()[-1]["status"], "blocked")
+        # Its stop is final: a new controller says it again and launches nothing.
+        with self.assertRaisesRegex(RuntimeError, "fix loop exhausted for lane ui after 2 rounds"):
+            self.drive()
+        self.assertEqual(self.sessions.starts.count("repair-3"), 0)
+
+    def test_a_blocked_round_ends_the_loop(self):
+        self.start()
+        self.sessions.repair_status = "blocked"
+        with self.assertRaisesRegex(RuntimeError, "fix loop exhausted for lane ui after 1 round: .*; round 1 ended blocked: the repair "
+                                                  r"session ended blocked: Synthetic repair \(blocked\)\. A hand fix"):
+            self.drive()
+        self.assertEqual([entry["status"] for entry in self.entries()], ["blocked"])
+        self.assertFalse((self.directory / "candidate-1.json").exists())
+
+    def test_a_memory_kill_never_starts_a_round(self):
+        runtime = type("Runtime", (), {})()
+        runtime.directory, runtime.plan, runtime.workers = self.directory, self.runtime.plan, ["adapter", "ui"]
+        runtime.attempt = lambda phase, node: 1
+        state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
+        folder = self.directory / "verification/worker/ui/1"
+        folder.mkdir(parents=True)
+        packet = {"expected": {"output_commit": "a" * 40}, "result": {"transient_checks": ["ui-build"]}, "gate": {"status": "blocked", "reasons": ["x"]}}
+        save_json(folder / "packet.json", packet)
+        self.assertIsNone(automatic.fix_decision(runtime, state))
+        save_json(folder / "packet.json", {**packet, "result": {}})
+        self.assertEqual(automatic.fix_decision(runtime, state), ("ui", "verify"))
+
+
+class NoFixLoop(FixLoop):
+    """`--fix-rounds 0`: the run stops as before, at the identical-failure guard, and launches no repair session."""
+
+    rounds = 0
+    test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch = None
+    test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
+    test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
+
+    def test_without_rounds_the_run_stops_as_before(self):
+        self.start()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        with self.assertRaisesRegex(RuntimeError, "candidate/ui failed identically on attempts 1 and 2"):
+            self.drive()
+        self.assertFalse((self.directory / "repairs.json").exists())
+        self.assertNotIn("repair-1", self.sessions.starts)
+
+
 class RepairCommandLine(RepairFixture):
     """The real command in its own process: a dry run writes nothing, and --commit never calls claude (--session is RepairSession's)."""
 

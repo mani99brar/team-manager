@@ -95,10 +95,11 @@ def repair_command(directory: Path, entry: dict) -> str:
             f"--commit {entry['source_commit']} --reason {shlex.quote(entry['reason'])} {BY_OPERATOR}")
 
 
-def refuse_recorded(directory: Path) -> None:
-    """While a repair is recorded its refs and counters may already exist: the failed branch never resumes, completing it is the way on."""
+def refuse_recorded(directory: Path, controller_ok: bool = False) -> None:
+    """While a repair is recorded its refs and counters may already exist: the failed branch never resumes, completing it is the way on.
+    `controller_ok`: drive's own check, where the fix loop completes a round the controller recorded."""
     for entry in load_repairs(directory):
-        if entry["status"] == "recorded":
+        if entry["status"] == "recorded" and not (controller_ok and entry.get("by") == "controller"):
             raise RuntimeError(f"Repair {entry['n']} is recorded but not applied; rerun exactly: {repair_command(directory, entry)}")
 
 

@@ -247,7 +247,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                     worker_timeout_seconds: int | None = None, review_timeout_seconds: int | None = None,
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
                     roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
-                    follows: str | None = None, allow_untried: str | None = None, prove=None) -> tuple[Path, list[list[str]], list[str]]:
+                    follows: str | None = None, allow_untried: str | None = None, prove=None,
+                    fix_rounds: int | None = None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes. Nothing of the run is executed
     here; the one exception is a feature with `panels` (2.6.0), whose two read-only transport probes (`claude --help` for a
     claude provider, `pi --version` for a pi provider; `panel.prove_transports`, injectable as `prove`) run here so a dry run
@@ -461,16 +462,19 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     if automatic:
         from .automatic import automatic_settings
         # Reject bad deadlines, an unknown transport or profile before any command runs.
-        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds, reviewer_transport, profile)
+        settings = automatic_settings(worker_timeout_seconds, review_timeout_seconds, reviewer_transport, profile, fix_rounds=fix_rounds)
         commands[0].append("--automatic")
         commands[2].extend(["--automatic", "--worker-timeout-seconds", str(settings["worker_timeout_seconds"]),
                             "--review-timeout-seconds", str(settings["review_timeout_seconds"]),
                             "--reviewer-transport", settings["reviewer_transport"], "--profile", settings["profile"]])
+        if fix_rounds is not None:
+            commands[2].extend(["--fix-rounds", str(fix_rounds)])  # Prepare pins FIX_ROUNDS without it.
         if manifest.get("critical") is True:
             commands[2].append("--critical")  # Prepare pins finish "approval" (C51); a manual run stops for approval anyway.
         commands.append([*base, "automatic", str(run), "--live", "--repo", str(source), "--by", by])
-    elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None or profile is not None:
-        raise ValueError("Timeouts, the reviewer transport and the profile apply to --automatic runs only")
+    elif worker_timeout_seconds is not None or review_timeout_seconds is not None or reviewer_transport is not None or profile is not None \
+            or fix_rounds is not None:
+        raise ValueError("Timeouts, the reviewer transport, the profile and the fix rounds apply to --automatic runs only")
     drill = policy.get("failure_drill")
     if drill and drill["node_id"] not in selected:
         notes.append(f"Failure drill skipped: its lane {drill['node_id']} is not selected (selected: {', '.join(selected)}).")
@@ -539,6 +543,8 @@ def main(argv=None):
     parser.add_argument("--review-timeout-seconds", type=int, help="Automatic mode: reviewer deadline from its launch to its completion file (default 30m, max 24h)")
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="Automatic mode: the run's profile (default unattended), pinned at prepare")
+    parser.add_argument("--fix-rounds", type=int, metavar="N", help="Automatic mode: repair sessions per lane in the in-run fix loop before "
+                                                                    "attention (default 2, 0 disables), pinned at prepare")
     parser.add_argument("--worker-model", help="The workers' model, pinned at prepare (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="The workers' effort, pinned at prepare (default: WORKFLOW_WORKER_EFFORT)")
     parser.add_argument("--judge-model", help="The model of the design challenge, the reviewers and the review sidecar, pinned at prepare "
@@ -570,7 +576,8 @@ def main(argv=None):
         roles = {"worker_model": args.worker_model, "worker_effort": args.worker_effort, "judge_model": args.judge_model, "judge_effort": args.judge_effort}
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
-                                               by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows, args.allow_untried)
+                                               by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows, args.allow_untried,
+                                               fix_rounds=args.fix_rounds)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]
