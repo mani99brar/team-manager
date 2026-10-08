@@ -23,12 +23,6 @@ records that the operator merged a blocked (or abandoned) run's candidate, and w
 
 **Open questions for the grill:** may `accept` also merge (fast-forward) the candidate, or only record a merge the operator did; does an override need a minimum (for example at least one reviewer accepted); how the attention record and the outcome block word it.
 
-## 2. Freeze: wait for a stopped session before declaring termination not established
-
-**Status:** todo. **Size:** a small direct fix with a test. **Added:** 2026-10-06.
-
-`stop_session` (`workflow/pipeline.py`) checks once, right after `claude stop`, whether the session is gone. A session still exiting fails the freeze as "termination is not established", a non-retryable graph failure, and `automatic --live` only repeats it (shared-memory-003). Poll the listing and the PID for a few seconds before giving up. Today's recovery, once the PID is gone: write `<run>/freeze-interrupted.json` `{"error": "<why>"}` and run `automatic --live`.
-
 ## 3. Worker prompt: end the turn without addressing the operator
 
 **Status:** todo. **Size:** a small direct fix with a test. **Added:** 2026-10-06.
