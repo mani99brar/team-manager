@@ -647,7 +647,12 @@ def recheck_reused(packet: dict, policy: dict, run: Path) -> dict:
             worker["expected"][key] != expected[key] for key in ("run_id", "node_id", "base_commit", "output_commit")):
         raise ValueError(f"{reference['path']} is not the worker packet of {expected['node_id']} at {expected['output_commit']}")
     gated = recheck_packet({**worker, "phase": "candidate"}, policy, run)
-    return {**gated, "phase": "candidate", "expected": expected, "reused_from": reference}
+    # The worker phase left its deferred checks out of transient_checks; at the candidate every check gates.
+    lane = next(item for item in policy["workers"] if item["node_id"] == expected["node_id"])
+    result = {key: value for key, value in gated["result"].items() if key != "transient_checks"}
+    killed = transient_checks(lane, worker["evidence"]["checks"], worker["result"]["checks"], "candidate")
+    return {**gated, "result": {**result, **({"transient_checks": killed} if killed else {})}, "phase": "candidate", "expected": expected,
+            "reused_from": reference}
 
 
 def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:

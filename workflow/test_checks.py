@@ -294,6 +294,24 @@ class ReusedPacketTests(unittest.TestCase):
         self.assertIn("build: exit 1", packet["gate"]["reasons"])
         self.assertEqual(json.loads((f.run_dir / "verification/candidate/adapter/1/packet.json").read_text())["gate"]["status"], "blocked")
 
+    def test_a_build_killed_for_memory_in_the_worker_phase_is_transient_at_the_candidate(self):
+        # Deferred in the worker phase, so not listed there; gated at the candidate, where the kill is what blocks.
+        f = self.fixture
+        policy = f.policy()
+        policy["workers"][0]["checks"].append({"id": "build", "kind": "build", "argv": [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"],
+                                               "timeout_seconds": 60, "scenarios": []})
+        commit, changed = f.snapshot({"docs/OTHER.md": b"# Other\n"})
+        worker = verify_revision(f.run_dir, f.plan, policy, "adapter", commit, changed, "session", attempt=2)
+        self.assertEqual(worker["gate"]["status"], "passed")
+        self.assertNotIn("transient_checks", worker["result"])
+        packet = self.reuse(policy=policy, commit=commit, worker_path=f.run_dir / "verification/worker/adapter/2/packet.json")
+        self.assertEqual((packet["gate"]["status"], packet["result"]["transient_checks"]), ("blocked", ["build"]))
+        saved = json.loads((f.run_dir / "verification/candidate/adapter/1/packet.json").read_text())
+        self.assertEqual(saved["result"]["transient_checks"], ["build"])
+        self.assertEqual(recheck_packet(saved, policy, f.run_dir)["result"]["transient_checks"], ["build"])
+        from .repair import transient_packet
+        self.assertTrue(transient_packet(f.run_dir / "verification/candidate/adapter/1/packet.json"))
+
     def test_a_changed_or_foreign_worker_packet_is_refused(self):
         f = self.fixture
         with self.assertRaisesRegex(ValueError, "is not the worker packet of adapter at"):
