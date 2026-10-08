@@ -2381,6 +2381,32 @@ sys.exit(knob.get('exit', 0))
     def untagged(self, findings: list) -> list:
         return [{key: value for key, value in finding.items() if key != "reviewer"} for finding in findings]
 
+    def followed_commit(self) -> str:
+        """A followed run's candidate kept in the repository and on no branch: the base with ui.txt (owned) changed and
+        elsewhere.txt (owned by no lane: main moved between the runs) added."""
+        f = self.fixture
+        env = {**os.environ, "GIT_INDEX_FILE": str(f.root / "followed.index")}
+
+        def run(*args, text=None):
+            return subprocess.run(["git", "-C", str(f.repo), *args], check=True, capture_output=True, text=True, env=env, input=text).stdout.strip()
+        run("read-tree", f.plan["base_commit"])
+        for name, content in (("ui.txt", "followed\n"), ("elsewhere.txt", "main moved\n")):
+            run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', text=content)},{name}")
+        return run("commit-tree", run("write-tree"), "-p", f.plan["base_commit"], "-m", "followed candidate")
+
+    def follow(self, commit: str, verdict: str | None = "blocked") -> None:
+        """Pin plan.follows as prepare does from brief.follows_record."""
+        f = self.fixture
+        follows = {"run_id": "feature-001", "verdict": verdict, "candidate_commit": commit}
+        for plan in (f.plan, f.runtime.plan):
+            plan["follows"] = follows
+        save_json(f.directory / "plan.json", f.plan)
+
+    def delta_line(self, commit: str, verdict: str = "blocked") -> str:
+        f = self.fixture
+        return (f"Delta since the followed run feature-001's candidate {commit} (its verdict: {verdict}), limited to the lanes' owned paths: "
+                f"{f.directory / 'review.delta.diff'}. Read it first; the full diff below is the whole candidate for context. Diff: {f.directory / 'review.diff'}.")
+
     PLANTED = '{"permissions": {"allow": ["Bash"]}}'
 
     def ignore_claude_config(self):
@@ -3051,6 +3077,64 @@ class AutomaticTwoReviewerGraphTests(SharedGraphTests, GraphFixture):
     reviewers = ["general", "coverage"]
 
 
+class DeltaReviewTests:
+    """A follow-up run's reviewers read the delta since the followed run's candidate first, on both transports."""
+
+    def test_a_follow_up_run_gives_every_reviewer_the_delta_over_the_owned_paths_first(self):
+        f = self.fixture
+        followed = self.followed_commit()
+        self.follow(followed)
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(f.runtime)
+        delta = (f.directory / "review.delta.diff").read_text()
+        self.assertIn("+++ b/ui.txt", delta)
+        self.assertIn("-followed", delta)
+        candidate = read_json(f.directory / "review.json")["candidate_commit"]
+        self.assertIn("elsewhere.txt", git(f.repo, "diff", followed, candidate))  # An unrestricted diff carries main's change ...
+        self.assertNotIn("elsewhere.txt", delta)  # ... the delta keeps to the lanes' owned paths.
+        receipt = self.combined()
+        self.assertEqual((receipt["delta_from"], receipt["delta_sha256"]), (followed, fixtures.digest_file(f.directory / "review.delta.diff")))
+        for reviewer_id in self.ids:
+            self.assertIn(self.delta_line(followed), self.file(reviewer_id, "prompt.txt").read_text())
+
+    def test_a_follow_up_without_a_verdict_says_none(self):
+        f = self.fixture
+        followed = self.followed_commit()
+        self.follow(followed, verdict=None)
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(f.runtime)
+        self.assertIn(self.delta_line(followed, "none"), self.file(self.ids[0], "prompt.txt").read_text())
+
+    def assert_no_delta(self):
+        f = self.fixture
+        self.assertFalse((f.directory / "review.delta.diff").exists())
+        self.assertEqual((self.combined()["delta_from"], self.combined()["delta_sha256"]), (None, None))
+        for reviewer_id in self.ids:
+            prompt = self.file(reviewer_id, "prompt.txt").read_text()
+            self.assertNotIn("Delta since", prompt)
+            self.assertIn(f"Diff: {f.directory / 'review.diff'}.", prompt)
+
+    def test_a_followed_candidate_that_no_longer_resolves_gets_no_delta(self):
+        self.follow("0" * 40)
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(self.fixture.runtime)
+        self.assert_no_delta()
+
+    def test_a_run_without_follows_has_no_delta(self):
+        with patch("workflow.automatic.wait_handoffs"):
+            drive(self.fixture.runtime)
+        self.assert_no_delta()
+
+
+class NativeDeltaReviewGraphTests(DeltaReviewTests, GraphFixture):
+    transport = "native"
+
+
+class PrintDeltaReviewGraphTests(DeltaReviewTests, GraphFixture):
+    transport = "print"
+    reviewers = ["general", "coverage"]
+
+
 class PrintReviewerTests(SharedGraphTests):
     """The headless fallback, with one and with two reviewers."""
 
@@ -3580,6 +3664,12 @@ sys.exit(0 if commit else 75)
         f = self.fixture
         f.sessions.reviewer_after_file = lambda: (f.directory / "review-worktree" / "ui.txt").write_text("edited during review")
         self.assert_refused_after_wait("Reviewer worktree changed")
+
+    def test_a_delta_change_during_review_is_refused(self):
+        f = self.fixture
+        self.follow(self.followed_commit())
+        f.sessions.reviewer_after_file = lambda: (f.directory / "review.delta.diff").write_text("rewritten during review\n")
+        self.assert_refused_after_wait("Evidence changed during review")
 
     def test_evidence_change_during_review_is_refused(self):
         f = self.fixture

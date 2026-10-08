@@ -2,6 +2,12 @@
 
 Workers remain native interactive Claude sessions. Review is a separate read-only
 Claude invocation owned by the graph's review node. No push or main integration.
+
+A follow-up run (`plan.follows`, RUNBOOK "Follow-up runs: brief, --follows and abandon" and "Automatic mode: the review
+step") also gets `review.delta.diff`: the followed run's candidate to this candidate, when that commit still resolves in the
+repository (no delta otherwise, silently). It is restricted to the owned paths of the run's lanes, because the two candidates
+may have different parents when main moved between the runs and an unrestricted diff would carry main's changes as the
+lanes' work. Reviewers read it first, beside the full `review.diff`; its digest is bound like the diff's.
 """
 from __future__ import annotations
 
@@ -605,13 +611,94 @@ def worker_claims(runtime) -> str:
     return text
 
 
+DELTA = "review.delta.diff"
+
+
+def owned_paths(runtime) -> list[str]:
+    """Every owned path of the run's lanes, in policy order without repeats, from the pinned policy (`runtime.policy` or the
+    run's policy.json); empty without one."""
+    from .export_state import load_optional
+    policy = getattr(runtime, "policy", None) or load_optional(Path(runtime.directory) / "policy.json")
+    if not isinstance(policy, dict) or not isinstance(policy.get("workers"), list):
+        return []
+    selected = set(lanes(runtime))
+    paths = []
+    for worker in policy["workers"]:
+        if isinstance(worker, dict) and worker.get("node_id") in selected:
+            paths += [path for path in worker.get("owned_paths") or [] if isinstance(path, str) and path not in paths]
+    return paths
+
+
+def delta_base(runtime, cwd: Path) -> tuple[str, list[str]] | None:
+    """(the followed run's candidate, the lanes' owned paths) when the plan follows a run whose candidate commit still resolves
+    from `cwd` (a checkout of the run's repository) and the lanes own a path; None otherwise (no delta, never an error)."""
+    follows = runtime.plan.get("follows")
+    commit = follows.get("candidate_commit") if isinstance(follows, dict) else None
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
+        return None
+    try:
+        paths = owned_paths(runtime)
+    except Exception:  # noqa: BLE001 - a plan whose lanes do not resolve gets no delta, as before.
+        return None
+    if not paths or subprocess.run(["git", "-C", str(cwd), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode != 0:
+        return None
+    return commit, paths
+
+
+def write_delta(runtime, cwd: Path, candidate: str) -> str | None:
+    """`review.delta.diff` of a follow-up run (delta_base), from the followed candidate to `candidate` over the lanes' owned
+    paths; the followed candidate, or None with no file (a stale one is removed so no prompt names it)."""
+    delta = runtime.directory / DELTA
+    found = delta_base(runtime, cwd)
+    if found is None:
+        delta.unlink(missing_ok=True)
+        return None
+    commit, paths = found
+    with delta.open("w") as handle:
+        subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", commit, candidate, "--", *paths], stdout=handle, check=True)
+    return commit
+
+
+def delta_line(runtime) -> str:
+    """The reviewer prompt's line for a follow-up run's delta, before the full diff; empty when there is no delta file."""
+    follows = runtime.plan.get("follows")
+    delta = runtime.directory / DELTA
+    if not isinstance(follows, dict) or not delta.is_file():
+        return ""
+    return (f"Delta since the followed run {follows.get('run_id')}'s candidate {follows.get('candidate_commit')} "
+            f"(its verdict: {follows.get('verdict') or 'none'}), limited to the lanes' owned paths: {delta}. "
+            "Read it first; the full diff below is the whole candidate for context. ")
+
+
+def delta_fields(runtime) -> dict:
+    """The combined status's `delta_from` and `delta_sha256` (both null without a delta), bound like `patch_sha256`."""
+    from .pipeline import digest_file
+    follows = runtime.plan.get("follows")
+    delta = runtime.directory / DELTA
+    if not isinstance(follows, dict) or not delta.is_file():
+        return {"delta_from": None, "delta_sha256": None}
+    return {"delta_from": follows.get("candidate_commit"), "delta_sha256": digest_file(delta)}
+
+
+def evidence_changed(runtime, combined: dict, digest: str, patch: Path) -> bool:
+    """The bundle, review.diff or (when one was bound) review.delta.diff no longer has the digest the review started from."""
+    from .pipeline import digest_file
+    if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
+        return True
+    bound = combined.get("delta_sha256")  # A status written before deltas has none.
+    if bound is None:
+        return False
+    delta = runtime.directory / DELTA
+    return not delta.is_file() or digest_file(delta) != bound
+
+
 def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
-    """The brief, then the rubric and the fixed blocks every reviewer gets: bundle paths, task locations, lane vocabulary, the
-    lane repairs, a 1.1.0 run's inputs and worker claims, the project's conventions and decisions.md. Both transports build on
-    it (print_review_prompt; the native completion protocol), so a replay can too."""
+    """The brief, then the rubric and the fixed blocks every reviewer gets: a follow-up run's delta (delta_line), bundle paths,
+    task locations, lane vocabulary, the lane repairs, a 1.1.0 run's inputs and worker claims, the project's conventions and
+    decisions.md. Both transports build on it (print_review_prompt; the native completion protocol), so a replay can too."""
     from .notes import notes_note
     from .repair import repair_note
-    return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " "
+    return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " " + delta_line(runtime) +
             f"Diff: {patch}. Bundle: {runtime.directory / 'review-bundle.json'}. "
             f"Requirements: each worker's task text pinned in {runtime.directory / 'plan.json'} under nodes.<worker>.task, "
             "and the documents those tasks cite, read in the candidate checkout. "
@@ -1098,6 +1185,7 @@ def _review_candidate(runtime) -> dict:
     patch = runtime.directory / "review.diff"
     with patch.open("w") as handle:
         subprocess.run(["git", "-C", str(cwd), "diff", "--binary", "--no-ext-diff", "--no-textconv", runtime.plan["base_commit"], bundle["candidate_commit"]], stdout=handle, check=True)
+    write_delta(runtime, cwd, bundle["candidate_commit"])  # A follow-up run's delta, before any reviewer prompt names it.
     attack.ensure_started(runtime)  # The attack pass runs in parallel with the reviewers (PRD 4.1, [L4]); started before they launch.
     panel.ensure_started(runtime)  # The panels' provider jobs, in-process beside the reviewers on both transports (PRD_MULTI_PROVIDER_PANEL 4.1).
     if reviewer_transport(runtime.plan) == "print":
@@ -1266,7 +1354,7 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
     from .pipeline import digest_file
     declared = reviewers(runtime)
     combined = {"transport": "native", "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
-                "patch_sha256": digest_file(patch), "status": "launching", "reviewers": [item["reviewer_id"] for item in declared]}
+                "patch_sha256": digest_file(patch), **delta_fields(runtime), "status": "launching", "reviewers": [item["reviewer_id"] for item in declared]}
     statuses = {item["reviewer_id"]: {"reviewer_id": item["reviewer_id"], "node_id": review_node(item["reviewer_id"]), "transport": "native",
                                       "launch_token": str(uuid.uuid4()), "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
                                       "status": "pending", **requested(runtime.plan)} for item in declared}
@@ -1375,7 +1463,6 @@ def worktree_changed(cwd: Path, bundle: dict) -> bool:
 
 
 def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> dict:
-    from .pipeline import digest_file
     cwd = runtime.directory / "review-worktree"
     patch = runtime.directory / "review.diff"
     combined = state.combined
@@ -1405,7 +1492,7 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
                                               "the block and review.json stand")
         if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
-        if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
+        if evidence_changed(runtime, combined, digest, patch):
             raise RuntimeError("Evidence changed during review")
         review = _decide(runtime, bundle, digest, state, decisions)
     except KeyboardInterrupt:
@@ -1546,7 +1633,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
     from .pipeline import digest_file
     declared = reviewers(runtime)
     combined = {"transport": "print", "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
-                "status": "launching", "patch_sha256": digest_file(patch), "reviewers": [item["reviewer_id"] for item in declared]}
+                "status": "launching", "patch_sha256": digest_file(patch), **delta_fields(runtime), "reviewers": [item["reviewer_id"] for item in declared]}
     statuses = {item["reviewer_id"]: {"reviewer_id": item["reviewer_id"], "node_id": review_node(item["reviewer_id"]), "transport": "print",
                                       "session_id": str(uuid.uuid4()), "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
                                       "status": "launching"} for item in declared}
@@ -1578,7 +1665,7 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
         waited = True
         if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
-        if runtime.validate_bundle()[1] != digest or digest_file(patch) != combined["patch_sha256"]:
+        if evidence_changed(runtime, combined, digest, patch):
             raise RuntimeError("Evidence changed during review")
         review = _decide(runtime, bundle, digest, state, state.decisions)
     except BaseException as error:
