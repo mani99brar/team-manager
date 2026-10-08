@@ -1957,16 +1957,18 @@ def blocked_lanes(runtime, phase: str, nodes: list[str]) -> list[tuple[str, Path
     return found
 
 
-def exhausted(runtime, lane: str, reasons: list[str]) -> RuntimeError:
-    """The stop once a lane's fix loop is spent: its rounds used, or its last round ended blocked."""
+def exhausted(runtime, lane: str, reasons: list[str], trigger: str = "verify") -> RuntimeError:
+    """The stop once a lane's fix loop is spent: its rounds used, or its last round ended blocked. After a review block a
+    `repair` refuses (reviewers have seen a candidate), so its routes are brief and a --follows run only."""
     from .repair import session_entries
     sessions = session_entries(runtime.directory, lane)
     last = sessions[-1] if sessions else None
     ended = f"; round {last['round']} ended blocked: {last['reason']}" if last and last["status"] == "blocked" else ""
     directory = shlex.quote(str(runtime.directory))
     return RuntimeError(f"fix loop exhausted for lane {lane} after {len(sessions)} round{'' if len(sessions) == 1 else 's'}: "
-                        f"{'; '.join(reasons)}{ended}. A hand fix: python -m workflow repair {directory} {lane} --workspace --by operator, "
-                        f"then repair --commit; or python -m workflow brief {directory} and a --follows run")
+                        f"{'; '.join(reasons)}{ended}. " + (f"A hand fix: python -m workflow brief {directory} and a --follows run" if trigger == "review" else
+                        f"A hand fix: python -m workflow repair {directory} {lane} --workspace --by operator, then repair --commit; or "
+                        f"python -m workflow brief {directory} and a --follows run"))
 
 
 # A reviewer node's session files, moved into `review-round-<k>/` when its round is archived; the next round launches fresh.
@@ -2097,7 +2099,7 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
     sessions = [entry for entry in session_entries(runtime.directory) if previous and entry.get("review_round") == previous[-1]["round"]]
     if failed == ["review"] and sessions and sessions[-1]["status"] == "blocked" and not (runtime.directory / "review.json").exists():
         # The round's review is archived and its repair session ended without a repair: never a second review of that candidate.
-        raise exhausted(runtime, previous[-1]["lane"], finding_lines(previous[-1]["findings"]))
+        raise exhausted(runtime, previous[-1]["lane"], finding_lines(previous[-1]["findings"]), "review")
     block = review_block(runtime, state)
     if block is not None:
         lane, findings = block
@@ -2105,7 +2107,7 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
             return None
         sessions = session_entries(runtime.directory, lane)
         if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
-            raise exhausted(runtime, lane, finding_lines(findings))
+            raise exhausted(runtime, lane, finding_lines(findings), "review")
         return lane, "review"
     workers = lanes(runtime)
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]

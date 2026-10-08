@@ -1449,6 +1449,9 @@ class ReviewFixLoop(FixLoop):
         self.assertTrue(str(raised.exception).startswith("fix loop exhausted for lane ui after 2 rounds: P1 (review): ui.txt says after"),
                         str(raised.exception))
         self.assertIn("(round 3)", str(raised.exception))
+        # After a review block a repair is refused (reviewers have seen a candidate): the routes are brief and a --follows run.
+        self.assertTrue(str(raised.exception).endswith(f". A hand fix: python -m workflow brief {self.directory} and a --follows run"))
+        self.assertNotIn("--workspace", str(raised.exception))
         self.assertEqual([(entry["status"], entry["trigger"]) for entry in self.entries()], [("applied", "review")] * 2)
         self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
         self.assertTrue((self.directory / "review.round-2.json").exists())
