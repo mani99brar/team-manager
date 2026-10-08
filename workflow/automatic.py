@@ -2022,7 +2022,9 @@ def review_archive(runtime, k: int) -> list[tuple[Path, Path]]:
     moves.append((directory / "panel", folder / "panel"))
     renames = [("review.json", f"review.round-{k}.json"), ("review-bundle.json", f"review-bundle.round-{k}.json"),
                ("review.diff", f"review.round-{k}.diff"), (DELTA, f"review.delta.round-{k}.diff"), ("panel.json", f"panel.round-{k}.json")]
-    renames += [(f"automatic-{review_node(rid)}.json", f"automatic-{review_node(rid)}.round-{k}.json") for rid in reviewer_ids(runtime.plan)]
+    # The combined restart state is automatic-review.json in every run; a declared reviewer's own is automatic-review-<id>.json.
+    nodes = dict.fromkeys([DEFAULT_REVIEWER, *(review_node(rid) for rid in reviewer_ids(runtime.plan))])
+    renames += [(f"automatic-{node}.json", f"automatic-{node}.round-{k}.json") for node in nodes]
     return moves + [(directory / name, directory / archived) for name, archived in renames]
 
 

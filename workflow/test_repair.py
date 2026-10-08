@@ -1486,6 +1486,34 @@ class ReviewFixLoop(FixLoop):
     test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
 
 
+class DeclaredReviewerFixLoop(ReviewFixLoop):
+    """A run with a declared reviewer keeps automatic-review.json (the combined restart state) beside the reviewer's own
+    automatic-review-<id>.json: a round archives both, so the next round's review starts clean."""
+
+    def prepare(self, name: str) -> OfflinePipeline:
+        runtime = super().prepare(name)
+        runtime.plan["reviewers"] = [{"reviewer_id": "general", "prompt": "Review the candidate."}]
+        save_json(self.directory / "plan.json", runtime.plan)
+        self.sessions.plan = runtime.plan
+        return runtime
+
+    def test_a_review_block_on_one_lane_is_repaired_and_re_reviewed_in_the_run(self):
+        directory = self.directory
+        self.sessions.reviewer_mutate = self.reviewer
+        self.sessions.repair_edits["ui"] = {"web/notes.txt": "notes\n"}
+        self.start()
+        self.drive()
+        for name in ("automatic-review.round-1.json", "automatic-review-general.round-1.json", "review-round-1/review-general.interactive.json"):
+            self.assertTrue((directory / name).exists(), name)
+        self.assertEqual(read_json(directory / "automatic-review.round-1.json")["status"], "blocked")
+        live = read_json(directory / "automatic-review.json")
+        self.assertEqual((live["status"], live["delta_from"]), ("succeeded", self.candidate_commit()))
+        self.assertEqual(read_json(directory / "review.json")["verdict"], "approved")
+
+    test_two_blocked_review_rounds_raise_attention = test_a_blocked_review_round_never_reviews_that_candidate_again = None
+    test_findings_on_two_lanes_end_the_run_as_before = None
+
+
 class NoFixLoop(FixLoop):
     """`--fix-rounds 0`: the run stops as before, at the identical-failure guard, and launches no repair session."""
 
