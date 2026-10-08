@@ -151,6 +151,18 @@
         },
         "error": {
           "$ref": "#/$defs/nullableText"
+        },
+        "delta_from": {
+          "description": "Optional (added within 1.0.0): on a follow-up run whose followed candidate still resolves, that commit, from which the context's touched files and diffs were taken (restricted to the lanes' owned paths); null otherwise. Absent in a record written before it.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,64}$"
+            }
+          ]
         }
       }
     },

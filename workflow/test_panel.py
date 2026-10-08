@@ -77,8 +77,9 @@ class Seam(unittest.TestCase):
             item["panels"][0]["overlap_threshold"] = threshold
             validate_schema("panel", item)
         schema = json.loads(panel.SCHEMA.read_text())
-        self.assertEqual(set(schema["$defs"]["panel"]["properties"]),
-                         {"id", "stage", "status", "overlap_threshold", "context_bytes", "providers", "findings", "started_at", "ended_at", "budget_usd", "error"})
+        appendix = {"id", "stage", "status", "overlap_threshold", "context_bytes", "providers", "findings", "started_at", "ended_at", "budget_usd", "error"}
+        self.assertEqual(set(schema["$defs"]["panel"]["required"]), appendix)
+        self.assertEqual(set(schema["$defs"]["panel"]["properties"]), appendix | {"delta_from"})  # Optional, added within 1.0.0.
         self.assertEqual(set(schema["$defs"]["provider"]["properties"]), {"transport", "model", "effort", "status", "cost_usd", "context_bytes", "finding_ids", "error"})
         self.assertEqual(schema["$defs"]["output"]["type"], "object")  # The claude provider's --json-schema needs an object root.
 
@@ -502,6 +503,22 @@ class Harness(unittest.TestCase):
         save_json(self.run / "plan.json", plan)
         return plan
 
+    def follow_up(self, plan: dict) -> str:
+        """Make this run a follow-up: a followed candidate kept on no branch (the candidate's x.py, an older new.py, main's
+        docs/elsewhere.md), plan.follows naming it, and a policy whose lanes own workflow/ and src/ only."""
+        env = {**os.environ, "GIT_INDEX_FILE": str(self.tmp / "followed.index")}
+
+        def run(*args, text=None):
+            return subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True, text=True, env=env, input=text).stdout.strip()
+        run("read-tree", self.candidate)
+        for name, content in (("workflow/new.py", "NEW = 0\n"), ("docs/elsewhere.md", "main moved\n"), ("docs/req.md", "REQ-1: only the owner withdraws\n")):
+            run("update-index", "--add", "--cacheinfo", f"100644,{run('hash-object', '-w', '--stdin', text=content)},{name}")
+        followed = run("commit-tree", run("write-tree"), "-p", self.base, "-m", "followed candidate")
+        plan["follows"] = {"run_id": "panel-000", "verdict": "blocked", "candidate_commit": followed}
+        save_json(self.run / "plan.json", plan)
+        save_json(self.run / "policy.json", {"workers": [{"node_id": "ui", "owned_paths": ["workflow"]}, {"node_id": "adapter", "owned_paths": ["src"]}]})
+        return followed
+
     def runtime(self, plan=None):
         return SimpleNamespace(directory=self.run, plan=plan or read_json(self.run / "plan.json"), sessions=SimpleNamespace(executable=str(self.fake_claude)))
 
@@ -558,6 +575,7 @@ class ReviewStep(Harness):
         entry = record["panels"][0]
         self.assertEqual(entry["status"], "succeeded")
         self.assertEqual(entry["context_bytes"], len(context.encode()))
+        self.assertIsNone(entry["delta_from"])  # Not a follow-up: the whole candidate against the base.
         self.assertEqual([(p["status"], p["cost_usd"], p["context_bytes"]) for p in entry["providers"]],
                          [("ok", 0.021, entry["context_bytes"]), ("ok", 0.0047, entry["context_bytes"])])
         self.assertEqual([(f["id"], f["file"], f["severity"], f["providers_raised"], f["accepted"], f["unanchored"]) for f in entry["findings"]],
@@ -597,6 +615,38 @@ class ReviewStep(Harness):
         self.assertFalse((self.run / "panel" / "review-panel" / "claude-2.stdout.json").exists())
         panel.collect(again, None)
         self.assertEqual(self.record()["panels"][0]["status"], "succeeded")
+
+    def test_a_follow_up_panel_reads_the_delta_since_the_followed_candidate_over_the_owned_paths(self):
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        plan = self.plan()
+        followed = self.follow_up(plan)
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        context = (self.run / "panel" / "review-panel" / "context.txt").read_text()
+        # x.py is the same at both candidates; docs/req.md and docs/elsewhere.md differ but no lane owns docs/: only new.py.
+        self.assertEqual(panel.context_labels(context), ["workflow/new.py", "docs/req.md"])
+        self.assertIn("-NEW = 0\n+NEW = 1", context)
+        self.assertIn("--- full file at the candidate ---\nNEW = 1", context)  # It existed at the followed candidate: its body.
+        self.assertNotIn("owner check is gone", context)
+        self.assertNotIn("elsewhere", context)
+        self.assertEqual(self.record()["panels"][0]["delta_from"], followed)
+        self.decide()
+        panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
+        self.assertEqual(self.record()["panels"][0]["delta_from"], followed)
+
+    def test_a_follow_up_whose_candidate_no_longer_resolves_reads_the_whole_candidate(self):
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        plan = self.plan()
+        self.follow_up(plan)
+        plan["follows"]["candidate_commit"] = "0" * 40
+        save_json(self.run / "plan.json", plan)
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        context = (self.run / "panel" / "review-panel" / "context.txt").read_text()
+        self.assertEqual(panel.context_labels(context), ["docs/req.md", "workflow/new.py", "workflow/x.py", "docs/req.md"])
+        self.assertIsNone(self.record()["panels"][0]["delta_from"])
+        self.decide()
+        panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
 
     def test_a_fenced_pi_reply_and_a_claude_model_entry(self):
         self.set_control(claude={"findings": []}, pi={"findings": PI_FINDINGS[:1], "fenced": True})

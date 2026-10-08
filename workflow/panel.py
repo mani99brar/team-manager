@@ -13,6 +13,10 @@ A report-only, configurable panel of providers beside the review of an automatic
 - Each provider job reviews ONE read-only context file, assembled once per panel under `<run>/panel/<id>/context.txt`
   with every section headed by one canonical repository-relative label; the normalizer anchors each finding's `file` to
   that label set, the overlap clusters findings across providers and `accepted` follows the panel's threshold.
+- On a follow-up run (`plan.follows` whose candidate still resolves; RUNBOOK "Follow-up runs: brief, --follows and
+  abandon") the touched files and their diffs come from the followed run's candidate to this one, restricted to the lanes'
+  owned paths as the reviewers' `review.delta.diff` is (`automatic.delta_base`), and `panel.json` records that commit as
+  each panel's `delta_from` (null otherwise).
 - Never raises into the review step: `ensure_started` and `collect` swallow every failure into the record (`failed` with
   its `error`); the only thing that propagates is a KeyboardInterrupt, which terminates the jobs and leaves the record
   non-terminal so `resume` reruns the non-terminal providers (each from its own start, into a new numbered output file).
@@ -423,12 +427,14 @@ def added_file(worktree: Path, base: str, path: str) -> bool:
     return subprocess.run(["git", "-C", str(worktree), "cat-file", "-e", f"{base}:{path}"], capture_output=True).returncode != 0
 
 
-def review_sections(worktree: Path, base: str, candidate: str) -> list[tuple[str, str]]:
+def review_sections(worktree: Path, base: str, candidate: str, paths: list[str] | None = None) -> list[tuple[str, str]]:
     """One section per touched text file of the frozen candidate: its diff hunks against the base, then its full text at the
     candidate (`git show`), under the file's repository-relative path as the label. Binary files are skipped; a deleted file
-    carries its diff only. Read from the review worktree's Git objects, never from its working files."""
+    carries its diff only. Read from the review worktree's Git objects, never from its working files. `paths` (a follow-up's
+    owned paths, with the followed candidate as `base`) restricts the touched files to those paths."""
     sections = []
-    for line in git_text(worktree, "diff", "--numstat", "--no-ext-diff", "--no-textconv", "--no-renames", base, candidate).splitlines():
+    limit = ["--", *paths] if paths else []
+    for line in git_text(worktree, "diff", "--numstat", "--no-ext-diff", "--no-textconv", "--no-renames", base, candidate, *limit).splitlines():
         parts = line.split("\t", 2)
         if len(parts) != 3 or parts[0] == "-" or parts[1] == "-":
             continue  # A binary file (numstat prints `-`), or a line that is no numstat row.
@@ -447,10 +453,18 @@ def review_sections(worktree: Path, base: str, candidate: str) -> list[tuple[str
     return sections
 
 
+def delta_from(directory: Path, plan: dict) -> tuple[str, list[str]] | None:
+    """A follow-up run's (followed candidate, owned paths), as the reviewers' delta (automatic.delta_base); None otherwise."""
+    from types import SimpleNamespace
+    from .automatic import delta_base
+    return delta_base(SimpleNamespace(directory=Path(directory), plan=plan), Path(directory) / "review-worktree")
+
+
 def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Path, int]:
-    """`<run>/panel/<id>/context.txt`: the candidate's touched files (diff + full text, from the frozen candidate), then the
-    pinned PRD copy and the pinned requirement documents, each section headed by one canonical label. The same bytes go to
-    every provider; an existing file is reused (the candidate is frozen), so a resumed rerun reads what the first run read."""
+    """`<run>/panel/<id>/context.txt`: the candidate's touched files (diff + full text, from the frozen candidate; on a
+    follow-up only the files the delta touches, diffed from the followed candidate: delta_from), then the pinned PRD copy and
+    the pinned requirement documents, each section headed by one canonical label. The same bytes go to every provider; an
+    existing file is reused (the candidate is frozen), so a resumed rerun reads what the first run read."""
     panel_dir = directory / DIR / item["id"]
     panel_dir.mkdir(parents=True, exist_ok=True)
     path = panel_dir / CONTEXT
@@ -458,8 +472,10 @@ def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Pa
         return path, path.stat().st_size
     bundle = read_json(directory / "review-bundle.json")
     worktree = directory / "review-worktree"
+    delta = delta_from(directory, plan)
+    base, paths = delta if delta else (plan["base_commit"], None)
     parts = []
-    for label, body in review_sections(worktree, plan["base_commit"], bundle["candidate_commit"]):
+    for label, body in review_sections(worktree, base, bundle["candidate_commit"], paths):
         parts.append(label_line(label) + body.rstrip("\n") + "\n\n")
     prd = plan.get("prd")
     if isinstance(prd, dict) and prd.get("copy") and item.get("prd_label"):
@@ -887,7 +903,9 @@ def ensure_started(runtime, *, clock=time.time) -> None:
                 entry.update(status="failed", started_at=entry["started_at"] or now, ended_at=now,
                              error=clip(f"context assembly failed: {type(error).__name__}: {error}", 4000))
                 continue
-            entry.update(status="running", started_at=entry["started_at"] or now, context_bytes=size, ended_at=None, error=None)
+            delta = delta_from(directory, plan)
+            entry.update(status="running", started_at=entry["started_at"] or now, context_bytes=size, ended_at=None, error=None,
+                         delta_from=delta[0] if delta else None)
             for index in owed:
                 provider = entry["providers"][index]
                 try:
