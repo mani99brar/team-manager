@@ -5,6 +5,7 @@ import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatAgo, formatSpan } from './time.ts'
 import { stateTone } from './tone.ts'
+import { Chip } from './ui/index.tsx'
 
 type Props = {
   run: RunSummary
@@ -13,6 +14,10 @@ type Props = {
   labels: ReadonlyMap<string, string>
   /** What the row names beside its run id on lists that mix workflows: the workflow's title, the run's feature, the project. */
   context?: readonly (string | null)[]
+  /** The lanes the run's definition launches, shown as plain chips on the Running and Paused rows (no per-lane state claim). */
+  lanes?: readonly string[]
+  /** An extra line under the row, in the given tone's muted colour (the paused "since <n> days"). */
+  trailing?: { text: string; tone?: 'pause' } | null
   now: number
   onNavigate: (pathname: string) => void
 }
@@ -25,7 +30,7 @@ type Props = {
  * (PRD_VIEWER_REVAMP 5.1) draws it as a table row: a tone stripe from `stateTone`, the outcome on one line with its full text
  * in the title, and the waiting-since time outside the ellipsised outcome so it is never the part cut off.
  */
-export function RunRow({ run, href, labels, context = [], now, onNavigate }: Props) {
+export function RunRow({ run, href, labels, context = [], lanes = [], trailing = null, now, onNavigate }: Props) {
   const kind = waitingKind(run)
   const time = rowTime(run, now)
   const since = kind === null ? null : run.activity?.attention?.since ?? null
@@ -39,6 +44,12 @@ export function RunRow({ run, href, labels, context = [], now, onNavigate }: Pro
           <span className="run-row-id">{run.run_id}</span>
           {names.length > 0 && <span className="run-row-context">{names.join(' · ')}</span>}
           <StatusBadge status={run.status} explain />
+          {lanes.length > 0 && (
+            <span className="run-row-lanes">
+              <span className="visually-hidden">Lanes: </span>
+              {lanes.map(lane => <Chip key={lane} plain className="lane-chip" data-lane={lane}>{lane}</Chip>)}
+            </span>
+          )}
         </span>
         <span className="run-row-when">
           {time.kind === 'finished' && <><Time iso={time.at} /> · {formatAgo(time.at, now)} · <span className="run-row-span">{formatSpan(time.ms)}</span></>}
@@ -49,6 +60,7 @@ export function RunRow({ run, href, labels, context = [], now, onNavigate }: Pro
           {kind !== null && <span className="visually-hidden">Waiting on you: </span>}
           <span className="run-row-summary" title={summary}>{summary}</span>
           {since && <span className="run-row-since"> · since <Time iso={since} /></span>}
+          {trailing && <span className={`run-row-paused-since${trailing.tone === 'pause' ? ' tone-pause-text' : ''}`}> · {trailing.text}</span>}
         </span>
       </AppLink>
     </li>

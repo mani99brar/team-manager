@@ -402,7 +402,11 @@
   .app-projects .breadcrumbs li:not(:nth-last-child(-n + 2)) { display: none; }
   /* Tap targets are at least 44 px on phones (PRD_VIEWER_UX section 10). */
   .time-zone-toggle .button { min-height: 44px; min-width: 44px; }
-  .workspace-projects { padding: 10px; }
+  /* Every Projects header control is 44 px on a phone: the roots links and the Refresh button (PRD_VIEWER_REFINE 5.7). */
+  .app-header-projects .roots a { min-height: 44px; display: inline-flex; align-items: center; }
+  .app-header-projects > .button { min-height: 44px; }
+  /* The page gutter is 16 px at 760 px and below; the run page relies on it (PRD_VIEWER_REFINE, pages lane). */
+  .workspace-projects { padding: 16px; }
   .projects-facts { grid-template-columns: 1fr; }
   .status-badge { white-space: normal; }
   .task-source { max-height: 360px; }

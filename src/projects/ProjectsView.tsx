@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
 import type { ControllerReading } from '../../contracts/projects/triage.ts'
 import {
-  describeApiError, fetchProjects, fetchRegistryRuns, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
+  describeApiError, fetchProjects, fetchRegistryRuns, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
+import { endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
 import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
@@ -119,6 +119,27 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const pages: RunPage[] = firstPageData ? [firstPageData, ...extra.pages] : []
   const runs: RunSummary[] = pages.flatMap(page => page.runs)
   const nextCursor = pages.length ? pages[pages.length - 1].nextCursor : null
+
+  // The feature header names the run's actual reviewers, not the definition's review steps (PRD_VIEWER_REFINE 5.7, [L10]a):
+  // the latest finished run's reviewer ids, one fetch cached per feature. The run detail carries no review section, so this
+  // reads the review node's result_uri (contracts/projects/v1.ts:105) and then the review result; an unreviewed run, a run
+  // with no review result, or a pending/failed fetch yields none, and the header falls back to the definition's review steps.
+  const latestReviewedId = useMemo(() => {
+    let best: RunSummary | null = null
+    for (const run of runs) if (isFinished(run.status) && (best === null || Date.parse(endedAt(run)) > Date.parse(endedAt(best)))) best = run
+    return best?.run_id ?? null
+  }, [runs])
+  const loadReviewers = useCallback(async (signal: AbortSignal): Promise<string[]> => {
+    const reviewScope = { projectId: projectId!, workflowId: workflowId!, runId: latestReviewedId! }
+    const reviewed = await fetchRunDetail(reviewScope, signal)
+    const reviewNode = reviewed.snapshot.nodes.find(node => node.node_id === 'review')
+    if (!reviewNode?.result_uri) return []
+    const result = await fetchReviewResult(reviewScope, reviewNode.result_uri, signal)
+    return result.reviewers.map(entry => entry.reviewer_id)
+  }, [projectId, workflowId, latestReviewedId])
+  const reviewersKey = projectId !== null && workflowId !== null && latestReviewedId !== null ? `feature-review:${projectId}/${workflowId}/${latestReviewedId}` : null
+  const { state: featureReviewers } = useResource(reviewersKey, loadReviewers, refreshToken)
+  const reviewers = featureReviewers.status === 'ready' ? featureReviewers.data : []
   const loadMore = async () => {
     if (!nextCursor || projectId === null || workflowId === null || firstPageData === null) return
     setMorePages({ ...extra, base: firstPageData, loading: true, error: null })
@@ -254,13 +275,21 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 {laneNamesOf(currentWorkflow.nodes).map(lane => <Chip key={lane} plain className="lane-chip">{lane}</Chip>)}
               </p>
             )}
-            {currentWorkflow && reviewStepsOf(currentWorkflow.nodes).length > 0 && (
-              // The review steps the definition declares; the reviewer ids are in each run's review result, on the run's review page.
-              <p className="feature-reviews">
-                <span className="projects-muted">Review</span>
-                {reviewStepsOf(currentWorkflow.nodes).map(step => <Chip key={step} plain className="review-step-chip">{step}</Chip>)}
-              </p>
-            )}
+            {currentWorkflow && (reviewers.length > 0
+              ? (
+                // The run's actual reviewers, from the latest finished run's review result (PRD_VIEWER_REFINE 5.7).
+                <p className="feature-reviewers">
+                  <span className="projects-muted">Reviewers</span>
+                  {reviewers.map(reviewer => <Chip key={reviewer} plain className="reviewer-chip" data-reviewer={reviewer}>{reviewer}</Chip>)}
+                </p>
+              )
+              : reviewStepsOf(currentWorkflow.nodes).length > 0 && (
+                // No reviewed run yet (or the fetch is pending/failed): the review steps the definition declares, never called reviewers.
+                <p className="feature-reviews">
+                  <span className="projects-muted">Review steps</span>
+                  {reviewStepsOf(currentWorkflow.nodes).map(step => <Chip key={step} plain className="review-step-chip">{step}</Chip>)}
+                </p>
+              ))}
             {runs.length > 0 && (
               // The run history at a glance: one chip per listed run, newest first, its status in colour, glyph and title.
               <ol className="run-history" aria-label="Run history, newest first">
