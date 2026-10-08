@@ -2188,6 +2188,10 @@ def advance_or_block(runtime, state, graph=None, config=None) -> bool:
         if decision is not None:
             return fix_round(runtime, graph, config, *decision)
         return advance_failed_checks(runtime, state)
+    except TransientInfraError:
+        # Claude Code unavailable mid-round (the listing, a respawn gap): no verdict, and the next `automatic --live` resumes the
+        # round from its journal. No blocked event or attention record; the step exits resumable.
+        raise
     except RuntimeError as error:
         runtime.event("controller", "blocked", str(error))
         blocked_attention(runtime, str(error))

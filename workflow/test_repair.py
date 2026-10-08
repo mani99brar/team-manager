@@ -1367,6 +1367,20 @@ class FixLoop(RepairFixture):
         self.assertEqual([entry["status"] for entry in self.entries()], ["blocked"])
         self.assertFalse((self.directory / "candidate-1.json").exists())
 
+    def test_claude_code_unavailable_mid_round_is_resumable_not_blocked(self):
+        from .sessions import TransientInfraError
+        self.start()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        with patch("workflow.repair.wait_session", side_effect=TransientInfraError("Claude session inventory unavailable")), \
+                self.assertRaises(TransientInfraError):
+            self.drive()
+        self.assertFalse(any(event["node"] == "controller" and event["status"] == "blocked" for event in self.events()))
+        self.assertNotIn("controller_blocked", [kind for kind, _ in self.attention()])
+        self.assertEqual(self.entries()[0]["status"], "launched")
+        commit = self.drive()  # The next controller resumes the same round: no second launch.
+        self.assertEqual(self.sessions.starts.count("repair-1"), 1)
+        self.assertEqual((self.entries()[0]["status"], git(self.repo, "show", f"{commit}:ui.txt")), ("applied", "after"))
+
     def test_a_memory_kill_never_starts_a_round(self):
         runtime = type("Runtime", (), {})()
         runtime.directory, runtime.plan, runtime.workers = self.directory, self.runtime.plan, ["adapter", "ui"]
@@ -1503,6 +1517,7 @@ class ReviewFixLoop(FixLoop):
     test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch = None
     test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
     test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
+    test_claude_code_unavailable_mid_round_is_resumable_not_blocked = None
 
 
 class DeclaredReviewerFixLoop(ReviewFixLoop):
@@ -1540,6 +1555,7 @@ class NoFixLoop(FixLoop):
     test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch = None
     test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
     test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
+    test_claude_code_unavailable_mid_round_is_resumable_not_blocked = None
 
     def test_without_rounds_the_run_stops_as_before(self):
         self.start()
