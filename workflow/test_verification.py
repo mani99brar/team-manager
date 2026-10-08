@@ -252,7 +252,7 @@ class PolicyLintTests(unittest.TestCase):
 
     def test_md_managers_own_policies_get_no_test_kind_note(self):
         policies = sorted((REPO / "features").glob("*/policy.json"))
-        self.assertEqual(len(policies), 11)  # attack-pass added the ninth feature policy, multi-provider-panel the tenth, attention-notify the eleventh.
+        self.assertEqual(len(policies), 13)  # attack-pass added the ninth feature policy, multi-provider-panel the tenth, attention-notify the eleventh, worker-skills and viewer-refine the twelfth and thirteenth.
         for path in policies:
             with self.subTest(policy=path.parent.name):
                 self.assertEqual([note for note in policy_lint(validate_policy(json.loads(path.read_text())), None) if "no test kind" in note], [])

@@ -1,0 +1,25 @@
+{
+  "version": "2.7.0",
+  "name": "Worker skills (PRD_WORKER_SKILLS): a lane may declare Claude Code skills; its worker and repair sessions load them through a pinned session-only plugin without safe mode, with the advisor and the same deny list; every other lane launches as today",
+  "branch_prefix": "feature/worker-skills-runs",
+  "prd": "docs/PRD_WORKER_SKILLS.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critical": false,
+  "tryout": false
+}

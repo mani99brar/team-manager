@@ -1,0 +1,35 @@
+{
+  "version": "2.7.0",
+  "name": "Viewer refine (PRD_VIEWER_REFINE): the run page opens on an answer and draws the fix loop (repair sessions as nodes, review rounds as attempts with their delta base, lane pins); export 1.10.0 and the viewer contract; grouped steps and activity; Assignment as the setup page and the review diff inline (S7); Runs home ranked by need; the revamp's eight P2s; a refinement of the Calm look made with the impeccable skill",
+  "branch_prefix": "feature/viewer-refine-runs",
+  "prd": "docs/PRD_VIEWER_REFINE.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "adapter",
+      "task": "adapter-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium"
+    },
+    {
+      "node_id": "pages",
+      "task": "pages-task.md"
+    },
+    {
+      "node_id": "shell",
+      "task": "shell-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critical": false,
+  "tryout": true
+}

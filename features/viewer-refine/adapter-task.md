@@ -1,0 +1,33 @@
+# Adapter worker: export 1.10.0 and the viewer contract for the fix loop (PRD_VIEWER_REFINE Appendix A)
+
+## Goal
+
+The export (`workflow/export_state.py`) moves to 1.10.0 exactly as Appendix A.1 pins it: repair-session nodes in the definition, the `fix_loop` section, `review.round`, `review.delta_from`, `review.delta_diff`, `inputs.workers.<lane>.roles` and `.skills`, `inputs.automatic.fix_rounds`; a run without those records exports its 1.9.0 content plus the version and the new keys. The server (`server/projects.ts`) accepts 1.10.0 and the viewer contract (`contracts/projects`) moves to 1.10.0 as Appendix A.2 pins it: `fixLoop`, the repair nodes with derived statuses, the review fields, `roles` and `skills` per worker, and `triage.ts` deriving repair spans and markers, the review rounds as attempts, the focus and attention of a running or blocked repair. Every 1.9.0 export renders exactly as today. The UI lanes build their fixtures from Appendix A's records and nothing else, so the shapes there are a contract you implement, not a draft you improve: a field you must change is a question to the operator, not an edit.
+
+## Context
+
+- The export's versions and their style: the module docstring of `workflow/export_state.py` (1.2.0 to 1.9.0, each additive, each with its rule for older runs), `EXPORT_VERSION`, `graph_nodes`, the panel and attack sections (`panel.export_section`, `attack_section`) as precedents for a section that is `null` when the run has no record. The records you read: `<run>/repairs.json` (`workflow/repair.py` `JOURNAL_VERSION`, the entry keys at the `entry = {` sites and `save_entry`), `<run>/review-rounds.json` (`workflow/automatic.py` `REVIEW_ROUNDS`, `start_review_round`, `archive_review`: the archived `review.round-<k>.json`), `repair-<n>.interactive.json` (`requested`), `plan.nodes.<lane>.roles` (`sessions.lane_pins`) and `plan.nodes.<lane>.skills` (PRD_WORKER_SKILLS 3; absent on runs before it), `plan.automatic.fix_rounds` (`automatic.fix_rounds`), the combined status's `delta_from` (`automatic.delta_fields`) and `plan.follows`. The RUNBOOK sections "In-run fix loop" and "Follow-up runs: brief, --follows and abandon" say what each record means.
+- The viewer side: `server/projects.ts` (`EXPORT_VERSIONS`, the run endpoint, `runDetail`, how `panelResults` and `attack` are wrapped with `contract_version` and `source`), `contracts/projects/v1.ts` (the zod schemas, the DAG check, `COMPLETION_VERSIONS`), the JSON schemas beside it, `contracts/projects/examples.ts` and `contract.test.ts` (every example validates), `contracts/projects/triage.ts` (`buildMarkers`, `buildActivity`, spans, `focus`, `attention`, the `repair` marker from the `REPAIR_APPLIED` message) and `tests/unit/triage.test.ts`.
+- No live run with a repair session exists yet: build the test run directory from Appendix A's records (write `repairs.json`, `review-rounds.json`, the archived `review.round-1.json` and `repair-<n>.interactive.json` under a temporary directory in `workflow/test_export.py`), and the viewer example from the same records.
+- `docs/handoff/refine-adapter.md`: the mapping table (journal key to export key), the derived status rule, every open P2 with one line each, and the exact command that renders the Appendix A example through the server.
+
+## Constraints
+
+- Owned paths only: `workflow/export_state.py`, `workflow/test_export.py`, `contracts/projects`, `server`, `tests/unit/triage.test.ts`, `docs/handoff/refine-adapter.md`. Do not touch any other file under `workflow/` (the controller, `repair.py`, `automatic.py` stay as they are: you read their records), `src/`, `tests/project-workflows/`, `PRODUCT.md` or `DESIGN.md`.
+- Additive only: no existing key changes meaning or shape; a 1.9.0 run directory exports byte for byte the same content apart from `version` and the new keys (a test diffs the two).
+- The export never launches anything and never reads outside the run directory and the records named above; a malformed `repairs.json` or `review-rounds.json` exports `fix_loop` as `{"version": "1.0.0", "error": "<why>", "rounds": null, "repairs": [], "review_rounds": []}` and the definition without repair nodes, never a crash (the panel's `failed` precedent).
+- The projects contract stays strict (`additionalProperties: false` where it is today); the node id pattern already admits `repair-<n>`, the kind is `worker`.
+
+## Acceptance
+
+1. `workflow/test_export.py`: a run directory with Appendix A's two repairs and one review round exports the definition with `repair-1` after `verify_viewer` and `repair-2` after `review`, the `fix_loop` section equal to Appendix A's record (field by field), `review.round` 2, `delta_from` and `delta_diff` set; a 1.9.0 run directory exports the same content as before plus `version` and the new keys (`fix_loop: null`, `round: 1`, `delta_from: null`, `delta_diff: null`, `roles: null`, `skills: []`); a malformed journal exports the `error` form; an operator `--commit` repair adds no node.
+2. `server/projects.test.ts`: 1.10.0 accepted and 1.9.0 still accepted; the run detail carries `fixLoop` verbatim with `contract_version`, repair nodes in `definition` and `snapshot` with the derived statuses of A.1 item 5 (`applied` → succeeded, `blocked` → failed, the rest running), `review.round`, `delta_from`, `delta_diff`, `inputs.workers[].roles` and `.skills`, `inputs.automatic.fix_rounds`; a 1.9.0 export renders unchanged (a snapshot test).
+3. `contracts/projects/contract.test.ts`: the Appendix A record is an example that validates against the schemas; the DAG check passes with repair nodes.
+4. `tests/unit/triage.test.ts`: a repair session is a span of its node with a `repair` marker (`session: true`, `round`, `trigger`) on the step it answers; the review node has two attempts whose first ends at the round's `started_at`; a running repair is the focus with the sentence of A.2; a blocked repair is the cause of the `controller_blocked` attention.
+5. `workflow-unit`, `shared-contract`, `server-projects`, `frontend-unit`, `frontend-build` and `frontend-lint` green.
+
+Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; run browser specs only through check-report on this lane's own specs.
+
+## Stop
+
+Stop and report `blocked` when a record Appendix A names does not exist in the controller as described (say which key and where you looked), when an additive export cannot carry a field without changing an existing one, or when the contract's strictness would have to be loosened. Do not add events, do not change the controller, do not render anything in `src/`.
