@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -879,6 +880,29 @@ class InteractiveTests(unittest.TestCase):
         with patch("workflow.interactive.os.replace", side_effect=lambda source, target: (replace(source, target), Path(target).write_text('{"projects": {}}'))):
             with self.assertRaisesRegex(RuntimeError, "replaced it 3 times"):
                 trust_workspace(worktree, config)
+
+    def test_lanes_trusting_at_once_keep_each_others_entries(self):
+        # Two lane threads read the config before either replaced it: the later replace dropped the first lane's entry after
+        # that lane had read it back, so its launch failed "Workspace not trusted".
+        config = self.root / "config" / ".claude.json"
+        config.parent.mkdir()
+        save_json(config, {"projects": {}})
+        lanes = [self.root / "lane-a", self.root / "lane-b"]
+        for lane in lanes:
+            lane.mkdir()
+        replace = os.replace
+        def slow(source, target):
+            time.sleep(0.3)  # long enough for the other thread to read the old file, were the writes not serialized
+            replace(source, target)
+        with patch("workflow.interactive.os.replace", side_effect=slow):
+            threads = [threading.Thread(target=trust_workspace, args=(lane, config)) for lane in lanes]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        projects = read_json(config)["projects"]
+        for lane in lanes:
+            self.assertTrue(projects[str(lane.resolve())]["hasTrustDialogAccepted"])
 
 
 class AttachOneTests(unittest.TestCase):

@@ -833,9 +833,25 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             with self.assertRaisesRegex(RuntimeError, "Stop failed"):
                 Pipeline.stop_workers(self.runtime)
         self.assertFalse(read_json(self.directory / "ui.stop.json")["stopped"])
-        with patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 0)), patch("workflow.pipeline.pid_alive", return_value=True):
+        with patch("workflow.pipeline.subprocess.run", return_value=subprocess.CompletedProcess([], 0)), patch("workflow.pipeline.pid_alive", return_value=True), \
+                patch("workflow.pipeline.STOP_TERMINATION_GRACE_SECONDS", 0):
             with self.assertRaisesRegex(RuntimeError, "termination"):
                 Pipeline.stop_workers(self.runtime)
+
+    def test_a_process_that_exits_within_the_grace_is_not_a_failed_stop(self):
+        # `claude stop` returns while the process is still exiting: the first look sees the PID, the next does not.
+        live = self.native_rows()
+        self.set_native(live)
+        looks = iter([True, True, False] + [False] * 20)
+
+        def stop(argv, **_kwargs):  # The listing drops the session at once; only the process lingers.
+            live.pop(argv[-1].removeprefix("id-"), None)
+            return subprocess.CompletedProcess([], 0)
+        with patch("workflow.pipeline.subprocess.run", side_effect=stop), \
+                patch("workflow.pipeline.pid_alive", side_effect=lambda pid: next(looks)), patch("workflow.pipeline.time.sleep") as nap:
+            Pipeline.stop_workers(self.runtime)
+        self.assertGreaterEqual(nap.call_count, 1)
+        self.assertTrue(read_json(self.directory / "ui.stop.json")["stopped"])
 
     def test_missing_handoff_does_not_stop_workers(self):
         with patch.object(self.runtime, "stop_workers") as stop:
@@ -867,6 +883,40 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
         self.assertEqual(snapshots["ui"]["changed_files"], sorted(["ui.txt", *names]))
         tree = subprocess.check_output(["git", "-C", str(self.repo), "ls-tree", "-r", "-z", "--name-only", snapshots["ui"]["commit"]]).decode()
         self.assertLessEqual(set(names), set(tree.split("\0")))
+
+    def test_freeze_keeps_a_gitignored_file_the_lane_tracks(self):
+        # A `--restore-from` run restores a file that a repository-wide ignore rule (`.env*`) matches, and stages it. `git add -A` in
+        # the private snapshot index skips it, so changed_files and the captured tree disagreed and freeze refused the run.
+        self.policy["workers"][0]["owned_paths"].append("docs")
+        self.plan["policy_sha256"] = policy_digest(self.policy)
+        save_json(self.directory / "policy.json", self.policy)
+        save_json(self.directory / "plan.json", self.plan)
+        self.runtime = OfflinePipeline(self.directory, self.sessions)
+        self.sessions.run("ui"); self.sessions.run("adapter")
+        worktree = Path(self.plan["nodes"]["ui"]["worktree"])
+        exclude = Path(subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], text=True).strip())
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as handle:
+            handle.write("docs/*.example\n")
+        (worktree / "docs").mkdir()
+        (worktree / "docs" / "app.example").write_text("KEY=\n")
+        (worktree / "docs" / "other.example").write_text("untracked and ignored\n")
+        subprocess.run(["git", "-C", str(worktree), "add", "-f", "docs/app.example"], check=True)
+        snapshots = self.runtime.freeze()
+        self.assertEqual(snapshots["ui"]["changed_files"], sorted(["ui.txt", "docs/app.example"]))
+        tree = subprocess.check_output(["git", "-C", str(self.repo), "ls-tree", "-r", "-z", "--name-only", snapshots["ui"]["commit"]]).decode().split("\0")
+        self.assertIn("docs/app.example", tree)
+        self.assertNotIn("docs/other.example", tree)  # an ignored file nothing tracks stays out
+
+    def test_freeze_captures_a_file_the_lane_deleted(self):
+        # The exact-path `git add` after `add -A` got every changed path, deletions included, and Git refuses a pathspec that
+        # matches nothing (exit 128): a lane that deleted a base file could not freeze.
+        self.sessions.run("ui"); self.sessions.run("adapter")
+        (Path(self.plan["nodes"]["adapter"]["worktree"]) / "backend.py").unlink()
+        snapshots = self.runtime.freeze()
+        self.assertEqual(snapshots["adapter"]["changed_files"], ["backend.py"])
+        tree = subprocess.check_output(["git", "-C", str(self.repo), "ls-tree", "-r", "-z", "--name-only", snapshots["adapter"]["commit"]]).decode().split("\0")
+        self.assertNotIn("backend.py", tree)
 
 
 class BundleTests(unittest.TestCase):
@@ -1071,6 +1121,7 @@ class RecordTests(unittest.TestCase):
         # The candidate's event keeps its message; a second one gives the gate's reasons.
         commit = read_json(f.directory / "candidate.json")["commit"]
         self.assertEqual(self.events("candidate_ui"), [
+            ("running", f"Attempt 1; combined revision {commit}"),
             ("blocked", f"Combined revision {commit}"),
             ("blocked", "Candidate gate blocked on attempt 1: Executed check failed: python -c 'import sys; sys.exit(1)'; build: exit 1")])
 
@@ -1100,7 +1151,8 @@ class RecordTests(unittest.TestCase):
         commit = read_json(f.directory / "candidate.json")["commit"]
         self.assertEqual(self.events("candidate_adapter")[-2:], [("passed", f"Combined revision {commit}"),
                                                                 ("passed", "Candidate gate passed on attempt 2 after attempt 1 failed")])
-        self.assertEqual(self.events("candidate_ui"), [("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step; not a retry.
+        self.assertEqual(self.events("candidate_ui"), [("running", f"Attempt 1; combined revision {commit}"),
+                                                       ("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step, which runs the checks again; not a retry.
 
     def test_a_check_over_sixty_percent_of_its_timeout_is_named_in_its_verify_and_candidate_events(self):
         f = self.fixture

@@ -13,7 +13,9 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -80,6 +82,9 @@ def listed_rows(result: subprocess.CompletedProcess) -> list | None:
 
 TRUSTED = "hasTrustDialogAccepted"
 TRUST_WRITES = 3
+# Lanes launch from threads of one process: without it, one lane can read the config before another's write and replace it
+# after that lane's read-back, dropping its entry, and that lane's `claude --bg` then fails "Workspace not trusted".
+TRUST_LOCK = threading.Lock()
 
 
 def claude_config_path(env=None) -> Path:
@@ -97,6 +102,12 @@ def trust_workspace(worktree: Path, config: Path) -> None:
     is kept, and the file is replaced whole (private, 0600). Claude Code rewrites the file itself, so the entry is read
     back, and written again if a concurrent write dropped it. A file that is not a JSON object is never overwritten.
     """
+    with TRUST_LOCK:
+        record_trust(worktree, config)
+
+
+def record_trust(worktree: Path, config: Path) -> None:
+    """trust_workspace's read-modify-write; call it only under TRUST_LOCK."""
     key = str(worktree.resolve())
     for _ in range(TRUST_WRITES):
         try:
@@ -112,7 +123,7 @@ def trust_workspace(worktree: Path, config: Path) -> None:
             return
         entry[TRUSTED] = True
         config.parent.mkdir(parents=True, exist_ok=True)
-        temporary = config.with_name(f".{config.name}.{os.getpid()}.trust.tmp")
+        temporary = config.with_name(f".{config.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.trust.tmp")  # lanes launch from threads of one process
         with temporary.open("w") as handle:
             os.chmod(temporary, 0o600)
             json.dump(document, handle, indent=2)

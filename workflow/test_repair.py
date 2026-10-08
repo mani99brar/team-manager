@@ -315,7 +315,7 @@ class ForkPoint(RepairFixture):
         # The candidate ran once, after both verifies, as generation 1.
         steps = [event["node"] for event in self.events()[mark:]]
         self.assertEqual(sorted(steps[:4]), ["verify_adapter", "verify_adapter", "verify_ui", "verify_ui"])
-        self.assertEqual(steps[4:], ["candidate_adapter", "candidate_ui", "candidate_ui"])  # ui's verdict, then its gate's reasons.
+        self.assertEqual(steps[4:], ["candidate_adapter", "candidate_adapter", "candidate_ui", "candidate_ui", "candidate_ui"])  # Each lane says it is running; ui's verdict, then its gate's reasons.
         self.assertRegex(self.events()[-1]["message"], r"^Candidate gate blocked on attempt \d+: ")
         second_candidate = self.candidate_commit(1)
         self.assertNotEqual(second_candidate, first_candidate)
