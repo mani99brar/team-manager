@@ -16,7 +16,7 @@ From the grill session of 2026-10-08 with the operator.
 - [G3] accept writes one timeline event (node `controller`, status `succeeded`, message `Accepted by the operator: <reason>`) and resolves the run's open `review_blocked` / `controller_blocked` attention records; it writes no new attention record. [added, not asked]
 - [G4] The outcome block's first line reads `integrated (operator override): <reason>`, followed by the findings open at acceptance; `status` adds `accepted` beside `abandoned`. [added, not asked]
 - [G5] The ledger classifies an accepted candidate as `accepted (override)`, a class of its own: it ends `base_unreviewed` as an approved candidate does, and `workflow ledger` prints it with the run id and `override`. [added, not asked]
-- [G6] Run settings for pilot A: lane `viewer` on `claude-sonnet-5-5` at medium (feature.json 2.7.0), `engine` on the run-wide worker model; launched with `--fix-rounds 2 --profile attended`. [added, not asked]
+- [G6] Run settings for pilot A: lane `viewer` on `claude-sonnet-5-5` at medium (feature.json 2.7.0), `engine` on the run-wide worker model; launched with `--fix-rounds 2`, unattended (the operator chose an unattended overnight run under /night-shift, recommend-only, 2026-10-08). [added, not asked]
 
 ## Changes after launch
 
