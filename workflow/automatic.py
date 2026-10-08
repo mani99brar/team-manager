@@ -10,6 +10,12 @@ may have different parents when main moved between the runs and an unrestricted 
 lanes' work. The restriction is by path, not ancestry, so the delta may also hold changes main made under those paths
 between the runs (the operator's trade-off; the prompt says so). Reviewers read it first, beside the full `review.diff`;
 its digest is bound like the diff's.
+
+The in-run fix loop (RUNBOOK "In-run fix loop"): when a lane's verify gate, the candidate gate of one lane, or a review whose
+every open P0/P1 names one lane blocks, the controller runs `repair.repair_session` for that lane (`fix_decision`,
+`fix_round`) up to `plan.automatic.fix_rounds` times, then stops with "fix loop exhausted". A review round is archived first
+(`review-rounds.json`, `archive_review`) and the next review's delta runs from that round's candidate. A check killed under
+memory pressure is rerun after a wait for memory without spending the attempt budget (`wait_for_memory`).
 """
 from __future__ import annotations
 
@@ -670,9 +676,34 @@ def owned_paths(runtime) -> list[str]:
     return paths
 
 
+REVIEW_ROUNDS = "review-rounds.json"  # The in-run fix loop's archived review rounds (archive_review), oldest first.
+
+
+def review_rounds(directory: Path) -> list[dict]:
+    """Each archived review round: `{round, verdict, candidate, lane, findings, archived}`; [] before any."""
+    path = Path(directory) / REVIEW_ROUNDS
+    return read_json(path)["rounds"] if path.exists() else []
+
+
+def last_round(runtime) -> dict | None:
+    """The previous review round, once it is archived and a later candidate is being reviewed: the base of this round's delta."""
+    rounds = review_rounds(runtime.directory)
+    return rounds[-1] if rounds and rounds[-1].get("archived") else None
+
+
+def lane_paths(runtime, lane: str) -> list[str]:
+    from .export_state import load_optional
+    policy = getattr(runtime, "policy", None) or load_optional(Path(runtime.directory) / "policy.json")
+    return next((list(worker.get("owned_paths") or []) for worker in policy["workers"] if worker.get("node_id") == lane), [])
+
+
 def delta_base(runtime, cwd: Path) -> tuple[str, list[str]] | None:
     """(the followed run's candidate, the lanes' owned paths) when the plan follows a run whose candidate commit still resolves
-    from `cwd` (a checkout of the run's repository) and the lanes own a path; None otherwise (no delta, never an error)."""
+    from `cwd` (a checkout of the run's repository) and the lanes own a path; None otherwise (no delta, never an error).
+    A review round of the in-run fix loop takes precedence: (the previous round's candidate, the repaired lane's owned paths)."""
+    previous = last_round(runtime)
+    if previous is not None:
+        return previous["candidate"], lane_paths(runtime, previous["lane"])
     follows = runtime.plan.get("follows")
     commit = follows.get("candidate_commit") if isinstance(follows, dict) else None
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
@@ -701,9 +732,16 @@ def write_delta(runtime, cwd: Path, candidate: str) -> str | None:
 
 
 def delta_line(runtime) -> str:
-    """The reviewer prompt's line for a follow-up run's delta, before the full diff; empty when there is no delta file."""
+    """The reviewer prompt's line for a follow-up run's delta, before the full diff; empty when there is no delta file. In a
+    review round of the in-run fix loop, the round, the previous round's P0/P1 findings verbatim and that round's delta."""
     follows = runtime.plan.get("follows")
     delta = runtime.directory / DELTA
+    previous = last_round(runtime)
+    if previous is not None and delta.is_file():
+        findings = "; ".join(json.dumps(finding, ensure_ascii=False) for finding in previous["findings"])
+        return (f"Round {previous['round'] + 1} of the in-run fix loop: the previous round's P0/P1 findings were: {findings}; check they "
+                f"are resolved and read the delta first: {delta} (the previous round's candidate {previous['candidate']} to this one, "
+                f"limited to lane {previous['lane']}'s owned paths). The full diff below is the whole candidate for context. ")
     if not isinstance(follows, dict) or not delta.is_file():
         return ""
     return (f"Delta since the followed run {follows.get('run_id')}'s candidate {follows.get('candidate_commit')} "
@@ -717,6 +755,9 @@ def delta_fields(runtime) -> dict:
     from .pipeline import digest_file
     follows = runtime.plan.get("follows")
     delta = runtime.directory / DELTA
+    previous = last_round(runtime)
+    if previous is not None and delta.is_file():
+        return {"delta_from": previous["candidate"], "delta_sha256": digest_file(delta)}
     if not isinstance(follows, dict) or not delta.is_file():
         return {"delta_from": None, "delta_sha256": None}
     return {"delta_from": follows.get("candidate_commit"), "delta_sha256": digest_file(delta)}
@@ -1481,6 +1522,8 @@ def check_recorded_identity(bundle: dict, state: ReviewStatus) -> None:
     """
     from .repair import writer_ids
     worker_ids = writer_ids(bundle["snapshots"])  # The workers' sessions and their lanes' repair sessions.
+    # A fix-loop round's reviewers are fresh sessions: the previous rounds' reviewer sessions are prior, never this round's.
+    worker_ids |= {sid for item in review_rounds(state.runtime.directory) for sid in item.get("reviewer_sessions", [])}
     seen = set()
     for reviewer_id in state.ids:
         session_id = state.statuses[reviewer_id].get("session_id")
@@ -1926,11 +1969,117 @@ def exhausted(runtime, lane: str, reasons: list[str]) -> RuntimeError:
                         f"then repair --commit; or python -m workflow brief {directory} and a --follows run")
 
 
+# A reviewer node's session files, moved into `review-round-<k>/` when its round is archived; the next round launches fresh.
+REVIEW_SESSION_SUFFIXES = (".interactive.json", ".completion.json", ".stop.json", ".cost.json", ".prompt.txt", ".launch.log",
+                           ".stdout.json", ".stderr.log", ".imported.json")
+
+
+def open_blockers(review: dict) -> list[dict]:
+    """A review's findings that block: P0 and P1 not resolved (open or accepted)."""
+    return [finding for finding in review.get("findings") or [] if isinstance(finding, dict) and finding.get("severity") in ("P0", "P1")
+            and finding.get("disposition") != "resolved"]
+
+
+def finding_lines(findings: list[dict]) -> list[str]:
+    return [f"{finding.get('severity')} ({finding.get('reviewer') or 'reviewer'}): {finding.get('message')}" for finding in findings]
+
+
+def review_block(runtime, state) -> tuple[str | None, list[dict]] | None:
+    """A review node that failed on its recorded block, every reviewer stopped: (the one lane every open P0/P1 names, or None
+    when a finding names none, several or no lane, or none blocks; the open P0/P1 findings). None for any other review failure."""
+    if [task.name for task in state.tasks if task.error and task.name in state.next] != ["review"]:
+        return None
+    directory = runtime.directory
+    if not (directory / "review.json").exists() or not combined_status_path(runtime).exists():
+        return None
+    combined = read_json(combined_status_path(runtime))
+    review = read_json(directory / "review.json")
+    if combined.get("status") != "blocked" or review.get("verdict") == "approved":
+        return None
+    if combined.get("transport", "native") == "native" and not all(reviewer_stopped(runtime, rid) for rid in reviewer_ids(runtime.plan)):
+        return None  # A reviewer stop still owed is the review node's to retry.
+    findings = open_blockers(review)
+    named = {finding.get("worker") for finding in findings}
+    lane = next(iter(named)) if findings and len(named) == 1 and next(iter(named)) in lanes(runtime) else None
+    return lane, findings
+
+
+def pending_review_round(runtime) -> dict | None:
+    """The newest review round the fix loop started (archive_review) whose repair session is not launched yet."""
+    from .repair import session_entries
+    rounds = review_rounds(runtime.directory)
+    if not rounds or any(entry.get("review_round") == rounds[-1]["round"] for entry in session_entries(runtime.directory)):
+        return None
+    return rounds[-1]
+
+
+def review_archive(runtime, k: int) -> list[tuple[Path, Path]]:
+    """(live path, archived path) of every file archive_review moves for round `k`."""
+    from .sessions import review_nodes
+    directory = runtime.directory
+    folder = directory / f"review-round-{k}"
+    moves = [(directory / f"{node}{suffix}", folder / f"{node}{suffix}") for node in review_nodes(runtime.plan) for suffix in REVIEW_SESSION_SUFFIXES]
+    moves.append((directory / "panel", folder / "panel"))
+    renames = [("review.json", f"review.round-{k}.json"), ("review-bundle.json", f"review-bundle.round-{k}.json"),
+               ("review.diff", f"review.round-{k}.diff"), (DELTA, f"review.delta.round-{k}.diff"), ("panel.json", f"panel.round-{k}.json")]
+    renames += [(f"automatic-{review_node(rid)}.json", f"automatic-{review_node(rid)}.round-{k}.json") for rid in reviewer_ids(runtime.plan)]
+    return moves + [(directory / name, directory / archived) for name, archived in renames]
+
+
+def restore_review(runtime, k: int) -> None:
+    """Undo archive_review for a round whose repair session ended blocked: the round's block is the run's record again."""
+    for live, archived in review_archive(runtime, k):
+        if archived.exists() and not live.exists():
+            os.replace(archived, live)
+
+
+def archive_review(runtime, k: int) -> None:
+    """Move review round `k` aside so the next round reviews afresh: the records renamed `<name>.round-<k>.<ext>` beside the
+    others (review.json, review-bundle.json, review.diff, review.delta.diff, automatic-review[-<id>].json, panel.json), each
+    reviewer's session files and panel/ into `review-round-<k>/`, and review-worktree/ removed (its sessions' transcripts stay
+    under their cwd, which the next round reuses). Idempotent: a controller that died midway completes it."""
+    directory = runtime.directory
+    (directory / f"review-round-{k}").mkdir(exist_ok=True)
+    for live, archived in review_archive(runtime, k):
+        if live.exists():
+            os.replace(live, archived)
+    (directory / REVIEW_RESTART).unlink(missing_ok=True)
+    worktree = directory / "review-worktree"
+    if worktree.exists():
+        git_worktree(runtime.plan["repository"], "remove", "--force", str(worktree))
+
+
+def start_review_round(runtime, lane: str, findings: list[dict]) -> dict:
+    """The review round the fix loop repairs: recorded in review-rounds.json (round, verdict, reviewed candidate, lane, the open
+    P0/P1 findings verbatim, the reviewers' sessions), then archived (archive_review), its review_blocked attention resolved."""
+    directory = runtime.directory
+    rounds = review_rounds(directory)
+    record = rounds[-1] if rounds and not rounds[-1].get("archived") else None
+    if record is None:
+        record = pending_review_round(runtime)
+        if record is not None:
+            return record  # Archived by a controller that died before its session launched.
+        review, bundle = read_json(directory / "review.json"), read_json(directory / "review-bundle.json")
+        k = len(rounds) + 1
+        record = {"round": k, "verdict": review["verdict"], "candidate": bundle["candidate_commit"], "lane": lane, "findings": findings,
+                  "reviewer_sessions": [entry["session_id"] for entry in review.get("reviewers") or [] if entry.get("session_id")],
+                  "archived": False, "started_at": now()}
+        save_json(directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": rounds + [record]})
+    archive_review(runtime, record["round"])
+    record["archived"] = True
+    save_json(directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": [*review_rounds(directory)[:-1], record]})
+    attention_record.resolved(directory, "review_blocked", node="review")
+    runtime.event("review", NOTE, f"Review round {record['round']} blocked on lane {lane}: archived as review.round-{record['round']}.json "
+                                  f"and review-round-{record['round']}/; the fix loop repairs {lane}, then fresh reviewers review the new candidate")
+    return record
+
+
 def fix_decision(runtime, state) -> tuple[str, str] | None:
     """The in-run fix loop's decision, read only: `(lane, trigger)` when a repair session repairs that lane now (the one the
     journal has open first); None when the loop does not apply (no rounds pinned, a step it does not repair, a memory kill or
     an unverified check, which retry, a candidate block that names no single lane). RuntimeError (exhausted) once the lane
     blocked again after its rounds, or its last round ended blocked."""
+    from .attack import has_attack
     from .repair import open_session, session_entries
     rounds = fix_rounds(runtime.plan)
     if not rounds:
@@ -1938,6 +2087,24 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
     entry = open_session(runtime.directory)
     if entry is not None and entry.get("by") == "controller":
         return next(iter(entry["lanes"])), entry["trigger"]
+    pending = pending_review_round(runtime)
+    if pending is not None:
+        return pending["lane"], "review"  # A round archived by a controller that died before its session launched.
+    previous = review_rounds(runtime.directory)
+    failed = [task.name for task in state.tasks if task.error and task.name in state.next]
+    sessions = [entry for entry in session_entries(runtime.directory) if previous and entry.get("review_round") == previous[-1]["round"]]
+    if failed == ["review"] and sessions and sessions[-1]["status"] == "blocked" and not (runtime.directory / "review.json").exists():
+        # The round's review is archived and its repair session ended without a repair: never a second review of that candidate.
+        raise exhausted(runtime, previous[-1]["lane"], finding_lines(previous[-1]["findings"]))
+    block = review_block(runtime, state)
+    if block is not None:
+        lane, findings = block
+        if lane is None or has_attack(runtime.plan):  # Findings on no single lane end the run as before; the attack pass is not looped (yet).
+            return None
+        sessions = session_entries(runtime.directory, lane)
+        if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
+            raise exhausted(runtime, lane, finding_lines(findings))
+        return lane, "review"
     workers = lanes(runtime)
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]
     if not failures or (runtime.directory / RETRY_REQUESTS).exists():
@@ -1960,12 +2127,25 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
 def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
     """One controller round of the fix loop (repair.repair_session, `by: controller`): True once its repair is applied and
     the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start."""
-    from .repair import repair_session
+    from .repair import open_session, repair_session
+    keys = {}
+    if trigger == "review" and open_session(runtime.directory) is None:
+        block = review_block(runtime, graph.get_state(config))
+        record = start_review_round(runtime, lane, block[1] if block else pending_review_round(runtime)["findings"])
+        delta = runtime.directory / f"review.delta.round-{record['round']}.diff"
+        keys = {"findings": record["findings"], "review_round": record["round"],
+                "delta": delta if delta.exists() else runtime.directory / f"review.round-{record['round']}.diff"}
     try:
-        entry = repair_session(runtime, graph, config, lane, actor="controller", trigger=trigger)
+        entry = repair_session(runtime, graph, config, lane, actor="controller", trigger=trigger, **keys)
     except ValueError as error:  # A state the round refuses (the repair limit, a run that moved): no session ran.
         raise exhausted(runtime, lane, [str(error)]) from error
     if entry["status"] != "applied":
+        if trigger == "review":
+            rounds = review_rounds(runtime.directory)
+            restore_review(runtime, rounds[-1]["round"])  # The round's block is the run's record again.
+            rounds[-1].update(archived=False, restored_at=now())
+            save_json(runtime.directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": rounds})
+            raise exhausted(runtime, lane, finding_lines(rounds[-1]["findings"]))
         path = entry["blocked"]["packets"][0]["path"] if entry.get("blocked", {}).get("packets") else None
         raise exhausted(runtime, lane, gate_reasons(runtime.directory / path) if path else [])
     return True

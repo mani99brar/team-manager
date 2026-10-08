@@ -1369,6 +1369,111 @@ class FixLoop(RepairFixture):
         self.assertEqual(automatic.fix_decision(runtime, state), ("ui", "verify"))
 
 
+class ReviewFixLoop(FixLoop):
+    """A review block whose every open P0/P1 names one lane: the round is archived, a repair session on the reviewed candidate
+    gets the findings, the lane is verified again and fresh reviewers review the new candidate with the round's delta."""
+
+    P1 = {"severity": "P1", "message": "ui.txt says after but web/notes.txt is missing.", "disposition": "open", "worker": "ui", "requirement": None}
+
+    def setUp(self):
+        super().setUp()
+        self.sessions.edits["ui"] = ("ui.txt", "after")
+        self.blocking_rounds = 1
+
+    def reviewer(self, completion: dict) -> dict:
+        rounds = self.directory / "review-rounds.json"
+        done = len(read_json(rounds)["rounds"]) if rounds.exists() else 0
+        if done < self.blocking_rounds:
+            return {**completion, "verdict": "blocked", "findings": [{**self.P1, "message": f"{self.P1['message']} (round {done + 1})"}]}
+        return completion
+
+    def test_a_review_block_on_one_lane_is_repaired_and_re_reviewed_in_the_run(self):
+        directory = self.directory
+        self.sessions.reviewer_mutate = self.reviewer
+        self.sessions.repair_edits["ui"] = {"web/notes.txt": "notes\n"}
+        self.start()
+        commit = self.drive()
+        [entry] = self.entries()
+        self.assertEqual((entry["status"], entry["trigger"], entry["base_kind"], entry["review_round"]), ("applied", "review", "candidate", 1))
+        first_candidate = self.candidate_commit()
+        self.assertEqual(entry["base_commit"], first_candidate)
+        # The archive of round 1, and the final review.json is round 2's approval of the repaired candidate.
+        for name in ("review.round-1.json", "review-bundle.round-1.json", "review.round-1.diff", "automatic-review.round-1.json",
+                     "review-round-1/review.interactive.json", "review-round-1/review.completion.json", "review-round-1/review.stop.json"):
+            self.assertTrue((directory / name).exists(), name)
+        self.assertEqual(read_json(directory / "review.round-1.json")["verdict"], "blocked")
+        final = read_json(directory / "review.json")
+        self.assertEqual(final["verdict"], "approved")
+        self.assertEqual(read_json(directory / "review-bundle.json")["candidate_commit"], self.candidate_commit(1))
+        self.assertEqual(git(self.repo, "show", f"{commit}:web/notes.txt"), "notes")
+        self.assertEqual(self.tree(commit), self.tree(self.candidate_commit(1)))
+        # Fresh reviewers: a new session id and launch, never the round-1 reviewer's.
+        [rounds] = read_json(directory / "review-rounds.json")["rounds"]
+        self.assertEqual((rounds["round"], rounds["lane"], rounds["candidate"], rounds["archived"]), (1, "ui", first_candidate, True))
+        self.assertNotIn(final["reviewers"][0]["session_id"], rounds["reviewer_sessions"])
+        self.assertEqual(self.sessions.starts.count("review"), 2)
+        # The session's brief carried the findings verbatim; the second round's reviewers got the delta and the round line.
+        prompt = self.sessions.repair_prompts["repair-1"]
+        self.assertIn("## Review findings on this lane (P0/P1, verbatim)", prompt)
+        self.assertIn("ui.txt says after but web/notes.txt is missing. (round 1)", prompt)
+        self.assertIn(str(directory / "review.round-1.diff"), prompt)
+        review_prompt = (directory / "review.prompt.txt").read_text()
+        self.assertIn("Round 2 of the in-run fix loop: the previous round's P0/P1 findings were: ", review_prompt)
+        self.assertIn("(round 1)", review_prompt)
+        self.assertIn(f"read the delta first: {directory / 'review.delta.diff'}", review_prompt)
+        delta = (directory / "review.delta.diff").read_text()
+        self.assertIn("web/notes.txt", delta)
+        self.assertNotIn("backend.py", delta)
+        self.assertEqual(read_json(directory / "automatic-review.json")["delta_from"], first_candidate)
+        self.assertNotIn("review_blocked", [kind for kind, _ in self.attention()])  # The round's record was resolved.
+
+    def test_two_blocked_review_rounds_raise_attention(self):
+        self.blocking_rounds = 3
+        self.sessions.reviewer_mutate = self.reviewer
+        self.sessions.repair_edits["ui"] = {"web/notes.txt": lambda node: f"notes of {node}\n"}
+        self.start()
+        with self.assertRaises(RuntimeError) as raised:
+            self.drive()
+        self.assertTrue(str(raised.exception).startswith("fix loop exhausted for lane ui after 2 rounds: P1 (review): ui.txt says after"),
+                        str(raised.exception))
+        self.assertIn("(round 3)", str(raised.exception))
+        self.assertEqual([(entry["status"], entry["trigger"]) for entry in self.entries()], [("applied", "review")] * 2)
+        self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
+        self.assertTrue((self.directory / "review.round-2.json").exists())
+        self.assertFalse((self.directory / "review.round-3.json").exists())
+        self.assertIn("controller_blocked", [kind for kind, _ in self.attention()])
+
+    def test_a_blocked_review_round_never_reviews_that_candidate_again(self):
+        self.sessions.reviewer_mutate = self.reviewer
+        self.sessions.repair_status = "blocked"
+        self.start()
+        for _ in range(2):  # A second controller stops the same way and launches nothing.
+            with self.assertRaisesRegex(RuntimeError, r"fix loop exhausted for lane ui after 1 round: P1 \(review\): .*; round 1 ended blocked: "
+                                                      "the repair session ended blocked"):
+                self.drive()
+        self.assertEqual((self.sessions.starts.count("review"), self.sessions.starts.count("repair-1")), (1, 1))
+        # The round's block is the run's record again: restored from the archive.
+        self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
+        self.assertTrue((self.directory / "review.stop.json").exists())
+        self.assertFalse((self.directory / "review.round-1.json").exists())
+        self.assertFalse(read_json(self.directory / "review-rounds.json")["rounds"][0]["archived"])
+
+    def test_findings_on_two_lanes_end_the_run_as_before(self):
+        def two_lanes(completion):
+            return {**completion, "verdict": "blocked", "findings": [self.P1, {**self.P1, "worker": "adapter", "message": "adapter too."}]}
+        self.sessions.reviewer_mutate = two_lanes
+        self.start()
+        with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
+            self.drive()
+        self.assertFalse((self.directory / "repairs.json").exists())
+        self.assertFalse((self.directory / "review-rounds.json").exists())
+        self.assertIn("review_blocked", [kind for kind, _ in self.attention()])
+
+    test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch = None
+    test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
+    test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
+
+
 class NoFixLoop(FixLoop):
     """`--fix-rounds 0`: the run stops as before, at the identical-failure guard, and launches no repair session."""
 

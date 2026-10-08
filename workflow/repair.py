@@ -7,7 +7,11 @@ and forks the run's LangGraph thread at the freeze boundary with the new snapsho
 check and never invokes the graph: `automatic --live` (or `retry` for a manual run) re-verifies the repaired lanes,
 rechecks the others, checks a new candidate generation for every lane and only then reaches review. Every apply step
 is idempotent, so a crash is completed by rerunning the identical command. `--workspace` makes a detached worktree at
-the right base to commit the fix in, never in the source checkout.
+the right base to commit the fix in, never in the source checkout (RUNBOOK "Blocked after freeze: repair a lane").
+
+`--session --live` launches one native repair session for the lane in such a workspace, narrowed to what blocked it, waits
+for its completion, stops it, captures the workspace as the fix commit and applies it through the same steps; the
+controller's in-run fix loop runs the same `repair_session` as `controller`, on review blocks too (RUNBOOK "In-run fix loop").
 """
 from __future__ import annotations
 
@@ -201,10 +205,20 @@ def check_before_review(runtime, state) -> None:
         raise ValueError("Reviewers have seen a candidate; code changes need a new run")
 
 
-def blocked_step(runtime, state) -> dict:
-    """The check verdict the run stopped at: a blocked packet of the candidate, or of a failed verify_<lane>."""
+def blocked_phase(blocked: dict) -> str:
+    """The phase a fix of `blocked` belongs to: a review block's is the reviewed candidate's."""
+    return blocked.get("phase") or blocked["packets"][0]["phase"]
+
+
+def blocked_step(runtime, state, after_review: bool = False) -> dict:
+    """The check verdict the run stopped at: a blocked packet of the candidate, or of a failed verify_<lane>. `after_review`
+    (the controller's fix loop only, its review round archived first) also takes a blocked review of the current candidate."""
     directory = runtime.directory
     pending = [item.value.get("kind") for task in state.tasks for item in task.interrupts]
+    failed = [task.name for task in state.tasks if task.error and task.name in state.next]
+    if after_review and state.values and failed == ["review"] and tuple(state.next) == ("review",):
+        candidate = read_json(candidate_paths(directory, len(applied_repairs(directory)))[0])["commit"]
+        return {"step": "review", "phase": "candidate", "candidate_commit": candidate, "packets": []}
     if not state.values:
         raise ValueError("The run was never started; there is no frozen lane to repair")
     if any(step.startswith("launch_") for step in state.next):
@@ -279,8 +293,10 @@ def fork_point(graph, config, runtime, previous: dict, checkpoint_id: str | None
     return fork
 
 
-def blocked_run(runtime, graph, config, applied: list[dict]) -> tuple:
-    """Every state refusal. Returns the head, the blocked step, the fork point and the effective snapshots."""
+def blocked_run(runtime, graph, config, applied: list[dict], after_review: bool = False) -> tuple:
+    """Every state refusal. Returns the head, the blocked step, the fork point and the effective snapshots. `after_review` is
+    the controller's fix loop on a review block: the round's review files are archived by then, so check_before_review
+    passes; blocked_step takes the review step."""
     state = graph.get_state(config)
     check_before_review(runtime, state)
     if len(applied) >= MAX_REPAIRS:
@@ -290,7 +306,7 @@ def blocked_run(runtime, graph, config, applied: list[dict]) -> tuple:
     if applied and state.config["configurable"]["checkpoint_id"] == applied[-1]["head_after"] and not any(task.error for task in state.tasks):
         raise ValueError(f"Repair {applied[-1]['n']} is applied and the run has not continued from it; an applied repair is not "
                          f"replaced. Continue with: {continuation(runtime)}")
-    blocked = blocked_step(runtime, state)
+    blocked = blocked_step(runtime, state, after_review)
     check_source(runtime)
     previous = effective_snapshots(runtime.directory, applied)
     return state, blocked, fork_point(graph, config, runtime, previous), previous
@@ -503,7 +519,7 @@ def finish_repair(runtime, graph, config, entry: dict, head_after: str) -> None:
 
 
 def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: str, dry_run: bool, actor: str = "operator",
-                 session: dict | None = None) -> dict | None:
+                 session: dict | None = None, after_review: bool = False) -> dict | None:
     """S0 to S6 for a fix commit. `session` is a repair session's journal entry (status `captured`): the repair keeps its number,
     its actor and its session fields."""
     directory, repo = runtime.directory, Path(runtime.plan["repository"])
@@ -512,7 +528,7 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
     applied = [entry for entry in entries if entry["status"] == "applied"]
     recorded = next((entry for entry in entries if entry["status"] == "recorded"), None)
     if recorded is None:
-        state, blocked, fork, previous = blocked_run(runtime, graph, config, applied)
+        state, blocked, fork, previous = blocked_run(runtime, graph, config, applied, after_review)
     elif list(recorded["lanes"]) != lanes or recorded["source_commit"] != source or recorded["reason"] != reason:
         raise RuntimeError(f"Repair {recorded['n']} is recorded but not applied; only the identical command completes it: "
                            f"{repair_command(directory, recorded)}")
@@ -522,7 +538,7 @@ def apply_repair(runtime, graph, config, lanes: list[str], commit: str, reason: 
         check_source(runtime)
         blocked, previous = recorded["blocked"], effective_snapshots(directory, applied)
         fork = fork_point(graph, config, runtime, previous, recorded["fork_from"])
-    derived = derive(runtime, lanes, source, blocked["packets"][0]["phase"], previous)
+    derived = derive(runtime, lanes, source, blocked_phase(blocked), previous)
     if recorded is None:
         targets = attempt_targets(directory, lanes, runtime.workers)
         entry = {"n": session["n"] if session else len(entries) + 1, "status": "recorded", "mode": "session" if session else "commit", "reason": reason,
@@ -574,8 +590,9 @@ BROWSER_RULES = ("Every required scenario id appears in exactly one test title a
 def workspace_base(runtime, blocked: dict, previous: dict, lanes: list[str]) -> tuple[str, str]:
     """The commit a fix belongs on and what it is: the failing candidate for a candidate block, the lane's snapshot for a
     worker-phase one."""
-    if blocked["packets"][0]["phase"] == "candidate":
-        return read_json(candidate_paths(runtime.directory, len(applied_repairs(runtime.directory)))[0])["commit"], "the combined candidate that failed"
+    if blocked_phase(blocked) == "candidate":
+        what = "the reviewed candidate" if blocked["step"] == "review" else "the combined candidate that failed"
+        return read_json(candidate_paths(runtime.directory, len(applied_repairs(runtime.directory)))[0])["commit"], what
     if len(lanes) == 1:
         return previous[lanes[0]]["commit"], f"the {lanes[0]} snapshot"
     raise ValueError("A worker-phase block has no combined candidate: a fix on a lane snapshot repairs one lane only; name one lane")
@@ -635,7 +652,7 @@ def make_workspace(runtime, graph, config, lanes: list[str], reason: str | None)
 
 # The journal keeps a repair session from its launch: `launched` (the receipt and the session), `captured` (stopped, its
 # workspace committed as `source_commit`), then `recorded` and `applied` through the --commit path, or `blocked` with why.
-SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary")
+SESSION_KEYS = ("by", "via", "trigger", "round", "workspace", "workspace_commit", "session", "captured_at", "summary", "review_round")
 LOG_TAIL_LINES = 60
 LOG_LINE_LIMIT = 400  # Characters of one log line in the brief: a minified bundle on one line must not fill the prompt.
 
@@ -708,7 +725,7 @@ def session_brief(runtime, lane: str, entry: dict, rounds: int, deadline: str, f
     else:
         lines += ["", "## Review findings on this lane (P0/P1, verbatim)", "", *(f"- {json.dumps(finding, ensure_ascii=False)}" for finding in findings)]
         if delta is not None:
-            lines += ["", f"The reviewers read the candidate; the diff of this lane's owned paths is {delta}."]
+            lines += ["", f"The diff the reviewers read (read it first): {delta}. This workspace is the candidate they reviewed."]
     lines += ["", "## Owned paths", "", f"{lane} owns: {', '.join(worker['owned_paths'])}. Change nothing outside them: another lane's "
               "paths are not yours, and a change there is refused with the whole round.", "", "Checks:",
               *(f"- {check['id']} ({check['kind']}): {shlex.join(check['argv'])}" for check in worker["checks"])]
@@ -723,15 +740,15 @@ def session_brief(runtime, lane: str, entry: dict, rounds: int, deadline: str, f
 
 
 def launch_session(runtime, graph, config, lane: str, actor: str, trigger: str, *, findings: list[dict] | None = None,
-                   delta: Path | None = None) -> dict:
+                   delta: Path | None = None, review_round: int | None = None) -> dict:
     """S-1: the round's journal entry (`launched`), its workspace at the failing base, and one native session in it."""
     from .automatic import fix_rounds, repair_timeout
     from .guardrails import epoch, iso
     directory = runtime.directory
     refuse_recorded(directory)
     applied = applied_repairs(directory)
-    _, blocked, _, previous = blocked_run(runtime, graph, config, applied)
-    if lane not in {packet["node_id"] for packet in blocked["packets"]}:
+    _, blocked, _, previous = blocked_run(runtime, graph, config, applied, after_review=trigger == "review")
+    if trigger != "review" and lane not in {packet["node_id"] for packet in blocked["packets"]}:
         raise ValueError(f"Lane {lane} has no blocked packet at {blocked['step']}; repair a lane whose checks blocked the run")
     base, what = workspace_base(runtime, blocked, previous, [lane])
     number, path = add_workspace(runtime, base)
@@ -740,6 +757,7 @@ def launch_session(runtime, graph, config, lane: str, actor: str, trigger: str, 
     entry = {"n": n, "status": "launched", "mode": "session", **({"by": "controller"} if actor == "controller" else actor_record(actor)),
              "trigger": trigger, "round": len(session_entries(directory, lane)) + 1, "lanes": {lane: {}}, "recorded_at": now(),
              "blocked": blocked, "workspace": str(path), "workspace_commit": base,
+             **({"review_round": review_round} if review_round else {}),
              "session": {"node": f"repair-{n}", "launch_token": str(uuid.uuid4()), "session_id": None}}
     save_entry(directory, entry)
     launched_at = datetime.now(timezone.utc).isoformat()
@@ -868,7 +886,7 @@ def finish_session(runtime, graph, config, entry: dict) -> dict:
         return entry
     try:
         applied = apply_repair(runtime, graph, config, [lane], entry["source_commit"], session_reason(entry), False, entry.get("by", "operator"),
-                               session=None if entry["status"] == "recorded" else entry)
+                               session=None if entry["status"] == "recorded" else entry, after_review=entry["trigger"] == "review")
     except (ValueError, RuntimeError, subprocess.SubprocessError) as error:
         if load_entry(directory, entry["n"])["status"] != "captured":
             raise  # S1 is written: only the identical command completes it (refuse_recorded says which).
@@ -884,14 +902,14 @@ def load_entry(directory: Path, n: int) -> dict:
 
 
 def repair_session(runtime, graph, config, lane: str, *, actor: str, trigger: str, findings: list[dict] | None = None,
-                   delta: Path | None = None) -> dict:
+                   delta: Path | None = None, review_round: int | None = None) -> dict:
     """One round: launch a narrowed session for `lane` (or continue the one the journal has open), wait, stop, capture, apply.
     Returns the journal entry: `applied`, or `blocked` with its reason. Never invokes the graph; the caller holds the locks."""
     entry = open_session(runtime.directory)
     if entry is not None and next(iter(entry["lanes"])) != lane:
         raise ValueError(f"Repair session {entry['n']} of lane {next(iter(entry['lanes']))} is not finished; it is continued first")
     if entry is None:
-        entry = launch_session(runtime, graph, config, lane, actor, trigger, findings=findings, delta=delta)
+        entry = launch_session(runtime, graph, config, lane, actor, trigger, findings=findings, delta=delta, review_round=review_round)
         if entry["status"] == "blocked":
             return entry
     return finish_session(runtime, graph, config, entry)

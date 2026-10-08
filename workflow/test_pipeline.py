@@ -132,9 +132,12 @@ class FakeSessions:
         override = self.per_reviewer(self.reviewer_session_id, reviewer_id)
         if override:
             return override
+        rounds = self.directory / "review-rounds.json"
+        index = 0 if node == "review" else self.reviewer_nodes().index(node) + 1
+        if rounds.exists():  # A review round of the in-run fix loop launches fresh reviewer sessions.
+            return f"{index:08d}-{len(read_json(rounds)['rounds']) + 1:04d}-4333-8333-333333333333"
         if node == "review":
             return self.REVIEWER_UUID
-        index = self.reviewer_nodes().index(node) + 1
         return f"{index:08d}-3333-4333-8333-333333333333"  # Distinct per declared reviewer.
 
     def background_id(self, node):

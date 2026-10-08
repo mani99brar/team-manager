@@ -164,7 +164,13 @@ class InteractiveSessions(ClaudeSessions):
         return rows
 
     def launch_name(self, node: str) -> str:
-        return launch_name(self.plan["run_id"], node)
+        """launch_name, and for a reviewer of review round k > 1 of the in-run fix loop `-round-<k>` after it: the stopped
+        reviewers of the earlier rounds keep their names, and a fresh launch must not collide with them."""
+        name = launch_name(self.plan["run_id"], node)
+        rounds = self.directory / "review-rounds.json"
+        if is_review_node(node) and rounds.exists():
+            name += f"-round-{len(read_json(rounds)['rounds']) + 1}"
+        return name
 
     def trust(self, cwd: Path) -> None:
         """Trust a worktree this run created (inside the run directory) before a session launches there; nothing else."""
