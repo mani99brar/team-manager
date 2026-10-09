@@ -1,0 +1,266 @@
+diff --git a/docs/handoff/worker-skills.md b/docs/handoff/worker-skills.md
+index a42ffa4..8a433e0 100644
+--- a/docs/handoff/worker-skills.md
++++ b/docs/handoff/worker-skills.md
+@@ -11,8 +11,8 @@ launches byte for byte as today.
+ - `workflow/skills.py` (new): resolve/check/copy/digest the named skills and read `advisorModel`. Pure functions;
+   `skills_root` and `home` injected so tests never touch the real `~/.claude`.
+ - `workflow/sessions.py`: `worker_settings(directory, *, skills_lane=None, advisor_model=None)` — the plain call is
+-  byte-for-byte today's; the skills variant adds one `Edit(/<run>/skills/<lane>/**)` deny (note 6: Edit only, never
+-  Write) and `advisorModel` when the plan pinned one. `worker_authority(directory, skills=None)` keeps
++  byte-for-byte today's; the skills variant adds `Edit(/<run>/skills/<lane>/**)` and `Write(/<run>/skills/<lane>/**)`
++  denies (decisions.md [L1] g) and `advisorModel` when the plan pinned one. `worker_authority(directory, skills=None)` keeps
+   `worker_settings_sha256` as the plain digest and adds `skills_sha256[<lane>]` (whole plugin tree) and
+   `skills_settings_sha256[<lane>]`. New `lane_skills(plan, node)`. `ClaudeSessions.run` refuses a skills lane on the
+   print transport (note 9).
+@@ -21,8 +21,9 @@ launches byte for byte as today.
+   file.
+ - `workflow/launch.py`: version gates (`CRITICAL_VERSIONS`, `LANE_ROLE_VERSIONS` gain 2.8.0; new `SKILLS_VERSIONS`);
+   `lane_skills(manifest)` refuses `skills` before 2.8.0 in `load_feature`; `launch_commands` resolves and checks each
+-  lane's skills before any Git action and forwards `--lane-skills <lane>=a,b`; the dry run prints per-lane skills, the
+-  plugin dir and `advisorModel` labelled "read again at prepare".
++  lane's skills before any Git action and forwards `--lane-skills <lane>=a,b`; the dry run prints per-lane skills and
++  the plugin dir, and a note that `advisorModel` is read at prepare — it does not read `~/.claude/settings.json`
++  ([L1] b: launch and `launch --dry-run` read the plan, never the file).
+ - `workflow/pipeline.py`: preflight `required_flags` gain `--setting-sources` and `--plugin-dir` (note c, so a skills
+   session's flags are proven on the installed CLI). Prepare parses `--lane-skills`, re-checks each skill before the run
+   directory exists (note 3), then copies the plugin tree, writes `plugin.json`, pins `plan.nodes[<lane>].skills`
+@@ -90,8 +91,16 @@ the worktree's `CLAUDE.md`, which does not reach the session.
+ 
+ - The CLAUDE.md probe does **not** load the operator-notes section, so note 2's narrowing does not apply:
+   `scaffold.py:99` and `test_portable.py:468-477` are unchanged and their guarantee holds for skills lanes too.
+-- Note 6 followed: only `Edit(/<run>/skills/<lane>/**)` is emitted (no `Write(...)` rule), cited to interactive.py:398.
+-- No departures from decisions.md Operator decisions or grill defaults.
++- The lane's `--settings` deny list gains **both** `Edit(/<run>/skills/<lane>/**)` and `Write(/<run>/skills/<lane>/**)`
++  on its pinned plugin (decisions.md [L1] g); nothing is removed from the list. (Repair 2 reverted round 1's Edit-only
++  departure, which had followed design-challenge note 6 without naming [L1] g; the operator's decision stands as written.)
++- `advisorModel` is read once at prepare and pinned as `plan.nodes[<lane>].advisor_model`; the dry run reads the plan,
++  never `~/.claude/settings.json` (decisions.md [L1] b). (Repair 2 reverted round 1's dry-run file read.)
++- SKILL.md is resolved with symlinks followed (Design settled): a `SKILL.md` symlinked to a regular file inside the
++  folder resolves and copies as a real file; a `SKILL.md` symlinked outside the folder still resolves but is refused by
++  `check_skill`/`_walk` under the escape rule (PRD 4.5), the same as any other escaping symlink. (Repair 2 dropped the
++  round-1 `is_symlink()` refusal that had rejected every symlinked SKILL.md.)
++- No remaining departures from decisions.md Operator decisions or grill defaults.
+ 
+ ## Open P2s / verify independently
+ 
+diff --git a/workflow/README.md b/workflow/README.md
+index 3b96f1b..4ee2e05 100644
+--- a/workflow/README.md
++++ b/workflow/README.md
+@@ -74,7 +74,7 @@ A worker runs as your user, with Bash, and in automatic mode with permission che
+ 
+ None of this stops a program the worker runs. A Bash `cat ~/.ssh/id_ed25519` is not a Read tool call, `sh -c "git push"` or `kill $(pgrep -f x)` passes the prefix rules, and the network is open. Until workers run under another user or a sandbox, the only real fix is to move credentials off this account: move the funded deployer key in `~/.config/vps-wallet.env` to another user or a hardware wallet (only you broadcast mainnet transactions), put a passphrase on the SSH key, replace the gh token with a fine-grained one, take API keys such as the DeepSeek key out of `~/.bashrc`, and run the Telegram decision bot as another user.
+ 
+-A `feature.json` 2.8.0 lane may declare `skills` (`"workers": [{"node_id": "pages", "task": "pages-task.md", "skills": ["impeccable"]}]`): its worker and repair sessions launch without `--safe-mode`, with `--setting-sources ""`, `--plugin-dir <run>/skills/<lane>` and the `Skill` tool, so they load exactly the named skills (copied into the run and pinned by digest) and nothing else of your customizations — no user skills, no hooks, no MCP servers, and no `CLAUDE.md` operator-notes section, the same as a `--safe-mode` lane. The advisor your settings give is restored through `advisorModel` in the lane's `--settings`; every other key of your settings is lost for that lane. The same deny list applies, plus one `Edit` deny on the lane's own pinned plugin. A lane without `skills` launches exactly as today. The runbook's "Skills for a lane (feature.json 2.8.0)" has the details and the refusals.
++A `feature.json` 2.8.0 lane may declare `skills` (`"workers": [{"node_id": "pages", "task": "pages-task.md", "skills": ["impeccable"]}]`): its worker and repair sessions launch without `--safe-mode`, with `--setting-sources ""`, `--plugin-dir <run>/skills/<lane>` and the `Skill` tool, so they load exactly the named skills (copied into the run and pinned by digest) and nothing else of your customizations — no user skills, no hooks, no MCP servers, and no `CLAUDE.md` operator-notes section, the same as a `--safe-mode` lane. The advisor your settings give is restored through `advisorModel` in the lane's `--settings`; every other key of your settings is lost for that lane. The same deny list applies, plus `Edit` and `Write` denies on the lane's own pinned plugin. A lane without `skills` launches exactly as today. The runbook's "Skills for a lane (feature.json 2.8.0)" has the details and the refusals.
+ 
+ ## Which model and effort a session runs
+ 
+diff --git a/workflow/RUNBOOK.md b/workflow/RUNBOOK.md
+index 53b48dc..3fc4d1f 100644
+--- a/workflow/RUNBOOK.md
++++ b/workflow/RUNBOOK.md
+@@ -141,10 +141,10 @@ A feature.json 2.6.0 feature may declare `panels`: report-only reviews by severa
+ A feature.json 2.8.0 lane may declare `skills: ["<name>", ...]` (1 to 8 unique names, each `^[a-z][a-z0-9-]{0,63}$`): its worker session and every repair session of that lane load those named Claude Code skills through the `Skill` tool, and nothing else of the operator's customizations (docs/PRD_WORKER_SKILLS.md). A lane without `skills`, and every feature before 2.8.0, launches exactly as today, byte for byte. `skills` on an earlier version is refused.
+ 
+ - **The launch.** A skills lane drops `--safe-mode` for `--setting-sources ""`, adds `--plugin-dir <run>/skills/<lane>` where `--safe-mode` was (before `--tools`), adds `Skill` to its tools, and restores the advisor in its `--settings` as `"advisorModel": <value>`. Everything else of the launch (the deny list, `--strict-mcp-config --mcp-config '{"mcpServers":{}}'`, the pinned model and effort, the permission mode, the launch name, the prompt and the receipt) is unchanged. The receipt `<lane>.interactive.json` (and `repair-<n>.interactive.json`) gains `skills: [{name, sha256}]` (`[]` for a lane without them); `status` lists the skills per lane.
+-- **What loads, what does not.** Verified on this host (Claude Code 2.1.293) with a `claude --bg` canary carrying the exact skills-lane argv: the session loads the pinned plugin's skills (`workflow-<lane>:<name>`) and Claude Code's own bundled skills (on 2.1.293: `dataviz`, `artifact-design`, `artifact-diagramming`, `artifact-capabilities`, `update-config`, `keybindings-help`, `code-review`, `simplify`, `fewer-permission-prompts`, `loop`, `schedule`, `claude-api`, `workflow-authoring`, `run`, `plugin-authoring`, `init`, `security-review`), and **no** user skill from `~/.claude/skills/`. It loads **no** operator hooks and **no** user MCP servers (the canary reported `HOOKS: no`, `MCP: no`), and the deny list in `--settings` still applies (a `Read` of a denied path is refused). The `Skill` tool and the advisor are both present in its tools. Auto-memory, keychain reads and background prefetches are Claude Code's own; a skills lane neither enables nor disables them beyond what `--setting-sources ""` does.
++- **What loads, what does not.** Verified on this host (Claude Code 2.1.293) with a `claude --bg` canary carrying the skills-lane argv (round 1's, before the plugin `Write` deny was added; the deny only tightens what the session may write, not what loads): the session loads the pinned plugin's skills (`workflow-<lane>:<name>`) and Claude Code's own bundled skills (on 2.1.293: `dataviz`, `artifact-design`, `artifact-diagramming`, `artifact-capabilities`, `update-config`, `keybindings-help`, `code-review`, `simplify`, `fewer-permission-prompts`, `loop`, `schedule`, `claude-api`, `workflow-authoring`, `run`, `plugin-authoring`, `init`, `security-review`), and **no** user skill from `~/.claude/skills/`. It loads **no** operator hooks and **no** user MCP servers (the canary reported `HOOKS: no`, `MCP: no`), and the deny list in `--settings` still applies (a `Read` of a denied path is refused). The `Skill` tool and the advisor are both present in its tools. Auto-memory, keychain reads and background prefetches are Claude Code's own; a skills lane neither enables nor disables them beyond what `--setting-sources ""` does.
+ - **CLAUDE.md.** No session gets the operator-notes section of the worktree's `CLAUDE.md` — a skills lane no more than a `--safe-mode` lane. The canary ran in a scratch repository whose `CLAUDE.md` held a unique token below its operator-notes heading and reported `TOKENS: NONE` and that no `CLAUDE.md` / operator-notes section was in its context, the same answer a `--safe-mode` session gives. The controller pins the project's conventions above that heading into the prompt, as for every lane.
+ - **The advisor and the lost settings keys.** The operator's `~/.claude/settings.json` applies to a `--safe-mode` lane, so the advisor is already there; under `--setting-sources ""` it is gone, and the controller restores only `advisorModel`, read once at prepare and pinned as `plan.nodes[<lane>].advisor_model` (string or null; every launch and `launch --dry-run` read the plan, never the file). A skills lane loses every other key of the operator's settings file (its model default, permissions and hooks): accepted, since the model, effort, permissions and deny list come from the controller.
+-- **The pinned plugin.** At prepare the controller copies each named `~/.claude/skills/<name>/` (symlinks resolved, modes preserved, `.git` skipped) into `<run>/skills/<lane>/skills/<name>/` and writes `<run>/skills/<lane>/.claude-plugin/plugin.json` (`{"name": "workflow-<lane>", ...}`). The copy is run evidence like the prompt, so a later edit of the operator's skill folder changes no running run. Two digests: `plan.nodes[<lane>].skills[].sha256` is the digest of that skill's own subtree (its sorted relative paths and contents, so the same skill text gives the same digest in two runs), and `plan.worker_authority.skills_sha256[<lane>]` is the digest of the whole plugin tree (which includes the run id in `plugin.json`, so it changes per run). `worker_authority.skills_settings_sha256[<lane>]` is the digest of that lane's skills `--settings` variant; `worker_settings_sha256` stays the digest of the plain worker settings. The lane's `--settings` adds one deny, `Edit(/<run>/skills/<lane>/**)`, so a session cannot alter its own pinned plugin (only the Edit rule family is denied: a `Write(...)` rule never matches under Claude Code's permission engine). A skill's own launcher binary is the session's business (the operator fetches it before launch); the controller neither fetches nor installs anything.
++- **The pinned plugin.** At prepare the controller copies each named `~/.claude/skills/<name>/` (symlinks resolved, modes preserved, `.git` skipped) into `<run>/skills/<lane>/skills/<name>/` and writes `<run>/skills/<lane>/.claude-plugin/plugin.json` (`{"name": "workflow-<lane>", ...}`). The copy is run evidence like the prompt, so a later edit of the operator's skill folder changes no running run. Two digests: `plan.nodes[<lane>].skills[].sha256` is the digest of that skill's own subtree (its sorted relative paths and contents, so the same skill text gives the same digest in two runs), and `plan.worker_authority.skills_sha256[<lane>]` is the digest of the whole plugin tree (which includes the run id in `plugin.json`, so it changes per run). `worker_authority.skills_settings_sha256[<lane>]` is the digest of that lane's skills `--settings` variant; `worker_settings_sha256` stays the digest of the plain worker settings. The lane's `--settings` adds two denies, `Edit(/<run>/skills/<lane>/**)` and `Write(/<run>/skills/<lane>/**)`, so a session cannot alter its own pinned plugin (decisions.md [L1] g); nothing is removed from the deny list. A skill's own launcher binary is the session's business (the operator fetches it before launch); the controller neither fetches nor installs anything.
+ - **A skill's frontmatter.** A `SKILL.md` whose frontmatter declares `hooks` is refused at prepare (naming the lane and the skill). `allowed-tools` in a frontmatter is allowed: a pinned skill may carry it. A skill's `model` frontmatter overrides the lane's pinned model while that skill runs.
+ - **Refusals (nothing written, each naming the lane and the skill).** `skills` on a version before 2.8.0; a name that does not match the pattern or is listed twice; a name that does not resolve to `~/.claude/skills/<name>/SKILL.md`; a `SKILL.md` that is not a regular file; a `hooks` frontmatter; a file over 2 MB; a skill folder over 8 MB in total; a symlink that resolves outside the skill folder or forms a loop. `launch` and `launch --dry-run` resolve and check the skills before any Git action; `prepare` checks them again before the run directory exists. The print transport cannot load skills, so a skills lane on it is refused.
+ 
+diff --git a/workflow/launch.py b/workflow/launch.py
+index 9ba08fe..1c99d01 100644
+--- a/workflow/launch.py
++++ b/workflow/launch.py
+@@ -652,11 +652,13 @@ def main(argv=None):
+                                      "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
+             feature_skills = lane_skills(manifest)  # 2.8.0: each selected lane's skills and the plugin dir prepare would write.
+             if feature_skills:
+-                from .skills import advisor_model, plugin_dir
++                from .skills import plugin_dir
+                 printed["skills"] = {node: {"skills": names, "plugin_dir": str(plugin_dir(run, node))}
+                                      for node, names in feature_skills.items() if node in selected}
+-                # [L1] b: prepare pins plan.nodes[<lane>].advisor_model once; the dry run reads the file and labels the value.
+-                printed["advisor_model"] = {"value": advisor_model(), "note": "read again at prepare from ~/.claude/settings.json"}
++                # [L1] b: `advisor_model` is read once at prepare and pinned as plan.nodes[<lane>].advisor_model; every
++                # launch and `launch --dry-run` read the plan, never the file. The dry run runs no prepare and has no
++                # plan yet, so it names what prepare will do without reading ~/.claude/settings.json.
++                printed["advisor_model"] = {"note": "read at prepare from ~/.claude/settings.json, pinned as plan.nodes[<lane>].advisor_model"}
+             print(json.dumps(printed, indent=2))
+             for note in notes + ([migration] if migration else []):
+                 print(f"Note: {note}", file=sys.stderr)
+diff --git a/workflow/sessions.py b/workflow/sessions.py
+index c5670a6..8232f36 100644
+--- a/workflow/sessions.py
++++ b/workflow/sessions.py
+@@ -290,10 +290,10 @@ def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_
+     of this exact argument (worker_authority).
+ 
+     The plain call (no `skills_lane`) is byte for byte today's. For a skills lane (RUNBOOK "Skills for a lane",
+-    feature.json 2.8.0) `skills_lane` adds one deny so the session cannot alter its own pinned plugin, and
+-    `advisor_model` restores the advisor the operator's settings give (lost under `--setting-sources ""`): only the Edit
+-    rule family is denied (a Write(...) rule never matches under dontAsk/bypass, interactive.py:398), and advisorModel is
+-    added only when the plan pins a value. prepare pins this variant's digest beside the plain one (worker_authority).
++    feature.json 2.8.0) `skills_lane` adds `Edit` and `Write` denies on the lane's own pinned plugin so the session
++    cannot alter what it loads (decisions.md [L1] g), and `advisor_model` restores the advisor the operator's settings
++    give (lost under `--setting-sources ""`); advisorModel is added only when the plan pins a value. prepare pins this
++    variant's digest beside the plain one (worker_authority).
+     """
+     controller = Path(__file__).resolve().parents[1]
+     deny = [*(f"{tool}({path})" for path in WORKER_SECRETS for tool in ("Read", "Edit")), *(f"Read({path})" for path in WORKER_TRANSCRIPTS),
+@@ -301,8 +301,11 @@ def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_
+     if not Path(directory).resolve().is_relative_to(controller):
+         deny.append(f"Edit(/{controller}/**)")
+     if skills_lane is not None:
+-        # The lane's own pinned plugin, under the run directory: a skills session must not edit what it loads.
+-        deny.append(f"Edit(/{Path(directory).resolve() / 'skills' / skills_lane}/**)")
++        # The lane's own pinned plugin, under the run directory: a skills session must not alter what it loads, so both
++        # the Edit and the Write rule families are denied (decisions.md [L1] g; nothing is removed from the list).
++        plugin = Path(directory).resolve() / "skills" / skills_lane
++        deny.append(f"Edit(/{plugin}/**)")
++        deny.append(f"Write(/{plugin}/**)")
+     deny.extend(WORKER_DENY)
+     settings = {**BACKGROUND_SETTINGS, "env": {**BACKGROUND_ENV, **WORKER_ENV}, "permissions": {"deny": deny}}
+     if skills_lane is not None and advisor_model is not None:
+diff --git a/workflow/skills.py b/workflow/skills.py
+index 15da33b..4181ddd 100644
+--- a/workflow/skills.py
++++ b/workflow/skills.py
+@@ -71,12 +71,12 @@ def _declares_hooks(text: str) -> bool:
+ 
+ def resolve_skill(lane: str, name: str, root: Path) -> Path:
+     """The resolved skill folder `<root>/<name>` (symlinks followed), refused naming the lane and the skill when its
+-    `SKILL.md` does not exist or is not a regular file (PRD 4.5)."""
++    `SKILL.md` does not exist or is not a regular file (Design: "symlinks followed"; PRD 4.5)."""
+     folder = (Path(root) / name).resolve()
+     manifest = folder / "SKILL.md"
+-    if not manifest.exists():
++    if not manifest.exists():  # exists() follows the link, so a dangling SKILL.md symlink is "does not exist"
+         raise ValueError(f"Blocked: lane {lane} names skill {name}, but {Path(root) / name / 'SKILL.md'} does not exist")
+-    if not manifest.is_file() or manifest.is_symlink():  # resolve() left a real file; a dangling or special node is refused
++    if not manifest.is_file():  # is_file() follows the link: a SKILL.md symlinked to a regular file resolves; a link to a directory or special node is refused
+         raise ValueError(f"Blocked: lane {lane} skill {name}: {manifest} is not a regular file")
+     return folder
+ 
+diff --git a/workflow/test_interactive.py b/workflow/test_interactive.py
+index 06ed651..45f66bf 100644
+--- a/workflow/test_interactive.py
++++ b/workflow/test_interactive.py
+@@ -504,7 +504,7 @@ class InteractiveTests(unittest.TestCase):
+ 
+     def test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today(self):
+         # PRD_WORKER_SKILLS acceptance 1: the skills lane launches with --setting-sources "", --plugin-dir and the Skill tool,
+-        # the advisor and the one Edit deny; the plain lane's argv is exactly today's.
++        # the advisor and the Edit and Write denies on its plugin; the plain lane's argv is exactly today's.
+         from .sessions import worker_settings
+         self._pin_skills("ui", ("impeccable",), "fable")
+         ids = {row["name"]: row["id"] for row in (self.row("ui"), self.row("adapter"))}
+@@ -526,7 +526,7 @@ class InteractiveTests(unittest.TestCase):
+         settings = json.loads(ui_cmd[ui_cmd.index("--settings") + 1])
+         self.assertEqual(settings["advisorModel"], "fable")
+         self.assertIn(f"Edit(/{plugin}/**)", settings["permissions"]["deny"])
+-        self.assertFalse(any(rule.startswith("Write(") for rule in settings["permissions"]["deny"]))
++        self.assertIn(f"Write(/{plugin}/**)", settings["permissions"]["deny"])  # decisions.md [L1] g: both denies
+         # The plain lane is byte for byte today's launch: plain worker_settings, --safe-mode, no Skill, no skills flags.
+         expected = ["claude", "--bg", "--name", self.sessions.launch_name("adapter"), *worker_settings(self.directory),
+                     "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+diff --git a/workflow/test_pipeline.py b/workflow/test_pipeline.py
+index a9fd822..71274ac 100644
+--- a/workflow/test_pipeline.py
++++ b/workflow/test_pipeline.py
+@@ -2433,8 +2433,9 @@ class PanelLaunchGuards(unittest.TestCase):
+         self.assertTrue(load_feature(self.folder)["tryout"])
+ 
+     def test_the_dry_run_prints_a_lanes_skills_and_the_advisor(self):
+-        # PRD_WORKER_SKILLS 4.4 / Design: launch --dry-run prints per lane its skills and the plugin directory, and the
+-        # advisorModel it read from the file labelled "read again at prepare". HOME is the temp home set in setUp.
++        # PRD_WORKER_SKILLS 4.4 / Design: launch --dry-run prints per lane its skills and the plugin directory, and a
++        # note that advisorModel is read at prepare. [L1] b: the dry run reads the plan, never the file, so it names
++        # what prepare will do without reading ~/.claude/settings.json (a settings file is present to prove no read).
+         from .launch import main
+         skill = self.tmp / "home" / ".claude" / "skills" / "impeccable"
+         skill.mkdir(parents=True)
+@@ -2443,13 +2444,17 @@ class PanelLaunchGuards(unittest.TestCase):
+         self.write_feature(version="2.8.0", workers=[{"node_id": "ui", "task": "ui-task.md", "skills": ["impeccable"]},
+                                                      {"node_id": "adapter", "task": "adapter-task.md"}])
+         out = io.StringIO()
+-        with patch("workflow.panel.prove_transports", return_value={"pi_bin": "/nvm/bin"}), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
++        # No call path reads the operator's settings file in a dry run ([L1] b): advisor_model raises if reached.
++        with patch("workflow.skills.advisor_model", side_effect=AssertionError("the dry run read ~/.claude/settings.json")), \
++             patch("workflow.panel.prove_transports", return_value={"pi_bin": "/nvm/bin"}), \
++             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+             main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.tmp / "runs"), "--dry-run", "--automatic"])
+         printed = json.loads(out.getvalue())
+         self.assertEqual(printed["skills"]["ui"]["skills"], ["impeccable"])
+         self.assertTrue(printed["skills"]["ui"]["plugin_dir"].endswith("/skills/ui"))
+         self.assertNotIn("adapter", printed["skills"])
+-        self.assertEqual(printed["advisor_model"], {"value": "fable", "note": "read again at prepare from ~/.claude/settings.json"})
++        self.assertNotIn("value", printed["advisor_model"])  # no advisorModel value: the file is not read in a dry run
++        self.assertEqual(printed["advisor_model"]["note"], "read at prepare from ~/.claude/settings.json, pinned as plan.nodes[<lane>].advisor_model")
+         self.assertFalse((self.tmp / "runs").exists())
+ 
+     def test_skills_need_version_2_8_0(self):
+diff --git a/workflow/test_skills.py b/workflow/test_skills.py
+index 48dd80d..3468394 100644
+--- a/workflow/test_skills.py
++++ b/workflow/test_skills.py
+@@ -63,6 +63,32 @@ class SkillsModuleTests(unittest.TestCase):
+         with self.assertRaisesRegex(ValueError, "leaky: link.txt resolves outside the skill folder"):
+             skills.check_skill("pages", "leaky", self.root)
+ 
++    def test_resolve_follows_a_skill_md_symlinked_to_a_regular_file_inside_the_folder(self):
++        # Design (settled): "each name resolves to ~/.claude/skills/<name>/SKILL.md (symlinks followed)". A SKILL.md that
++        # is a symlink to a regular file inside the folder resolves, passes check_skill, and copies as a real file.
++        folder = self.root / "linked-md"
++        (folder).mkdir(parents=True)
++        (folder / "real.md").write_text("---\nname: linked\ndescription: y\n---\n# linked\n")
++        os.symlink("real.md", folder / "SKILL.md")  # relative link inside the folder
++        self.assertEqual(skills.resolve_skill("pages", "linked-md", self.root), folder.resolve())
++        self.assertTrue(skills.check_skill("pages", "linked-md", self.root).is_dir())
++        dest = Path(self.temp.name) / "linked-copy"
++        skills.copy_skill("pages", "linked-md", folder.resolve(), dest)
++        self.assertEqual((dest / "SKILL.md").read_text().splitlines()[-1], "# linked")
++        self.assertFalse((dest / "SKILL.md").is_symlink())  # copied as a real file, not a dangling link
++
++    def test_check_refuses_a_skill_md_symlinked_outside_the_folder(self):
++        # The escape boundary still applies (PRD 4.5, RUNBOOK): a SKILL.md symlinked out of the folder resolves but is
++        # refused by check_skill, the same as any other escaping symlink.
++        folder = self.root / "escaping-md"
++        (folder).mkdir(parents=True)
++        shared = self.home / "shared.md"
++        shared.write_text("---\nname: shared\n---\n# shared\n")
++        os.symlink(shared, folder / "SKILL.md")
++        self.assertEqual(skills.resolve_skill("pages", "escaping-md", self.root), folder.resolve())
++        with self.assertRaisesRegex(ValueError, "escaping-md: SKILL.md resolves outside the skill folder"):
++            skills.check_skill("pages", "escaping-md", self.root)
++
+     def test_digest_is_stable_per_skill_and_covers_contents(self):
+         write_skill(self.root, "s", files={"ref/a.md": "alpha"})
+         first = skills.skill_digest("pages", "s", skills.resolve_skill("pages", "s", self.root))
+@@ -98,14 +124,15 @@ class SkillsModuleTests(unittest.TestCase):
+ 
+ 
+ class WorkerSettingsSkillsVariantTests(unittest.TestCase):
+-    def test_the_skills_variant_adds_only_an_edit_deny_and_the_advisor(self):
++    def test_the_skills_variant_adds_edit_and_write_denies_and_the_advisor(self):
+         run = Path(tempfile.gettempdir()) / "runs" / "skill-run"
+         plain = json.loads(worker_settings(run)[1])
+         variant = json.loads(worker_settings(run, skills_lane="pages", advisor_model="fable")[1])
+-        edit = f"Edit(/{(run.resolve() / 'skills' / 'pages')}/**)"
+-        # Exactly one deny added, the Edit rule on the lane's own plugin (note 6: never a Write rule).
+-        self.assertEqual([rule for rule in variant["permissions"]["deny"] if rule not in plain["permissions"]["deny"]], [edit])
+-        self.assertFalse(any(rule.startswith("Write(") for rule in variant["permissions"]["deny"]))
++        plugin = run.resolve() / "skills" / "pages"
++        edit, write = f"Edit(/{plugin}/**)", f"Write(/{plugin}/**)"
++        # Exactly the Edit and Write denies on the lane's own plugin are added (decisions.md [L1] g); nothing is removed.
++        self.assertEqual([rule for rule in variant["permissions"]["deny"] if rule not in plain["permissions"]["deny"]], [edit, write])
++        self.assertTrue(set(plain["permissions"]["deny"]).issubset(variant["permissions"]["deny"]))
+         # advisorModel is the only other difference; env and worktree are byte for byte the plain settings.
+         self.assertEqual(variant["advisorModel"], "fable")
+         self.assertEqual((variant["env"], variant["worktree"]), (plain["env"], plain["worktree"]))

@@ -191,7 +191,9 @@
         "tests/unit/diff.test.ts",
         "tests/unit/assignment.test.ts",
         "tests/unit/dag.test.ts",
-        "docs/handoff/refine-pages.md"
+        "docs/handoff/refine-pages.md",
+        "src/projects/NowBanner.tsx",
+        "src/projects/CommandBlock.tsx"
       ],
       "checks": [
         {
@@ -252,19 +254,19 @@
           "scenarios": [
             {
               "id": "run-first-screen",
-              "description": "At 1440 px the run page of a paused, a running and a succeeded fixture opens on: the breadcrumb and the run title on one line; a one-sentence state line in the state's colour with its glyph (what it does, waits on, or how it ended); the cause as one quoted line with its open link; the next step as one command with Copy and the other routes in a closed disclosure; the lanes strip with each lane's model pin and round count; then the graph. The metadata (branch, commit, mode, definition hash) sits in a closed disclosure under the title, the worker and review durations as two chips; nothing on the first screen is a paragraph; the viewer stays read-only (no control acts on a run)"
+              "description": "At 1440 px the run page's own DOM ([data-testid=run-view]) of a paused, a running and a succeeded fixture opens on: the run title on its first line (the feature name truncated, the run id in full; the breadcrumb above it is the shell's and is not asserted); a one-sentence state line in the state's colour with its glyph (what it does, waits on, or how it ended); the cause as one quoted line with its open link; the next step's first command with Copy and its remaining steps, in their order, in a closed disclosure named All steps; the lanes strip with each lane's model pin (or the executor only when the lane has no pin) and its repair round count; then the graph. The metadata (branch, commit, mode, definition hash) sits in a closed disclosure under the title, the worker and review durations as two chips; nothing in the run view's first screen is a paragraph; the viewer stays read-only (no control acts on a run)"
             },
             {
               "id": "fix-loop-graph",
-              "description": "On the PRD_VIEWER_REFINE Appendix A fixtures (the worked example: lane viewer, repair-1 applied after a verify block, repair-2 applied after review round 1, round 2 approved; the mid-round example: repair-2 launched, its session not yet bound; the restored-round example: repair-1 blocked after review round 1, the round restored) the graph shows repair-1 after verify_viewer and repair-2 after review, each with a dashed return mark to the step it answers, a meta line 'round <r> of <rounds> \u00b7 <trigger>', status glyph and tone (succeeded for an applied repair, running for a launched one, failed for a blocked one); the launch nodes show their pins (opus-4-8 \u00b7 medium; a lane without a pin shows the executor only); the review node shows 'round 2' and 'delta from <7 chars>' on the worked example, 'round 2 in review' on the mid-round example, and 'round 1' with the restored note on the restored example; its attempt 1 page shows round 1's verdict, findings and reviewers marked superseded; the repair node page shows its round, trigger, the findings verbatim, the outcome and why; the verify attempt after repair-1 says 'after repair 1' and links to it; a running repair is the run's focus and the state line says so; keyboard order visits every node; the legend names the return mark; the lane chips show a failed and a running tone; the Steps table groups by phase with repair rows indented under their step and Activity folds each challenge attempt and repair round into a one-line summary"
+              "description": "On run-detail fixtures the lane builds from the contract examples (contracts/projects/examples.ts fixLoop, fixLoopLaunched, fixLoopRestored) by projecting the repair nodes as Appendix A.1 item 1 says, with a second lane 'shell' added whose roles are null (the worked example: lane viewer, repair-1 applied after a verify block, repair-2 applied after review round 1, round 2 approved; the mid-round example: repair-2 launched, its session not yet bound; the restored-round example: repair-1 blocked after review round 1, the round restored) the graph shows repair-1 after verify_viewer and repair-2 after review, each with a dashed return mark to the step it answers, a meta line 'round <r> of <rounds> \u00b7 <trigger>', status glyph and tone (succeeded for an applied repair, running for a launched one, failed for a blocked one); the viewer lane's launch node shows its pin (opus-4-8 \u00b7 medium) and the shell lane's shows the executor only; the review node shows 'round 2' and 'delta from <7 chars>' on the worked example, 'round 2 in review' on the mid-round example, and 'round 1' with the restored note on the restored example; its attempt 1 page shows round 1's verdict, findings and reviewers marked superseded; the repair node page shows its round, trigger, the findings verbatim, the outcome and why; the verify attempt after repair-1 says 'after repair 1' and links to it; a running repair is the run's focus and the state line says so; keyboard order visits every node; the legend names the return mark; the lane chips show a failed and a running tone (the two lanes in different states); the Steps table groups by phase with repair rows indented under their step and Activity folds each challenge attempt and repair round into a one-line summary"
             },
             {
               "id": "assignment-and-diff",
-              "description": "The Assignment tab opens on one setup line (feature, mode, profile, base commit, reviewers, fix_rounds, follows) and one table row per lane (lane, role, model and effort, skills, owned paths count, checks count, task length) before any long text, with each lane's task, prompt and decisions in closed disclosures; the review node's Diff section renders the diff inline: a file list with added and removed counts, each file a disclosure with hunks and line numbers in add, remove and context tones, the raw patch still downloadable; on the Appendix A fixture the delta diff is the default view and the full diff a second tab; a file over 2,000 diff lines is a stat with a show button"
+              "description": "The Assignment tab opens on one setup line (feature, mode, profile, base commit, fix_rounds, and the reviewers from the latest review result's reviewer ids, 'reviewers not recorded' before a review) and one table row per lane (lane, role, model and effort or 'no pin', skills, owned paths count, checks count, task length) before any long text, with each lane's task, prompt and decisions in closed disclosures; the review node's Diff section renders the diff inline: a file list with added and removed counts, each file a disclosure with hunks and line numbers in add, remove and context tones, a GIT binary patch section as a stat with no hunks, the raw patch still downloadable; on a fixture with review.delta_diff the delta diff is the default view and the full diff a second tab; a file over 2,000 diff lines is a stat with a show button"
             },
             {
               "id": "run-phone",
-              "description": "At 390 px the run page is a single column with 16 px gutters and no horizontal page scroll (the graph box scrolls inside itself), the state line and next step come before the graph, the Pipeline stacks above the Steps (data-layout=stacked asserted), every control is at least 44 px tall, and tables scroll inside their container; in dark theme too"
+              "description": "At 390 px the run view ([data-testid=run-view]) is a single column with no horizontal scroll of the page (the graph box scrolls inside itself; the 16 px gutter of the page is the shell lane's App.css rule and is not asserted here), the state line and next step come before the graph, the Pipeline stacks above the Steps (data-layout=stacked asserted), every control inside the run view is at least 44 px tall, and tables scroll inside their container; in dark theme too"
             }
           ]
         }
@@ -291,8 +293,6 @@
         "src/projects/RunRow.tsx",
         "src/projects/lists.ts",
         "src/projects/lists.css",
-        "src/projects/NowBanner.tsx",
-        "src/projects/CommandBlock.tsx",
         "src/projects/LiveStatus.tsx",
         "src/projects/Time.tsx",
         "src/projects/TimeZoneToggle.tsx",

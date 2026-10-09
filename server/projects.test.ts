@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +12,8 @@ import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts
 import { seedCandidate } from '../tests/project-workflows/seed.ts'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
-import { ATTACK_BYTE_LIMIT, PANEL_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, type RunStoreOptions } from './projects.ts'
+import { mapRepairs, mapReviewRounds, redactDeep } from './fixLoop.ts'
+import { ATTACK_BYTE_LIMIT, PANEL_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, redactPaths, type RunStoreOptions } from './projects.ts'
 import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
@@ -111,6 +112,10 @@ type RunSpec = {
   panels?: unknown
   /** Content written to the live `<run>/panel.json`. */
   livePanel?: string
+  /** Export 1.10.0: the `fix_loop` section as persisted (undefined leaves the key out; null is an explicit null). */
+  fixLoop?: unknown
+  /** Further files of the run directory (the fix loop's live records), by name. */
+  files?: Record<string, string | Buffer>
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -122,6 +127,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
   if (spec.liveLedger !== undefined) await writeFile(join(dir, 'sidecar.ledger.json'), spec.liveLedger)
   if (spec.liveAttack !== undefined) await writeFile(join(dir, 'attack.json'), spec.liveAttack)
   if (spec.livePanel !== undefined) await writeFile(join(dir, 'panel.json'), spec.livePanel)
+  for (const [name, content] of Object.entries(spec.files ?? {})) await writeFile(join(dir, name), content)
   const registrations: Registration[] = []
   for (const packetSpec of spec.packets ?? []) {
     const phase = packetSpec.phase ?? 'worker'
@@ -184,6 +190,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     ...(spec.sidecar !== undefined ? { sidecar: spec.sidecar } : {}),
     ...(spec.attack !== undefined ? { attack: spec.attack } : {}),
     ...(spec.panels !== undefined ? { panels: spec.panels } : {}),
+    ...(spec.fixLoop !== undefined ? { fix_loop: spec.fixLoop } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
@@ -1288,7 +1295,7 @@ test('a retried lane whose newest packet passed is not failed by the error its c
     // The first attempt failed (the task keeps its error until the graph moves on) and the retry passed: the packet decides.
     await writeRun(runsRoot('alpha', 'main'), { runId: 'retried', values: reviewedValues(), next: [], events: [...reviewedEvents],
       tasks: [{ node_id: 'verify_adapter', error: 'RuntimeError(platform verification blocked; retry raised the attempt)', interrupts: [], result: null }],
-      packets: reviewedPackets, review: null, inputs: inputsSection(), diffFile: DIFF, updatedAt: T2 })
+      packets: reviewedPackets, review: null, inputs: inputsSection(), diffFile: DIFF })
     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'retried'))).json())
     const node = detail.snapshot.nodes.find(item => item.node_id === 'verify_adapter')!
     assert.equal(node.status, 'succeeded')
@@ -1524,7 +1531,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.10.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.11.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -3196,5 +3203,288 @@ test('[tryout] a 1.7.0 export serves the tryout, its verdicts redacted and the o
     await writeRun(root, { runId: 'bad-tryout', version: '1.7.0', values: { ui: receipt('ui') }, next: ['launch_adapter'], events: launchEvents.slice(0, 2),
       inputs: { ...inputsSection(), tryout: { required: true, verdicts: [{ result: 'fine', note: null, at: '2026-10-04T10:00:00Z', by: 'operator' }] } } })
     assertError(await get(app, url('alpha', 'main', 'bad-tryout', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+  })
+})
+
+// ---- Export 1.10.0: the in-run fix loop (docs/PRD_VIEWER_REFINE.md Appendix A) ----------------------------------
+
+const FIX_DIR = new URL('../contracts/projects/examples/fix-loop/', import.meta.url)
+const fixText = (name: string) => readFileSync(new URL(name, FIX_DIR), 'utf8')
+const fixJson = (name: string) => JSON.parse(fixText(name))
+const FIX_RUN = 'fix-loop'
+const FINDING = { severity: 'P1', message: 'src/a.ts:1 the return mark is drawn from depends_on', disposition: 'open', worker: 'ui', requirement: 'draw it from fixLoop', reviewer: 'review' }
+
+/** A session entry as `launch_session` writes it (repair.py), for lane `ui`: `launched`, nothing else written yet. */
+function journalEntry(n: number, over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    n, status: 'launched', mode: 'session', by: 'controller', trigger: 'review', round: 1, rounds: 2, lanes: { ui: {} }, recorded_at: '2026-03-01T10:12:00.000000Z',
+    blocked: { step: 'review', phase: 'candidate', candidate_commit: OUTPUT, packets: [] }, workspace: '/synthetic/run/repair-workspace-1', workspace_commit: OUTPUT,
+    what: 'the reviewed candidate', review_round: 1, brief: { findings: [FINDING], delta: '/synthetic/run/review.round-1.diff' },
+    session: { node: `repair-${n}`, launch_token: 'e3a0b7a8-0000-4000-8000-000000000000', session_id: null }, ...over,
+  }
+}
+const journal = (...entries: Record<string, unknown>[]) => json({ version: '1.0.0', repairs: entries })
+const roundsFile = (...rounds: Record<string, unknown>[]) => json({ version: '1.0.0', rounds })
+const reviewRound = (round: number, over: Record<string, unknown> = {}) => ({
+  round, verdict: 'blocked', candidate: OUTPUT, lane: 'ui', findings: [FINDING], reviewer_sessions: ['s-1', 's-2'], archived: true, started_at: '2026-03-01T10:11:00.000000Z', ...over,
+})
+const reviewBlocked = [{ node_id: 'review', error: 'RuntimeError(review blocked)', interrupts: [], result: null }]
+const fixRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
+  runId: FIX_RUN, version: '1.10.0', values: reviewedValues(), next: ['review'], packets: reviewedPackets, events: reviewedEvents, tasks: reviewBlocked,
+  review: null, inputs: inputsSection(), ...spec,
+})
+const reviewDone = reviewedValues({ review: '/synthetic/review.json' })
+const detailOf = async (app: Harness['app'], run = FIX_RUN) => validateRunDetail((await get(app, url('alpha', 'main', run))).json())
+const nodeOf = (detail: RunDetail, id: string) => detail.snapshot.nodes.find(node => node.node_id === id)
+
+test('[fix loop] the live mapping and the Python export are tested against the same real journals of worker-skills-001', () => {
+  const expected = fixJson('expected.json')
+  const receipts = new Map([[1, fixJson('repair-1.interactive.json')], [2, fixJson('repair-2.interactive.json')]])
+  const repairs = mapRepairs(fixJson('repairs.json'), n => receipts.get(n))
+  const rounds = mapReviewRounds(fixJson('review-rounds.json'), repairs, round => fixJson(`review.round-${round}.json`))
+  assert.deepEqual({ version: '1.0.0', rounds: 2, repairs, review_rounds: rounds }, expected)
+  // The record is a valid served fix loop, and the lanes' pins of the receipts reach `requested`.
+  const loop = projectSchemas.fixLoop.parse({ contract_version: '1.10.0', source: 'live', ...expected })
+  assert.deepEqual(loop.repairs.map(repair => repair.requested), [{ model: 'claude-opus-4-8', effort: null }, { model: 'claude-opus-4-8', effort: null }])
+})
+
+test('[fix loop] a non-string item in fix_files or left_behind is dropped by the mapping (the Python export drops it the same way)', () => {
+  const entry = journalEntry(1, { lanes: { ui: { fix_files: ['a.ts', 7, null, 'b.ts'] } }, left_behind: ['x', { y: 1 }, 'z'] })
+  const [repair] = mapRepairs(JSON.parse(journal(entry)), () => undefined)
+  assert.deepEqual([repair.fix_files, repair.left_behind], [['a.ts', 'b.ts'], ['x', 'z']])
+})
+
+test('[fix loop] the real run directory of worker-skills-001 (an export 1.9.0 with session repairs) is read live: repair nodes, statuses, the review attempt and /reviews/2', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const lanes = ['engine']
+    const files: Record<string, string> = {}
+    for (const name of ['repairs.json', 'review-rounds.json', 'review.round-1.json', 'repair-1.interactive.json', 'repair-2.interactive.json']) files[name] = fixText(name)
+    const delta = fixText('review.delta.diff')
+    const section = reviewSection({ attempt: 1, round: 2, delta_from: '56c8ebd521a1b252e9ec7242784977c1a188ed61', delta_diff: { path: 'review.delta.diff', sha256: sha256(delta), bytes: Buffer.byteLength(delta) } } as Partial<ReviewSection>)
+    await writeRun(runsRoot('alpha', 'main'), fixRun({
+      definition: { name: 'Feature implementation', nodes: graphNodes(lanes) as typeof GRAPH_NODES }, version: '1.10.0', tasks: [], files: { ...files, 'review.delta.diff': delta },
+      review: section, inputs: null as never, events: [],
+      values: { run_id: FIX_RUN, review: '/synthetic/review.json' }, next: [], packets: [],
+    }))
+    const detail = await detailOf(app)
+    const loop = detail.fixLoop!
+    assert.equal(loop.source, 'live')
+    assert.equal(loop.contract_version, '1.10.0')
+    assert.deepEqual({ ...loop, contract_version: undefined, source: undefined }, redactDeep({ ...fixJson('expected.json'), contract_version: undefined, source: undefined }, redactPaths))
+    // Repair nodes sit right after the step they answer; nothing depends on them; their status comes from the journal (applied).
+    const ids = detail.definition.nodes.map(node => node.node_id)
+    assert.equal(ids[ids.indexOf('verify_engine') + 1], 'repair-1')
+    assert.equal(ids[ids.indexOf('review') + 1], 'repair-2')
+    assert.deepEqual(detail.definition.nodes.find(node => node.node_id === 'repair-2'), { node_id: 'repair-2', label: 'Repair engine 2', kind: 'worker', depends_on: ['review'] })
+    assert.equal(detail.definition.nodes.some(node => node.depends_on.some(parent => parent.startsWith('repair-'))), false)
+    assert.deepEqual(['repair-1', 'repair-2'].map(id => nodeOf(detail, id)?.status), ['succeeded', 'succeeded'])
+    assert.equal(nodeOf(detail, 'repair-2')?.session_id, '2a16e9fa-a209-449a-b2f9-7297e9dd25d4')
+    // The definition revision is the pinned definition's: a round landing never moves it.
+    const bare = await (async () => { await writeRun(runsRoot('alpha', 'main'), fixRun({ runId: 'bare', definition: { name: 'Feature implementation', nodes: graphNodes(lanes) as typeof GRAPH_NODES }, tasks: [], review: null, inputs: null as never, events: [], values: { run_id: 'bare' }, next: [], packets: [] })); return detailOf(app, 'bare') })()
+    assert.equal(detail.definition.definition_revision, bare.definition.definition_revision)
+    assert.equal(bare.fixLoop, undefined)
+    // The review node is attempt 2 (review.round) and its result is served at /reviews/2.
+    assert.equal(nodeOf(detail, 'review')?.attempt, 2)
+    const review = validateReviewResult((await get(app, url('alpha', 'main', FIX_RUN, '/reviews/2'))).json())
+    assert.deepEqual([review.attempt, review.round, review.delta_from], [2, 2, '56c8ebd521a1b252e9ec7242784977c1a188ed61'])
+    assert.equal(review.delta_diff?.kind, 'patch')
+    assert.equal((await get(app, url('alpha', 'main', FIX_RUN, '/reviews/1'))).status, 404)
+    // The delta diff is served as review.diff is, through the artifact route, hash-checked.
+    const artifact = await get(app, review.delta_diff!.uri)
+    assert.equal(artifact.status, 200)
+    assert.equal(artifact.body, delta)
+  })
+})
+
+test('[fix loop] a 1.9.0 export with session repairs read live projects the review attempt from the archived rounds; one without renders as before', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const files = { 'repairs.json': journal(journalEntry(1, { status: 'applied', applied_at: '2026-03-01T10:30:00.000000Z', reason: 'repair session round 1: review', session: { node: 'repair-1', launch_token: 't', session_id: 'abc-session' } })),
+      'review-rounds.json': roundsFile(reviewRound(1)) }
+    await writeRun(root, fixRun({ runId: 'old-live', version: '1.9.0', review: reviewSection(), values: reviewDone, tasks: [], files }))
+    const old = await detailOf(app, 'old-live')
+    assert.equal(old.fixLoop?.source, 'live')
+    assert.equal(nodeOf(old, 'review')?.attempt, 2)
+    assert.equal(validateReviewResult((await get(app, url('alpha', 'main', 'old-live', '/reviews/2'))).json()).attempt, 2)
+    // The 1.9.0 shape of a run without session repairs: no fixLoop key, no repair node, the 1.9.0 keys of review and inputs only.
+    await writeRun(root, fixRun({ runId: 'plain', version: '1.9.0', review: reviewSection(), values: reviewDone, tasks: [] }))
+    const plain = await detailOf(app, 'plain')
+    assert.deepEqual(Object.keys(plain).sort(), ['definition', 'run_dir', 'snapshot', 'summary'])
+    assert.deepEqual(plain.definition.nodes.map(node => node.node_id), GRAPH_NODES.map(node => node.node_id))
+    assert.equal(nodeOf(plain, 'review')?.attempt, 1)
+    const review = validateReviewResult((await get(app, url('alpha', 'main', 'plain', '/reviews/1'))).json())
+    assert.deepEqual(Object.keys(review).sort(), ['attempt', 'bundle_sha256', 'candidate_commit', 'contract_version', 'diff', 'findings', 'node_id', 'reviewed_at', 'reviewer', 'reviewers', 'run_id', 'verdict'])
+    const inputs = validateRunInputs((await get(app, url('alpha', 'main', 'plain', '/inputs'))).json())
+    assert.equal(inputs.workers.some(worker => 'roles' in worker || 'skills' in worker), false)
+    assert.equal(inputs.automatic !== null && 'fix_rounds' in inputs.automatic, false)
+    // A commit-only journal lists no session repair and adds no node.
+    const commit = { n: 1, status: 'applied', mode: 'commit', reason: 'by hand', by: 'operator', via: 'claude-code', lanes: { ui: {}, adapter: {} }, recorded_at: T1, workspace_commit: OUTPUT }
+    await writeRun(root, fixRun({ runId: 'commit-only', version: '1.9.0', review: reviewSection(), tasks: [], files: { 'repairs.json': journal(commit) } }))
+    const commitOnly = await detailOf(app, 'commit-only')
+    assert.equal(commitOnly.fixLoop, undefined)
+    assert.equal(commitOnly.definition.nodes.some(node => node.node_id.startsWith('repair-')), false)
+  })
+})
+
+test('[fix loop] 1.10.0 is accepted: inputs carry roles, skills and fix_rounds, and the review carries round, delta_from and delta_diff', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const skills = [{ name: 'impeccable', sha256: 'a'.repeat(64) }]
+    const inputs = inputsSection({ automatic: { ...inputsSection().automatic!, fix_rounds: 2 } as never }, {
+      ui: { roles: { model: 'claude-opus-4-8', effort: 'high' }, skills } as never, adapter: { roles: null, skills: [] } as never })
+    await writeRun(runsRoot('alpha', 'main'), fixRun({ tasks: [], inputs, review: reviewSection({ round: 1, delta_from: null, delta_diff: null } as never) }))
+    const served = validateRunInputs((await get(app, url('alpha', 'main', FIX_RUN, '/inputs'))).json())
+    assert.equal(served.automatic?.fix_rounds, 2)
+    assert.deepEqual(served.workers.map(worker => [worker.node_id, worker.roles, worker.skills]), [['ui', { model: 'claude-opus-4-8', effort: 'high' }, skills], ['adapter', null, []]])
+    const review = validateReviewResult((await get(app, url('alpha', 'main', FIX_RUN, '/reviews/1'))).json())
+    assert.deepEqual([review.round, review.delta_from, review.delta_diff], [1, null, null])
+    assert.equal(await detailOf(app).then(detail => detail.fixLoop), undefined)
+  })
+})
+
+test('[fix loop] a repair node reads running, failed or succeeded from its entry, and never enters the run status', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const cases: [string, Record<string, unknown>, string][] = [
+      ['launched', { status: 'launched' }, 'running'], ['captured', { status: 'captured' }, 'running'], ['recorded', { status: 'recorded' }, 'running'],
+      ['applied', { status: 'applied', applied_at: T2, reason: 'repair session round 1: review' }, 'succeeded'],
+      ['blocked', { status: 'blocked', reason: 'the repair session repair-1 ended without a completion file' }, 'failed'],
+    ]
+    const without = await (async () => { await writeRun(root, fixRun({ runId: 'without' })); return detailOf(app, 'without') })()
+    for (const [name, over, status] of cases) {
+      await writeRun(root, fixRun({ runId: `s-${name}`, files: { 'repairs.json': journal(journalEntry(1, over)), 'review-rounds.json': roundsFile(reviewRound(1)) } }))
+      const detail = await detailOf(app, `s-${name}`)
+      assert.equal(nodeOf(detail, 'repair-1')?.status, status, name)
+      assert.deepEqual(nodeOf(detail, 'repair-1'), { node_id: 'repair-1', kind: 'worker', depends_on: ['review'], status, attempt: 1, session_id: null, result_uri: null, lane_results: [] })
+      assert.equal(detail.fixLoop?.source, 'live')
+      if (status !== 'running') assert.equal(detail.summary.status, without.summary.status, `${name}: the run status folds the pinned steps only`)
+    }
+    // While a repair runs, the step it answers is re-entered (running, its attempt unchanged) and the run is running.
+    const running = await detailOf(app, 's-launched')
+    assert.equal(nodeOf(running, 'review')?.status, 'running')
+    assert.equal(nodeOf(without, 'review')?.status, 'failed')
+    assert.equal(running.summary.status, 'running')
+    assert.equal(without.summary.status, 'failed')
+  })
+})
+
+test('[fix loop] a two-lane verify block re-enters every failed verify step while its repair runs, and a launched entry maps without an error', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const entry = journalEntry(3, {
+      trigger: 'verify', round: 1, review_round: undefined, brief: undefined, lanes: { adapter: {} },
+      blocked: { step: 'verify_ui, verify_adapter', packets: [{ node_id: 'ui', reasons: ['ui broke'] }, { node_id: 'adapter', reasons: ['adapter broke'] }] },
+    })
+    delete entry.review_round
+    delete entry.brief
+    await writeRun(runsRoot('alpha', 'main'), fixRun({
+      tasks: [{ node_id: 'verify_ui', error: 'RuntimeError(blocked)', interrupts: [], result: null }, { node_id: 'verify_adapter', error: 'RuntimeError(blocked)', interrupts: [], result: null }],
+      files: { 'repairs.json': journal(entry) },
+    }))
+    const detail = await detailOf(app)
+    const loop = detail.fixLoop!
+    assert.equal('error' in loop, false)
+    assert.deepEqual(loop.repairs[0], {
+      n: 3, node_id: 'repair-3', mode: 'session', lane: 'adapter', trigger: 'verify', round: 1, rounds: 2, status: 'launched', by: 'controller', recorded_at: '2026-03-01T10:12:00.000000Z',
+      applied_at: null, blocked_step: 'verify_adapter', reentered_steps: ['verify_ui', 'verify_adapter'], reason: null, workspace_commit: OUTPUT, session_id: null, review_round: null,
+      findings: [], delta: false, fix_files: [], left_behind: [], requested: null, gate_reasons: ['adapter broke'],
+    })
+    assert.deepEqual(['verify_ui', 'verify_adapter', 'repair-3'].map(id => nodeOf(detail, id)?.status), ['running', 'running', 'running'])
+    assert.deepEqual(detail.definition.nodes.find(node => node.node_id === 'repair-3')?.depends_on, ['verify_adapter'])
+    assert.equal(detail.summary.status, 'running')
+    assert.equal(detail.summary.activity?.focus?.node_id, 'repair-3')
+  })
+})
+
+test('[fix loop] failure isolation: an unknown status is the error form on the list and the detail; an unknown journal key is not an error', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, fixRun({ runId: 'bad-status', files: { 'repairs.json': journal(journalEntry(1, { status: 'exploded' })) } }))
+    await writeRun(root, fixRun({ runId: 'extra-key', files: { 'repairs.json': journal(journalEntry(1, { status: 'applied', applied_at: T2, brand_new_key: { nested: true }, stop_pending: false })) } }))
+    await writeRun(root, fixRun({ runId: 'no-lane', files: { 'repairs.json': journal(journalEntry(1, { lanes: {} })) } }))
+    await writeRun(root, fixRun({ runId: 'bad-actor', files: { 'repairs.json': journal(journalEntry(1, { by: 'robot' })) } }))
+    await writeRun(root, fixRun({ runId: 'garbage', files: { 'repairs.json': '{not json' } }))
+    await writeRun(root, fixRun({ runId: 'other-step', files: { 'repairs.json': journal(journalEntry(1, { trigger: 'verify', lanes: { nobody: {} } })) } }))
+    const warnings: string[] = []
+    const list = await get(app, url('alpha', 'main'))
+    assert.equal(list.status, 200)
+    for (const runId of ['bad-status', 'no-lane', 'bad-actor', 'other-step']) {
+      const response = await get(app, url('alpha', 'main', runId))
+      assert.equal(response.status, 200, runId)
+      const detail = validateRunDetail(response.json())
+      const loop = detail.fixLoop!
+      assert.ok('error' in loop && loop.error.length > 0, runId)
+      assert.deepEqual([loop.rounds, loop.repairs, loop.review_rounds], [null, [], []])
+      assert.equal(detail.definition.nodes.some(node => node.node_id.startsWith('repair-')), false)
+      assert.equal(nodeOf(detail, 'review')?.status, 'failed')  // no repair, no re-entered step
+    }
+    const extra = await detailOf(app, 'extra-key')
+    assert.equal(extra.fixLoop?.source, 'live')
+    assert.equal('error' in extra.fixLoop!, false)
+    assert.equal(nodeOf(extra, 'repair-1')?.status, 'succeeded')
+    // An unreadable journal falls back to the export's record, and says so.
+    const exportRecord = { version: '1.0.0', rounds: 2, repairs: [{ ...fixJson('expected.json').repairs[0], lane: 'ui', blocked_step: 'verify_ui', reentered_steps: ['verify_ui'] }], review_rounds: [] }
+    await writeRun(root, fixRun({ runId: 'fallback', fixLoop: exportRecord, files: { 'repairs.json': '{not json' } }))
+    const fallback = await detailOf(app, 'fallback')
+    assert.equal(fallback.fixLoop?.source, 'export')
+    assert.equal(nodeOf(fallback, 'repair-1')?.status, 'succeeded')
+    void warnings
+  })
+})
+
+test('[fix loop] the export path alone (no live journal): the export\'s fix_loop is served with source export, the error form too', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const record = { version: '1.0.0', rounds: 2, repairs: [{ ...fixJson('expected.json').repairs[1], lane: 'ui', worker: undefined }], review_rounds: fixJson('expected.json').review_rounds.map((round: Record<string, unknown>) => ({ ...round, lane: 'ui' })) }
+    await writeRun(root, fixRun({ runId: 'exp', tasks: [], fixLoop: record }))
+    await writeRun(root, fixRun({ runId: 'exp-error', fixLoop: { version: '1.0.0', error: 'repairs.json has no repairs list', rounds: null, repairs: [], review_rounds: [] } }))
+    await writeRun(root, fixRun({ runId: 'exp-null', fixLoop: null }))
+    const exported = await detailOf(app, 'exp')
+    assert.equal(exported.fixLoop?.source, 'export')
+    assert.equal(nodeOf(exported, 'repair-2')?.status, 'succeeded')
+    const error = (await detailOf(app, 'exp-error')).fixLoop!
+    assert.deepEqual(['error' in error && error.error, error.source], ['repairs.json has no repairs list', 'export'])
+    assert.equal((await detailOf(app, 'exp-null')).fixLoop, undefined)
+  })
+})
+
+test('[fix loop] events of a repair session sit on its repair node: the repair-<n> token first, then the round counted per lane', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const rows: RawEvent[] = [
+      { sequence: 10, time: T2, node: 'repair_ui', status: 'running', message: 'round 1: repair session launched (repair-4, the reviewed candidate 56c8ebd5, review block)' },
+      { sequence: 11, time: T2, node: 'repair_ui', status: 'warning', message: 'repair session repair-4 stop not confirmed: no pid' },
+      { sequence: 12, time: T2, node: 'repair_ui', status: 'passed', message: 'round 1: repair 4 applied; ui is verified again' },
+      { sequence: 13, time: T2, node: 'repair_adapter', status: 'running', message: 'round 1: repair session launched (repair-5, the engine snapshot e5f9d0c7, verify block)' },
+      { sequence: 14, time: T2, node: 'repair_adapter', status: 'failed', message: 'round 1: the repair session ended' },
+      { sequence: 15, time: T2, node: 'repair_ghost', status: 'running', message: 'round 9: repair session launched' },
+    ]
+    const four = journalEntry(4, { status: 'applied', applied_at: T2 })
+    const five = journalEntry(5, { trigger: 'verify', lanes: { adapter: {} }, status: 'blocked', reason: 'ended', review_round: undefined, brief: undefined, blocked: { step: 'verify_adapter', packets: [{ node_id: 'adapter', reasons: [] }] } })
+    await writeRun(runsRoot('alpha', 'main'), fixRun({ events: [...reviewedEvents, ...rows], files: { 'repairs.json': journal(four, five), 'review-rounds.json': roundsFile(reviewRound(1)) } }))
+    const events = ((await get(app, url('alpha', 'main', FIX_RUN, '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual(events.filter(event => event.sequence >= 10).map(event => [event.sequence, event.node_id, event.status]), [
+      [10, 'repair-4', 'running'], [11, 'repair-4', null], [12, 'repair-4', 'succeeded'], [13, 'repair-5', 'running'], [14, 'repair-5', 'failed'], [15, null, null]])
+  })
+})
+
+test('[fix loop] review rounds: the live review-rounds.json, the archived reviewers and a restored round; round k in review shows attempt k with the review section null', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const archive = { reviewers: [{ reviewer_id: 'review', session_id: 's-1', verdict: 'blocked', accepted_at: T2 }, { reviewer_id: 'coverage', session_id: 's-2', verdict: 'approved', accepted_at: T2 }] }
+    const applied = journalEntry(1, { status: 'applied', applied_at: T2, session: { node: 'repair-1', launch_token: 't', session_id: 'abc' } })
+    await writeRun(root, fixRun({ runId: 'in-review', tasks: [], next: ['review'], events: reviewingEvents, files: { 'repairs.json': journal(applied), 'review-rounds.json': roundsFile(reviewRound(1)), 'review.round-1.json': json(archive) } }))
+    const live = await detailOf(app, 'in-review')
+    assert.equal(nodeOf(live, 'review')?.attempt, 2)  // review section null: one plus the archived rounds
+    const loop = live.fixLoop as Extract<NonNullable<RunDetail['fixLoop']>, { rounds: number }>
+    assert.deepEqual(loop.review_rounds[0].reviewers, [{ reviewer_id: 'review', verdict: 'blocked', session_id: 's-1' }, { reviewer_id: 'coverage', verdict: 'approved', session_id: 's-2' }])
+    assert.equal(loop.review_rounds[0].repair_n, 1)
+    // A restored round is one attempt: not archived, no reviewers, review.round 1.
+    const restored = journalEntry(1, { status: 'blocked', reason: 'ended without a completion file' })
+    await writeRun(root, fixRun({ runId: 'restored', review: reviewSection({ round: 1 } as never), values: reviewDone, tasks: [], files: { 'repairs.json': journal(restored), 'review-rounds.json': roundsFile(reviewRound(1, { archived: false, restored_at: T2 })) } }))
+    const back = await detailOf(app, 'restored')
+    assert.equal(nodeOf(back, 'review')?.attempt, 1)
+    const rounds = (back.fixLoop as { review_rounds: { reviewers: unknown[]; restored_at: string | null }[] }).review_rounds
+    assert.deepEqual([rounds[0].reviewers, rounds[0].restored_at], [[], '2026-03-01T10:10:00.000000Z'.replace('10:10:00.000000Z', '10:10:00.000000Z')])
+    assert.equal(nodeOf(back, 'repair-1')?.status, 'failed')
+    // A journal and a rounds file that disagree with the export: the live files win.
+    assert.equal((await detailOf(app, 'restored')).fixLoop?.source, 'live')
   })
 })

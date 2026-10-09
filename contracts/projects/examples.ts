@@ -1,5 +1,5 @@
 import type { WorkerResult } from '../workflow/v1.js'
-import type { AttackRecord, AttackResult, PanelRecord, PanelResults, ReviewFinding, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
+import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, ReviewFinding, RepairEntry, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
 
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
@@ -377,3 +377,246 @@ export const panelPendingRecord: PanelRecord = {
 
 /** The same record as the panels route serves it from the export's `panels` section. */
 export const panelResults: PanelResults = { contract_version: '1.9.0', source: 'export', ...panelRecord }
+
+// ---- The in-run fix loop (1.10.0, docs/PRD_VIEWER_REFINE.md Appendix A): the pinned records, verbatim --------------------
+
+type FixLoopRecord = Omit<Extract<FixLoop, { rounds: number }>, 'contract_version' | 'source'>
+const fixLoopHeader = { contract_version: '1.10.0', source: 'live' } as const
+/** The state after a verify block repaired in round 1 and a review block repaired in round 2, with round 2's reviewers approving. */
+export const fixLoopRecord: FixLoopRecord = {
+  "version": "1.0.0",
+  "rounds": 2,
+  "repairs": [
+    {
+      "n": 1,
+      "node_id": "repair-1",
+      "mode": "session",
+      "lane": "viewer",
+      "trigger": "verify",
+      "round": 1,
+      "rounds": 2,
+      "status": "applied",
+      "by": "controller",
+      "recorded_at": "2026-10-09T08:12:40Z",
+      "applied_at": "2026-10-09T08:31:02Z",
+      "blocked_step": "verify_viewer",
+      "reentered_steps": [
+        "verify_viewer"
+      ],
+      "reason": "repair session round 1: verify",
+      "workspace_commit": "3f1c9a2b7d4e5f60718293a4b5c6d7e8f9012345",
+      "session_id": "6a1d2c3b-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      "review_round": null,
+      "findings": [],
+      "delta": false,
+      "fix_files": [
+        "src/projects/WorkflowGraph.tsx"
+      ],
+      "left_behind": [],
+      "requested": {
+        "model": "claude-opus-4-8",
+        "effort": "medium"
+      },
+      "gate_reasons": [
+        "frontend-unit-regression failed: 1 of 42 tests failed (steps.test.ts: repair row order)"
+      ]
+    },
+    {
+      "n": 2,
+      "node_id": "repair-2",
+      "mode": "session",
+      "lane": "viewer",
+      "trigger": "review",
+      "round": 2,
+      "rounds": 2,
+      "status": "applied",
+      "by": "controller",
+      "recorded_at": "2026-10-09T09:40:11Z",
+      "applied_at": "2026-10-09T10:02:48Z",
+      "blocked_step": "review",
+      "reentered_steps": [
+        "review"
+      ],
+      "reason": "repair session round 2: review",
+      "workspace_commit": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+      "session_id": "0c9b8a7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
+      "review_round": 1,
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "src/projects/WorkflowGraph.tsx:118 the return mark is drawn from depends_on, so a repair node with no fix_loop entry gets an edge to nowhere",
+          "disposition": "open",
+          "worker": "viewer",
+          "requirement": "PRD_VIEWER_REFINE 5.2: the return mark is a drawing from the fix-loop section, never a dependency edge",
+          "reviewer": "general"
+        }
+      ],
+      "delta": false,
+      "fix_files": [
+        "src/projects/WorkflowGraph.tsx",
+        "tests/unit/dag.test.ts"
+      ],
+      "left_behind": [
+        "coverage/"
+      ],
+      "requested": {
+        "model": "claude-opus-4-8",
+        "effort": "medium"
+      },
+      "gate_reasons": []
+    }
+  ],
+  "review_rounds": [
+    {
+      "round": 1,
+      "verdict": "blocked",
+      "candidate": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+      "lane": "viewer",
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "src/projects/WorkflowGraph.tsx:118 the return mark is drawn from depends_on, so a repair node with no fix_loop entry gets an edge to nowhere",
+          "disposition": "open",
+          "worker": "viewer",
+          "requirement": "PRD_VIEWER_REFINE 5.2: the return mark is a drawing from the fix-loop section, never a dependency edge",
+          "reviewer": "general"
+        }
+      ],
+      "reviewer_sessions": [
+        "d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a",
+        "e2f3a4b5-c6d7-4e8f-9a0b-1c2d3e4f5a6b"
+      ],
+      "started_at": "2026-10-09T09:40:10Z",
+      "archived": true,
+      "restored_at": null,
+      "repair_n": 2,
+      "reviewers": [
+        {
+          "reviewer_id": "general",
+          "verdict": "blocked",
+          "session_id": "d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a"
+        },
+        {
+          "reviewer_id": "coverage",
+          "verdict": "approved",
+          "session_id": "e2f3a4b5-c6d7-4e8f-9a0b-1c2d3e4f5a6b"
+        }
+      ]
+    }
+  ]
+}
+export const fixLoop: FixLoop = { ...fixLoopHeader, ...fixLoopRecord }
+/** The same run mid-round at 09:40:12, as the live read serves it: repair 2 `launched`, the session not bound yet. */
+export const launchedRepair: RepairEntry = {
+  "n": 2,
+  "node_id": "repair-2",
+  "mode": "session",
+  "lane": "viewer",
+  "trigger": "review",
+  "round": 2,
+  "rounds": 2,
+  "status": "launched",
+  "by": "controller",
+  "recorded_at": "2026-10-09T09:40:11Z",
+  "applied_at": null,
+  "blocked_step": "review",
+  "reentered_steps": [
+    "review"
+  ],
+  "reason": null,
+  "workspace_commit": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+  "session_id": null,
+  "review_round": 1,
+  "findings": [
+    {
+      "severity": "P1",
+      "message": "src/projects/WorkflowGraph.tsx:118 the return mark is drawn from depends_on, so a repair node with no fix_loop entry gets an edge to nowhere",
+      "disposition": "open",
+      "worker": "viewer",
+      "requirement": "PRD_VIEWER_REFINE 5.2: the return mark is a drawing from the fix-loop section, never a dependency edge",
+      "reviewer": "general"
+    }
+  ],
+  "delta": false,
+  "fix_files": [],
+  "left_behind": [],
+  "requested": null,
+  "gate_reasons": []
+}
+export const fixLoopLaunched: FixLoop = { ...fixLoopHeader, ...fixLoopRecord, repairs: [fixLoopRecord.repairs[0], launchedRepair] }
+/** A review-round repair that ended blocked: the round is restored (`archived: false`, `restored_at` set) and the run stops. */
+export const fixLoopRestoredRecord: FixLoopRecord = {
+  "version": "1.0.0",
+  "rounds": 2,
+  "repairs": [
+    {
+      "n": 1,
+      "node_id": "repair-1",
+      "mode": "session",
+      "lane": "viewer",
+      "trigger": "review",
+      "round": 1,
+      "rounds": 2,
+      "status": "blocked",
+      "by": "controller",
+      "recorded_at": "2026-10-09T11:02:40Z",
+      "applied_at": null,
+      "blocked_step": "review",
+      "reentered_steps": [
+        "review"
+      ],
+      "reason": "the repair session repair-1 ended without a completion file",
+      "workspace_commit": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+      "session_id": "0c9b8a7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d",
+      "review_round": 1,
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "src/projects/WorkflowGraph.tsx:118 the return mark is drawn from depends_on, so a repair node with no fix_loop entry gets an edge to nowhere",
+          "disposition": "open",
+          "worker": "viewer",
+          "requirement": "PRD_VIEWER_REFINE 5.2: the return mark is a drawing from the fix-loop section, never a dependency edge",
+          "reviewer": "general"
+        }
+      ],
+      "delta": false,
+      "fix_files": [],
+      "left_behind": [],
+      "requested": {
+        "model": "claude-opus-4-8",
+        "effort": "medium"
+      },
+      "gate_reasons": []
+    }
+  ],
+  "review_rounds": [
+    {
+      "round": 1,
+      "verdict": "blocked",
+      "candidate": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f",
+      "lane": "viewer",
+      "findings": [
+        {
+          "severity": "P1",
+          "message": "src/projects/WorkflowGraph.tsx:118 the return mark is drawn from depends_on, so a repair node with no fix_loop entry gets an edge to nowhere",
+          "disposition": "open",
+          "worker": "viewer",
+          "requirement": "PRD_VIEWER_REFINE 5.2: the return mark is a drawing from the fix-loop section, never a dependency edge",
+          "reviewer": "general"
+        }
+      ],
+      "reviewer_sessions": [
+        "d1e2f3a4-b5c6-4d7e-8f9a-0b1c2d3e4f5a",
+        "e2f3a4b5-c6d7-4e8f-9a0b-1c2d3e4f5a6b"
+      ],
+      "started_at": "2026-10-09T11:02:39Z",
+      "archived": false,
+      "restored_at": "2026-10-09T11:40:12Z",
+      "repair_n": 1,
+      "reviewers": []
+    }
+  ]
+}
+export const fixLoopRestored: FixLoop = { ...fixLoopHeader, ...fixLoopRestoredRecord }
+/** A loop neither source could project: no repairs, no rounds, no repair nodes. */
+export const fixLoopError: FixLoop = { contract_version: '1.10.0', source: 'export', version: '1.0.0', error: 'repairs.json: repair 2 has a status the viewer does not know', rounds: null, repairs: [], review_rounds: [] }

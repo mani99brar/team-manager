@@ -9,7 +9,7 @@
  * placeholders; every other value the viewer cannot know (a feature name, a run id, a commit, a reason) stays a `<…>`
  * placeholder. Nothing here runs a command or changes a run.
  */
-import { isBlockingFinding, type ReviewResult, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
+import { isBlockingFinding, type FixLoopReviewRound, type RepairEntry, type ReviewResult, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../workflow/v1.ts'
 
 export type NodeStatus = RunDetail['snapshot']['status']
@@ -68,7 +68,10 @@ export type Marker = {
   blocked: boolean
   message: string
   raw: string
-  repair?: { n: number; snapshot: string | null; files: string[] }
+  /** A repair: the operator's `--commit` repair as the timeline shows it, or (`session`) an in-run repair session of the fix loop with its round and trigger. */
+  repair?: { n: number; snapshot: string | null; files: string[]; session?: true; round?: number; trigger?: 'verify' | 'candidate' | 'review' }
+  /** A `controller_blocked` row's cause when a blocked repair session of the fix loop explains it (the loop was exhausted). */
+  cause?: { node_id: string; repair_n: number; lane: string }
   question?: { n: number; text: string; asked_at: string; answered_at: string | null; wait_ms: number | null; live: boolean; exported: boolean }
 }
 
@@ -333,6 +336,19 @@ const TERMINAL: ReadonlySet<SpanStatus> = new Set(['succeeded', 'failed', 'pause
 const FINISHED_RUN: ReadonlySet<NodeStatus> = new Set(['succeeded', 'failed', 'cancelled'])
 const GLYPH: Record<NodeStatus, string> = { pending: '○', running: '●', awaiting_approval: '?', paused: '‖', succeeded: '✓', failed: '✗', cancelled: '○' }
 
+/** The fix loop's session repairs served on the run detail (export 1.10.0); [] without a loop and in its error form. */
+function repairsOf(detail: RunDetail): readonly RepairEntry[] {
+  return detail.fixLoop?.repairs ?? []
+}
+
+function roundsOf(detail: RunDetail): readonly FixLoopReviewRound[] {
+  return detail.fixLoop?.review_rounds ?? []
+}
+
+function repairOf(detail: RunDetail, nodeId: string): RepairEntry | undefined {
+  return repairsOf(detail).find(repair => repair.node_id === nodeId)
+}
+
 function laneOf(nodeId: string): string | null {
   return nodeId.startsWith('launch_') || nodeId.startsWith('verify_') ? nodeId.slice('launch_'.length) : null
 }
@@ -515,7 +531,7 @@ export function buildTimeline(run: RunData): Timeline {
   const { summary, snapshot, definition } = run.detail
   const id = `${summary.project_id}/${summary.workflow_id}/${summary.run_id}`
   const key = [snapshot.last_sequence, snapshot.status, snapshot.nodes.map(node => `${node.status}:${node.attempt}:${node.result_uri ?? ''}`).join(','),
-    definition.definition_revision, summary.created_at, run.events.length, run.events.at(-1)?.sequence, run.inputs ?? null, run.review ?? null, run.results ?? null]
+    definition.definition_revision, fixLoopKey(run.detail), summary.created_at, run.events.length, run.events.at(-1)?.sequence, run.inputs ?? null, run.review ?? null, run.results ?? null]
   const cached = TIMELINES.get(id)
   if (cached && cached.key.every((value, index) => value === key[index])) return cached.timeline
   const timeline = computeTimeline(run)
@@ -523,6 +539,11 @@ export function buildTimeline(run: RunData): Timeline {
   TIMELINES.set(id, { key, timeline })
   if (TIMELINES.size > TIMELINE_CACHE_SIZE) TIMELINES.delete(TIMELINES.keys().next().value!)
   return timeline
+}
+
+/** What of the fix loop the timeline reads, as one comparable value (the detail's objects are new on every poll). */
+function fixLoopKey(detail: RunDetail): string {
+  return [...repairsOf(detail).map(repair => `${repair.n}:${repair.status}:${repair.recorded_at}`), ...roundsOf(detail).map(round => `r${round.round}:${round.archived}:${round.started_at}:${round.restored_at ?? ''}`)].join(',')
 }
 
 function newSpan(nodeId: string, lane: string | null, attempt: number, start: Instant | null): Span {
@@ -543,6 +564,15 @@ function reviewOutcome(review: ReviewResult): string {
     ? `blocked by ${review.reviewers.filter(entry => entry.status === 'blocked').map(entry => entry.reviewer_id).join(', ') || 'review'}`
     : `approved by ${review.reviewers.map(entry => entry.reviewer_id).join(' and ')}`
   return [who, ...counts].join(' · ')
+}
+
+/** An archived review round in the words of `reviewOutcome`: who blocked it and its findings by severity. */
+function roundOutcome(round: FixLoopReviewRound): string {
+  const counts = (['P0', 'P1', 'P2'] as const).map(severity => [severity, round.findings.filter(finding => finding.severity === severity).length] as const)
+    .filter(([, count]) => count > 0).map(([severity, count]) => `${count} ${severity}`)
+  const blockers = round.reviewers.filter(entry => entry.verdict === 'blocked').map(entry => entry.reviewer_id)
+  const who = round.verdict === 'blocked' ? `blocked by ${blockers.join(', ') || round.lane}` : `approved by ${round.reviewers.map(entry => entry.reviewer_id).join(' and ') || 'review'}`
+  return [`round ${round.round} ${who}`, ...counts].join(' · ')
 }
 
 function computeTimeline(run: RunData): Timeline {
@@ -678,6 +708,37 @@ function computeTimeline(run: RunData): Timeline {
     spans.push(span)
   }
 
+  // Export 1.10.0: a repair session is a span of its node; one the event log does not carry is built from the journal entry.
+  for (const repair of repairsOf(detail)) {
+    const own = spans.filter(span => span.node_id === repair.node_id)
+    for (const span of own) span.lane = repair.lane
+    if (own.length) continue
+    const span = newSpan(repair.node_id, repair.lane, 1, { at: repair.recorded_at, source: 'receipt', note: 'repair journal entry' })
+    if (repair.status === 'applied' && repair.applied_at) close(span, 'succeeded', { at: repair.applied_at, source: 'receipt', note: 'repair applied' }, `repair ${repair.n} applied`)
+    else if (repair.status === 'blocked') { span.status = 'failed'; span.outcome = repair.reason ?? `repair ${repair.n} blocked` }
+    else span.outcome = `repair session launched (round ${repair.round} of ${repair.rounds})`
+    spans.push(span)
+  }
+  // Export 1.10.0: the review node's attempts are the archived rounds plus the live one. Round k ends at the moment the fix loop
+  // recorded it (review-rounds.json `started_at`); a restored round is not archived and stays the one live attempt.
+  const archived = roundsOf(detail).filter(round => round.archived).sort((a, b) => a.round - b.round)
+  if (archived.length > 0) {
+    const mine = spans.filter(span => span.node_id === 'review')
+    const lastRecorded = archived.at(-1)!.started_at
+    const live = mine.filter(span => span.start !== null && ms(span.start.at) > ms(lastRecorded)).at(-1)
+    const first = mine.map(span => span.start?.at).filter((value): value is string => value !== undefined).sort()[0]
+    for (const span of mine) if (span !== live) spans.splice(spans.indexOf(span), 1)
+    if (live) live.attempt = archived.length + 1
+    const candidateEnd = latestOf(spans.filter(span => span.node_id === 'candidate').map(span => span.end?.at))
+    for (const round of archived) {
+      const fed = round.round === 1 ? undefined : repairsOf(detail).find(repair => repair.review_round === round.round - 1)?.applied_at ?? archived[round.round - 2]?.started_at
+      const startAt = round.round === 1 ? first ?? candidateEnd : fed
+      const span = newSpan('review', null, round.round, startAt ? { at: startAt, source: round.round === 1 && !first ? 'inferred' : 'receipt', note: round.round === 1 ? 'first review event' : 'the repair of the previous round applied' } : null)
+      close(span, round.verdict === 'approved' ? 'succeeded' : 'failed', { at: round.started_at, source: 'receipt', note: 'review round recorded' }, roundOutcome(round))
+      spans.push(span)
+    }
+  }
+
   const lastReview = spans.filter(span => span.node_id === 'review').at(-1)
   if (review && lastReview?.end) lastReview.outcome = reviewOutcome(review)
   const runStatus = detail.snapshot.status
@@ -729,6 +790,10 @@ function computeTimeline(run: RunData): Timeline {
   return timeline
 }
 
+function sessionRepair(repair: RepairEntry): NonNullable<Marker['repair']> {
+  return { n: repair.n, snapshot: repair.workspace_commit.slice(0, 8), files: [...repair.fix_files], session: true, round: repair.round, trigger: repair.trigger }
+}
+
 function buildMarkers(run: RunData, rows: Row[]): Marker[] {
   const markers: Marker[] = []
   for (const row of rows) {
@@ -745,6 +810,15 @@ function buildMarkers(run: RunData, rows: Row[]): Marker[] {
     }
     if (row.marker === 'repair') {
       const n = Number(REPAIR_APPLIED.exec(message)?.[1])
+      const session = repairsOf(run.detail).find(repair => repair.n === n)
+      if (session) {
+        // A session repair's marker sits on the step it answers, not on the row's node (the controller's rows name `verify_<lane>` for every trigger).
+        marker.node_id = session.blocked_step
+        marker.lane = session.lane
+        marker.repair = sessionRepair(session)
+        markers.push(marker)
+        continue
+      }
       const noted = rows.filter(other => other.node && other.event.sequence <= row.event.sequence && REPAIR_BY_OPERATOR.exec(other.event.message)?.[1] === String(n)).at(-1)
       const detail = noted ? REPAIR_BY_OPERATOR.exec(noted.event.message) : null
       marker.node_id = noted?.node ?? null
@@ -752,6 +826,22 @@ function buildMarkers(run: RunData, rows: Row[]): Marker[] {
       marker.repair = { n, snapshot: detail?.[2] ?? null, files: detail ? detail[3].split(', ').filter(Boolean) : [] }
     }
     markers.push(marker)
+  }
+  // Export 1.10.0: each session repair has its marker on the step it answers, from the journal when no controller row carried it.
+  for (const repair of repairsOf(run.detail)) {
+    if (markers.some(marker => marker.kind === 'repair' && marker.repair?.session && marker.repair.n === repair.n)) continue
+    markers.push({
+      kind: 'repair', at: repair.recorded_at, sequence: null, node_id: repair.blocked_step, lane: repair.lane, run_level: false, blocked: false,
+      message: `Repair ${repair.n} (${repair.lane}, round ${repair.round} of ${repair.rounds}) after ${repair.trigger} blocked`, raw: repair.reason ?? '', repair: sessionRepair(repair),
+    })
+  }
+  // A `controller_blocked` row that follows an exhausted fix loop has the blocked repair session as its cause.
+  const blocked = repairsOf(run.detail).filter(repair => repair.status === 'blocked')
+  for (const marker of markers) {
+    if (marker.kind !== 'controller_blocked' || !marker.run_level || blocked.length === 0) continue
+    const named = /fix loop exhausted for lane ([a-z][a-z0-9-]*)/.exec(marker.raw)?.[1]
+    const cause = [...blocked].reverse().find(repair => named === undefined || repair.lane === named) ?? blocked.at(-1)!
+    marker.cause = { node_id: cause.node_id, repair_n: cause.n, lane: cause.lane }
   }
   // Rule 7: each question and answer is a row; the export's record wins, the event log stands in when it is stale.
   const exported = new Set<string>()
@@ -881,9 +971,20 @@ function depths(detail: RunDetail): Map<string, number> {
 
 function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
   const depth = depths(detail)
-  const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? null
+  const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? repairOf(detail, nodeId)?.recorded_at ?? null
+  const repairIds = new Set(repairsOf(detail).map(repair => repair.node_id))
+  // A running repair session is the run's focus: the steps it re-enters read running beside it and come second.
+  const runningRepair = detail.snapshot.nodes.filter(node => repairIds.has(node.node_id) && node.status === 'running')
+  if (runningRepair.length) {
+    const node = runningRepair.reduce((best, candidate) => ms(since(candidate.node_id) ?? '') >= ms(since(best.node_id) ?? '') ? candidate : best)
+    return { node_id: node.node_id, label: labelOf(detail, node.node_id), kind: node.kind, status: node.status, since: since(node.node_id) }
+  }
+  // A blocked repair is a focus candidate only while no pinned node runs or awaits approval and the run has not succeeded.
+  const hideBlockedRepairs = detail.snapshot.status === 'succeeded'
+    || detail.snapshot.nodes.some(node => !repairIds.has(node.node_id) && (node.status === 'running' || node.status === 'awaiting_approval'))
   const pick = (wanted: readonly NodeStatus[], skip: string | null = null) => {
-    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip && node.node_id !== ATTACK_NODE_ID)
+    const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip && node.node_id !== ATTACK_NODE_ID
+      && !(hideBlockedRepairs && repairIds.has(node.node_id)))
     if (!matches.length) return null
     // Parallel lanes share a column: the tie goes to the latest event.
     const tied = matches.filter(node => depth.get(node.node_id) === depth.get(matches[0].node_id))
@@ -1552,11 +1653,14 @@ function runningNow(context: Context): Draft | null {
   // current step, so the banner names it, never "between steps" and never the report-only attack node (PRD_ATTACK_PASS 4.6).
   const attackWait = !running.length && context.focus?.node_id === 'review'
     && context.run.detail.snapshot.nodes.some(node => node.node_id === ATTACK_NODE_ID && node.status === 'running')
-  const headline: Text = ['● Running']
-  if (resumed && context.focus) headline.push(` · ${context.focus.label} · resumed at `, clock(resumed.at))
-  else if (attackWait && context.focus) headline.push(` · ${context.focus.label}`)
-  else if (!running.length) headline.push(' · between steps')
-  for (const node of running.slice(0, 2)) {
+  const repair = repairOf(context.run.detail, context.focus?.node_id ?? '')
+  const answering = repair && context.focus?.status === 'running' ? repair : undefined
+  const headline: Text = [answering ? `● Running: repair ${answering.n} of ${answering.lane} (round ${answering.round} of ${answering.rounds}) after ${answering.trigger} blocked` : '● Running']
+  // The repair's sentence names the step it answers; the generic prefixes below are for every other focus.
+  if (!answering && resumed && context.focus) headline.push(` · ${context.focus.label} · resumed at `, clock(resumed.at))
+  else if (!answering && attackWait && context.focus) headline.push(` · ${context.focus.label}`)
+  else if (!answering && !running.length) headline.push(' · between steps')
+  for (const node of answering ? [] : running.slice(0, 2)) {
     headline.push(` · ${labelOf(context.run.detail, node.node_id)}`)
     const span = context.timeline.byNode.get(node.node_id)?.at(-1)
     const worker = workerOf(context.run.inputs, node.node_id.startsWith('launch_') ? laneOf(node.node_id) : null)
@@ -1570,7 +1674,8 @@ function runningNow(context: Context): Draft | null {
   const watch = running.flatMap(node => node.node_id.startsWith('launch_') ? [command(`"$PY" -m workflow.interactive attach-one "$RUN" --node ${laneOf(node.node_id)}`, 'Optional, to watch a pane:')] : [])
   return {
     situation: 'running', tone: 'running', glyph: '●', headline,
-    since: resumed?.at ?? (running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : attackWait ? context.focus?.since ?? null : null),
+    since: answering ? context.timeline.byNode.get(answering.node_id)?.at(-1)?.start?.at ?? context.focus?.since ?? null
+      : resumed?.at ?? (running.length ? context.timeline.byNode.get(running[0].node_id)?.at(-1)?.start?.at ?? null : attackWait ? context.focus?.since ?? null : null),
     next: { action: 'none', label: context.automatic ? 'No action needed: the controller is supervising.' : 'No action needed while the steps run.', runbook: [], steps: watch, caveat: null },
   }
 }

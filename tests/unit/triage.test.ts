@@ -1437,3 +1437,165 @@ describe('the review sidecar in the triage model', () => {
     assert.deepEqual(gaps.map(gap => [gap.kind, gap.to]), [['idle', '2026-10-01T14:20:00Z']])
   })
 })
+
+// ---- Export 1.10.0: the in-run fix loop (docs/PRD_VIEWER_REFINE.md Appendix A, A.2) -------------------------------------
+
+type FixLoop = NonNullable<RunDetail['fixLoop']>
+type Repair = Extract<FixLoop, { rounds: number }>['repairs'][number]
+const COMMIT = 'c'.repeat(40)
+const FINDING = { severity: 'P1' as const, message: 'src/a.ts:1 the return mark is drawn from depends_on', disposition: 'open' as const, worker: 'game', requirement: 'draw it from fixLoop', reviewer: 'review' }
+
+function repairOf(n: number, over: Partial<Repair> = {}): Repair {
+  const trigger = over.trigger ?? 'review'
+  const step = trigger === 'verify' ? 'verify_game' : trigger
+  return {
+    n, node_id: `repair-${n}`, mode: 'session', lane: 'game', trigger, round: 1, rounds: 2, status: 'applied', by: 'controller', recorded_at: t(205), applied_at: t(400),
+    blocked_step: step, reentered_steps: [step], reason: `repair session round ${n}: ${trigger}`, workspace_commit: COMMIT, session_id: `session-${n}`,
+    review_round: trigger === 'review' ? 1 : null, findings: trigger === 'review' ? [FINDING] : [], delta: false, fix_files: ['src/a.ts'], left_behind: [],
+    requested: { model: 'claude-opus-4-8', effort: null }, gate_reasons: [], ...over,
+  }
+}
+
+function roundOf(round: number, over: Partial<NonNullable<Extract<FixLoop, { rounds: number }>['review_rounds']>[number]> = {}) {
+  return {
+    round, verdict: 'blocked' as const, candidate: COMMIT, lane: 'game', findings: [FINDING], reviewer_sessions: ['s-1', 's-2'], started_at: t(205), archived: true, restored_at: null,
+    repair_n: 2, reviewers: [{ reviewer_id: 'review', verdict: 'blocked' as const, session_id: 's-1' }], ...over,
+  }
+}
+
+/** A synthetic run with its fix loop: the repair nodes are projected as the server does (right after the step they answer). */
+function looped(base: RunData, loop: { repairs: Repair[]; review_rounds?: ReturnType<typeof roundOf>[] }, status: NodeStatusName, extraNodes: Record<string, NodeStatusName> = {}): RunData {
+  const state = (repair: Repair): NodeStatusName => repair.status === 'applied' ? 'succeeded' : repair.status === 'blocked' ? 'failed' : 'running'
+  const insert = <T extends { node_id: string }>(nodes: T[], make: (repair: Repair) => T) =>
+    nodes.flatMap(node => [node, ...loop.repairs.filter(repair => repair.blocked_step === node.node_id).map(make)])
+  const definition = { ...base.detail.definition, nodes: insert(base.detail.definition.nodes, repair => ({ node_id: repair.node_id, label: `Repair ${repair.lane} ${repair.n}`, kind: 'worker' as const, depends_on: [repair.blocked_step] })) }
+  const nodes = insert(base.detail.snapshot.nodes.map(node => ({ ...node, status: extraNodes[node.node_id] ?? node.status })),
+    repair => ({ node_id: repair.node_id, kind: 'worker' as const, depends_on: [repair.blocked_step], status: state(repair), attempt: 1, session_id: null, result_uri: null, lane_results: [] }))
+  const fixLoop = { contract_version: '1.10.0' as const, source: 'live' as const, version: '1.0.0' as const, rounds: 2, repairs: loop.repairs, review_rounds: loop.review_rounds ?? [] }
+  const detail = validateRunDetail({ summary: { ...base.detail.summary, status }, definition, snapshot: { ...base.detail.snapshot, status, nodes }, fixLoop })
+  return { ...base, detail }
+}
+
+/** skeleton-001's lane after a review block and the repair that answered it: round 1 recorded at +205 s, applied at +400 s, round 2 approves at +500 s. */
+const FIXED_EVENTS: EventSpec[] = [
+  [0, 'launch_game', 'running', 'Launching or reconciling the exact native session'],
+  [10, 'verify_game', 'succeeded', 'Required tests and artifacts passed'],
+  [20, 'candidate', 'succeeded', `Combined revision ${COMMIT}`],
+  [100, 'review', 'running', 'Launching reviewer review over the shared review worktree'],
+  [200, 'review', 'failed', 'Review blocked: 1 P1'],
+  [210, 'repair-2', 'running', 'round 1: repair session launched (repair-2, the reviewed candidate cccccccc, review block)'],
+  [400, 'repair-2', 'succeeded', 'round 1: repair 2 applied; game is verified again'],
+  [401, null, 'running', 'Repair 2 applied: checkpoint forked from 1f1c31a0 (after handoff); attempts reset'],
+  [420, 'review', 'running', 'Launching reviewer review over the shared review worktree'],
+  [500, 'review', 'succeeded', 'Review approved'],
+]
+
+describe('the in-run fix loop in the triage model (A.2)', () => {
+  const settled = (events: EventSpec[], nodes: Record<string, NodeState>, status: NodeStatusName, loop: Parameters<typeof looped>[1], extra: Record<string, NodeStatusName> = {}) => {
+    const base = synthetic({ status, nodes, events: events.filter(([, node]) => node === null || !node.startsWith('repair-')).map(spec => spec) })
+    // The repair rows belong to the repair nodes, which the base definition lacks: add them after the base is validated.
+    const rows = events.map(([second, node, st, message], index) => eventSchema.parse({
+      contract_version: '1.0.0', run_id: base.detail.summary.run_id, event_id: `r:${index + 1}`, sequence: index + 1, occurred_at: t(second), node_id: node, attempt: node ? 1 : 0,
+      type: st && node ? 'status_changed' : 'log', status: st, message, artifact: null, result_uri: null, reused_from_attempt: null,
+    }))
+    return looped({ ...base, events: rows }, loop, status, extra)
+  }
+  const APPROVED = { challenge: 'succeeded', launch_game: 'succeeded', handoff: 'succeeded', verify_game: 'succeeded', candidate: 'succeeded', review: 'succeeded' } as const
+
+  it('a repair session is a span of its node with a repair marker on the step it answers', () => {
+    const run = settled(FIXED_EVENTS, { ...APPROVED, approval: 'pending' }, 'running', { repairs: [repairOf(2)], review_rounds: [roundOf(1)] })
+    const timeline = buildTimeline(run)
+    const spans = timeline.byNode.get('repair-2') ?? []
+    assert.equal(spans.length, 1)
+    assert.deepEqual([spans[0].lane, spans[0].status, spans[0].start?.at, spans[0].end?.at, spans[0].attempt], ['game', 'succeeded', t(210), t(400), 1])
+    const marker = timeline.markers.find(item => item.kind === 'repair')!
+    assert.equal(marker.node_id, 'review')  // the step it answers, not the row's node
+    assert.equal(marker.lane, 'game')
+    assert.deepEqual(marker.repair, { n: 2, snapshot: COMMIT.slice(0, 8), files: ['src/a.ts'], session: true, round: 1, trigger: 'review' })
+    assert.equal(timeline.markers.filter(item => item.kind === 'repair').length, 1)  // the controller's "Repair 2 applied" row is that marker
+  })
+
+  it('a session repair without events is still a span and a marker, built from its journal entry', () => {
+    const run = settled(FIXED_EVENTS.filter(([, node]) => node !== 'repair-2' && node !== null), { ...APPROVED, approval: 'pending' }, 'running', { repairs: [repairOf(2)], review_rounds: [roundOf(1)] })
+    const timeline = buildTimeline(run)
+    const span = timeline.byNode.get('repair-2')?.[0]
+    assert.deepEqual([span?.status, span?.start?.at, span?.end?.at, span?.start?.source], ['succeeded', t(205), t(400), 'receipt'])
+    assert.deepEqual(timeline.markers.map(item => [item.kind, item.node_id, item.repair?.session]).filter(([kind]) => kind === 'repair'), [['repair', 'review', true]])
+  })
+
+  it('the review node has one attempt per archived round plus the live one; round 1 ends where the loop recorded it', () => {
+    const run = settled(FIXED_EVENTS, { ...APPROVED, approval: 'pending' }, 'running', { repairs: [repairOf(2)], review_rounds: [roundOf(1)] })
+    const attempts = buildTimeline(run).byNode.get('review')!
+    assert.deepEqual(attempts.map(span => [span.attempt, span.status]), [[1, 'failed'], [2, 'succeeded']])
+    assert.equal(attempts[0].end?.at, t(205))  // review-rounds.json started_at
+    assert.equal(attempts[0].start?.at, t(100))
+    assert.match(attempts[0].outcome, /^round 1 blocked by review · 1 P1$/)
+    assert.equal(attempts[1].start?.at, t(420))
+    assert.equal(attempts[1].end?.at, t(500))
+  })
+
+  it('a restored round stays the one live attempt of the review node', () => {
+    const run = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, review: 'failed' }, 'failed', { repairs: [repairOf(2, { status: 'blocked', applied_at: null })], review_rounds: [roundOf(1, { archived: false, restored_at: t(300) })] })
+    assert.deepEqual((buildTimeline(run).byNode.get('review') ?? []).map(span => span.attempt), [1])
+  })
+
+  it('a running repair is the focus, and the Now sentence names it', () => {
+    const events: EventSpec[] = [...FIXED_EVENTS.slice(0, 6)]
+    const run = settled(events, { ...APPROVED, review: 'running' }, 'running', { repairs: [repairOf(2, { status: 'launched', applied_at: null, session_id: null })], review_rounds: [roundOf(1)] })
+    const focus = deriveFocus(run.detail, run.events)
+    assert.deepEqual([focus?.node_id, focus?.label, focus?.status, focus?.since], ['repair-2', 'Repair game 2', 'running', t(210)])
+    const now = deriveNow(run)
+    assert.equal(now.situation, 'running')
+    assert.match(textToString(now.headline, T0), /^● Running: repair 2 of game \(round 1 of 2\) after review blocked/)
+    assert.equal(now.focus?.node_id, 'repair-2')
+    assert.equal(now.since, t(210))
+  })
+
+  it('a two-lane verify block: the focus is the one running repair although both failed verify steps read running', () => {
+    const base = guardrails.detail
+    const nodes = Object.fromEntries(base.snapshot.nodes.map(node => [node.node_id, 'succeeded' as NodeStatusName]))
+    const repair = { ...repairOf(1, { trigger: 'verify', lane: 'ui', status: 'recorded', applied_at: null }), blocked_step: 'verify_ui', reentered_steps: ['verify_controller', 'verify_ui'] }
+    const states = { ...nodes, verify_controller: 'running', verify_ui: 'running', candidate: 'pending', review: 'pending', approval: 'pending', integrate: 'pending' } as Record<string, NodeStatusName>
+    const detail = looped({ detail: base, events: guardrails.events, inputs: guardrails.inputs, review: null, results: new Map() }, { repairs: [repair] }, 'running', states).detail
+    assert.equal(deriveFocus(detail, [])?.node_id, 'repair-1')
+    const withoutRepair = looped({ detail: base, events: [], inputs: guardrails.inputs, review: null, results: new Map() }, { repairs: [repairOf(1, { trigger: 'verify', lane: 'ui', status: 'applied' })] }, 'running', states).detail
+    assert.equal(deriveFocus(withoutRepair, [])?.node_id, 'verify_controller')  // an applied repair is no focus; the running steps are
+  })
+
+  it('a blocked repair is a focus candidate only while no pinned node runs or awaits approval and the run has not succeeded', () => {
+    const blocked = repairOf(2, { status: 'blocked', applied_at: null })
+    const failed = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, review: 'failed' }, 'failed', { repairs: [blocked], review_rounds: [roundOf(1, { archived: false, restored_at: t(300) })] })
+    assert.equal(deriveFocus(failed.detail, failed.events)?.node_id, 'review')  // definition order: the step it answers comes first
+    // Only the repair reads failed (the step re-ran green): it is the candidate.
+    const only = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, review: 'succeeded' }, 'failed', { repairs: [blocked] })
+    assert.equal(deriveFocus(only.detail, only.events)?.node_id, 'repair-2')
+    // A retry that re-verifies the lane takes the focus away.
+    const retry = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, review: 'succeeded', verify_game: ['running', 2] }, 'running', { repairs: [blocked] })
+    assert.equal(deriveFocus(retry.detail, retry.events)?.node_id, 'verify_game')
+    const approval = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, approval: 'awaiting_approval' }, 'paused', { repairs: [blocked] })
+    assert.notEqual(deriveFocus(approval.detail, approval.events)?.node_id, 'repair-2')
+    // A succeeded run with an earlier blocked repair has no repair focus.
+    const done = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, approval: 'succeeded', integrate: 'succeeded' }, 'succeeded', { repairs: [blocked] })
+    assert.equal(deriveFocus(done.detail, done.events), null)
+  })
+
+  it('a blocked repair is the cause of the controller_blocked row of an exhausted fix loop', () => {
+    const exhausted = 'Controller blocked: fix loop exhausted for lane game after 2 rounds: the repair session repair-2 ended without a completion file'
+    const events: EventSpec[] = [...FIXED_EVENTS.slice(0, 5), [210, 'repair-2', 'running', 'round 1: repair session launched (repair-2, the reviewed candidate cccccccc, review block)'],
+      [300, 'repair-2', 'failed', 'round 1: the repair session repair-2 ended without a completion file'], [301, null, 'failed', exhausted]]
+    const run = settled(events, { ...APPROVED, review: 'failed' }, 'failed', { repairs: [repairOf(2, { status: 'blocked', applied_at: null })], review_rounds: [roundOf(1, { archived: false, restored_at: t(300) })] })
+    const marker = buildTimeline(run).markers.find(item => item.kind === 'controller_blocked')!
+    assert.deepEqual(marker.cause, { node_id: 'repair-2', repair_n: 2, lane: 'game' })
+    assert.deepEqual(buildTimeline(run).byNode.get('repair-2')?.map(span => span.status), ['failed'])
+    // Without a blocked repair the row has no cause.
+    const plain = synthetic({ status: 'failed', nodes: { ...APPROVED, review: 'failed' }, events: [[301, null, 'failed', exhausted]] })
+    assert.equal(buildTimeline(plain).markers.find(item => item.kind === 'controller_blocked')?.cause, undefined)
+  })
+
+  it('a run without a fix loop derives exactly as before', () => {
+    const before = buildTimeline(runData(skeleton))
+    assert.equal(skeleton.detail.fixLoop, undefined)
+    assert.equal(before.markers.some(item => item.repair?.session), false)
+    assert.equal(deriveFocus(skeleton.detail, skeleton.events)?.node_id, 'review')
+  })
+})

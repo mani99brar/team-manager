@@ -1,0 +1,159 @@
+{
+  "transport": "native",
+  "bundle_sha256": "2a068bdaf9027a4be3f76686398f2fa355f5781c52729d3131ab12290de25e99",
+  "candidate_commit": "afc9456e536b209aa5f0ab89dfc686542c73d798",
+  "patch_sha256": "1b0b51abdfcafe2cdef32c1eef2f703eaee546edc8bc03ae89b8e2211655ca8c",
+  "delta_from": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+  "delta_sha256": "49c3ceb1d2708d03efb700a4dd53607fc3de2cccd03cb7d712b928c5ee7dea6f",
+  "status": "succeeded",
+  "reviewers": [
+    "general",
+    "coverage"
+  ],
+  "decided_at": "2026-10-08T15:31:48.384473Z",
+  "review": {
+    "run_id": "worker-skills-001",
+    "bundle_sha256": "2a068bdaf9027a4be3f76686398f2fa355f5781c52729d3131ab12290de25e99",
+    "candidate_commit": "afc9456e536b209aa5f0ab89dfc686542c73d798",
+    "reviewer": "14bac225-df49-4f86-8f78-8219e25047de, 34355dfd-660e-459f-8abe-e3271d8cb9c9",
+    "independent": true,
+    "verdict": "approved",
+    "findings": [
+      {
+        "severity": "P1",
+        "message": "Round 1 P1s (general and coverage), the plugin Write deny of decisions.md [L1](g), are resolved. workflow/sessions.py:306-308 now appends both Edit(/<run>/skills/<lane>/**) and Write(/<run>/skills/<lane>/**) for a skills lane only, and nothing is removed from the list. workflow/test_skills.py:132-135 asserts that exactly [edit, write] are added and that the plain deny list is a subset of the variant's. workflow/test_interactive.py:529 asserts that the Write rule is in the launched --settings. RUNBOOK 'The pinned plugin', the README paragraph and the handoff now describe both denies. The plain worker_settings call, worker_settings_sha256 and the judges' settings are byte for byte unchanged. Verification packet attempt 3 on afc9456: workflow-unit 1104 passed, shared-contract 31 passed. Consequence: none remaining. The operator's [L1](g) holds as written in every skills lane's settings bytes and skills_settings_sha256.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+        "reviewer": "general"
+      },
+      {
+        "severity": "P1",
+        "message": "The round 1 P1 on [L1](b), where the dry run read ~/.claude/settings.json, is resolved. workflow/launch.py:655-661 no longer imports or calls skills.advisor_model. It prints only a note that advisorModel is read at prepare and pinned as plan.nodes[<lane>].advisor_model. The only remaining caller is prepare (workflow/pipeline.py:1607, skills_mod.advisor_model(), once, then pinned at :1636). interactive.py:303 reads the plan's pin for both the worker and run_repair. workflow/test_pipeline.py::PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor patches the module attribute workflow.skills.advisor_model to raise, so a stray read in the dry run would fail the test. It also asserts that no value is printed. Consequence: none remaining. The dry run no longer reads the operator's settings file, as [L1](b) requires.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+        "reviewer": "general"
+      },
+      {
+        "severity": "P1",
+        "message": "The round 1 P1 on the symlinked SKILL.md is resolved. workflow/skills.py:77-80 dropped the is_symlink() refusal. exists() and is_file() follow the link, so a SKILL.md that is a symlink to a regular file now resolves. _walk and copy_skill copy it as a real file (test_resolve_follows_a_skill_md_symlinked_to_a_regular_file_inside_the_folder). The PRD's own case (PRD line 9: ~/.claude/skills/impeccable is itself a symlink into a shared clone) resolves through the folder's resolve(). A SKILL.md linked outside its resolved skill folder is still refused, as 'SKILL.md resolves outside the skill folder' (test_check_refuses_a_skill_md_symlinked_outside_the_folder). That refusal comes from the design challenge's copy note (challenge.json: 'refuse ... a link that resolves outside the skill folder's resolved root or forms a loop'). It is listed in the RUNBOOK's refusals and names the lane and the skill, so it is a documented, security-motivated boundary: it keeps a skill from copying, for example, a key file into the run directory a worker can read. It does not contradict 'symlinks followed'. Consequence: none blocking. An operator whose SKILL.md points outside its skill folder gets a named refusal at launch and must make the folder itself the symlink.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)",
+        "reviewer": "general"
+      },
+      {
+        "severity": "P2",
+        "message": "The [L1](i) canary evidence is now stale against the final argv. [L1](i) asks for one claude --bg canary 'with the skills lane's exact argv'. The canary recorded in docs/handoff/worker-skills.md ('Probes') was run in round 1. Its --settings deny list was a reduced probe list (Read(~/.ssh/**) and an Edit rule on the probe plugin), not the controller's list, and it had no Write rule. Repair 2 then added the Write(/<run>/skills/<lane>/**) deny, and no canary was run again. RUNBOOK 'What loads, what does not' now says so ('round 1's, before the plugin Write deny was added'). The handoff still calls it a canary 'with the exact skills-lane argv'. The risk is low. The codebase's own record (interactive.py:421-424) shows Claude Code accepts a Write(...) rule but never matches it, so the rule should be inert rather than invalidate the settings. The Edit rule already covers Write. Fix: rerun the canary with the final argv (full deny list, both plugin rules), or correct the handoff wording. The [G7] canary-first launch of viewer-refine also gives a live check. Consequence: the operator relies on a handoff that says the exact final argv was proven live, when the final --settings (with the Write deny) has not been run in a claude --bg session. A CLI-side surprise with the new rule would show up only at the first viewer-refine skills launch.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+        "reviewer": "general"
+      },
+      {
+        "severity": "P1",
+        "message": "Resolved (round 1 P1, the missing Write deny on the pinned plugin, raised by both reviewers). On the candidate, workflow/sessions.py:301-306 appends both `Edit(/<run>/skills/<lane>/**)` and `Write(/<run>/skills/<lane>/**)` when `skills_lane` is set and removes nothing. workflow/test_skills.py::WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_edit_and_write_denies_and_the_advisor asserts that the added rules are exactly [edit, write] and that the plain deny list is a subset of the variant's. workflow/test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today:528-529 asserts both rules in the launched skills argv. worker_authority (sessions.py:663-669) derives skills_settings_sha256 from the same function, and RecordTests.test_prepare_pins_a_skills_lanes_plugin_tree_and_the_authority checks that digest. The RUNBOOK, README and handoff now describe both denies. The departure is gone, so no open_assumptions entry is needed. Both packets pass on afc9456 (workflow-unit 1104/0, shared-contract 31/0). Consequence: none remaining.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P1",
+        "message": "Resolved (round 1 P1, the dry run reading ~/.claude/settings.json against [L1](b)). workflow/launch.py:653-659 no longer imports or calls `advisor_model`. The dry run prints only a note: {\"note\": \"read at prepare from ~/.claude/settings.json, pinned as plan.nodes[<lane>].advisor_model\"}. launch_commands (launch.py:453-459) calls only check_skill/skills_root. The file is read once, at prepare (pipeline.py:1607), and pinned at pipeline.py:1636. The worker and repair launches read plan.nodes[<lane>].advisor_model (interactive.py:302-304). workflow/test_pipeline.py::PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor patches workflow.skills.advisor_model to raise AssertionError, writes a settings file with advisorModel, and asserts that no `value` is printed. Consequence: none remaining.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P1",
+        "message": "Resolved (round 1 P1, a symlinked SKILL.md refused). workflow/skills.py:77-80 now checks only `exists()` and `is_file()`, both of which follow the link; the `is_symlink()` refusal is gone. workflow/test_skills.py::SkillsModuleTests.test_resolve_follows_a_skill_md_symlinked_to_a_regular_file_inside_the_folder links SKILL.md -> real.md inside the folder. It asserts that resolve_skill and check_skill pass and that copy_skill writes a real file (not a symlink) with the target's content. test_check_refuses_a_skill_md_symlinked_outside_the_folder shows that a SKILL.md linked outside the folder resolves and is then refused by the escape rule (_walk, skills.py:103-105). The task delegates refusals to PRD 4.5 (\"Refusals (PRD 4.5) happen before anything is written\"), and the RUNBOOK lists \"a symlink that resolves outside the skill folder\" among the refusals, so this does not contradict \"symlinks followed\". Consequence: none remaining.",
+        "disposition": "resolved",
+        "worker": "engine",
+        "requirement": "each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "The skills lane's launch argv is not asserted in full. Requirement (Acceptance 1): \"the launch argv of both lanes is asserted in full (the plain lane identical to today's, the skills lane with the three flag changes and `Skill` in the tools)\". workflow/test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today compares a full list only for the plain `adapter` lane (lines 531-534). For `ui` it checks piecewise (lines 521-529): `--safe-mode` absent, a 4-slot window from `--setting-sources`, the `--tools` value, and two settings keys. It never checks `--bg`, `--name`, `--strict-mcp-config --mcp-config`, `--permission-mode` or the trailing prompt, and never checks that the settings JSON equals worker_settings(..., skills_lane=\"ui\", advisor_model=\"fable\"). test_a_repair_session_of_a_skills_lane_gets_the_same_flags is piecewise the same way and does not assert the plugin denies. The current code builds them correctly (interactive.py:349-356, 386-390), but a stray, dropped or reordered flag elsewhere in a skills argv would pass. The same gap leaves the Goal line \"Everything else of the launch (deny list, `--strict-mcp-config`, pinned model and effort, permissions, launch name, prompt, receipt) is unchanged\" proved only in part for the skills lane. Consequence: a future change that alters the rest of a skills lane's launch (for example, drops `--strict-mcp-config` and so lets user MCP servers in) passes the suite, and viewer-refine's UI lanes get a launch the operator did not approve.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "the launch argv of both lanes is asserted in full (the plain lane identical to today's, the skills lane with the three flag changes and `Skill` in the tools)",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "[L1](c) preflight flags: no test shows that preflight fails without them. [L1](c): \"Preflight checks that `claude --help` lists `--setting-sources` and `--plugin-dir` as it checks `--safe-mode` and `--tools`\". The code adds both flags to required_flags (pipeline.py:1483). workflow/test_portable.py::PreflightClaudeFlags.test_preflight_refuses_a_claude_cli_without_settings_or_effort (lines 239-241) puts both new flags into all three stub `--help` outputs and drops only `--settings` or `--effort`. No case asserts a non-zero exit when `--setting-sources` or `--plugin-dir` is missing. The worker discloses this in `untested`: \"no unit test asserts preflight fails without them\". Proof on the candidate: self-report plus code. Consequence: if the two flags fell out of required_flags, a host whose CLI lacks them would pass preflight, and every skills-lane launch would then fail after prepare had written the run.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "No test covers launch forwarding a lane's skills to prepare, or refusing a skill at launch level. launch_commands appends `--lane-skills <lane>=a,b` to the prepare argv (launch.py:458-459), and it refuses an unresolvable or invalid skill before any Git action (launch.py:455-457; the RUNBOOK says \"`launch` and `launch --dry-run` resolve and check the skills before any Git action\"; PRD 3 says \"`launch --dry-run` and `prepare` refuse a name that does not resolve, naming it\"). No test asserts either. test_the_dry_run_prints_a_lanes_skills_and_the_advisor reads printed[\"skills\"], which comes straight from lane_skills(manifest) at launch.py:653, not from the prepare command. RecordTests call prepare with `--lane-skills` by hand. test_a_2_8_0_feature_keeps_every_gate_a_2_6_0_feature_has writes no skills. The only launch-level refusal tested is the version gate (test_skills_need_version_2_8_0). The new `start --lane-skills` \"prepare only\" refusal (pipeline.py:1441-1446) is also untested. Consequence: if the forwarding broke, a 2.8.0 feature with `skills` would prepare and launch every lane as a plain `--safe-mode` lane with no error, and viewer-refine's UI lanes would run without impeccable. The suite would stay green.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "Refusals (PRD 4.5) happen before anything is written and name the lane and the skill.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "Acceptance 4 is only partly proved at prepare level. Requirement: \"Each refusal of PRD 4.5 with its message, nothing written.\" workflow/test_pipeline.py::RecordTests.test_each_skills_refusal_before_the_run_directory_exists (lines 1661-1665) covers a missing skill, a hooks frontmatter, a 2 MB file, a bad name and a duplicate, and asserts that no run directory exists. Two PRD 4.5 refusals, \"a skill folder over 8 MB in total\" and \"a `SKILL.md` that is not a regular file\", have only module-level message tests (test_skills.py::test_check_refuses_an_oversized_file_and_an_oversized_folder, test_resolve_refuses_a_missing_or_irregular_skill_md_naming_the_lane_and_skill). For those two, \"nothing written\" is inferred from where the code calls check_skill. The RUNBOOK's refusal of a symlink that \"forms a loop\" (skills.py:96-97) has no test anywhere. Consequence: a regression that moved one of these checks after the run directory, or broke loop detection (copy_skill would then recurse until the 8 MB cap or an OSError), would not be caught.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "Each refusal of PRD 4.5 with its message, nothing written.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "No test covers the judges' launch in a run that has a skills lane. Requirement: \"Judges (reviewers, challenge, sidecar, attack, panel) stay in safe mode and keep today's settings bytes.\" [L1](a) also requires that `panel_settings` and the attack pass keep today's bytes. Their code is unchanged (interactive.py:431, attack.py:334, automatic.py:1643, panel.py:649 still pass `--safe-mode`), but no test in the suite asserts `--safe-mode` on a reviewer, challenge, sidecar, attack or panel argv. No test launches a judge from a plan whose lane has `skills` to show that the judge gets neither `--setting-sources`, `--plugin-dir`, `Skill` nor the skills settings variant. Proof on the candidate: the worker's self-report (\"panel.py/attack.py bytes untouched\") and unchanged code. Consequence: a later change that routed judges through worker_launch_flags, or keyed it on the run instead of the lane, would give judges the operator-customizations-free but skill-loading launch [G6] rules out, and nothing would fail.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "Judges (reviewers, challenge, sidecar, attack, panel) stay in safe mode and keep today's settings bytes.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "[L1](i) canary: the recorded argv is not the candidate's skills-lane argv. [L1](i): \"The lane runs one `claude --bg` canary with the skills lane's exact argv ... and records the command and the answer in the handoff\". docs/handoff/worker-skills.md (Probes) records a `--settings` whose deny list is [\"Read(~/.ssh/**)\",\"Edit(/<tmp>/probe-plugin/**)\"] and a hard-coded `--model`, not the controller's worker_settings JSON. The RUNBOOK now says the canary ran \"round 1's [argv], before the plugin `Write` deny was added\". The canary's isolation result (no user skills, no hooks, no MCP, CLAUDE.md not loaded, deny list applies) was observed with settings bytes that differ from the ones that merge. Proof: self-report only. No re-run is recorded. Consequence: the operator relies on a canary for viewer-refine's first skills launch that did not exercise the merged settings, including the full WORKER_SECRETS/WORKER_DENY list and the new Write rule.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "Rows of the worker's Proof table do not verify on the candidate. The completion summary still describes round 1: \"sessions.worker_settings gained a skills variant (one Edit deny on the lane's own plugin, note 6: Edit only never Write ...)\" and \"dry run prints per-lane skills, plugin dir and advisorModel labelled 'read again at prepare'\". Its rows \"| [L1]g Edit-only plugin deny | argv tests + WorkerSettingsSkillsVariantTests (no Write rule) |\" and \"| A3 ... | ... WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_only_an_edit_deny_and_the_advisor; ... |\" are false on afc9456. The test was renamed to test_the_skills_variant_adds_edit_and_write_denies_and_the_advisor and now asserts that the Write rule is present (test_skills.py:127-135). The dry run prints no advisorModel value (launch.py:659). The candidate's behaviour is the one decisions.md requires (see the resolved findings); only the completion text is stale. The controller appended a \"Controller repair 2\" note but did not correct the rows. Consequence: anyone who reads the bundle's summary or Proof table, the operator at approve included, is told the opposite of what merges about the plugin deny and the dry run, and the A3 row cites a test that does not exist.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "PRD_WORKER_SKILLS section 7, each with a test the verifier runs through `workflow-unit`:",
+        "reviewer": "coverage"
+      },
+      {
+        "severity": "P2",
+        "message": "No Python test covers a lane model/effort pin on a 2.8.0 feature. [L1](e) adds 2.8.0 to LANE_ROLE_VERSIONS (launch.py:43). test_a_2_7_0_lane_pin_reaches_prepare_for_its_selected_lane_only uses only 2.7.0, and test_a_2_8_0_feature_keeps_every_gate_a_2_6_0_feature_has writes no lane model/effort. Only the TS contract test parses `pinned` at 2.8.0 (contract.test.ts), and that test checks the schema, not load_feature/launch_commands. A 2.8.0 feature with both `skills` and `model`/`effort` on lanes, as in PRD section 3's example, is never loaded or launched by the workflow suite. Consequence: if 2.8.0 dropped out of LANE_ROLE_VERSIONS, viewer-refine's lanes with their own model or effort would be refused at launch (\"needs version 2.7.0\") and no test would catch it first.",
+        "disposition": "open",
+        "worker": "engine",
+        "requirement": "A 2.7.0 feature with `skills` is refused; a test that every 2.7.0 feature still launches unchanged after 2.8.0 joins the gate sets.",
+        "reviewer": "coverage"
+      }
+    ],
+    "reviewers": [
+      {
+        "reviewer_id": "general",
+        "session_id": "14bac225-df49-4f86-8f78-8219e25047de",
+        "verdict": "approved",
+        "accepted_at": "2026-10-08T15:28:49.948950Z"
+      },
+      {
+        "reviewer_id": "coverage",
+        "session_id": "34355dfd-660e-459f-8abe-e3271d8cb9c9",
+        "verdict": "approved",
+        "accepted_at": "2026-10-08T15:31:47.856965Z"
+      }
+    ]
+  },
+  "accepted_at": "2026-10-08T15:31:48.403655Z"
+}
