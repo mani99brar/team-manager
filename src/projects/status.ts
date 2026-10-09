@@ -4,7 +4,7 @@
  * its native session launched and ended its turn.
  */
 import { ATTACK_NODE_ID, SIDECAR_NODE_ID } from '../../contracts/projects/triage.ts'
-import { isBlockingFinding, type ReviewResult, type RunDetail, type RunInputs } from './api.ts'
+import { isBlockingFinding, type ReviewResult, type RunDetail, type RunInputs, type RunInputWorker } from './api.ts'
 
 export { ATTACK_NODE_ID, SIDECAR_NODE_ID }
 
@@ -200,4 +200,96 @@ export function reviewSummary(review: ReviewResult): string {
     .map(([disposition, count]) => `${count} ${disposition}`)
   const blocking = findings.filter(isBlockingFinding).length
   return `${verdict} with ${findings.length} ${findings.length === 1 ? 'finding' : 'findings'}: ${counts.join(', ')}, ${blocking === 0 ? 'none blocking' : `${blocking} blocking`}`
+}
+
+// ---- The Assignment tab's model (docs/PRD_VIEWER_REFINE 5.5) ----------------------------------------------------
+
+/** The one setup line of the Assignment tab: the run's shape in a sentence of facts. */
+export type AssignmentSetup = {
+  feature: string
+  mode: RunInputs['mode']
+  /** The automatic profile, or null for a manual run. */
+  profile: string | null
+  baseCommit: string
+  /** The repair rounds each lane gets (`inputs.automatic.fix_rounds`); null for a run prepared before the setting. */
+  fixRounds: number | null
+  /** The reviewer ids from the latest review result; null before a review (shown as "reviewers not recorded"). */
+  reviewers: string[] | null
+}
+
+/** One lane row of the Assignment table: its pins and sizes before any long text. */
+export type AssignmentLane = {
+  node_id: string
+  role: string
+  /** The model and effort pin (`opus-4-8 · medium`), or null for a lane without one ("no pin"). */
+  pin: string | null
+  skills: string[]
+  ownedPaths: number
+  checks: number
+  /** The task text's length in characters; a truncated task says so. */
+  taskLength: number
+  taskTruncated: boolean
+}
+
+export type AssignmentModel = { setup: AssignmentSetup; lanes: AssignmentLane[] }
+
+/** The viewer API's task-text cap (`server/projects.ts` `TEXT_LIMIT`); a truncated task is reported as "over this many". */
+export const TASK_TEXT_LIMIT = 65536
+
+/**
+ * A lane's task length for the Assignment table: the character count, or, when the API truncated the text, the pinned
+ * "over 65,536 characters (truncated)" (never the length of the already-truncated text, which includes the API's marker).
+ */
+export function taskLengthLabel(lane: Pick<AssignmentLane, 'taskLength' | 'taskTruncated'>): string {
+  if (lane.taskTruncated) return `over ${TASK_TEXT_LIMIT.toLocaleString('en-US')} characters (truncated)`
+  return `${lane.taskLength}`
+}
+
+function lanePin(worker: RunInputWorker): string | null {
+  const roles = worker.roles
+  if (!roles) return null
+  const model = roles.model ? roles.model.replace(/^claude-/, '') : 'default model'
+  return `${model} · ${roles.effort ?? 'default effort'}`
+}
+
+/**
+ * The Assignment tab's model: one setup line and one lane row, read from the run inputs and the latest review result. Pure,
+ * so the table and the unit test read the same values. A 1.9.0 detail (no lane pins, no `fix_rounds`, no review yet) yields
+ * "no pin", empty skills, a null `fixRounds` and null reviewers.
+ */
+export function assignmentModel(inputs: RunInputs, review: ReviewResult | null): AssignmentModel {
+  return {
+    setup: {
+      feature: inputs.feature,
+      mode: inputs.mode,
+      profile: inputs.automatic?.profile ?? null,
+      baseCommit: inputs.base_commit,
+      fixRounds: inputs.automatic?.fix_rounds ?? null,
+      reviewers: review ? review.reviewers.map(reviewer => reviewer.reviewer_id) : null,
+    },
+    lanes: inputs.workers.map(worker => ({
+      node_id: worker.node_id,
+      role: worker.role,
+      pin: lanePin(worker),
+      skills: (worker.skills ?? []).map(skill => skill.name),
+      ownedPaths: worker.owned_paths.length,
+      checks: worker.checks.length,
+      taskLength: worker.task.text.length,
+      taskTruncated: worker.task.truncated,
+    })),
+  }
+}
+
+// ---- The lanes strip's model pins (export 1.10.0, docs/PRD_VIEWER_REFINE 5.1) ----------------------------------
+
+/** A lane's model and effort pin (`plan.nodes.<lane>.roles`), or null for a lane without one. */
+export type LanePin = { model: string | null; effort: string | null } | null
+/** A lane's strip meta: its pin (or null for the executor) and its repair round count. */
+export type LaneMeta = { pin: LanePin; rounds: number }
+
+/** The pin as the strip and the graph show it (`opus-4-8 · medium`); null for a lane without one, which shows the executor. */
+export function lanePinText(pin: LanePin): string | null {
+  if (!pin) return null
+  const model = pin.model ? pin.model.replace(/^claude-/, '') : 'default model'
+  return `${model} · ${pin.effort ?? 'default effort'}`
 }

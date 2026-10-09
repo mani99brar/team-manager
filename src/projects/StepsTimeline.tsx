@@ -3,7 +3,8 @@ import type { ActivityRow, MarkerKind, Timeline } from '../../contracts/projects
 import { groupActivity, orderActivityGroups, phaseState, type ActivityPhase } from './node/model.ts'
 import { AppLink } from './panels.tsx'
 import { STATUS_LABEL } from './status.ts'
-import { outageBands, STATUS_GLYPH, timeAxis, type StepRow, type TimeAxis } from './steps.ts'
+import { outageBands, pinnedStepCounts, repairRoundCount, STATUS_GLYPH, stepGroups, stepItems, timeAxis, type StepRow, type TimeAxis } from './steps.ts'
+import type { RunDetail } from './api.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
 import { stateTone, toneClass } from './tone.ts'
@@ -58,6 +59,8 @@ function Bar({ row, axis, gaps, now }: { row: StepRow; axis: TimeAxis; gaps: Tim
 
 type StepsProps = {
   rows: StepRow[]
+  /** The run detail, for the phase grouping and the fix loop's repair rows (docs/PRD_VIEWER_REFINE 5.3). */
+  detail: RunDetail
   timeline: Timeline | null
   now: number
   /** The run can still move by itself (running or awaiting a decision): its axis runs to now, else to its last activity. */
@@ -71,7 +74,7 @@ type StepsProps = {
  * attempts and their marks, its outcome and a bar on the run's time axis, toned by status (docs/PRD_VIEWER_REVAMP.md 5.3). Each row's step link opens the node page; the
  * bar is decoration, its times are in the text cells. Inferred times carry `≈`, their source in the tooltip.
  */
-export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: StepsProps) {
+export function StepsTable({ rows, detail, timeline, now, live, nodeHref, onNavigate }: StepsProps) {
   const [zone] = useTimeZone()
   const from = timeline ? Math.min(Date.parse(timeline.runStart.at), ...rows.flatMap(row => row.start ? [Date.parse(row.start.at)] : [])) : null
   const ends = rows.flatMap(row => row.end ? [Date.parse(row.end.at)] : [])
@@ -85,13 +88,15 @@ export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: 
     return [{ start: Date.parse(start.at), end: span.end ? Date.parse(span.end.at) : span.live ? now : Date.parse(start.at) }]
   }))
   const axis = from !== null && to !== null && to > from ? timeAxis(from, to, busy) : null
-  const done = rows.filter(row => row.shown === 'succeeded').length
-  const failed = rows.filter(row => row.shown === 'failed').length
+  const items = stepItems(rows, detail)
+  const groups = stepGroups(items)
+  const counts = pinnedStepCounts(items)
+  const rounds = repairRoundCount(detail)
   return (
     <section className="run-steps" data-testid="run-steps" aria-labelledby="run-steps-title">
       <header className="ui-section-header">
         <h3 id="run-steps-title">Steps</h3>
-        <span className="ui-sub">{done} of {rows.length} done{failed > 0 ? ` · ${failed} failed` : ''}</span>
+        <span className="ui-sub">{counts.done} of {counts.total} done{counts.failed > 0 ? ` · ${counts.failed} failed` : ''}{rounds > 0 ? ` · ${rounds} repair ${rounds === 1 ? 'round' : 'rounds'}` : ''}</span>
       </header>
       <table className="steps-table" data-testid="run-node-list" role="table" aria-labelledby="run-steps-title">
         <caption className="steps-hint" data-testid="node-hint">Select a step to open its evidence. ≈ marks a time no event recorded: it is inferred (hover for the source).</caption>
@@ -115,27 +120,33 @@ export function StepsTable({ rows, timeline, now, live, nodeHref, onNavigate }: 
             </th>
           </tr>
         </thead>
-        <tbody role="rowgroup">
-          {rows.map(row => {
-            const glyph = row.attention ? '?' : STATUS_GLYPH[row.shown]
-            const note = sourceNote(row)
-            return (
-              <tr key={row.node_id} role="row" className={`step-row status-row-${row.shown} ${toneClass(stateTone({ status: row.shown, attention: row.attention }))}`} data-node-id={row.node_id} data-status={row.status} data-attention={row.attention ?? undefined}>
-                <th scope="row" role="rowheader" className="step-name">
-                  <AppLink href={nodeHref(row.node_id)} onNavigate={onNavigate} className="step-link" title={`${row.label}: ${STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}>
-                    <span className={`step-glyph status-text-${row.shown}`} aria-hidden="true">{glyph}</span>
-                    <span className="step-label">{row.label}</span>
-                  </AppLink>
-                </th>
-                <td role="cell" className="step-started" title={row.start?.note ?? undefined}>{row.start ? <>{row.start.source === 'inferred' ? '≈' : ''}<Time iso={row.start.at} /></> : '—'}</td>
-                <td role="cell" className="step-took" title={note || undefined}>{row.ms === null ? '—' : `${row.inferred ? '≈' : ''}${formatSpan(row.ms)}`}</td>
-                <td role="cell" className="step-attempts">{row.attempt === 0 ? '—' : `attempt ${row.attempt}`}{row.marks && <> · <span className="step-marks">{row.marks}</span></>}</td>
-                <td role="cell" className="step-outcome" title={row.outcome}>{row.outcome}</td>
-                <td role="cell" className="step-bar" aria-hidden="true">{axis && timeline && <Bar row={row} axis={axis} gaps={timeline.gaps} now={now} />}</td>
-              </tr>
-            )
-          })}
-        </tbody>
+        {groups.map(group => (
+          <tbody role="rowgroup" key={group.phase} className="steps-phase-group" data-phase={group.phase}>
+            <tr role="row" className="steps-phase-head" data-testid="steps-phase">
+              <th scope="colgroup" colSpan={6} className="steps-phase-label">{group.label}</th>
+            </tr>
+            {group.items.map(({ row, repair }) => {
+              const glyph = row.attention ? '?' : STATUS_GLYPH[row.shown]
+              const note = sourceNote(row)
+              const label = repair ? `${row.label} · round ${repair.round} of ${repair.rounds}` : row.label
+              return (
+                <tr key={row.node_id} role="row" className={`step-row${repair ? ' step-row-repair' : ''} status-row-${row.shown} ${toneClass(stateTone({ status: row.shown, attention: row.attention }))}`} data-node-id={row.node_id} data-status={row.status} data-attention={row.attention ?? undefined} data-repair={repair ? repair.n : undefined}>
+                  <th scope="row" role="rowheader" className="step-name">
+                    <AppLink href={nodeHref(row.node_id)} onNavigate={onNavigate} className="step-link" title={`${label}: ${STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}>
+                      <span className={`step-glyph status-text-${row.shown}`} aria-hidden="true">{glyph}</span>
+                      <span className="step-label">{label}</span>
+                    </AppLink>
+                  </th>
+                  <td role="cell" className="step-started" title={row.start?.note ?? undefined}>{row.start ? <>{row.start.source === 'inferred' ? '≈' : ''}<Time iso={row.start.at} /></> : '—'}</td>
+                  <td role="cell" className="step-took" title={note || undefined}>{row.ms === null ? '—' : `${row.inferred ? '≈' : ''}${formatSpan(row.ms)}`}</td>
+                  <td role="cell" className="step-attempts">{row.attempt === 0 ? '—' : `attempt ${row.attempt}`}{row.marks && <> · <span className="step-marks">{row.marks}</span></>}</td>
+                  <td role="cell" className="step-outcome" title={row.outcome}>{row.outcome}</td>
+                  <td role="cell" className="step-bar" aria-hidden="true">{axis && timeline && <Bar row={row} axis={axis} gaps={timeline.gaps} now={now} />}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        ))}
       </table>
     </section>
   )

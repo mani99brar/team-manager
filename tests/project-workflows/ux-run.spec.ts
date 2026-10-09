@@ -54,6 +54,8 @@ test(`[scenario:run-now-banner] The Now banner names the situation, its cause an
   ])
   await expect(banner.getByTestId('now-step')).toHaveCount(3)
   await expect(banner.getByTestId('now-step').nth(1)).toContainText('Paste what each lane needs from the brief')
+  // The first command shows; the remaining steps sit in the closed "All steps" disclosure (docs/PRD_VIEWER_REFINE 5.1), opened here.
+  await banner.getByTestId('now-all-steps').locator('summary').click()
   const copy = banner.getByTestId('copy-command')
   await expect(copy).toHaveText(['Copy', 'Copy'], { useInnerText: true })
   for (const button of await copy.all()) await expect(button).toHaveAttribute('aria-label', 'Copy command')

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   isBlockingFinding,
   isNotRecorded,
@@ -10,6 +10,7 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
+import { DIFF_BYTE_LIMIT, diffTotals, fetchDiffText, MAX_DIFF_LINES, parseDiff, type DiffFile } from './diff.ts'
 import { findingsForFile, runLanes, workerWording } from './findings.ts'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
@@ -213,6 +214,123 @@ function reviewerTone(reviewer: Reviewer): Tone {
   return 'idle'
 }
 
+type DiffView = { id: string; label: string; artifactId: string }
+
+/** One file of the parsed diff, as a disclosure of its hunks, or a stat when it is binary or over the line limit. */
+function DiffFileView({ file }: { file: DiffFile }) {
+  const [shown, setShown] = useState(false)
+  const stat = <span className="diff-file-stat"><span className="diff-added">+{file.added}</span> <span className="diff-removed">−{file.removed}</span></span>
+  const tooLarge = file.lineCount > MAX_DIFF_LINES
+  const header = (
+    <span className="diff-file-head">
+      <code className="diff-file-path">{file.renamedFrom ? `${file.renamedFrom} → ${file.path}` : file.path}</code>
+      {file.binary ? <span className="diff-file-binary projects-muted">binary</span> : stat}
+    </span>
+  )
+  if (file.binary) return <li className="diff-file diff-file-binary-row" data-testid="diff-file" data-binary="true" data-path={file.path}>{header}</li>
+  if (tooLarge) {
+    return (
+      <li className="diff-file" data-testid="diff-file" data-path={file.path}>
+        {header}
+        {shown ? <DiffHunks file={file} /> : (
+          <div className="diff-file-large">
+            <span className="projects-muted">{file.lineCount} diff lines (over {MAX_DIFF_LINES})</span>
+            <button type="button" className="button button-small" data-testid="diff-show" onClick={() => setShown(true)}>Show</button>
+          </div>
+        )}
+      </li>
+    )
+  }
+  return (
+    <li className="diff-file" data-testid="diff-file" data-path={file.path}>
+      <details>
+        <summary>{header}</summary>
+        <DiffHunks file={file} />
+      </details>
+    </li>
+  )
+}
+
+function DiffHunks({ file }: { file: DiffFile }) {
+  return (
+    <div className="diff-hunks" data-testid="diff-hunks">
+      {file.hunks.map((hunk, index) => (
+        <table key={index} className="diff-hunk">
+          <tbody>
+            <tr className="diff-hunk-header"><td className="diff-gutter" aria-hidden="true" /><td className="diff-gutter" aria-hidden="true" /><td className="diff-line-text">{hunk.header}</td></tr>
+            {hunk.lines.map((line, lineIndex) => (
+              <tr key={lineIndex} className={`diff-line diff-${line.kind}`} data-kind={line.kind}>
+                <td className="diff-gutter" aria-hidden="true">{line.oldLine ?? ''}</td>
+                <td className="diff-gutter" aria-hidden="true">{line.newLine ?? ''}</td>
+                <td className="diff-line-text"><span className="diff-sign" aria-hidden="true">{line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}</span>{line.text}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * The review diff rendered inline (docs/PRD_VIEWER_REFINE 5.6): a file list with added/removed counts, each file a disclosure
+ * of its hunks (add, remove, context tones), a binary patch as a stat; the raw patch stays downloadable. When a delta diff
+ * exists it is the default view and the full diff a second tab. The body read is bounded at 1 MB (`fetchDiffText`); past it
+ * the viewer says "over 1 MB, not read" with a show button and does not render the partial text.
+ */
+function InlineDiff({ scope, views }: { scope: RunScope; views: DiffView[] }) {
+  const [view, setView] = useState(views[0]?.id ?? '')
+  const active = views.find(candidate => candidate.id === view) ?? views[0]
+  const href = active ? paths.artifact(scope, active.artifactId) : null
+  // "Show it anyway" past the 1 MB bound: the next read drops the limit for this view only; a view change resets it.
+  const [showAll, setShowAll] = useState(false)
+  // The read is keyed by the artifact it loaded: while the loaded key differs from the active view the diff reads "loading",
+  // so the effect never sets state synchronously (one request per view, cancelled on change). It depends on the active
+  // view's artifact id (a string), not the view object, so a parent re-render does not re-read the diff.
+  type Loaded = { artifactId: string; files: DiffFile[]; overLimit: boolean; error: string | null }
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
+  const activeArtifactId = active?.artifactId ?? null
+  useEffect(() => {
+    if (activeArtifactId === null) return
+    let live = true
+    fetchDiffText(scope, activeArtifactId, undefined, showAll ? Infinity : DIFF_BYTE_LIMIT)
+      .then(body => { if (live) setLoaded({ artifactId: activeArtifactId, files: body.overLimit ? [] : parseDiff(body.text), overLimit: body.overLimit, error: null }) })
+      .catch(error => { if (live) setLoaded({ artifactId: activeArtifactId, files: [], overLimit: false, error: error instanceof Error ? error.message : 'The diff could not be read.' }) })
+    return () => { live = false }
+  }, [scope, activeArtifactId, showAll])
+  if (!active) return null
+  const state: Loaded | 'loading' = loaded && loaded.artifactId === active.artifactId ? loaded : 'loading'
+  return (
+    <section className="review-diff-inline" data-testid="review-diff-inline" aria-label="Review diff">
+      {views.length > 1 && (
+        <div className="review-diff-tabs" role="tablist" aria-label="Diff view">
+          {views.map(candidate => (
+            <button key={candidate.id} type="button" role="tab" aria-selected={candidate.id === active.id} className="button button-small" data-testid="diff-tab" data-view={candidate.id} onClick={() => { setView(candidate.id); setShowAll(false) }}>{candidate.label}</button>
+          ))}
+        </div>
+      )}
+      {state === 'loading' && <p className="projects-muted">Reading the diff…</p>}
+      {state !== 'loading' && state.error !== null && <p className="projects-error-inline" role="alert">{state.error}</p>}
+      {state !== 'loading' && state.error === null && state.overLimit && (
+        <p className="projects-muted" data-testid="diff-over-limit">
+          This diff is over 1 MB, not read.{' '}
+          <button type="button" className="button button-small" data-testid="diff-show-all" onClick={() => setShowAll(true)}>Show it anyway</button>
+          {href && <> · <a href={href} target="_blank" rel="noopener noreferrer">open the raw patch</a></>}
+        </p>
+      )}
+      {state !== 'loading' && state.error === null && !state.overLimit && (
+        <>
+          <p className="review-diff-totals" data-testid="diff-totals">
+            {(() => { const totals = diffTotals(state.files); return `${totals.files} ${totals.files === 1 ? 'file' : 'files'} · +${totals.added} −${totals.removed}` })()}
+            {href && <> · <a href={href} target="_blank" rel="noopener noreferrer" data-testid="diff-raw">raw patch</a></>}
+          </p>
+          <ul className="review-diff-files">{state.files.map(file => <DiffFileView key={file.path} file={file} />)}</ul>
+        </>
+      )}
+    </section>
+  )
+}
+
 function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: { review: ReviewResult } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri'>) {
   const approved = review.verdict === 'approved'
   const reviewers = review.reviewers
@@ -223,6 +341,18 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
   const diffHref = review.diff === null ? null : paths.artifact(scope, review.diff.artifact_id)
   const diffScoped = review.diff !== null && review.diff.uri === diffHref
+  // Memoised so the array (and the `active` view derived from it) keeps its identity across the run clock's re-renders;
+  // InlineDiff's read effect keys on the active view, so a stable array means one read per view, not one per second.
+  const diffArtifactId = review.diff?.artifact_id ?? null
+  const deltaArtifactId = review.delta_diff?.artifact_id ?? null
+  const deltaFrom = review.delta_from
+  const diffViews = useMemo<DiffView[]>(() => {
+    if (diffArtifactId === null) return []
+    return [
+      ...(deltaArtifactId ? [{ id: 'delta', label: `Delta diff${deltaFrom ? ` from ${deltaFrom.slice(0, 7)}` : ''}`, artifactId: deltaArtifactId }] : []),
+      { id: 'full', label: 'Full diff', artifactId: diffArtifactId },
+    ]
+  }, [diffArtifactId, deltaArtifactId, deltaFrom])
   // One filter row (docs/PRD_VIEWER_REVAMP.md 5.4): each reviewer, each lane and Open only, any of them pressed at once.
   const [pressed, setPressed] = useState<ReadonlySet<string>>(() => new Set())
   const lanes = runLanes(definitionNodes, inputs)
@@ -290,6 +420,8 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
           </dd>
         </div>
       </dl>
+
+      {review.diff !== null && diffScoped && <InlineDiff scope={scope} views={diffViews} />}
 
       <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-filters={pressedIds.length === 0 ? 'all' : pressedIds.join(' ')}>
         <div className="ui-section-header review-findings-head">
