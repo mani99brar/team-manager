@@ -35,6 +35,13 @@
 .runs-home { display: flex; flex-direction: column; gap: 20px; margin-bottom: 20px; min-width: 0; }
 .runs-home-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .runs-home-head h2 { margin: 0; font-family: var(--font-display); }
+/* The section jumps: one pill per section with its count, the whole width on a phone, for traversing the home without scrolling. */
+.home-jumps { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.workspace-projects .home-jumps a { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 13px; font-weight: 600; text-decoration: none; }
+.workspace-projects .home-jumps a.has-rows { color: var(--fg); border-color: var(--border-strong); }
+.workspace-projects .home-jumps a:hover { border-color: var(--accent); color: var(--accent); }
+.workspace-projects .home-jumps a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-jump-count { font-variant-numeric: tabular-nums; font-weight: 700; }
 .home-section { scroll-margin-top: 12px; }
 .lists-empty { margin: 0; }
 

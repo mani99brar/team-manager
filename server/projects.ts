@@ -429,6 +429,8 @@ export type LoadedRun = {
   attack: unknown
   /** The export's `panels` section as written (export 1.9.0), unvalidated; undefined when the export predates it. */
   panels: unknown
+  /** The controller PID the events last logged, for the list cache's liveness check; null when none was logged. */
+  controller: ControllerPin | null
 }
 
 export type ArtifactContent = {
@@ -632,6 +634,25 @@ async function readBounded(directory: FileHandle, components: readonly string[],
   } finally {
     await Promise.all(handles.reverse().map(handle => handle.close()))
   }
+}
+
+/**
+ * What a run's list summary depends on, as one string: every top-level file of the run directory with its size and
+ * modification time (`run-state.json` itself, and the live files the activity reads: `<lane>.questions.json`,
+ * `repairs.json`, `events.jsonl` and the others, are all top-level). A changed, added or removed file changes it.
+ */
+async function runFingerprint(directory: FileHandle): Promise<string> {
+  const entries = (await fs.readdir(at(directory), { withFileTypes: true })).filter(dirent => dirent.isFile()).map(dirent => dirent.name).sort()
+  const hash = createHash('sha256')
+  for (const name of entries) {
+    try {
+      const stat = await fs.stat(at(directory, name))
+      hash.update(`\0${name}:${stat.size}:${stat.mtimeMs}`)
+    } catch (error) {
+      if (!isMissing(error)) throw error
+    }
+  }
+  return hash.digest('hex')
 }
 
 async function openDirectory(parent: FileHandle, name: string): Promise<FileHandle | null> {
@@ -914,13 +935,27 @@ export type RunStoreOptions = {
   procRoot?: string
   /** The home directory a served `run_dir` is relative to; defaults to the server's `$HOME`. */
   home?: string
+  /**
+   * Whether `listRuns` keeps each run's summary between calls, keyed by the names, sizes and times of the files in its
+   * directory (the export and the live files the activity reads are among them), so a list that is polled every few
+   * seconds re-projects only the runs whose files changed. The controller's liveness is read afresh on every call. On by
+   * default; tests that rewrite a run in place within one file-time tick can turn it off.
+   */
+  summaryCache?: boolean
 }
+
+/** A run's summary as `listRuns` last projected it, the key that tells whether its files changed, and its controller pin. */
+type CachedSummary = { key: string; summary: RunSummary; controller: ControllerPin | null }
+/** The controller PID a run's events last logged, and when: the liveness check reads `/proc` for it on every list. */
+type ControllerPin = { pid: number; at: string }
 
 export class RunStore {
   private current: ProjectsConfig
   private projectsById = new Map<string, ProjectConfig>()
   private syncing: Promise<void> | null = null
   private readonly options: Required<Omit<RunStoreOptions, 'warn' | 'refresh'>> & Pick<RunStoreOptions, 'warn' | 'refresh'>
+  /** Run summaries by `<project>/<workflow>/<run>` (see `RunStoreOptions.summaryCache`). */
+  private readonly summaries = new Map<string, CachedSummary>()
 
   constructor(config: ProjectsConfig, options: RunStoreOptions = {}) {
     this.current = config
@@ -931,6 +966,7 @@ export class RunStore {
       artifactByteLimit: options.artifactByteLimit ?? DEFAULT_ARTIFACT_BYTE_LIMIT,
       procRoot: options.procRoot ?? '/proc',
       home: options.home ?? homedir(),
+      summaryCache: options.summaryCache ?? true,
       warn: options.warn,
       refresh: options.refresh,
     }
@@ -998,7 +1034,11 @@ export class RunStore {
     }
   }
 
-  /** Every run under the workflow root, newest first. Legacy directories without a supported export are skipped with a warning. */
+  /**
+   * Every run under the workflow root, newest first. Legacy directories without a supported export are skipped with a warning.
+   * A run's summary is kept from the previous call while its export bytes and the files in its directory are unchanged
+   * (`summaryCache`); only the controller's liveness, which no file records, is read again for a running or paused run.
+   */
   async listRuns(scope: Scope): Promise<RunSummary[]> {
     return this.withRunsRoot(scope, async root => {
       const names = (await fs.readdir(at(root), { withFileTypes: true }))
@@ -1009,23 +1049,62 @@ export class RunStore {
         const directory = await openDirectory(root, name)
         if (!directory) continue
         try {
-          const state = await readBounded(directory, ['run-state.json'], this.options.exportByteLimit)
-          if (state === null) {
-            if (await readBounded(directory, ['plan.json'], this.options.exportByteLimit) !== null) {
-              this.options.warn?.('Skipping run directory without a supported run-state.json export; explicit import is required', { project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: name })
+          // The files are fingerprinted before the export is read: a cached run costs one directory listing, no parse.
+          const cacheKey = `${scope.project.project_id}/${scope.workflow.workflow_id}/${name}`
+          const fingerprint = this.options.summaryCache ? await runFingerprint(directory) : null
+          const cached = fingerprint === null ? undefined : this.summaries.get(cacheKey)
+          let summary: RunSummary
+          if (cached !== undefined && cached.key === fingerprint) summary = await this.withLiveController(cached, directory)
+          else {
+            const state = await readBounded(directory, ['run-state.json'], this.options.exportByteLimit)
+            if (state === null) {
+              if (await readBounded(directory, ['plan.json'], this.options.exportByteLimit) !== null) {
+                this.options.warn?.('Skipping run directory without a supported run-state.json export; explicit import is required', { project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: name })
+              }
+              continue
             }
-            continue
+            const run = await this.projectRun(scope, name, directory, state)
+            summary = run.detail.summary
+            if (fingerprint !== null) this.summaries.set(cacheKey, { key: fingerprint, summary, controller: run.controller })
           }
-          const run = await this.projectRun(scope, name, directory, state)
-          if (seen.has(run.detail.summary.run_id)) throw invalidRun(name, 'duplicate run ID within the workflow')
-          seen.add(run.detail.summary.run_id)
-          summaries.push(run.detail.summary)
+          if (seen.has(summary.run_id)) throw invalidRun(name, 'duplicate run ID within the workflow')
+          seen.add(summary.run_id)
+          summaries.push(summary)
         } finally {
           await directory.close()
         }
       }
       return summaries.sort(compareRuns)
     })
+  }
+
+  /**
+   * A cached summary with the controller's liveness read now: the pinned PID is checked against `/proc` again for a running
+   * or paused run, since a controller that died leaves no file behind to change the fingerprint.
+   */
+  private async withLiveController(cached: CachedSummary, directory: FileHandle): Promise<RunSummary> {
+    const { summary, controller } = cached
+    if (!summary.activity || controller === null || (summary.status !== 'running' && summary.status !== 'paused')) return summary
+    const runDir = await realpathOrNull(at(directory))
+    const liveness = runDir === null ? 'unknown' : await controllerLiveness(this.options.procRoot, controller.pid, controller.at, runDir)
+    return liveness === summary.activity.controller ? summary : { ...summary, activity: { ...summary.activity, controller: liveness } }
+  }
+
+  /**
+   * Projects every workflow's runs once so the first list request finds its summaries cached; failures are logged through
+   * `warn` and never thrown (the request path reports them itself). Called by the app at boot.
+   */
+  async warmSummaries(): Promise<void> {
+    if (!this.options.summaryCache) return
+    for (const project of this.config.projects) {
+      for (const workflow of project.workflows) {
+        try {
+          await this.listRuns(this.scope(project.project_id, workflow.workflow_id))
+        } catch (error) {
+          this.options.warn?.('Run summaries could not be warmed for a workflow', { project_id: project.project_id, workflow_id: workflow.workflow_id, message: (error as Error).message })
+        }
+      }
+    }
   }
 
   async loadRun(scope: Scope, runId: string): Promise<LoadedRun> {
@@ -1334,7 +1413,9 @@ export class RunStore {
     } catch (error) {
       throw contractFailure('run activity', error)
     }
-    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels }
+    const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
+    const controller = logged ? { pid: Number(PID_ROW.exec(logged.message)![1]), at: logged.time } : null
+    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller }
   }
 
 
