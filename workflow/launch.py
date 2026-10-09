@@ -21,7 +21,7 @@ from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLAC
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, role_pin, validate_node_id, validate_reviewer_id
-from . import attack, panel, sidecar
+from . import attack, critique, panel, sidecar
 from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
 
@@ -35,17 +35,17 @@ FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
 # 2.6.0 (the multi-provider panel), 2.7.0 (per-lane worker pins) and 2.8.0 (per-lane skills) keep both. The migration hint for
 # an earlier feature with a browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0"})
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0"})
 CRITICAL_VERSION = "2.4.0"
 # The feature versions whose `workers[]` may carry the lane's own worker `model` and `effort` (pinned per lane at prepare).
 # A set, not a range: the next bump must join it (shared learning version-gates-are-sets-add-a-keeps-everything-test).
 LANE_ROLE_VERSION = "2.7.0"
-LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0"})
+LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0", "2.9.0"})
 LANE_ROLE_FIELDS = ("model", "effort")
 # The feature versions whose `workers[]` may carry the lane's own `skills` (feature.json 2.8.0, PRD_WORKER_SKILLS section 3).
 # One more set the next bump must move.
 SKILLS_VERSION = "2.8.0"
-SKILLS_VERSIONS = frozenset({SKILLS_VERSION})
+SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0"})
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -183,6 +183,7 @@ def load_feature(folder: Path) -> dict:
         sidecar.declared(manifest)
         attack.declared(manifest)  # Refuses `attack` on a version before 2.5.0, naming the key, before schema validation.
         panel.declared(manifest)  # Refuses `panels` on a version before 2.6.0 (and each per-panel refusal), naming the key.
+        critique.declared(manifest)  # Refuses `critique` on a version before 2.9.0, naming the key, before schema validation.
         lane_roles(manifest)  # Refuses a lane's `model`/`effort` on a version before 2.7.0, naming the lane and the key.
         lane_skills(manifest)  # Refuses a lane's `skills` on a version before 2.8.0, naming the lane and the key.
     validate_schema("feature", manifest)
@@ -356,6 +357,29 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         for item in review_panels:
             panel_briefs[item["id"]] = panel.brief_path(folder, item["prompt"])
         proved = (prove or panel.prove_transports)(review_panels)
+    # 2.9.0: the critique reviewer (PRD_USER_CRITIQUE 4.2). The lanes-are-lanes check, the policy's critique_app and the
+    # critique skills are refused here, before any Git action (the dry run included; prepare pins plan.critique and refuses
+    # the print transport). Resolving the skills checks them on this host, naming the skill.
+    review_critique = critique.declared(manifest)
+    if review_critique is not None:
+        # The lane id `critique` is reserved only IN a feature that declares `critique` (PRD 4.2, 4.7); every feature
+        # before 2.9.0, and a 2.9.0 one without `critique`, keeps a lane or reviewer named `critique` and launches
+        # byte for byte (the id is not reserved in the schema's lane pattern, review finding 12). The reviewer id
+        # `critique` would collide with the critique reviewer's own review.json entry, so it is refused here too.
+        if critique.CRITIQUE in declared:
+            raise ValueError("feature.json declares critique, so it may not have a lane named `critique` (PRD 4.7); rename the lane or drop critique")
+        if critique.CRITIQUE in reviewers:
+            raise ValueError("feature.json declares critique, so it may not have a reviewer named `critique` (the critique reviewer owns that id); rename the reviewer or drop critique")
+        unknown = [lane for lane in review_critique["lanes"] if lane not in declared]
+        if unknown:
+            raise ValueError(f"feature.json critique.lanes name {', '.join(unknown)}, not lanes of this feature ({', '.join(declared)})")
+        if "critique_app" not in policy:
+            raise ValueError("feature.json declares critique but its policy has no critique_app (policy 1.4.0, "
+                             "contracts/workflow/verification.schema.json); add it, then launch again")
+        critique.validate_critique_app(policy["critique_app"])
+        from .skills import check_skill, skills_root
+        for name in review_critique["skills"]:
+            check_skill(critique.CRITIQUE, name, skills_root())
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     tryout = manifest.get("tryout") is True
@@ -473,6 +497,10 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                             "--sidecar-settings", json.dumps(bounds, sort_keys=True)])
         if review_attack:
             prepare.extend(["--attack-settings", json.dumps(review_attack, sort_keys=True)])
+        if review_critique is not None:
+            # prepare pins plan.critique (lanes intersected with the selected lanes, the skills resolved and digested, the
+            # advisor, the job settings digest, the worktree path) and refuses the print transport (PRD 4.4, 4.5).
+            prepare.extend(["--critique-settings", json.dumps(review_critique, sort_keys=True)])
         if review_panels:
             # Each panel with its brief as the path prepare reads (the committed file in the source checkout, or the bundled one)
             # and the pi bin directory the probe resolved; prepare pins plan.panels last (text + sha256, requirement copies).
@@ -647,6 +675,13 @@ def main(argv=None):
             if review_attack:  # The pinned settings and the guard's result (PRD 4.2); a secret file present raises above.
                 printed["attack"] = {**review_attack, "secret_files": attack.default_secret_files(),
                                      "guard": "clear: no listed secret file exists on this host"}
+            review_critique = critique.declared(manifest)
+            if review_critique is not None:  # 2.9.0: the critique reviewer's settings and its app (PRD 4.4); prepare pins plan.critique.
+                dry_policy = read_json(feature_folder(repo, args.feature) / manifest["policy"])
+                printed["critique"] = {**review_critique,
+                                       "lanes_pinned": [lane for lane in review_critique["lanes"] if lane in selected],
+                                       "critique_app": critique.validate_critique_app(dry_policy["critique_app"]),
+                                       "guard": "clear: critique lanes are selected lanes, policy has critique_app"}
             if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
                 printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
                                      "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}

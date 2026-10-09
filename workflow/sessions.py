@@ -281,7 +281,8 @@ WORKER_DENY = ("Bash(pkill:*)", "Bash(killall:*)", "Bash(git push:*)", "Bash(git
 WORKER_ENV = {"HUSKY": "0", "GIT_TERMINAL_PROMPT": "0"}
 
 
-def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_model: str | None = None) -> list[str]:
+def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_model: str | None = None,
+                    deny_run: bool = False) -> list[str]:
     """`--settings` for a worker's `claude --bg` (InteractiveSessions.run and run_repair only): background_settings plus
     HUSKY=0 and GIT_TERMINAL_PROMPT=0 in its environment and the deny rules above, one JSON argument.
 
@@ -306,6 +307,13 @@ def worker_settings(directory: Path, *, skills_lane: str | None = None, advisor_
         plugin = Path(directory).resolve() / "skills" / skills_lane
         deny.append(f"Edit(/{plugin}/**)")
         deny.append(f"Write(/{plugin}/**)")
+    if deny_run:
+        # The critique job (docs/PRD_USER_CRITIQUE.md 4.4, decisions.md [L2](c)): Edit and Write denied on all of the run
+        # directory, with no exception (Claude Code rules have no exception syntax, and the settings must be the same every
+        # round so one digest is pinned at prepare). The job writes its screenshots and scratch scripts with Bash.
+        run = Path(directory).resolve()
+        deny.append(f"Edit(/{run}/**)")
+        deny.append(f"Write(/{run}/**)")
     deny.extend(WORKER_DENY)
     settings = {**BACKGROUND_SETTINGS, "env": {**BACKGROUND_ENV, **WORKER_ENV}, "permissions": {"deny": deny}}
     if skills_lane is not None and advisor_model is not None:

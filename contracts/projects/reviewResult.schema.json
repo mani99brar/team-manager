@@ -118,6 +118,47 @@
           "reviewer": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,31}$"
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "steps": {
+                "minItems": 1,
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 300
+                }
+              },
+              "screenshots": {
+                "maxItems": 6,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "artifact_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "caption": {
+                      "type": "string",
+                      "maxLength": 200
+                    }
+                  },
+                  "required": [
+                    "artifact_id",
+                    "caption"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "steps",
+              "screenshots"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -232,6 +273,47 @@
                 "reviewer": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9-]{0,31}$"
+                },
+                "evidence": {
+                  "type": "object",
+                  "properties": {
+                    "steps": {
+                      "minItems": 1,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 300
+                      }
+                    },
+                    "screenshots": {
+                      "maxItems": 6,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "artifact_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "caption": {
+                            "type": "string",
+                            "maxLength": 200
+                          }
+                        },
+                        "required": [
+                          "artifact_id",
+                          "caption"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "steps",
+                    "screenshots"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [

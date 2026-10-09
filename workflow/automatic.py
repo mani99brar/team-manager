@@ -539,6 +539,7 @@ def _poll_handoffs(runtime, workers, met, bounds, attention, answered, gaps, sid
 
 # Finding attributions that name no single lane; the run's lane ids complete the vocabulary.
 FINDING_ATTRIBUTIONS = ("multiple", "none")
+CRITIQUE_ID = "critique"  # The critique reviewer (feature.json 2.9.0); it joins review.json after the native reviewers, never in state.ids.
 
 
 def finding_workers(runtime) -> list[str]:
@@ -1217,7 +1218,7 @@ def review_candidate(runtime) -> dict:
     timeout, and writes the terminal panel.json, or leaves it non-terminal on an interrupt. The attack child and the panel
     jobs are started only on the paths that launch or rebind reviewers (`_review_candidate` calls `attack.ensure_started`
     and `panel.ensure_started`), never on the reconciliation raise (note 4)."""
-    from . import attack, panel
+    from . import attack, critique, panel
     error = None
     try:
         return _review_candidate(runtime)
@@ -1225,6 +1226,10 @@ def review_candidate(runtime) -> dict:
         error = caught
         raise
     finally:
+        try:
+            critique.close_or_wait_critique(runtime, error)  # No-op for a plan without critique; the step waits in _accept_native/_review_print.
+        except BaseException:  # noqa: BLE001 - the critique never raises into the review step.
+            pass
         try:
             attack.close_or_wait_attack(runtime, error)
         except BaseException as caught:  # A KeyboardInterrupt re-raised by the decided attack wait: the panel collect sees it too.
@@ -1236,7 +1241,7 @@ def review_candidate(runtime) -> dict:
 
 def _review_candidate(runtime) -> dict:
     """Called only by the LangGraph review node. Ambiguous invocations never replay."""
-    from . import attack, panel
+    from . import attack, critique, panel
     validate_automatic(runtime.plan)
     bundle, digest = runtime.validate_bundle()
     if combined_status_path(runtime).exists():
@@ -1245,6 +1250,7 @@ def _review_candidate(runtime) -> dict:
         if combined.get("bundle_sha256") == digest and combined.get("status") == "succeeded":
             runtime.validate_review(combined["review"])
             attack.ensure_started(runtime)  # Re-entry on an accepted review: resume the pass while it is not terminal.
+            critique.ensure_started(runtime)  # And the critique child while it has not settled (idempotent; no-op once settled).
             panel.ensure_started(runtime)  # And the panels' non-terminal providers (PRD_MULTI_PROVIDER_PANEL Appendix A, resume rerun).
             if combined.get("transport") == "native":
                 # Accepted earlier, but a stop was not confirmed: retry it (the stop intent makes it idempotent). A stop
@@ -1258,6 +1264,7 @@ def _review_candidate(runtime) -> dict:
             # The reviewers kept running while the controller was away: bind what the launches produced, never launch again.
             rebind_reviewers(runtime, state)
             attack.ensure_started(runtime)  # After the rebind, which keeps the reviewers; never on the reconciliation raise below.
+            critique.ensure_started(runtime)
             panel.ensure_started(runtime)
             return _accept_native(runtime, bundle, digest, state)
         raise RuntimeError("Prior reviewer invocation needs reconciliation; no automatic relaunch")
@@ -1271,6 +1278,10 @@ def _review_candidate(runtime) -> dict:
     write_delta(runtime, cwd, bundle["candidate_commit"])  # A follow-up run's delta, before any reviewer prompt names it.
     attack.ensure_started(runtime)  # The attack pass runs in parallel with the reviewers (PRD 4.1, [L4]); started before they launch.
     panel.ensure_started(runtime)  # The panels' provider jobs, in-process beside the reviewers on both transports (PRD_MULTI_PROVIDER_PANEL 4.1).
+    # The critique child is NOT started here: PRD 4.4 Timing launches the native reviewers first, THEN runs setup, takes
+    # the browser slot, starts the app and the job, so its setup does not compete with the reviewers' launches (review
+    # finding 10). _review_native starts it right after the launch loop, so it still runs beside the reviewers. A critique
+    # plan never uses the print transport (refuse_print_transport at prepare), so _review_print needs none.
     if reviewer_transport(runtime.plan) == "print":
         return _review_print(runtime, bundle, digest, cwd, patch)
     return _review_native(runtime, bundle, digest, patch)
@@ -1343,18 +1354,29 @@ def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, dec
     blocked = any(reviewer_id not in decisions or decision_blocks(decisions[reviewer_id]) for reviewer_id in state.ids)
     # A late verdict, read after another reviewer's block, can add blockers but never makes the review approved.
     blocked = blocked or any(state.statuses[reviewer_id].get("late") for reviewer_id in decisions)
+    # The critique reviewer joins review.json after the native ones (PRD 4.5): its entry and findings are appended, and its
+    # verdict (null for a failed critique, blocked for an open P0/P1) counts toward the block. It is never in state.ids.
+    from . import critique
+    crit = critique.review_entry(runtime)
+    if crit is not None:
+        entries.append({"reviewer_id": CRITIQUE_ID, "session_id": crit["session_id"], "verdict": crit["verdict"], "accepted_at": crit["accepted_at"]})
+        findings.extend(crit["findings"])
+        blocked = blocked or crit["verdict"] != "approved"
     sessions = [entry["session_id"] for entry in entries if entry["session_id"]]
     return {"run_id": bundle["run_id"], "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
             "reviewer": ", ".join(sessions), "independent": True, "verdict": "blocked" if blocked else "approved",
             "findings": findings, "reviewers": entries}
 
 
-def blocked_error(names: list[str], blockers: list[str], decisions: dict) -> str:
+def blocked_error(names: list[str], blockers: list[str], decisions: dict, critique_entry: dict | None = None) -> str:
     """What the run's error (and `workflow status`) says: every blocker, then the first sentence of each open P0/P1, P0 first,
-    at most 3; review.json holds them all."""
+    at most 3; review.json holds them all. The critique reviewer (feature.json 2.9.0) blocks like any reviewer."""
     from .pipeline import blocking_findings
-    found = sorted(((finding["severity"], reviewer_id, finding["message"]) for reviewer_id in blockers
-                    for finding in blocking_findings(decisions[reviewer_id]["findings"])), key=lambda item: item[0])
+    pairs = [(finding["severity"], reviewer_id, finding["message"]) for reviewer_id in blockers
+             for finding in blocking_findings(decisions[reviewer_id]["findings"])]
+    if critique_entry is not None and critique_entry["verdict"] != "approved":
+        pairs += [(finding["severity"], CRITIQUE_ID, finding["message"]) for finding in blocking_findings(critique_entry["findings"])]
+    found = sorted(pairs, key=lambda item: item[0])
     message = f"Independent reviewer blocked the candidate ({', '.join(names)})"
     if found:
         message += ": " + " ".join(f"[{severity} {reviewer_id}] {first_sentence(text)}" for severity, reviewer_id, text in found[:3])
@@ -1363,10 +1385,13 @@ def blocked_error(names: list[str], blockers: list[str], decisions: dict) -> str
     return message
 
 
-def blocked_event(state: ReviewStatus, decisions: dict, blockers: list[str], undecided: list[str]) -> str:
+def blocked_event(state: ReviewStatus, decisions: dict, blockers: list[str], undecided: list[str], critique_entry: dict | None = None) -> str:
     """The timeline's `blocked` record of a review: each blocker with its verdict and open P0/P1, and the reviewers without one."""
     parts = [f"{reviewer_id} ({'late ' if state.statuses[reviewer_id].get('late') else ''}{decisions[reviewer_id]['verdict']}, "
              f"{open_counts(decisions[reviewer_id]['findings'])})" for reviewer_id in blockers]
+    if critique_entry is not None and critique_entry["verdict"] != "approved":
+        verdict = critique_entry["verdict"] or "failed"
+        parts.append(f"{CRITIQUE_ID} ({verdict}, {open_counts(critique_entry['findings'])})")
     message = f"Review blocked by {listing(parts)}" if parts else "Review blocked"
     if undecided:
         message += f"{';' if parts else ':'} no verdict from {listing(undecided)}"
@@ -1403,17 +1428,21 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
     save_json(runtime.directory / "review.json", review)
     # When the verdict was written, for the panel's grace (panel.verdict_time); review.json's key set is closed, so it is kept here.
     state.combined["decided_at"] = now()
+    from . import critique
+    crit = critique.review_entry(runtime)
+    crit_blocks = crit is not None and crit["verdict"] != "approved"
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
-    if review["verdict"] != "approved":  # A block, a reviewer without a verdict, or a late verdict (only ever after a block).
+    if review["verdict"] != "approved":  # A block, a reviewer without a verdict, a late verdict (only after a block), or the critique.
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
         blockers = mark_blockers(state, decisions)
         state.save()
-        message = blocked_event(state, decisions, blockers, undecided)
+        message = blocked_event(state, decisions, blockers, undecided, crit if crit_blocks else None)
         runtime.event("review", "blocked", message)
         attention_record(runtime.directory, "review_blocked", f"{message}. Read {runtime.directory / 'review.json'}; review findings are fixed "
                                                               "in a new run.", node="review")  # C44
         export_verdict(runtime)  # After the statuses and the event, so the export shows them with the verdict.
-        raise RuntimeError(blocked_error(blockers or undecided or late, blockers, decisions))
+        names = blockers + ([CRITIQUE_ID] if crit_blocks else [])
+        raise RuntimeError(blocked_error(names or undecided or late, blockers, decisions, crit if crit_blocks else None))
     runtime.validate_review(review)
     for status in state.statuses.values():
         status["status"] = "succeeded"
@@ -1503,6 +1532,8 @@ def _review_native(runtime, bundle: dict, digest: str, patch: Path) -> dict:
         state.save()
     combined["status"] = "running"
     state.save()
+    from . import critique
+    critique.ensure_started(runtime)  # PRD 4.4 Timing: the native reviewers launched first, now setup/slot/app/job, beside them.
     return _accept_native(runtime, bundle, digest, state)
 
 
@@ -1575,6 +1606,11 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     waited = False
     try:
         decisions = wait_reviews(runtime, state)
+        # The review decides once the native reviewers are settled AND the critique has a decision or failed (PRD 4.4). A
+        # native block does not stop the critique job; the detached child did setup, the slot and the app, so this only
+        # polls its status file. No-op for a plan without critique.
+        from . import critique
+        critique.wait_for_critique(runtime)
         waited = True  # From here a failure refuses the whole review (nothing accepted so far is trusted), but a blocked one keeps its record.
         # The recorded UUIDs first, whatever the verdict: a missing, a worker's or a shared one is refused with no review.json, as
         # a record holding it would fail the run's own validation (export, the viewer).
@@ -2102,8 +2138,11 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
         raise exhausted(runtime, previous[-1]["lane"], finding_lines(previous[-1]["findings"]), "review")
     block = review_block(runtime, state)
     if block is not None:
+        from .critique import has_critique
         lane, findings = block
-        if lane is None or has_attack(runtime.plan):  # Findings on no single lane end the run as before; the attack pass is not looped (yet).
+        # Findings on no single lane end the run as before. An attack-only plan is not looped (PRD_ATTACK_PASS); a plan with
+        # critique (attack and critique together included) loops, so a critique P1 repairs its lane (PRD_USER_CRITIQUE 4.6).
+        if lane is None or (has_attack(runtime.plan) and not has_critique(runtime.plan)):
             return None
         sessions = session_entries(runtime.directory, lane)
         if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):

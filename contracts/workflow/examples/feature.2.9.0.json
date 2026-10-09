@@ -1,0 +1,29 @@
+{
+  "version": "2.9.0",
+  "name": "User critique example",
+  "branch_prefix": "feature/user-critique",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "pages",
+      "task": "pages-task.md",
+      "skills": ["impeccable"]
+    },
+    {
+      "node_id": "shell",
+      "task": "shell-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    }
+  ],
+  "critique": {
+    "lanes": ["pages", "shell"],
+    "skills": ["impeccable"],
+    "max_budget_usd": 15,
+    "timeout_minutes": 45
+  }
+}

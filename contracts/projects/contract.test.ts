@@ -26,6 +26,38 @@ test('project examples and generated schemas agree', () => {
   validatePanelResults(examples.panelResults)
 })
 
+test('critique reviewer 1.11.0: a critique finding carries evidence (steps and critique-<round>-<sha12> screenshots) in the review and an archived round', () => {
+  // The review result: the critique reviewer is listed, its P1 blocks, and its findings carry evidence; other reviewers carry none.
+  const review = validateReviewResult(examples.critiqueReviewResult)
+  assert.equal(review.verdict, 'blocked')
+  const critique = review.reviewers.find(entry => entry.reviewer_id === 'critique')
+  assert.ok(critique && critique.verdict === 'blocked', 'the critique reviewer is listed and blocked')
+  const p1 = review.findings.find(finding => finding.reviewer === 'critique' && finding.severity === 'P1')
+  assert.ok(p1?.evidence && p1.evidence.screenshots[0].artifact_id === 'critique-1-0a1b2c3d4e5f', 'the P1 carries evidence with a critique screenshot id')
+  assert.ok(p1.evidence.steps.length >= 1 && p1.evidence.steps.every(step => step.length <= 300))
+  for (const finding of review.findings) {
+    if (finding.reviewer !== 'critique') assert.equal(finding.evidence, undefined, 'only critique findings carry evidence')
+  }
+  // Two critique findings with distinct screenshots keep their own evidence.
+  assert.notEqual(review.findings.filter(f => f.reviewer === 'critique')[0].evidence?.screenshots[0].artifact_id,
+                  review.findings.filter(f => f.reviewer === 'critique')[1].evidence?.screenshots[0].artifact_id)
+  // A genuine duplicate pair (same severity + worker + message) keeps its own evidence by digest + occurrence index.
+  const dups = review.findings.filter(f => f.reviewer === 'critique'
+    && f.message === 'An empty state shows no guidance on a lane with no findings yet.')
+  assert.equal(dups.length, 2, 'the example holds a duplicate critique-finding pair with the same digest')
+  assert.equal(dups[0].severity, dups[1].severity)
+  assert.equal(dups[0].worker, dups[1].worker)
+  assert.notEqual(dups[0].evidence?.screenshots[0].artifact_id, dups[1].evidence?.screenshots[0].artifact_id,
+    'each occurrence keeps its own evidence')
+  // The archived round in the fix loop carries the critique finding's own evidence.
+  const loop = validateFixLoop(examples.critiqueFixLoop)
+  assert.ok('review_rounds' in loop)
+  const archived = loop.review_rounds[0].findings.find(finding => finding.reviewer === 'critique')
+  assert.ok(archived?.evidence && archived.evidence.screenshots[0].artifact_id === 'critique-1-0a1b2c3d4e5f', 'the archived round exports the critique finding evidence')
+  // Evidence is optional and additive: the base reviewResult example (no critique) still validates with no evidence anywhere.
+  assert.ok(validateReviewResult(examples.reviewResult).findings.every(finding => finding.evidence === undefined))
+})
+
 test('rejects cyclic, dangling and duplicate graph nodes', () => {
   for (const dependency of ['unknown', 'review']) {
     const definition = structuredClone(examples.runDetail.definition)

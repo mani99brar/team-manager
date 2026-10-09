@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Workflow verification policy v1 / v1.1 / v1.2 / v1.3",
-  "description": "Policy 1.2.0 declares any number of worker lanes from configuration: lane ids follow a fixed pattern and avoid the reserved graph names, `role` is a free label and each lane lists the check kinds it must pass in `required_check_kinds`. Policies 1.0.0 and 1.1.0 stay accepted so pinned policies in old runs still validate; for them the controller derives the required kinds from the role (frontend: build and browser; backend: unit). Policy 1.3.0 adds the optional `attack_check` (docs/PRD_ATTACK_PASS.md section 3): the command that runs one exploit test file, `{argv, timeout_seconds}` with `{file}` exactly once in `argv`; a feature with `attack` and no `attack_check` is refused at launch. `attack_check` is refused before 1.3.0.",
+  "title": "Workflow verification policy v1 / v1.1 / v1.2 / v1.3 / v1.4",
+  "description": "Policy 1.2.0 declares any number of worker lanes from configuration: lane ids follow a fixed pattern and avoid the reserved graph names, `role` is a free label and each lane lists the check kinds it must pass in `required_check_kinds`. Policies 1.0.0 and 1.1.0 stay accepted so pinned policies in old runs still validate; for them the controller derives the required kinds from the role (frontend: build and browser; backend: unit). Policy 1.3.0 adds the optional `attack_check` (docs/PRD_ATTACK_PASS.md section 3): the command that runs one exploit test file, `{argv, timeout_seconds}` with `{file}` exactly once in `argv`; a feature with `attack` and no `attack_check` is refused at launch. `attack_check` is refused before 1.3.0. Policy 1.4.0 keeps `attack_check` and adds the optional `critique_app` (docs/PRD_USER_CRITIQUE.md section 4.2): `{argv, ready_path, timeout_seconds}`, how the critique reviewer starts the frozen candidate's app on free ports; a feature with `critique` and no `critique_app` is refused at launch. `critique_app` is refused before 1.4.0.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -103,7 +103,10 @@
         "not": {
           "properties": {
             "version": {
-              "const": "1.3.0"
+              "enum": [
+                "1.3.0",
+                "1.4.0"
+              ]
             }
           }
         }
@@ -115,6 +118,24 @@
           ]
         }
       }
+    },
+    {
+      "if": {
+        "not": {
+          "properties": {
+            "version": {
+              "const": "1.4.0"
+            }
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "critique_app"
+          ]
+        }
+      }
     }
   ],
   "properties": {
@@ -123,8 +144,39 @@
         "1.0.0",
         "1.1.0",
         "1.2.0",
-        "1.3.0"
+        "1.3.0",
+        "1.4.0"
       ]
+    },
+    "critique_app": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "1.4.0: how the critique reviewer starts the frozen candidate's app (docs/PRD_USER_CRITIQUE.md 4.2). The controller runs `argv` in the critique worktree with CRITIQUE_WEB_PORT and CRITIQUE_API_PORT set to free ports it picks, waits until http://127.0.0.1:$CRITIQUE_WEB_PORT<ready_path> answers within timeout_seconds, gives the session the URL, and stops the process group when the critique ends. Required when the feature declares `critique`; refused before 1.4.0.",
+      "required": [
+        "argv",
+        "ready_path",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "ready_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
     },
     "attack_check": {
       "type": "object",

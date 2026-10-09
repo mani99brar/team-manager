@@ -564,7 +564,7 @@ class BuiltinBriefs(Isolated):
         branches = git(target, "branch", "--list")
         errors = self.refused("skeleton", "--repo", str(target), "--no-herdr", "--live")
         self.assertIn("Unknown bundled reviewer brief 'builtin:nope'", errors)
-        self.assertIn("builtin:coverage, builtin:general", errors)
+        self.assertIn("builtin:coverage, builtin:critique, builtin:general", errors)
         self.assertEqual(git(target, "branch", "--list"), branches)
         self.assertFalse(self.registry.exists())
 

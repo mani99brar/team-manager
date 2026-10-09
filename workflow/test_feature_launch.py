@@ -104,6 +104,96 @@ class FeatureLaunchTests(unittest.TestCase):
             _, plain, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
         self.assertNotIn("--attack", plain[0])
 
+    def critique_feature(self, *, critique_app: bool = True, lanes=("ui",), version: str = "2.9.0") -> None:
+        """features/project-workflows as a 2.9.0 feature with `critique` (and its policy's critique_app, policy 1.4.0)."""
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        manifest.update(version=version, critique={"lanes": list(lanes)})
+        save_json(folder / "feature.json", manifest)
+        policy = read_json(folder / "policy.json")
+        policy["version"] = "1.4.0"
+        if critique_app:
+            policy["critique_app"] = {"argv": ["npm", "run", "dev"], "ready_path": "/", "timeout_seconds": 120}
+        save_json(folder / "policy.json", policy)
+        brief = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (folder / name).write_text(brief)
+        (folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        skill = self.root / "home" / ".claude" / "skills" / "impeccable"
+        skill.mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text("---\nname: impeccable\n---\nThe design critique method.\n")
+        self.git("add", "."), self.git("commit", "-qm", "critique")
+
+    def test_a_2_9_0_feature_with_critique_pins_critique_settings_at_prepare(self):
+        self.critique_feature()
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        prepare = next(command for command in commands if command[3] == "prepare")
+        self.assertIn("--critique-settings", prepare)
+        settings = json.loads(prepare[prepare.index("--critique-settings") + 1])
+        self.assertEqual(settings["lanes"], ["ui"])
+        self.assertEqual(settings["skills"], ["impeccable"])
+
+    def test_a_2_9_0_feature_without_critique_launches_like_a_2_8_0_one(self):
+        self.critique_feature()  # satisfies the 2.2.0 guardrails and a resolvable skill
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        del manifest["critique"]  # a 2.9.0 feature without critique
+        save_json(folder / "feature.json", manifest)
+        self.git("add", "."), self.git("commit", "-qm", "2.9.0 no critique")
+        run, commands, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        prepare = next(command for command in commands if command[3] == "prepare")
+        self.assertNotIn("--critique-settings", prepare)  # nothing of the critique path is added
+        # And the same feature at 2.8.0 (no critique key is possible) produces byte-for-byte the SAME full command list.
+        manifest["version"] = "2.8.0"
+        save_json(folder / "feature.json", manifest)
+        self.git("add", "."), self.git("commit", "-qm", "2.8.0")
+        run28, commands28, _ = launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        self.assertEqual(commands, commands28)  # the whole plan (preflight, worktree add, prepare, start), not only the prepare argv
+
+    def test_launch_refuses_critique_before_2_9_0(self):
+        self.critique_feature(version="2.8.0")
+        with self.assertRaisesRegex(ValueError, "version 2.9.0"):
+            launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+
+    def test_launch_refuses_critique_without_a_policy_critique_app(self):
+        self.critique_feature(critique_app=False)
+        with self.assertRaisesRegex(ValueError, "no critique_app"):
+            launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+
+    def test_launch_refuses_a_critique_lane_that_is_not_a_lane(self):
+        self.critique_feature(lanes=["nope"])
+        with self.assertRaisesRegex(ValueError, "not lanes of this feature"):
+            launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+
+    def test_launch_refuses_a_lane_named_critique_when_critique_is_declared(self):
+        # The lane id `critique` is reserved only IN a feature that declares `critique` (PRD 4.2, 4.7), enforced at launch
+        # (not in the schema's lane pattern, so a feature before 2.9.0 keeps a `critique` lane; review finding 12). Rename
+        # the second lane to `critique` in both the feature and its policy so they still match in order.
+        self.critique_feature()  # declares critique on lane ui
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        policy = read_json(folder / "policy.json")
+        manifest["workers"].append({"node_id": "critique", "task": "ui-task.md"})
+        extra = dict(policy["workers"][1])
+        extra["node_id"] = "critique"
+        extra["owned_paths"] = ["docs/critique-lane"]  # distinct, so the ownership check passes and the critique check is reached
+        policy["workers"].append(extra)
+        save_json(folder / "feature.json", manifest)
+        save_json(folder / "policy.json", policy)
+        self.git("add", "."), self.git("commit", "-qm", "critique lane")
+        with self.assertRaisesRegex(ValueError, r"lane named `critique`"):  # before any Git action
+            launch_commands(self.repo, "project-workflows", "project-workflows-001", self.root / "runs")
+        self.assertFalse((self.root / "runs").exists())
+
+    def test_dry_run_prints_the_critique_settings(self):
+        self.critique_feature()
+        result = self.dry_run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        printed = json.loads(result.stdout)
+        self.assertEqual(printed["critique"]["lanes"], ["ui"])
+        self.assertEqual(printed["critique"]["critique_app"]["ready_path"], "/")
+        self.assertIn("guard", printed["critique"])
+
     def attack_feature(self, attack_check: bool = True) -> None:
         """features/project-workflows as a 2.5.0 feature with `attack` (and its policy's attack_check unless told otherwise)."""
         folder = self.repo / "features/project-workflows"
