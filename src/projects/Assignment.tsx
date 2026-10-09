@@ -1,17 +1,55 @@
 import { Markdown } from '../document/Markdown.tsx'
-import type { RunInputs, RunScope } from './api.ts'
+import type { ReviewResult, RunInputs, RunScope } from './api.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { runPathname } from './routes.ts'
-import { deadlinesLabel, formatDuration, rolesLabel, shortRevision } from './status.ts'
+import { assignmentModel, deadlinesLabel, formatDuration, rolesLabel, shortRevision, taskLengthLabel } from './status.ts'
 import type { Resource } from './useResource.ts'
+import './assignment.css'
 
 type Props = {
   scope: RunScope
   inputs: Resource<RunInputs | null>
+  /** The latest review result, for the setup line's reviewers; null before a review ("reviewers not recorded"). */
+  review: ReviewResult | null
   onRetry: () => void
   onNavigate: (pathname: string) => void
   panelId: string
   tabId: string
+}
+
+/** The Assignment setup line and lane table (docs/PRD_VIEWER_REFINE 5.5): the run's shape, before any long text. */
+function AssignmentSummary({ inputs, review }: { inputs: RunInputs; review: ReviewResult | null }) {
+  const model = assignmentModel(inputs, review)
+  const { setup, lanes } = model
+  return (
+    <>
+      <p className="assignment-setup" data-testid="assignment-setup-line">
+        <span><strong>{setup.feature}</strong></span>
+        <span> · {setup.mode}{setup.profile ? ` (${setup.profile})` : ''}</span>
+        <span> · base <code title={setup.baseCommit}>{shortRevision(setup.baseCommit)}</code></span>
+        <span> · {setup.fixRounds === null ? 'fix rounds not pinned' : `${setup.fixRounds} fix ${setup.fixRounds === 1 ? 'round' : 'rounds'}`}</span>
+        <span> · {setup.reviewers === null ? 'reviewers not recorded' : `reviewers ${setup.reviewers.join(', ')}`}</span>
+      </p>
+      <table className="assignment-lanes-table" data-testid="assignment-lane-table">
+        <thead>
+          <tr><th scope="col">Lane</th><th scope="col">Role</th><th scope="col">Model</th><th scope="col">Skills</th><th scope="col">Owned</th><th scope="col">Checks</th><th scope="col">Task</th></tr>
+        </thead>
+        <tbody>
+          {lanes.map(lane => (
+            <tr key={lane.node_id} data-testid="assignment-lane-row" data-lane={lane.node_id}>
+              <th scope="row">{lane.node_id}</th>
+              <td>{lane.role}</td>
+              <td data-testid="assignment-lane-pin">{lane.pin ?? <span className="projects-muted">no pin</span>}</td>
+              <td>{lane.skills.length === 0 ? <span className="projects-muted">none</span> : lane.skills.join(', ')}</td>
+              <td className="assignment-num">{lane.ownedPaths}</td>
+              <td className="assignment-num">{lane.checks}</td>
+              <td className={lane.taskTruncated ? undefined : 'assignment-num'} data-testid="assignment-task-length">{taskLengthLabel(lane)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  )
 }
 
 export const INPUTS_NONE_SENTENCE = 'Inputs not recorded for this run (the export predates run inputs; re-export it with the workflow CLI).'
@@ -19,7 +57,7 @@ export const INPUTS_NONE_SENTENCE = 'Inputs not recorded for this run (the expor
 export const DECISIONS_NONE_SENTENCE = 'No decisions.md was recorded for this run (its feature predates the guardrails, or the export predates decisions).'
 
 /** The Assignment tab: what the run was asked to do, pinned from its own files, with the feature's decisions and each worker's task rendered as inert Markdown. */
-export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, tabId }: Props) {
+export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, panelId, tabId }: Props) {
   let content: React.ReactNode
   if (inputs.status === 'loading' || inputs.status === 'idle') content = <LoadingPanel>Loading the run inputs…</LoadingPanel>
   else if (inputs.status === 'error') content = <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetry} />
@@ -28,6 +66,7 @@ export function AssignmentPanel({ scope, inputs, onRetry, onNavigate, panelId, t
     const data = inputs.data
     content = (
       <>
+        <AssignmentSummary inputs={data} review={review} />
         <dl className="projects-facts">
           <div><dt>Feature</dt><dd>{data.feature}</dd></div>
           <div><dt>Source branch</dt><dd>{data.source_branch === null ? 'None recorded' : <code>{data.source_branch}</code>}</dd></div>

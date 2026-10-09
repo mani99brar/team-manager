@@ -186,3 +186,82 @@ export function withoutGlyph(text: Text, glyph: string): Text {
   const [first, ...rest] = text
   return typeof first === 'string' && first.startsWith(`${glyph} `) ? [first.slice(glyph.length + 1), ...rest] : text
 }
+
+// ---- Steps grouped by phase, with the fix loop's repairs and rounds (docs/PRD_VIEWER_REFINE 5.3) -----------------
+
+/** The phases the Steps table groups its rows into, in order. */
+export type StepPhase = 'challenge' | 'work' | 'verify' | 'candidate' | 'review' | 'integrate'
+export const STEP_PHASE_LABEL: Record<StepPhase, string> = {
+  challenge: 'Challenge', work: 'Work', verify: 'Verify', candidate: 'Candidate', review: 'Review', integrate: 'Integrate',
+}
+export const STEP_PHASE_ORDER: readonly StepPhase[] = ['challenge', 'work', 'verify', 'candidate', 'review', 'integrate']
+
+/** The phase a pinned step belongs to; a `repair-<n>` takes the phase of the step it answers (resolved by the caller). */
+export function stepPhase(node: { node_id: string; kind: DefinitionNode['kind'] }): StepPhase {
+  if (node.node_id === 'challenge' && node.kind === 'review') return 'challenge'
+  if (node.node_id === 'candidate') return 'candidate'
+  switch (node.kind) {
+    case 'worker': return 'work'
+    case 'prepare': return 'verify'
+    case 'verification': return 'verify'
+    case 'review': return 'review'
+    case 'integration': return 'integrate'
+    default: return 'work'
+  }
+}
+
+/** A session repair as the Steps and the node pages read it, by its `repair-<n>` node id. */
+export type RepairMark = { n: number; round: number; rounds: number; trigger: 'verify' | 'candidate' | 'review'; blocked_step: string }
+
+/** The repair marks of a run's fix loop, keyed by repair node id (`[]` for a run without one). */
+export function repairMarks(detail: RunDetail): Map<string, RepairMark> {
+  const repairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
+  return new Map(repairs.map(repair => [repair.node_id, { n: repair.n, round: repair.round, rounds: repair.rounds, trigger: repair.trigger, blocked_step: repair.blocked_step }]))
+}
+
+/** One Steps row with what it is: a pinned step, or a repair session beneath the step it answers (with its round). */
+export type StepItem = { row: StepRow; phase: StepPhase; repair: RepairMark | null }
+
+/**
+ * The Steps rows tagged with their phase and, for a `repair-<n>` row, its repair mark; the phase of a repair is the phase
+ * of the step it answers, so a repair sits in its parent's phase. Order is the row order (the server places each repair
+ * right after the step it answers), so consecutive grouping keeps a repair under its step.
+ */
+export function stepItems(rows: readonly StepRow[], detail: RunDetail): StepItem[] {
+  const marks = repairMarks(detail)
+  const phaseOf = new Map(detail.definition.nodes.map(node => [node.node_id, stepPhase(node)]))
+  return rows.map(row => {
+    const repair = marks.get(row.node_id) ?? null
+    const phase = repair ? phaseOf.get(repair.blocked_step) ?? 'work' : phaseOf.get(row.node_id) ?? 'work'
+    return { row, phase, repair }
+  })
+}
+
+export type StepPhaseGroup = { phase: StepPhase; label: string; items: StepItem[] }
+
+/** The step items cut into consecutive phase groups, in phase order (challenge → integrate). */
+export function stepGroups(items: readonly StepItem[]): StepPhaseGroup[] {
+  const groups: StepPhaseGroup[] = []
+  for (const item of items) {
+    const last = groups.at(-1)
+    if (!last || last.phase !== item.phase) groups.push({ phase: item.phase, label: STEP_PHASE_LABEL[item.phase], items: [item] })
+    else last.items.push(item)
+  }
+  return groups
+}
+
+/** The pinned-step counts for the Steps header, never counting the projected repair rows (5.3). */
+export function pinnedStepCounts(items: readonly StepItem[]): { done: number; total: number; failed: number } {
+  const pinned = items.filter(item => item.repair === null)
+  return {
+    done: pinned.filter(item => item.row.shown === 'succeeded').length,
+    failed: pinned.filter(item => item.row.shown === 'failed').length,
+    total: pinned.length,
+  }
+}
+
+/** How many repair rounds a run's fix loop recorded (the highest round of its session repairs); 0 without one. */
+export function repairRoundCount(detail: RunDetail): number {
+  const repairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
+  return repairs.reduce((max, repair) => Math.max(max, repair.round), 0)
+}

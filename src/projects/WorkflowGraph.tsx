@@ -34,6 +34,16 @@ type Props = {
    * rows, meta line and 83 % floor.
    */
   compact?: boolean
+  /**
+   * A per-node meta line override (docs/PRD_VIEWER_REFINE 5.2): a repair node's "round r of n · trigger", a launch node's
+   * model pin, the review node's round and delta base. Null keeps the default status/executor line.
+   */
+  metaOf?: (node: GraphNodeView) => string | null
+  /**
+   * The fix loop's return marks: a dashed edge from a repair node back to the step it answers, a drawing from the fix-loop
+   * section and never a dependency edge (the contract graph stays acyclic). `from` is the repair node, `to` the step.
+   */
+  returns?: { from: string; to: string }[]
 }
 
 /** Controller and verifier nodes are outlined dashed (an inline attribute, so no stylesheet rule is needed); agents stay solid. */
@@ -54,7 +64,7 @@ const META_FIT = 22
  * label, kind, status, attempt and executor; a status glyph repeats the status so colour never carries it alone, and a
  * step that waits on the operator gets an amber ring and a `?`. The outline says who executes it, as the legend explains.
  */
-export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSelect, compact = false }: Props) {
+export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSelect, compact = false, metaOf, returns = [] }: Props) {
   const layout = useMemo(() => (compact ? compactLayout(layoutDag(nodes)) : layoutDag(nodes)), [nodes, compact])
   const nodeWidth = compact ? COMPACT.width : DAG_NODE_WIDTH
   const interactive = onSelect !== undefined
@@ -106,6 +116,9 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
             <marker id="workflow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" className="workflow-edge-arrow" />
             </marker>
+            <marker id="workflow-return-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" className="workflow-return-arrow" />
+            </marker>
           </defs>
           {layout.edges.map(edge => {
             const from = layout.positions.get(edge.from)!
@@ -126,21 +139,46 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
               />
             )
           })}
+          {returns.flatMap(mark => {
+            const from = layout.positions.get(mark.from)
+            const to = layout.positions.get(mark.to)
+            if (!from || !to) return []
+            // The repair node sits right of the step it answers; the return mark arcs back from the repair's top-left to
+            // the step's top, dashed and distinct from the solid dependency edges (a drawing, never a dependency edge).
+            const x1 = from.x + nodeWidth / 2
+            const y1 = from.y
+            const x2 = to.x + nodeWidth / 2
+            const y2 = to.y
+            const lift = Math.min(y1, y2) - 22
+            return [(
+              <path
+                key={`return-${mark.from}-${mark.to}`}
+                className="workflow-return"
+                d={`M ${x1} ${y1} C ${x1} ${lift}, ${x2} ${lift}, ${x2} ${y2}`}
+                markerEnd="url(#workflow-return-arrow)"
+                data-return-from={mark.from}
+                data-return-to={mark.to}
+                aria-hidden="true"
+              />
+            )]
+          })}
           {nodes.map((node, index) => {
             const position = layout.positions.get(node.node_id)!
             const status = node.status
             const lines = wrapLabel(node.label, compact ? COMPACT.chars : 16, 2)
             const executor = executorCategory(node.kind)
+            const metaOverride = metaOf?.(node) ?? null
             const description = [
               node.label,
               KIND_LABEL[node.kind].toLowerCase(),
               status ? STATUS_LABEL[status].toLowerCase() : null,
               node.attempt !== undefined ? `attempt ${node.attempt}` : null,
+              metaOverride,
               `executed by ${executorOf(node.kind, undefined, node.node_id)}`,
             ].filter(Boolean).join(', ')
-            const meta = status
+            const meta = metaOverride ?? (status
               ? `${STATUS_LABEL[status]}${node.attempt !== undefined ? ` · attempt ${node.attempt}` : ''} · ${EXECUTOR_SHORT[executor]}`
-              : `${KIND_LABEL[node.kind]} · ${EXECUTOR_SHORT[executor]}`
+              : `${KIND_LABEL[node.kind]} · ${EXECUTOR_SHORT[executor]}`)
             const glyph = node.attention ? '?' : status ? STATUS_GLYPH[status] : null
             // Fill and stroke by status through the one tone mapping, a wait on the operator winning (`stateTone`); the glyph and
             // the meta line say it in text too.
@@ -212,6 +250,15 @@ export function WorkflowGraph({ title, nodes, selectedId, focusId = null, onSele
             <span className="visually-hidden">: {entry.meaning}</span>
           </li>
         ))}
+        {returns.length > 0 && (
+          <li data-legend="return" title="Return mark: a repair session answers the step it points back to (a drawing from the fix loop, not a dependency).">
+            <svg width="24" height="12" aria-hidden="true">
+              <path className="workflow-return" d="M 2 10 C 2 2, 22 2, 22 10" markerEnd="url(#workflow-return-arrow)" />
+            </svg>
+            <span>Return mark</span>
+            <span className="visually-hidden">: a repair session answers the step it points back to.</span>
+          </li>
+        )}
       </ul>
     </>
   )

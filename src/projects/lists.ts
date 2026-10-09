@@ -63,28 +63,61 @@ export const endedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run
 /** When a run last moved, for ordering live rows: the served last activity, else its last update. */
 export const movedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run.activity?.last_activity_at ?? run.updated_at
 
-export type HomeSections<T> = { needsYou: T[]; running: T[]; recent: T[] }
+export type HomeSections<T> = { needsYou: T[]; running: T[]; paused: T[]; recent: T[] }
 
 /**
- * Sorts rows into the three sections of Runs home; a run appears in one section only. Needs you: a question, a pane or an
- * approval waits (served `activity.attention.kind`), longest waiting first. Running: every other run that is not finished,
- * latest activity first. Recent: finished runs that ended within the seven days before `now`, newest first; older ones
- * stay on their project page only.
+ * Sorts rows into the four sections of Runs home (PRD_VIEWER_REFINE 5.7); a run appears in one section only. Needs you: a
+ * question, a pane or an approval waits (served `activity.attention.kind`), longest waiting first — whatever its status.
+ * Paused: a `paused` run that waits on nobody, oldest first (longest-stopped at the top), by its attention `since`, else
+ * its last activity. Running: every other run that is not finished, latest activity first. Recent: finished runs that ended
+ * within the seven days before `now`, newest first; older ones stay on their project page only.
  */
 export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number): HomeSections<T> {
   const needsYou: T[] = []
   const running: T[] = []
+  const paused: T[] = []
   const recent: T[] = []
   for (const row of rows) {
     if (waitingKind(row.run) !== null) needsYou.push(row)
-    else if (!isFinished(row.run.status)) running.push(row)
-    else if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row)
+    else if (isFinished(row.run.status)) { if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row) }
+    else if (row.run.status === 'paused') paused.push(row)
+    else running.push(row)
   }
   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
   needsYou.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
   running.sort((a, b) => ms(movedAt(b.run)) - ms(movedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
+  paused.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
   recent.sort((a, b) => ms(endedAt(b.run)) - ms(endedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
-  return { needsYou, running, recent }
+  return { needsYou, running, paused, recent }
+}
+
+/** Whole days from an instant to `now`, floored; never negative. */
+const daysSince = (iso: string, now: number) => Math.max(0, Math.floor((now - ms(iso)) / (24 * 60 * 60 * 1000)))
+
+/**
+ * How long a paused run has waited, for its row in the Paused section (PRD_VIEWER_REFINE 5.7): "since <n> days" from its
+ * attention `since`, else its last activity; "since today" under a day. Rendered in the paused tone by its caller.
+ */
+export function sincePausedLabel(run: Pick<RunSummary, 'updated_at' | 'activity'>, now: number): string {
+  const n = daysSince(run.activity?.attention?.since ?? movedAt(run), now)
+  if (n === 0) return 'since today'
+  return `since ${n} ${n === 1 ? 'day' : 'days'}`
+}
+
+/**
+ * A Running or Paused section's sub-header (PRD_VIEWER_REFINE 5.7): the step each row sits at, counted and named from the
+ * served `activity.focus.label`, in first-seen order ("3 at Launch ui worker, 1 at Verify ui"); rows the server gives no
+ * focus step are counted as "<n> without a step". Empty when there are no rows (the section shows its empty sub-header).
+ */
+export function stepTally<T extends { run: RunSummary }>(rows: readonly T[]): string {
+  const order: string[] = []
+  const counts = new Map<string, number>()
+  for (const row of rows) {
+    const key = row.run.activity?.focus?.label ?? ''
+    if (!counts.has(key)) order.push(key)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return order.map(key => `${counts.get(key)} ${key === '' ? 'without a step' : `at ${key}`}`).join(', ')
 }
 
 /** Whether Runs home reads the next page of a workflow's runs: pages are newest first, so it stops at the Recent cutoff. */

@@ -40,10 +40,19 @@ const graphNode = (page: Page, nodeId: string) => page.locator(`[data-testid="wo
 const nodeListItem = (page: Page, nodeId: string) => page.locator(`[data-testid="run-node-list"] [data-node-id="${nodeId}"]`)
 const nodeDetail = (page: Page) => page.getByTestId('node-detail')
 
-/** No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only selectors). */
+/**
+ * No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only
+ * selectors). The Projects header is read-only too (P2: the earlier check did not cover it), so it is checked alongside the
+ * workspace — only its Refresh and roots links, which act on no run.
+ */
 async function expectNoExecutionControls(page: Page) {
+  const EXECUTION = /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i
   const controls = workspace(page).locator('button, input, select, textarea, [role="menuitem"]')
-  await expect(controls.filter({ hasText: /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i })).toHaveCount(0)
+  await expect(controls.filter({ hasText: EXECUTION })).toHaveCount(0)
+  // The header was actually inspected (its Refresh button is present), so the no-execution count is not vacuous.
+  await expect(page.locator('.app-header-projects .button')).toHaveCount(1)
+  const header = page.locator('.app-header-projects').locator('button, input, select, textarea, [role="menuitem"]')
+  await expect(header.filter({ hasText: EXECUTION })).toHaveCount(0)
   await expect(page.locator('form')).toHaveCount(0)
 }
 

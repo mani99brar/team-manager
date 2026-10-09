@@ -4,7 +4,7 @@ import { INPUTS_NONE_SENTENCE } from './Assignment.tsx'
 import { LiveStatus } from './LiveStatus.tsx'
 import { RichText } from './NowBanner.tsx'
 import { AppLink, ErrorPanel, StatusBadge } from './panels.tsx'
-import { deadlinesLabel, RUN_STATUS_SHORT, shortRevision, workflowTitle } from './status.ts'
+import { deadlinesLabel, formatDuration, RUN_STATUS_SHORT, shortRevision, workflowTitle } from './status.ts'
 import { withoutGlyph } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
@@ -101,10 +101,10 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
       </div>
       {inputs.status === 'error' && <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />}
       <div className="run-facts" data-testid={data ? 'run-inputs-facts' : undefined}>
-        {data && (
-          <span className="run-facts-line">
-            {data.source_branch === null ? 'no source branch recorded' : <code>{data.source_branch}</code>} @ <code title={data.base_commit}>{shortRevision(data.base_commit)}</code>
-            {' · '}{data.mode}{data.automatic && <>{' · '}{deadlinesLabel(data.automatic)}</>}
+        {data?.automatic && (
+          <span className="run-deadline-chips" data-testid="run-deadlines">
+            <span className="ui-chip" title="The worker deadline: the configured limit for a worker's turn, not how long it ran.">worker {formatDuration(data.automatic.worker_timeout_seconds)}</span>
+            <span className="ui-chip" title="The review deadline: the configured limit for a review, not how long it ran.">review {formatDuration(data.automatic.review_timeout_seconds)}</span>
           </span>
         )}
         {inputs.status === 'ready' && inputs.data === null && <span className="projects-muted" data-testid="inputs-none">{INPUTS_NONE_SENTENCE}</span>}

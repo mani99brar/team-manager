@@ -353,3 +353,94 @@
   .run-details > summary, .command-legend > summary, .run-lanes-more > summary { display: inline-flex; align-items: center; min-height: 44px; }
   .activity-open, .step-strip-run, .run-now-open { display: inline-flex; align-items: center; min-height: 44px; }
 }
+
+/* ---- viewer-refine: the fix loop in the graph, the lanes strip, the steps phases and the inline diff ---- */
+
+/* The return mark: a repair session answers the step it points back to (a drawing from the fix loop, dashed, edge tone). */
+.workflow-return {
+  fill: none;
+  stroke: var(--edge);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+.workflow-return-arrow { fill: var(--edge); }
+
+/* The lanes strip: per-lane head with the model pin chip and the repair round count. */
+.run-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.run-lane-status { font-variant-numeric: tabular-nums; }
+.run-lane-rounds { font-size: 12px; }
+
+/* Two deadline chips beside the state line. */
+.run-deadline-chips { display: inline-flex; gap: 6px; margin-left: 6px; vertical-align: middle; }
+
+/* The next step's "All steps" disclosure: the first command shows, the rest fold. */
+.command-all-steps { margin-top: 6px; }
+.command-all-steps > summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--muted);
+  padding: 2px 0;
+}
+.command-all-steps[open] > summary { margin-bottom: 4px; }
+
+/* The Steps table grouped by phase: a quiet header row per phase, repair rows indented beneath their step. */
+.steps-phase-head .steps-phase-label {
+  text-align: left;
+  padding: 3px 8px 1px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  color: var(--muted);
+}
+.steps-phase-group:first-of-type .steps-phase-head .steps-phase-label { padding-top: 0; }
+.step-row-repair .step-name { padding-left: 20px; }
+.step-row-repair .step-label { color: var(--muted); }
+
+/* The review diff rendered inline: a file list, each file a disclosure of its hunks in add/remove/context tones. */
+.review-diff-inline { margin: 12px 0; }
+.review-diff-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.review-diff-totals { font-size: 0.85rem; color: var(--muted); margin: 0 0 8px; }
+.review-diff-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.diff-file {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.diff-file > details > summary, .diff-file-binary-row, .diff-file-large { cursor: default; padding: 6px 10px; }
+.diff-file > details > summary { cursor: pointer; }
+.diff-file-head { display: inline-flex; gap: 10px; align-items: baseline; }
+.diff-file-path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; }
+.diff-file-stat { font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.diff-added { color: var(--ok); }
+.diff-removed { color: var(--fail); }
+.diff-file-large { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.diff-hunks { overflow-x: auto; }
+.diff-hunk { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.78rem; }
+.diff-hunk .diff-gutter {
+  width: 1%;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.diff-hunk .diff-line-text { white-space: pre-wrap; padding: 0 8px; }
+.diff-hunk .diff-hunk-header td { background: var(--surface-2); color: var(--muted); }
+.diff-line-add { background: var(--ok-soft); }
+.diff-line-remove { background: var(--fail-soft); }
+.diff-sign { display: inline-block; width: 1ch; }
+
+/* Phone: the steps table and the diff scroll inside their own box, not the page; every run-view button is a 44 px target. */
+@media (max-width: 760px) {
+  .diff-hunks, .review-diff-files { max-width: 100%; }
+  .run-view button { min-height: 44px; }
+}

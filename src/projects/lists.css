@@ -101,6 +101,11 @@
 .run-row-since { flex: none; white-space: pre; }
 .run-row[data-status="failed"] .run-row-glyph { color: var(--fail); }
 .run-row[data-status="succeeded"] .run-row-glyph { color: var(--ok); }
+/* The lanes a Running or Paused row launches, as plain chips; no per-lane state is claimed. */
+.run-row-lanes { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* The paused "since <n> days", in the paused tone beside the outcome. */
+.run-row-paused-since { flex: none; white-space: pre; }
+.run-row-paused-since.tone-pause-text { color: var(--pause); font-weight: 600; }
 /* Waiting on the operator: a warn ring and a `?`; the status stays what it is. */
 .run-row[data-attention] { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
 .run-row[data-attention] .run-row-glyph { color: var(--warn); font-weight: 700; }
@@ -130,7 +135,7 @@
 .lists-group-last { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted); font-size: 0.9rem; }
 
 /* The feature page: the lanes, the run history strip, the rows, then the current definition folded away below them. */
-.feature-lanes, .feature-reviews { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
+.feature-lanes, .feature-reviews, .feature-reviewers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
 .run-history { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .workspace-projects .run-history-chip { text-decoration: none; min-width: 28px; min-height: 24px; justify-content: center; }
 .workspace-projects .run-history-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -160,6 +165,6 @@
   .run-row { grid-template-columns: minmax(0, 1fr); }
   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
   .run-row-detail { display: block; white-space: normal; }
-  .run-row-summary, .run-row-since { white-space: normal; }
+  .run-row-summary, .run-row-since, .run-row-paused-since { white-space: normal; }
   .home-search { max-width: none; }
 }

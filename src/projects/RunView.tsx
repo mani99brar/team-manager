@@ -14,9 +14,10 @@ import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
 import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
 import { RunBar, RunHeader } from './RunHeader.tsx'
-import { isAttackNode, isSidecarNode } from './status.ts'
+import { isAttackNode, isSidecarNode, lanePinText, type LanePin } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
-import { stepRows, withoutGlyph } from './steps.ts'
+import { repairRoundCount, stepRows, withoutGlyph } from './steps.ts'
+import { isRepairNode } from './dag.ts'
 import { Activity, StepsTable } from './StepsTimeline.tsx'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
 import { stateTone } from './tone.ts'
@@ -50,6 +51,9 @@ type Props = {
 
 type Highlight = { nodeId: string; quote: string }
 type FileFocus = { nodeId: string; path: string }
+
+/** A repair session whose node reads running (its launch has not applied or blocked yet). */
+const REPAIR_RUNNING_STATUSES: ReadonlySet<string> = new Set(['launched', 'captured', 'recorded'])
 
 const TABS: { id: Tab; label: string; testId: string }[] = [
   { id: 'run', label: 'Run', testId: 'tab-run' },
@@ -151,6 +155,39 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     const state = snapshotById.get(node.node_id)!
     return { node_id: node.node_id, label: node.label, kind: node.kind, depends_on: node.depends_on, status: state.status, attempt: state.attempt, attention: attention?.nodes.get(node.node_id)?.kind ?? null }
   })
+
+  // The in-run fix loop (export 1.10.0): the repair sessions, the lane pins and the review-node label the graph and the lanes
+  // strip read. The repair nodes are projected into `definition`/`snapshot` by the server; here we only draw their marks.
+  const fixLoopRepairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
+  const fixLoopRounds = detail.fixLoop && 'review_rounds' in detail.fixLoop ? detail.fixLoop.review_rounds : []
+  const pinOf = (lane: string): LanePin => inputsData?.workers.find(worker => worker.node_id === lane)?.roles ?? null
+  const laneMeta = new Map(lanes.map(line => [line.lane, {
+    pin: pinOf(line.lane),
+    rounds: fixLoopRepairs.filter(repair => repair.lane === line.lane).reduce((max, repair) => Math.max(max, repair.round), 0),
+  }]))
+  const graphReturns = fixLoopRepairs.map(repair => ({ from: repair.node_id, to: repair.blocked_step }))
+  // The review node's label follows the fix loop, not the snapshot attempt (docs/PRD_VIEWER_REFINE 5.2, decisions [L12]/[L13]).
+  const reviewMeta = (): string | null => {
+    const running = fixLoopRepairs.find(repair => repair.trigger === 'review' && repair.review_round !== null && REPAIR_RUNNING_STATUSES.has(repair.status))
+    if (running?.review_round != null) return `round ${running.review_round + 1} in review`
+    const applied = fixLoopRepairs.find(repair => repair.trigger === 'review' && repair.status === 'applied' && repair.review_round !== null)
+    if (applied?.review_round != null && reviewData === null) return `round ${applied.review_round + 1} in review`
+    if (reviewData?.round != null) {
+      const delta = reviewData.delta_from ? ` · delta from ${reviewData.delta_from.slice(0, 7)}` : ''
+      const restored = fixLoopRounds.some(round => round.restored_at !== null) ? ' · round restored' : ''
+      return `round ${reviewData.round}${delta}${restored}`
+    }
+    return null
+  }
+  const pinnedStepTotal = definition.nodes.filter(node => !isRepairNode(node.node_id)).length
+  const repairRounds = repairRoundCount(detail)
+  const graphMeta = (node: GraphNodeView): string | null => {
+    const repair = fixLoopRepairs.find(entry => entry.node_id === node.node_id)
+    if (repair) return `round ${repair.round} of ${repair.rounds} · ${repair.trigger}`
+    if (node.node_id === 'review') return reviewMeta()
+    if (node.node_id.startsWith('launch_')) return lanePinText(pinOf(node.node_id.slice('launch_'.length)))
+    return null
+  }
 
   // A requirement quote handed from a review finding to a worker's task; it applies to one node and is dropped once applied or when leaving it.
   const [pendingHighlight, setPendingHighlight] = useState<Highlight | null>(null)
@@ -258,7 +295,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
           {events.status === 'error'
             ? <ErrorPanel error={events.error} what="The run's events" onRetry={reloadEvents}><span>Without them the situation and the next step cannot be read.</span></ErrorPanel>
             : <NowBanner now={now} clock={clock} focusHref={now?.focus ? nodeHref(now.focus.node_id) : null} onNavigate={onNavigate} />}
-          <LanesLine lines={lanes} />
+          <LanesLine lines={lanes} meta={laneMeta} />
         </>
       ) : (
         <RunBar detail={detail} now={now} clock={clock} runHref={runHref} freshness={freshness} onNavigate={onNavigate} />
@@ -268,7 +305,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       {tabs}
 
       {tab === 'assignment' ? (
-        <AssignmentPanel scope={scope} inputs={inputs} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-tab-assignment" />
+        <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-tab-assignment" />
       ) : (
         <div role="tabpanel" id="run-panel-run" aria-labelledby="run-tab-run" className="run-body">
           {selectedNodeId === null ? (
@@ -278,11 +315,11 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                 <section className="run-graph run-pipeline" data-testid="run-pipeline" aria-labelledby="run-pipeline-title">
                   <header className="ui-section-header">
                     <h3 id="run-pipeline-title">Pipeline</h3>
-                    <span className="ui-sub">pinned definition · {definition.nodes.length} steps</span>
+                    <span className="ui-sub">{pinnedStepTotal} steps{repairRounds > 0 ? ` · ${repairRounds} repair ${repairRounds === 1 ? 'round' : 'rounds'}` : ''}</span>
                   </header>
-                  <WorkflowGraph title={`Pinned definition graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} compact />
+                  <WorkflowGraph title={`Graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} compact metaOf={graphMeta} returns={graphReturns} />
                 </section>
-                <StepsTable rows={rows} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
+                <StepsTable rows={rows} detail={detail} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
               </div>
               {hasAttack && (
                 <section className="run-attack" data-testid="attack-section" aria-labelledby="run-attack-title">

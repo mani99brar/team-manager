@@ -1,0 +1,46 @@
+/* The Assignment tab's setup line and lane table (docs/PRD_VIEWER_REFINE 5.5). Calm tokens only. */
+
+.assignment-setup {
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.assignment-setup code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+}
+
+.assignment-lanes-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  font-size: 0.85rem;
+}
+
+.assignment-lanes-table th,
+.assignment-lanes-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.assignment-lanes-table thead th {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.assignment-lanes-table tbody th {
+  font-weight: 600;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+.assignment-lanes-table .assignment-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}

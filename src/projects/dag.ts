@@ -23,6 +23,15 @@ export const DAG_COLUMN_GAP = 28
 export const DAG_ROW_GAP = 24
 export const DAG_PADDING = 16
 
+/**
+ * A projected repair node (`repair-<n>`) sits in the column of the step it answers, but below that step's lane rows: the
+ * pinned steps keep the rows they had before any round landed, and each repair takes the next free row in its column. So a
+ * run's picture never reshuffles its pinned rows because a repair appeared (docs/PRD_VIEWER_REFINE.md 5.2).
+ */
+export function isRepairNode(id: string): boolean {
+  return /^repair-[1-9][0-9]*$/.test(id)
+}
+
 export function layoutDag(nodes: DagNode[]): DagLayout {
   const depth = new Map<string, number>()
   const byId = new Map(nodes.map(node => [node.node_id, node]))
@@ -39,7 +48,8 @@ export function layoutDag(nodes: DagNode[]): DagLayout {
   }
   const rowsPerColumn = new Map<number, number>()
   const positions = new Map<string, DagPosition>()
-  for (const node of nodes) {
+  // Pinned steps first (their rows stay as they were), then repair nodes fill the rows beneath their column.
+  for (const node of [...nodes].sort((a, b) => Number(isRepairNode(a.node_id)) - Number(isRepairNode(b.node_id)))) {
     const column = depthOf(node.node_id, new Set())
     const row = rowsPerColumn.get(column) ?? 0
     rowsPerColumn.set(column, row + 1)

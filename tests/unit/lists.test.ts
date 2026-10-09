@@ -10,7 +10,7 @@ import { validateRunDetail, type RunActivity, type RunDetail, type RunSummary } 
 import {
   controllerSuffix, dayKey, cardElapsed, dayLabel, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun,
   NEXT_STEP, PREFIX_GROUP_MIN, projectFacts, projectPrefix, projectTone, railEntries, readsNextPage, RECENT_FILTERS, RECENT_SHOWN, recentCounts,
-  recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, waitingKind, workflowTitle, type ServedRun,
+  recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
 } from '../../src/projects/lists.ts'
 import { definition, laneGraphNodes, runDetail, type NodeState } from '../project-workflows/fixtures.ts'
 
@@ -88,8 +88,16 @@ describe('Runs home sections', () => {
   test('Needs you holds the questions, panes and approvals, longest waiting first', () => {
     assert.deepEqual(ids(sections.needsYou), ['approval', 'pane', 'asking'])
   })
-  test('Running holds every other run that is not finished, including one without activity, latest activity first', () => {
-    assert.deepEqual(ids(sections.running), ['live', 'interrupted', 'legacy-running'])
+  test('Running holds the unfinished runs that are not paused and wait on nobody, including one without activity, latest activity first', () => {
+    assert.deepEqual(ids(sections.running), ['live', 'legacy-running'])
+  })
+  test('Paused holds the paused runs that wait on nobody, oldest first (longest stopped at the top)', () => {
+    assert.deepEqual(ids(sections.paused), ['interrupted'])
+    // Two paused runs: the one stopped longer ago leads; a since-less paused run orders by its last activity.
+    const older = summary('paused-older', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-18T08:00:00Z' } }) })
+    const newer = summary('paused-newer', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-20T08:00:00Z' } }) })
+    const sinceless = summary('paused-sinceless', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: null, since: null }, last_activity_at: '2026-03-19T08:00:00Z' }) })
+    assert.deepEqual(ids(homeSections([row(newer), row(older), row(sinceless)], NOW).paused), ['paused-older', 'paused-sinceless', 'paused-newer'])
   })
   test('Recent holds finished runs of the last seven days, newest first; an older run is absent, and no run appears twice', () => {
     assert.deepEqual(ids(sections.recent), ['legacy-recent', 'failed-now', 'failed-earlier'])
@@ -299,6 +307,11 @@ describe('Recent filters and day groups', () => {
     assert.deepEqual(recentCounts(rows, NOW_MARCH_12, 'utc'), { all: 6, failed: 2, succeeded: 3, today: 2 })
     assert.deepEqual([...RECENT_FILTERS], ['all', 'failed', 'succeeded', 'today'])
   })
+  test('the filter counts are over the searched set, so a button names the rows that filter keeps (P2 1)', () => {
+    // Searching the run id "f-" narrows to the two failed runs; the counts are then over that set, not every row.
+    assert.deepEqual(recentCounts(searchRows(rows, 'f-'), NOW_MARCH_12, 'utc'), { all: 2, failed: 2, succeeded: 0, today: 1 })
+    assert.deepEqual(recentCounts(searchRows(rows, 'nothing-matches'), NOW_MARCH_12, 'utc'), { all: 0, failed: 0, succeeded: 0, today: 0 })
+  })
   test('a day key is the calendar day in the chosen zone', () => {
     assert.equal(dayKey('2026-03-12T01:00:00Z', 'utc'), '2026-03-12')
     assert.equal(dayKey('2026-03-11T23:59:59Z', 'utc'), '2026-03-11')
@@ -410,13 +423,29 @@ describe('Runs home cards', () => {
     assert.equal(cardElapsed(live('running', '2026-03-12T16:20:00Z'), now)?.since, null)
     assert.equal(cardElapsed({ status: 'failed', created_at: created, activity: { attention: null } }, now), null)
   })
-  test('a paused run served without attention.since waits on nobody: a Running card, not a Needs-you card (run 007)', () => {
+  test('a paused run served without attention.since waits on nobody: a Paused row, not a Needs-you card (run 007)', () => {
     const held = summary('held', 'paused', { created: '2026-03-20T07:00:00Z', activity: activity({ last_activity_at: '2026-03-20T07:00:16Z', attention: { kind: 'paused', node_id: 'handoff', since: null } }) })
     assert.equal(waitingKind(held), null)
     const sections = homeSections([{ run: held }], NOW)
-    assert.deepEqual(sections.running.map(row => row.run.run_id), ['held'])
+    assert.deepEqual(sections.paused.map(row => row.run.run_id), ['held'])
+    assert.equal(sections.running.length, 0)
     assert.equal(sections.needsYou.length, 0)
     assert.deepEqual(cardElapsed(held, NOW), { elapsed: 'paused · started 5h00m ago', since: null, started: null })
+  })
+  test('sincePausedLabel: whole days from the paused since, else today under a day', () => {
+    const paused = (since: string | null, lastActivity = '2026-03-20T09:00:00Z') => summary('p', 'paused', { activity: activity({ last_activity_at: lastActivity, attention: { kind: 'paused', node_id: 'handoff', since } }) })
+    assert.equal(sincePausedLabel(paused('2026-03-20T09:30:00Z'), NOW), 'since today')
+    assert.equal(sincePausedLabel(paused('2026-03-19T11:00:00Z'), NOW), 'since 1 day')
+    assert.equal(sincePausedLabel(paused('2026-03-17T12:00:00Z'), NOW), 'since 3 days')
+    // Without a since, the last activity is the clock it counts from.
+    assert.equal(sincePausedLabel(paused(null, '2026-03-14T12:00:00Z'), NOW), 'since 6 days')
+  })
+  test('stepTally names and counts the step each row sits at, in first-seen order; rows without a focus step counted apart', () => {
+    const at = (nodeId: string, label: string) => summary(`${nodeId}-run`, 'running', { activity: activity({ focus: { node_id: nodeId, label, status: 'running', since: null } }) })
+    const bare = summary('bare', 'running', { activity: activity() })
+    assert.equal(stepTally([{ run: at('launch_ui', 'Launch ui worker') }, { run: at('launch_ui', 'Launch ui worker') }, { run: at('verify_ui', 'Verify ui') }]), '2 at Launch ui worker, 1 at Verify ui')
+    assert.equal(stepTally([{ run: at('verify_ui', 'Verify ui') }, { run: bare }]), '1 at Verify ui, 1 without a step')
+    assert.equal(stepTally([]), '')
   })
   test('the review steps a feature declares come from its definition, in definition order (run 007)', () => {
     assert.deepEqual(reviewStepsOf(NODES), ['Independent review'])

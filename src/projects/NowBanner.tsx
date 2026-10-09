@@ -1,6 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { LaneLine, Now, Text, TextPart } from '../../contracts/projects/triage.ts'
+import type { LaneLine, NodeStatus, Now, Text, TextPart } from '../../contracts/projects/triage.ts'
 import { CommandBlock } from './CommandBlock.tsx'
+import { lanePinText, type LaneMeta } from './status.ts'
+import { stateTone, toneClass, type Tone } from './tone.ts'
 import { servedNow } from './lists.ts'
 import { useServedRun } from './LiveStatus.tsx'
 import { AppLink } from './panels.tsx'
@@ -95,22 +97,39 @@ export function NowBanner({ now: exported, clock, focusHref, onNavigate }: Props
   )
 }
 
+/** A lane's own tone, from the status that needs a look first across its steps (`stateTone`), so the chip shows failed/running. */
+function laneTone(line: LaneLine): Tone {
+  const rank: NodeStatus[] = ['failed', 'awaiting_approval', 'paused', 'running', 'pending', 'cancelled', 'succeeded']
+  const status = rank.find(candidate => line.steps.some(step => step.status === candidate)) ?? line.steps.at(-1)?.status ?? 'pending'
+  return stateTone({ status, attention: null })
+}
+
 /**
- * The lanes line (docs/PRD_VIEWER_UX.md 4.2), for runs with two or more lanes: one line per lane with its worker, verify and
- * candidate steps and no durations, the Steps table's job.
+ * The lanes strip (docs/PRD_VIEWER_UX.md 4.2, docs/PRD_VIEWER_REFINE 5.1): one line per lane with its model pin (or the
+ * executor only when the lane has no pin), its repair round count, a toned status chip, and its worker, verify and candidate
+ * steps (no durations, the Steps table's job).
  */
-export function LanesLine({ lines }: { lines: LaneLine[] }) {
+export function LanesLine({ lines, meta }: { lines: LaneLine[]; meta?: ReadonlyMap<string, LaneMeta> }) {
   if (lines.length < 2) return null
-  const item = (line: LaneLine) => (
-    <li key={line.lane} data-lane={line.lane}>
-      <span className="run-lane-name">{line.lane}</span>
-      <span className="run-lane-steps">
-        {line.steps.map((step, index) => (
-          <span key={step.node_id} className={`run-lane-step status-text-${step.status}`}>{index > 0 ? ' · ' : ''}{step.text}</span>
-        ))}
-      </span>
-    </li>
-  )
+  const item = (line: LaneLine) => {
+    const laneMeta = meta?.get(line.lane)
+    const pin = lanePinText(laneMeta?.pin ?? null)
+    const tone = laneTone(line)
+    return (
+      <li key={line.lane} data-lane={line.lane}>
+        <span className="run-lane-head">
+          <span className="run-lane-name">{line.lane}</span>
+          <span className={`ui-chip run-lane-status ${toneClass(tone)}`} data-testid="lane-chip" data-tone={tone}>{pin ?? 'agent session'}</span>
+          {laneMeta && laneMeta.rounds > 0 && <span className="run-lane-rounds projects-muted" data-testid="lane-rounds">{laneMeta.rounds} repair {laneMeta.rounds === 1 ? 'round' : 'rounds'}</span>}
+        </span>
+        <span className="run-lane-steps">
+          {line.steps.map((step, index) => (
+            <span key={step.node_id} className={`run-lane-step status-text-${step.status}`}>{index > 0 ? ' · ' : ''}{step.text}</span>
+          ))}
+        </span>
+      </li>
+    )
+  }
   return (
     <section className="run-lanes" data-testid="run-lanes" aria-labelledby="run-lanes-title">
       <h3 id="run-lanes-title" className="run-lanes-title">Lanes</h3>
