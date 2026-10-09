@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState, type MouseEvent } from 'react'
-import type { ControllerReading } from '../../contracts/projects/triage.ts'
 import { describeApiError, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
 import {
-  cardElapsed, controllerSuffix, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
-  projectFacts, projectTone, railEntries, RECENT_SHOWN, recentCounts, recordHomeReadings, rowSummary, rowTime, searchRows, waitingKind, workflowTitle,
+  filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
+  projectFacts, projectTone, railEntries, RECENT_SHOWN, recentCounts, rowSummary, searchRows, sincePausedLabel, stepTally, waitingKind, workflowTitle,
   type ListRow, type RecentFilter, type WaitingKind,
 } from './lists.ts'
 import { LiveStatus } from './LiveStatus.tsx'
@@ -13,7 +12,7 @@ import { RunRow } from './RunRow.tsx'
 import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
-import { stateTone, statusTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
+import { statusTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
 import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
 import { useTimeZone } from './useNow.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
@@ -86,51 +85,6 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
   )
 }
 
-/**
- * A live run nothing waits on: toned by its state, the current step from the served headline, one chip per lane its
- * definition launches (no state claim: the served activity has none per lane), the elapsed time, and the controller only as
- * the debounced readings say.
- */
-function RunningCard({ row, readings, now, onNavigate }: { row: Row; readings: readonly ControllerReading[]; now: number; onNavigate: (pathname: string) => void }) {
-  const { run } = row
-  const tone = stateTone({ status: run.status, attention: run.activity?.attention?.kind ?? null })
-  const time = rowTime(run, now)
-  const elapsed = cardElapsed(run, now)
-  const controller = controllerSuffix(run.status, readings)
-  const lanes = laneNamesOf(row.workflow.nodes)
-  return (
-    <li className={`ui-card ${toneClass(tone)} home-card`}>
-      <AppLink href={hrefOf(row)} onNavigate={onNavigate} className="home-card-link" data-run-id={run.run_id} data-status={run.status}>
-        <span className="home-card-head">
-          <span className="home-card-id">{run.run_id}</span>
-          <StatusBadge status={run.status} explain />
-          {controller === 'running' && <Chip tone="run" data-controller="running">controller running</Chip>}
-          {controller === 'not_running' && <Chip tone="warn" plain data-controller="not_running">▲ controller not running</Chip>}
-        </span>
-        <span className="home-card-context">{namesOf(row)}</span>
-        <span className="home-card-summary">{rowSummary(run, row.labels)}</span>
-        <span className="home-card-foot">
-          {lanes.length > 0 && (
-            <span className="home-card-lanes">
-              <span className="visually-hidden">Lanes: </span>
-              {lanes.map(lane => <Chip key={lane} plain className="lane-chip" data-lane={lane}>{lane}</Chip>)}
-            </span>
-          )}
-          {time.kind === 'live' && elapsed && (
-            <span className="home-card-when">
-              <span data-testid="run-elapsed">{elapsed.elapsed}</span>
-              {elapsed.since && <>{' '}· <span className="home-card-since">since <Time iso={elapsed.since} /></span></>}
-              {elapsed.started && <>{' '}· started <Time iso={elapsed.started} /></>}
-            </span>
-          )}
-          {time.kind !== 'live' && <span className="home-card-when">updated <Time iso={run.updated_at} /> · {formatAgo(run.updated_at, now)}</span>}
-          <span className="home-card-open" aria-hidden="true">open run ›</span>
-        </span>
-      </AppLink>
-    </li>
-  )
-}
-
 function RailProject({ project, entry, onNavigate }: { project: Project; entry: ProjectRuns | null; onNavigate: (pathname: string) => void }) {
   const runs = entry && entry.error === null ? entry.workflows.flatMap(item => item.runs) : null
   const tone: Tone = runs === null ? 'idle' : projectTone(runs)
@@ -172,15 +126,6 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
     : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error })))
   const count = (items: Row[]) => (loaded === null ? null : items.length)
   const needsCount = count(sections.needsYou)
-
-  // The controller chip of a Running card believes `not_running` only once the polls have read it for 15 s (PRD_VIEWER_UX 6.3).
-  // One reading per settled poll, recorded while rendering that poll's rows (React's "adjust state on a prop change").
-  const [readings, setReadings] = useState<{ settledAt: number | null; map: Map<string, ControllerReading[]> }>(() => ({ settledAt: null, map: new Map() }))
-  if (meta.settledAt !== null && loaded !== null && meta.settledAt !== readings.settledAt) {
-    const at = new Date(meta.settledAt).toISOString()
-    const live = rows.filter(row => row.run.status === 'running' || row.run.status === 'paused')
-    setReadings({ settledAt: meta.settledAt, map: recordHomeReadings(readings.map, live.map(row => ({ key: row.key, value: row.run.activity?.controller ?? null })), at) })
-  }
 
   // The tab title keeps the count of what waits, so a background tab still says it.
   useEffect(() => {
@@ -257,10 +202,23 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
               )}
             </Section>
             <Section headingId="running-title" data-testid="running-runs" className="home-section" title={`Running${count(sections.running) !== null ? ` · ${count(sections.running)}` : ''}`}
-              sub={sections.running.length === 0 ? 'nothing is running' : 'latest activity first'}>
+              sub={sections.running.length === 0 ? 'nothing is running' : stepTally(sections.running) || 'latest activity first'}>
               {sections.running.length > 0 && (
-                <ul className="home-cards">
-                  {sections.running.map(row => <RunningCard key={row.key} row={row} readings={readings.map.get(row.key) ?? []} now={now} onNavigate={onNavigate} />)}
+                <ul className="run-rows">
+                  {sections.running.map(row => (
+                    <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+                  ))}
+                </ul>
+              )}
+            </Section>
+            <Section headingId="paused-title" data-testid="paused-runs" className="home-section" title={`Paused${count(sections.paused) !== null ? ` · ${count(sections.paused)}` : ''}`}
+              sub={sections.paused.length === 0 ? 'nothing is paused' : stepTally(sections.paused) || 'longest paused first'}>
+              {sections.paused.length > 0 && (
+                <ul className="run-rows">
+                  {sections.paused.map(row => (
+                    <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
+                      trailing={{ text: sincePausedLabel(row.run, now), tone: 'pause' }} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+                  ))}
                 </ul>
               )}
             </Section>
@@ -298,8 +256,10 @@ function Recent({ rows, now, zone, onNavigate }: { rows: Row[]; now: number; zon
   const [byProject, setByProject] = useState(false)
   const view = `${query}\u0000${filter}\u0000${byProject}`
   const [expandedFor, setExpandedFor] = useState<string | null>(null)
-  const counts = recentCounts(rows, now, zone)
-  const kept = filterRecent(searchRows(rows, query), filter, now, zone)
+  // The filter counts are over the set the search narrowed to (P2 1), so a button's number equals the rows that filter keeps.
+  const searched = searchRows(rows, query)
+  const counts = recentCounts(searched, now, zone)
+  const kept = filterRecent(searched, filter, now, zone)
   const groups = byProject ? groupByProject(kept) : groupByDay(kept, now, zone)
   const shown = expandedFor === view ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
   const filters = (['all', 'failed', 'succeeded', 'today'] as const).map(id => ({ id, label: FILTER_LABEL[id], count: id === 'failed' || id === 'succeeded' ? counts[id] : undefined }))

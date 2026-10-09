@@ -42,6 +42,7 @@ The viewer renders only what the workflow's own records contain (`run-state.json
 
 - Name: MD Manager. No logo, no marketing surface, no external audience.
 - Voice: plain, factual, operator-to-operator; sentences, not labels with colons; commands shown verbatim with Copy; the RUNBOOK's words for things.
+- Replaced on 2026-10-09: the operator's design 4, "Signal Box Live", is the binding look (`DESIGN.md`); the Calm look below is history.
 - The "Calm" look chosen on 2026-10-02 over "Bold" (`docs/PRD_VIEWER_REVAMP.md`; Bold removed in ce23d44): neutral cool surfaces, one accent, colour only for state, a semantic state palette (ok, running, needs-you, failed, paused, idle, P0/P1/P2) used identically on chips, stripes, rail dots, graph nodes and finding stripes; the accent never carries state. Binding for refinements; `DESIGN.md` records it.
 
 ## Evidence on Hand

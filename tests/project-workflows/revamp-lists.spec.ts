@@ -10,19 +10,20 @@
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test'
 import { contrastRatio, parseColor } from '../../src/projects/tone.ts'
 import { waitingKind } from '../../src/projects/lists.ts'
-import type { Project, RunSummary } from '../../contracts/projects/v1.ts'
+import { validateReviewResult, type ReviewResult, type RunSummary } from '../../contracts/projects/v1.ts'
 import { EMPTY_WORKFLOW_ID, PROJECT } from './fixtures.ts'
 import {
-  PANE_MESSAGE, REVAMP_FAILED_RUNS, REVAMP_FINISHED_RUNS, REVAMP_LANES, REVAMP_LATEST_RUN, REVAMP_NOW, REVAMP_OWN_RUNS, REVAMP_PREFIX, REVAMP_RUN_DAY, REVAMP_SUCCEEDED_RUNS,
-  REVAMP_TITLE, RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_PANE, RUN_DESK_PAUSED, UX_REVAMP_LISTS_WORKFLOW_ID,
+  PANE_MESSAGE, REVAMP_FAILED_RUNS, REVAMP_FINISHED_RUNS, REVAMP_LANES, REVAMP_LATEST_RUN, REVAMP_NOW, REVAMP_OWN_RUNS, REVAMP_PREFIX, REVAMP_SUCCEEDED_RUNS,
+  REVAMP_TITLE, RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_PANE, RUN_DESK_PAUSED, RUN_DESK_STALE, UX_REVAMP_LISTS_WORKFLOW_ID,
 } from './fixtures/ux-revamp-lists.ts'
 import { mockResponse } from './mock.ts'
-import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
-const FAMILY: Project[] = [1, 2, 3].map(n => ({ project_id: `project-B-${n}`, name: `project-B-${n}` }))
-const OWN = [RUN_DESK_PANE, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_INTERRUPTED, RUN_DESK_PAUSED, RUN_DESK_HELD, ...REVAMP_FINISHED_RUNS]
+const OWN = [RUN_DESK_PANE, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_INTERRUPTED, RUN_DESK_PAUSED, RUN_DESK_STALE, RUN_DESK_HELD, ...REVAMP_FINISHED_RUNS]
+/** The paused runs of this module, oldest-stopped first (desk-stale is three days old; the rest stopped on 2026-03-12). */
+const PAUSED_OLDEST_FIRST = [RUN_DESK_STALE, RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_PAUSED]
 
 /** The original answer of an overridden route: the mocks' in the worker phase, the real API's (`route.fetch()`) in the candidate phase. */
 async function original(route: Route): Promise<unknown> {
@@ -32,237 +33,173 @@ async function original(route: Route): Promise<unknown> {
 }
 const isRunList = (url: URL) => /^\/api\/projects\/[^/]+\/workflows\/[^/]+\/runs$/.test(url.pathname)
 
-/** Adds the `project-B-*` family to the project list, each with no workflow; the worker phase answers from the mocks. */
-async function addProjectFamily(page: Page) {
-  await page.route(url => url.pathname === '/api/projects', async route => {
-    const body = await original(route) as { projects: Project[] }
-    body.projects.push(...FAMILY)
-    await route.fulfill({ json: body })
-  })
-  await page.route(url => /^\/api\/projects\/project-B-\d+\/workflows$/.test(url.pathname), route => route.fulfill({ json: { workflows: [] } }))
-}
-
 const row = (scope: Locator, runId: string) => scope.locator(`a[data-run-id="${runId}"]`)
 /** The run ids a section lists, in order, limited to this module's runs. */
 const ownIds = (scope: Locator) => scope.locator('a[data-run-id]').evaluateAll(
   (links, own) => links.map(link => link.getAttribute('data-run-id')).filter((id): id is string => id !== null && own.includes(id)), OWN)
-const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const showOlder = (recent: Locator) => recent.getByRole('button', { name: /^Show older/ })
 async function showAll(recent: Locator) {
   if (await showOlder(recent).count()) await showOlder(recent).click()
   await expect(showOlder(recent)).toHaveCount(0)
 }
 
-test(`[scenario:revamp-home] Runs home: a project rail with status dots and the folded project-B group, Needs you and Running as cards, Recent searchable, filterable and grouped by day (${phase})`, async ({ page }, testInfo) => {
+/** No control in the Projects header acts on a run: the header is read-only, like the workspace (P2). */
+async function expectNoHeaderExecutionControls(page: Page) {
+  // The header was actually inspected (its Refresh button is present), so the no-execution count is not vacuous.
+  await expect(page.locator('.app-header-projects .button')).toHaveCount(1)
+  const controls = page.locator('.app-header-projects').locator('button, input, select, textarea, [role="menuitem"]')
+  await expect(controls.filter({ hasText: /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i })).toHaveCount(0)
+}
+
+/** The feature's latest finished run (desk-ok-1); its review result names these reviewers, not the definition's review step. */
+const DESK_OK_LATEST = REVAMP_FINISHED_RUNS[0]
+const REVIEWERS = ['general', 'coverage'] as const
+const reviewerEntry = (reviewerId: string, nth: number) => ({
+  reviewer_id: reviewerId, transport: 'native' as const, session_id: `0000000a-0000-4000-8000-00000000000${nth}`,
+  verdict: 'approved' as const, findings: [], launched_at: '2026-03-12T15:35:00Z', accepted_at: '2026-03-12T15:38:00Z', status: 'accepted' as const,
+})
+const DESK_REVIEW: ReviewResult = validateReviewResult({
+  contract_version: '1.4.0', run_id: DESK_OK_LATEST, node_id: 'review', attempt: 1,
+  reviewer: { session_id: REVIEWERS.join(', '), transport: 'native', independent: true },
+  bundle_sha256: 'a'.repeat(64), candidate_commit: 'b'.repeat(40), verdict: 'approved',
+  findings: [], reviewers: REVIEWERS.map((id, index) => reviewerEntry(id, index + 1)), reviewed_at: '2026-03-12T15:38:00Z', diff: null,
+})
+
+/**
+ * Serves a review result for the feature's latest finished run, so the feature header can name real reviewers. The run
+ * detail carries no reviewers (contracts/projects: runDetail has no `review` section), so this also points that run's review
+ * node at the reviews route the header reads. Both phases: the worker phase builds on the mocks' detail, the candidate phase
+ * on the real API's (`original`).
+ */
+async function serveDeskReviewers(page: Page) {
+  const detailPath = `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs/${DESK_OK_LATEST}`
+  const reviewsPath = `${detailPath}/reviews/1`
+  await page.route(url => url.pathname === detailPath, async route => {
+    const body = await original(route) as { snapshot: { nodes: { node_id: string; result_uri: string | null }[] } }
+    const review = body.snapshot.nodes.find(node => node.node_id === 'review')
+    if (review) review.result_uri = reviewsPath
+    await route.fulfill({ json: body })
+  })
+  await page.route(url => url.pathname === reviewsPath, route => route.fulfill({ json: DESK_REVIEW }))
+}
+
+const RUNS_LIST_PATH = /^\/api\/projects\/[^/]+\/workflows\/[^/]+\/runs$/
+
+test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards, Running and Paused as compact rows with step sub-headers, Recent with filtered-set counts, and the feature header's real reviewers (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
-  await addProjectFamily(page)
+  await serveDeskReviewers(page)
   await page.clock.setFixedTime(REVAMP_NOW)
+  // The Runs home data path is read against the mock: record one run-list fetch (P2: no browser test of it before).
+  const recorded = page.waitForRequest(request => request.method() === 'GET' && RUNS_LIST_PATH.test(new URL(request.url()).pathname))
   await page.goto(projectsUrl)
+  await testInfo.attach('runs-home-fetch', { body: new URL((await recorded).url()).pathname, contentType: 'text/plain' })
 
-  // The rail: a Needs-you entry outside the project list, each project with a status dot that has a title, and the
-  // project-B family folded into one group named by its prefix; nothing failed to load.
-  const rail = page.getByTestId('projects-rail')
-  const list = page.getByTestId('projects-list')
-  const needsEntry = rail.getByTestId('rail-needs-you')
-  await expect(needsEntry).toHaveText(/^Needs you · \d+$/)
-  expect(await needsEntry.evaluate(element => element.closest('[data-testid="projects-list"]') === null)).toBe(true)
-  const alpha = list.getByRole('link', { name: new RegExp(`^${escape(PROJECT.name)}`) })
-  await expect(alpha).toContainText(/\d+ features/)
-  await expect(alpha.locator('.rail-dot')).toHaveAttribute('data-tone', 'warn')
-  await expect(alpha.locator('.rail-dot')).toHaveAttribute('title', 'Needs you')
-  const group = list.locator('details[data-prefix="project-B"]')
-  await expect(group.locator('summary')).toHaveText(/^project-B \(3\)/)
-  await expect(group).toHaveJSProperty('open', false)
-  await group.locator('summary').click()
-  await expect(group).toHaveJSProperty('open', true)
-  await expect(group.getByRole('link')).toHaveCount(3)
-  for (const project of FAMILY) {
-    const link = group.getByRole('link', { name: new RegExp(`^${escape(project.name)}`) })
-    await expect(link).toContainText('0 features')
-    await expect(link.locator('.rail-dot')).toHaveAttribute('data-tone', 'idle')
-    await expect(link.locator('.rail-dot')).toHaveAttribute('title', 'Idle')
-  }
-  await expect(page.getByTestId('lists-errors')).toHaveCount(0)
-  await expect(rail.getByTestId('projects-info')).toContainText('Read-only')
-
-  // Needs you: a warn-toned card per waiting run, the link its direct child, named by the run id first, with the cause,
-  // the feature, the project and the next step as a label; no command and no button on Runs home.
+  // Needs you: a warn card with the cause and the next-step label; the section names its own count.
   const needs = page.getByTestId('needs-you')
   await expect(needs.locator('.ui-section-header h2')).toHaveText(/^Needs you · \d+$/)
   const pane = row(needs, RUN_DESK_PANE)
   await expect(pane).toHaveAttribute('data-attention', 'pane')
-  expect(await pane.evaluate(link => [link.parentElement?.tagName, link.parentElement?.className])).toEqual(['LI', expect.stringMatching(/\bui-card\b.*\btone-warn\b/)])
-  await expect(needs.getByRole('link', { name: new RegExp(`^${RUN_DESK_PANE}\\s`) })).toHaveCount(1)
-  const paneName = await pane.evaluate(link => link.textContent ?? '')
-  expect(paneName).toContain('adapter needs attention in its pane')
-  expect(paneName).toContain(REVAMP_TITLE)
-  expect(paneName).toContain(PROJECT.name)
   await expect(pane.getByTestId('next-step')).toHaveText('Next: attend the pane')
   await expect(pane.getByTestId('run-cause')).toContainText(PANE_MESSAGE.slice(0, 30))
-  await expect(pane).toContainText('open run ›')
-  // Since when it waits and how long ago, from the list clock (20:00): the pane asked at 17:10.
-  await expect(pane.locator('.home-card-when')).toHaveText('since 17:10 · 2 h ago')
-  await expect(pane.locator('.home-card-when time')).toHaveAttribute('datetime', '2026-03-12T17:10:00Z')
-  // Each section of Runs home is a region named by its own heading, for landmark navigation.
-  for (const [testId, name] of [['needs-you', /^Needs you · \d+$/], ['running-runs', /^Running · \d+$/], ['recent-runs', /^Recent · \d+$/]] as const) {
-    const region = page.getByRole('region', { name })
-    await expect(region, testId).toHaveCount(1)
-    await expect(region, testId).toHaveAttribute('data-testid', testId)
-  }
-  await expect(needs.locator('button, pre, [data-testid="now-command"], [data-testid="command-run"]')).toHaveCount(0)
-  await expect(needs).not.toContainText('workflow attach')
 
-  // Running: a card per live run with the lanes named from the definition (no state claim) and the elapsed time only.
+  // Running: one compact row per running run (a run-row, not a six-line card), each with its lane chips; a sub-header counts
+  // the step each row sits at. The paused runs are not here, and a failed run is finished so it is never a Running row.
   const running = page.getByTestId('running-runs')
-  for (const [runId, elapsed] of [[RUN_DESK_LIVE, '1h00m'], [RUN_DESK_LIVE_QUIET, '1h30m']] as const) {
-    const card = row(running, runId)
-    await expect(card).toHaveAttribute('data-status', 'running')
-    await expect(card).not.toHaveAttribute('data-attention', /.+/)
-    expect(await card.evaluate(link => link.parentElement?.className)).toMatch(/\bui-card\b.*\btone-run\b/)
-    await expect(card.locator('[data-lane]')).toHaveText(['ui', 'adapter'])
-    await expect(card.getByTestId('run-elapsed')).toHaveText(`running for ${elapsed}`)
-    // A running run's line goes on with its start time (the elapsed text alone does not say when).
-    await expect(card.locator('.home-card-when')).toHaveText(`running for ${elapsed} · started ${runId === RUN_DESK_LIVE ? '19:00' : '18:30'}`)
-    await expect(running.getByRole('link', { name: new RegExp(`^${runId}\\s`) })).toHaveCount(1)
+  await expect(running.locator('.ui-section-header h2')).toHaveText(/^Running · \d+$/)
+  for (const runId of [RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET]) {
+    const liveRow = row(running, runId)
+    await expect(liveRow).toHaveAttribute('data-status', 'running')
+    expect(await liveRow.evaluate(link => link.parentElement?.className ?? '')).toMatch(/\brun-row-item\b/)
+    await expect(liveRow.locator('[data-lane]')).toHaveText([...REVAMP_LANES])
   }
-  await expect(row(running, RUN_DESK_PANE)).toHaveCount(0)
-  // A live run that stopped (interrupted, or paused on contradictory evidence) is a Running card in its own pause tone, its
-  // status chip saying Paused beside the colour; a failed run is finished, so it lists in Recent, never as a Running card.
-  const stopped = [[RUN_DESK_INTERRUPTED, '4h00m', 'Supervisor interrupted', '16:20'], [RUN_DESK_PAUSED, '3h30m', 'snapshots captured', '17:00']] as const
-  for (const [runId, elapsed, cause, stoppedAt] of stopped) {
-    const card = row(running, runId)
-    await expect(card).toHaveAttribute('data-status', 'paused')
-    await expect(card.locator('.home-card-summary')).toHaveText(new RegExp(`^Paused at Freeze worker handoffs · ${cause}`))
-    const tone = await card.evaluate(link => link.parentElement?.className ?? '')
-    expect(tone, runId).toMatch(/\bui-card\b.*\btone-pause\b/)
-    expect(tone, runId).not.toMatch(/\btone-(run|fail|warn|ok|idle)\b/)
-    await expect(card.locator('.status-badge')).toHaveText(/^Paused/)
-    await expect(card.locator('[data-lane]')).toHaveText([...REVAMP_LANES])
-    // The age is since the run started, and the stop time is said apart: never "paused · 4h00m", which reads as paused for 4h.
-    await expect(card.getByTestId('run-elapsed')).toHaveText(`paused · started ${elapsed} ago`)
-    await expect(card.locator('.home-card-since')).toHaveText(`since ${stoppedAt}`)
-    await expect(row(needs, runId)).toHaveCount(0)
-    await expect(row(page.getByTestId('recent-runs'), runId)).toHaveCount(0)
-  }
-  // A paused run served without attention.since (desk-held: nothing followed the launches, so no step stopped it). Today's
-  // waitingKind does not count a pause as waiting, so it is a Running card, not a Needs-you card; its line says when it
-  // started once ("started 5h00m ago"), with no "since" and no start time repeated after it.
-  const held = row(running, RUN_DESK_HELD)
-  await expect(held).toHaveAttribute('data-status', 'paused')
-  expect(await held.evaluate(link => link.parentElement?.className ?? '')).toMatch(/\bui-card\b.*\btone-pause\b/)
-  await expect(held.locator('.status-badge')).toHaveText(/^Paused/)
-  await expect(held.locator('[data-lane]')).toHaveText([...REVAMP_LANES])
-  await expect(held.locator('.home-card-when')).toHaveText('paused · started 5h00m ago')
-  await expect(held.locator('.home-card-when time, .home-card-since')).toHaveCount(0)
-  await expect(row(needs, RUN_DESK_HELD)).toHaveCount(0)
-  await expect(row(page.getByTestId('recent-runs'), RUN_DESK_HELD)).toHaveCount(0)
+  for (const runId of PAUSED_OLDEST_FIRST) await expect(row(running, runId)).toHaveCount(0)
   for (const runId of REVAMP_FAILED_RUNS) await expect(row(running, runId)).toHaveCount(0)
-  // The controller chip only from the served reading: alive in the worker-phase mock; nothing for a run without one.
-  if (phase === 'worker') await expect(row(running, RUN_DESK_LIVE).locator('[data-controller]')).toHaveText('controller running')
-  await expect(row(running, RUN_DESK_LIVE_QUIET).locator('[data-controller="running"]')).toHaveCount(0)
+  // The sub-header counts a step ("<n> at <label>"), derived from the rows, never a literal total.
+  await expect(running.locator('.ui-section-header .ui-sub')).toHaveText(/\d+ at \S/)
 
-  // Recent: the search narrows to one own row.
+  // Paused: its own section of compact rows, oldest-stopped first, each with "since <n> days" in the paused tone, and its
+  // own step sub-header. desk-stale stopped three days before the clock, so it leads and says "since 3 days".
+  const paused = page.getByTestId('paused-runs')
+  await expect(paused.locator('.ui-section-header h2')).toHaveText(/^Paused · \d+$/)
+  await expect(paused.locator('.ui-section-header .ui-sub')).not.toHaveText('nothing is paused')
+  expect(await ownIds(paused)).toEqual(PAUSED_OLDEST_FIRST)
+  for (const runId of PAUSED_OLDEST_FIRST) {
+    await expect(row(paused, runId)).toHaveAttribute('data-status', 'paused')
+    await expect(row(paused, runId).locator('.run-row-paused-since.tone-pause-text')).toHaveText(/since /)
+  }
+  await expect(row(paused, RUN_DESK_STALE).locator('.run-row-paused-since')).toHaveText(/ · since 3 days$/)
+
+  // Recent: the Failed and Succeeded filter counts equal the rows that filter keeps over the searched set (P2 1).
   const recent = page.getByTestId('recent-runs')
   const search = page.getByLabel('Search runs')
-  await expect(search).toHaveAttribute('id', 'runs-search')
-  await search.fill('desk-fail-3')
-  await expect(recent.locator('a[data-run-id]')).toHaveCount(1)
-  expect(await ownIds(recent)).toEqual(['desk-fail-3'])
-  await expect(row(recent, 'desk-fail-3')).toHaveAttribute('data-status', 'failed')
-
-  // Every own run: the first ten rows, then Show older for the four others; rows under Today, Yesterday and the date.
   await search.fill(REVAMP_PREFIX)
-  expect(await ownIds(recent)).toEqual(REVAMP_FINISHED_RUNS.slice(0, 10))
-  await expect(showOlder(recent)).toHaveText('Show older 4')
-  await showOlder(recent).click()
-  expect(await ownIds(recent)).toEqual(REVAMP_FINISHED_RUNS)
-  const label: Record<string, string> = { '2026-03-12': 'Today', '2026-03-11': 'Yesterday', '2026-03-10': 'Mar 10' }
-  for (const runId of REVAMP_FINISHED_RUNS) {
-    const day = await row(recent, runId).evaluate(link => {
-      const group = link.closest('[data-day]')
-      return [group?.getAttribute('data-day'), group?.querySelector('.recent-group-label')?.textContent]
-    })
-    expect(day, runId).toEqual([REVAMP_RUN_DAY[runId], label[REVAMP_RUN_DAY[runId]]])
+  await showAll(recent)
+  for (const [status, label] of [['failed', 'Failed'], ['succeeded', 'Succeeded']] as const) {
+    const button = recent.getByRole('button', { name: new RegExp(`^${label} \\d+$`) })
+    const count = Number((await button.textContent())!.replace(/\D/g, ''))
+    await button.click()
+    await showAll(recent)
+    const shown = await recent.locator('a[data-run-id]').count()
+    expect(shown, `${label} count equals the rows it keeps`).toBe(count)
+    for (const dataStatus of await recent.locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-status')))) expect(dataStatus).toBe(status)
+    await recent.getByRole('button', { name: 'All', exact: true }).click()
   }
-  // A row keeps one link in an li, named by its run id first, with its outcome on one line and the full text in its title.
-  const failedRow = row(recent, 'desk-fail-1')
-  expect(await failedRow.evaluate(link => link.parentElement?.tagName)).toBe('LI')
-  await expect(recent.getByRole('link', { name: /^desk-fail-1\s/ })).toHaveCount(1)
-  await expect(failedRow.locator('.run-row-summary')).toHaveAttribute('title', /^Failed at Verify ui/)
-  await expect(failedRow.locator('time').first()).toHaveText('13:52')
 
-  // Failed keeps only failed rows: every own failed run, no succeeded one.
-  await recent.getByRole('button', { name: /^Failed \d+$/ }).click()
-  await expect(recent.getByRole('button', { name: /^Failed/ })).toHaveAttribute('aria-pressed', 'true')
-  expect(await ownIds(recent)).toEqual(REVAMP_FAILED_RUNS)
-  for (const status of await recent.locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-status')))) expect(status).toBe('failed')
-  // Without the search, other slices' later failed runs sit above; Show older makes every own failed run visible.
-  await search.fill('')
-  await showAll(recent)
-  expect(await ownIds(recent)).toEqual(REVAMP_FAILED_RUNS)
-  for (const runId of REVAMP_SUCCEEDED_RUNS) await expect(row(recent, runId)).toHaveCount(0)
-  for (const status of await recent.locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-status')))) expect(status).toBe('failed')
-
-  // Today keeps what ended today; Succeeded the succeeded rows.
-  await search.fill(REVAMP_PREFIX)
-  await recent.getByRole('button', { name: 'Today', exact: true }).click()
-  expect(await ownIds(recent)).toEqual(REVAMP_FINISHED_RUNS.filter(runId => REVAMP_RUN_DAY[runId] === '2026-03-12'))
-  await recent.getByRole('button', { name: /^Succeeded \d+$/ }).click()
-  await showAll(recent)
-  expect(await ownIds(recent)).toEqual(REVAMP_SUCCEEDED_RUNS)
-
-  // Group by project: the rows under their project instead of their day.
-  await recent.getByRole('button', { name: 'All', exact: true }).click()
-  await recent.getByRole('button', { name: 'Group by project' }).click()
-  await expect(recent.getByRole('button', { name: 'Group by project' })).toHaveAttribute('aria-pressed', 'true')
-  await showAll(recent)
-  const projectGroup = recent.locator(`[data-group="${PROJECT.project_id}"]`)
-  await expect(projectGroup.locator('.recent-group-label')).toHaveText(PROJECT.name)
-  expect(await ownIds(projectGroup)).toEqual(REVAMP_FINISHED_RUNS)
-  await recent.getByRole('button', { name: 'Group by project' }).click()
-
-  // Show older on the whole list: every own run is visible after the click.
-  await search.fill('')
-  await showAll(recent)
-  expect(await ownIds(recent)).toEqual(REVAMP_FINISHED_RUNS)
-  for (const runId of OWN) expect(await page.locator(`a[data-run-id="${runId}"]`).count(), runId).toBe(1)
-
-  // Every button on Runs home is a filter, a fold or the header's; none holds a path or a command.
-  const texts = await page.getByTestId('projects-workspace').locator('button').allTextContents()
-  for (const text of texts) expect(text).toMatch(/^(All|Failed \d+|Succeeded \d+|Today|Group by project|Show older \d+)$/)
+  // The project rail keeps its state dots; the header and the workspace act on no run.
+  await expect(page.getByTestId('projects-list').locator('.rail-dot').first()).toHaveAttribute('data-tone', /.+/)
+  await expectNoHeaderExecutionControls(page)
   await expectNoExecutionControls(page)
-  await attach(page, testInfo, 'revamp-home')
+  await attach(page, testInfo, 'home-sections')
 
-  // At 390 px the rail sits above the sections as a row of chips, and nothing scrolls sideways.
+  // The feature header lists the latest finished run's actual reviewers, labelled "Reviewers", never the definition's steps.
+  await page.goto(workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID))
+  const reviewers = page.locator('.feature-reviewers')
+  await expect(reviewers).toContainText('Reviewers')
+  await expect(reviewers.locator('.reviewer-chip')).toHaveText([...REVIEWERS])
+  await expect(page.locator('.feature-reviews .review-step-chip')).toHaveCount(0)
+})
+
+test(`[scenario:home-phone] Runs home and the Projects header at 390 px: one column, 16 px gutters, 44 px header and row controls, the rail collapsed, and dark without a horizontal overflow (${phase})`, async ({ page }, testInfo) => {
+  test.setTimeout(90_000)
+  await page.clock.setFixedTime(REVAMP_NOW)
+  await page.goto(projectsUrl)
   await page.setViewportSize({ width: 390, height: 844 })
+  const overflow = () => page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>
+
+  // One column, 16 px gutters, no sideways scroll.
+  await expect(page.getByTestId('running-runs')).toBeVisible()
+  expect(await page.evaluate("getComputedStyle(document.querySelector('.workspace-projects')).paddingLeft")).toBe('16px')
+  expect(await overflow()).toBeLessThanOrEqual(0)
+
+  // Every Projects header control is at least 44 px tall: the three roots links and the Refresh button.
+  const headerControls = page.locator('.app-header-projects a, .app-header-projects button')
+  const headerCount = await headerControls.count()
+  expect(headerCount, 'the header has its roots links and Refresh').toBeGreaterThanOrEqual(4)
+  for (let index = 0; index < headerCount; index += 1) {
+    expect((await headerControls.nth(index).boundingBox())!.height, `header control ${index}`).toBeGreaterThanOrEqual(44)
+  }
+
+  // Every row control is at least 44 px tall (the whole row is the link).
+  const rowControls = page.locator('.runs-home a.run-row, .runs-home a.home-card-link')
+  const rowCount = await rowControls.count()
+  expect(rowCount, 'Runs home has rows').toBeGreaterThan(0)
+  for (let index = 0; index < rowCount; index += 1) {
+    expect((await rowControls.nth(index).boundingBox())!.height, `row control ${index}`).toBeGreaterThanOrEqual(44)
+  }
+
+  // The rail collapses above the sections as the revamp specified: it sits above Needs you and scrolls as a row within itself.
+  const rail = page.getByTestId('projects-rail')
   const railBox = await rail.boundingBox()
-  const needsBox = await needs.boundingBox()
-  expect(railBox && needsBox).toBeTruthy()
+  const needsBox = await page.getByTestId('needs-you').boundingBox()
   expect(railBox!.y + railBox!.height).toBeLessThanOrEqual(needsBox!.y + 1)
-  expect(await (page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>)).toBeLessThanOrEqual(0)
-  // The rail's entries lie in a row, not a stack: each project entry starts right of the one before, and Needs you and the
-  // entries take at most two lines (Needs you, then the chips). The row scrolls inside the rail (the open group makes it
-  // wider than the phone) without widening the page.
-  const layout = await rail.evaluate(element => {
-    const box = (node: typeof element) => node.getBoundingClientRect()
-    const list = element.querySelector('[data-testid="projects-list"]')!
-    const entries = [...list.children].map(box)
-    const needsTop = box(element.querySelector('[data-testid="rail-needs-you"]')!).top
-    return {
-      lefts: entries.map(entry => entry.left), tops: [needsTop, ...entries.map(entry => entry.top)].map(Math.round),
-      overflowX: element.ownerDocument.defaultView!.getComputedStyle(list).overflowX, scrollWidth: list.scrollWidth, clientWidth: list.clientWidth, right: box(list).right,
-    }
-  })
-  expect(layout.lefts.length, 'rail entries').toBeGreaterThanOrEqual(3)
-  for (let index = 1; index < layout.lefts.length; index += 1) expect(layout.lefts[index], `entry ${index} lies right of entry ${index - 1}`).toBeGreaterThan(layout.lefts[index - 1])
-  expect(new Set(layout.tops).size, `distinct tops ${layout.tops.join(', ')}`).toBeLessThanOrEqual(2)
-  expect(layout.overflowX).toBe('auto')
-  expect(layout.scrollWidth, 'the row is wider than the phone, so it scrolls inside the rail').toBeGreaterThan(layout.clientWidth)
-  expect(layout.right).toBeLessThanOrEqual(390)
-  expect(await (page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>)).toBeLessThanOrEqual(0)
-  // The folded group stays open as the reader left it, across a reload.
-  await page.reload()
-  await expect(page.getByTestId('projects-list').locator('details[data-prefix="project-B"]')).toHaveJSProperty('open', true)
+  expect(await rail.locator('.rail-list').first().evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).overflowX)).toBe('auto')
+  await attach(page, testInfo, 'home-phone')
+
+  // Dark theme: still a single column with no horizontal overflow.
+  await page.emulateMedia({ colorScheme: 'dark' })
+  expect(await page.evaluate("matchMedia('(prefers-color-scheme: dark)').matches")).toBe(true)
+  await expect(page.getByTestId('running-runs')).toBeVisible()
+  expect(await overflow()).toBeLessThanOrEqual(0)
 })
 
 /** The token pairs every primitive draws text with (PRD_VIEWER_REVAMP 4). */
@@ -419,46 +356,89 @@ for (const failure of LIST_FAILURES) {
   })
 }
 
-/** A request for a web font: a font host, or a font file by its extension. */
-const isFontRequest = (url: string) => /fonts\.googleapis\.com|fonts\.gstatic\.com|\.woff2?(\?|#|$)/i.test(url)
+/** A request for a font: a font host (Google Fonts' CSS or files), or a font file by its extension. */
+const isFontRequest = (url: string) => /fonts\.googleapis\.com|fonts\.gstatic\.com|\.(woff2?|ttf|otf|eot)(\?|#|$)/i.test(url)
+/** The two faces the Projects shell self-hosts from /fonts (src/projects/theme.css), and nothing else. */
+const SELF_HOSTED_FAMILIES = ['Atkinson Hyperlegible Mono', 'Atkinson Hyperlegible Next']
 
-test(`No web font: the Projects pages request no font and declare no @font-face (${phase})`, async ({ page }) => {
+test(`Self-hosted fonts: the Projects pages request fonts only from their own origin and declare exactly the two Atkinson Hyperlegible faces (${phase})`, async ({ page }) => {
   test.setTimeout(90_000)
-  const fonts: string[] = []
-  page.on('request', request => { if (isFontRequest(request.url()) || request.resourceType() === 'font') fonts.push(request.url()) })
+  const fonts: { url: string; status: number }[] = []
+  page.on('response', response => {
+    if (isFontRequest(response.url()) || response.request().resourceType() === 'font') fonts.push({ url: response.url(), status: response.status() })
+  })
+  const failed: string[] = []
+  page.on('requestfailed', request => { if (isFontRequest(request.url()) || request.resourceType() === 'font') failed.push(request.url()) })
   await page.clock.setFixedTime(REVAMP_NOW)
   const shell = page.getByTestId('projects-workspace')
-  /** What the document declares: every @font-face rule in a readable sheet, every FontFace in document.fonts, every font link. */
+  /**
+   * What the document declares: every @font-face rule in a readable sheet (its family and each src URL, resolved against the
+   * sheet's own URL, or the document's for an inline style), every FontFace in document.fonts, every font link.
+   */
   // Evaluated as a string: the spec compiles without the DOM library, as the other specs' page code reads the DOM untyped.
   const declared = () => page.evaluate(`(async () => {
     await document.fonts.ready
+    const unquote = value => value.trim().replace(/^["']|["']$/g, '')
     const faces = []
-    const walk = rules => {
+    const unreadable = []
+    const walk = (rules, base) => {
       for (const rule of [...rules]) {
-        if (rule instanceof CSSFontFaceRule) faces.push(rule.cssText)
-        else if (rule.cssRules) walk(rule.cssRules)
+        if (rule instanceof CSSFontFaceRule) {
+          const src = rule.style.getPropertyValue('src')
+          const urls = [...src.matchAll(/url\\(\\s*(["']?)([^"')]+)\\1\\s*\\)/g)].map(match => new URL(match[2], base).href)
+          faces.push({ family: unquote(rule.style.getPropertyValue('font-family')), urls, src })
+        } else if (rule.cssRules) walk(rule.cssRules, base)
       }
     }
     for (const sheet of [...document.styleSheets]) {
-      try { walk(sheet.cssRules) } catch { faces.push('unreadable sheet ' + sheet.href) }
+      try { walk(sheet.cssRules, sheet.href ?? document.baseURI) } catch { unreadable.push(String(sheet.href)) }
     }
-    const links = [...document.querySelectorAll('link[href]')].map(link => link.getAttribute('href') ?? '').filter(href => /font/i.test(href))
-    return { faces, fontSet: [...document.fonts].map(face => face.family + ' ' + face.status), links }
-  })()`) as Promise<{ faces: string[]; fontSet: string[]; links: string[] }>
+    const links = [...document.querySelectorAll('link[href]')].filter(link => /font/i.test(link.getAttribute('href') ?? '')).map(link => link.href)
+    return { origin: location.origin, faces, unreadable, fontSet: [...new Set([...document.fonts].map(face => unquote(face.family)))].sort(), links }
+  })()`) as Promise<{ origin: string; faces: { family: string; urls: string[]; src: string }[]; unreadable: string[]; fontSet: string[]; links: string[] }>
 
-  for (const url of [projectsUrl, projectUrl(PROJECT.project_id), workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID)]) {
+  const pages = [
+    { url: projectsUrl, ready: page.locator('.ui-section-header h2').first() },
+    { url: projectUrl(PROJECT.project_id), ready: page.locator('.ui-section-header h2').first() },
+    { url: workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.locator('.ui-section-header h2').first() },
+    // The run page (the Signal Box stage) uses the same two faces.
+    { url: runUrl(RUN_DESK_LIVE, undefined, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.getByTestId('run-stage') },
+  ]
+  let origin = ''
+  for (const { url, ready } of pages) {
     await page.goto(url)
     await expect(shell).toBeVisible()
-    await expect(page.locator('.ui-section-header h2').first()).toBeVisible()
-    expect(await declared(), url).toEqual({ faces: [], fontSet: [], links: [] })
+    await expect(ready).toBeVisible()
+    const found = await declared()
+    origin = found.origin
+    // Every sheet is readable (a cross-origin sheet, such as Google Fonts' CSS, is not), and no link names a font host.
+    expect(found.unreadable, url).toEqual([])
+    for (const link of found.links) expect(new URL(link).origin, `${url}: font link ${link}`).toBe(origin)
+    // The declared families are exactly the two self-hosted faces, each declared once, each source a file on this origin.
+    expect(found.faces.map(face => face.family).sort(), url).toEqual(SELF_HOSTED_FAMILIES)
+    for (const face of found.faces) {
+      expect(face.urls.length, `${url}: ${face.family} declares a url() source (${face.src})`).toBeGreaterThan(0)
+      for (const source of face.urls) {
+        expect(new URL(source).origin, `${url}: ${face.family} source ${source}`).toBe(origin)
+        expect(new URL(source).pathname, `${url}: ${face.family} source ${source}`).toMatch(/^\/fonts\/[^/]+\.woff2$/)
+      }
+    }
+    expect(found.fontSet, url).toEqual(SELF_HOSTED_FAMILIES)
   }
-  expect(fonts).toEqual([])
+  // Every font the pages fetched came from this origin's /fonts and was served; none went to another host.
+  expect(fonts.length, 'the pages load their self-hosted faces').toBeGreaterThan(0)
+  for (const font of fonts) {
+    expect(new URL(font.url).origin, font.url).toBe(origin)
+    expect(new URL(font.url).pathname, font.url).toMatch(/^\/fonts\/[^/]+\.woff2$/)
+    expect(font.status, font.url).toBe(200)
+  }
+  expect(failed).toEqual([])
 })
 
 /** What the feature page's run-history chip says for each own run: its status label and glyph. */
 const HISTORY: Record<string, [label: string, glyph: string, tone: string]> = Object.fromEntries([
   ...[RUN_DESK_PANE, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET].map(runId => [runId, ['Running', '●', 'run']]),
-  ...[RUN_DESK_INTERRUPTED, RUN_DESK_PAUSED, RUN_DESK_HELD].map(runId => [runId, ['Paused', '‖', 'pause']]),
+  ...[RUN_DESK_INTERRUPTED, RUN_DESK_PAUSED, RUN_DESK_HELD, RUN_DESK_STALE].map(runId => [runId, ['Paused', '‖', 'pause']]),
   ...REVAMP_SUCCEEDED_RUNS.map(runId => [runId, ['Succeeded', '✓', 'ok']]),
   ...REVAMP_FAILED_RUNS.map(runId => [runId, ['Failed', '✗', 'fail']]),
 ])

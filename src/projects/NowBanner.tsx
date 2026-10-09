@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { LaneLine, Now, Text, TextPart } from '../../contracts/projects/triage.ts'
+import type { Now, Text, TextPart } from '../../contracts/projects/triage.ts'
 import { CommandBlock } from './CommandBlock.tsx'
 import { servedNow } from './lists.ts'
 import { useServedRun } from './LiveStatus.tsx'
@@ -7,9 +7,6 @@ import { AppLink } from './panels.tsx'
 import { withoutGlyph } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatAgo, formatSpan, utcTitle } from './time.ts'
-
-/** How many lanes the lanes line lists before the rest move behind "+n more". */
-const LANES_SHOWN = 3
 
 /** One part of the triage model's rich text: a clock as `<Time>`, ages, durations and deadlines against the page's ticking clock. */
 function Part({ part, now }: { part: TextPart; now: number }): ReactNode {
@@ -56,6 +53,8 @@ type Props = {
   /** The focus step's page, for its "Open" link; null when there is no focus. */
   focusHref: string | null
   onNavigate: (pathname: string) => void
+  /** When given, the "Open" affordance centres the focus step on the run stage instead of leaving the page. */
+  onOpenFocus?: (nodeId: string) => void
 }
 
 /**
@@ -65,7 +64,7 @@ type Props = {
  * a controller read not running for 15 s (rule 5 case c). It is not a live region: the page announces only a change of
  * situation.
  */
-export function NowBanner({ now: exported, clock, focusHref, onNavigate }: Props) {
+export function NowBanner({ now: exported, clock, focusHref, onNavigate, onOpenFocus }: Props) {
   const served = useServedRun()
   const now = useMemo(() => (exported === null ? null : servedNow(exported, served)), [exported, served])
   if (now === null) {
@@ -78,8 +77,9 @@ export function NowBanner({ now: exported, clock, focusHref, onNavigate }: Props
   }
   // The focus page's link names the node its last segment ends in (`/nodes/<n>`); a served situation can move the focus.
   const href = now.focus && focusHref ? focusHref.replace(/[^/]+$/, encodeURIComponent(now.focus.node_id)) : null
+  const focusId = now.focus?.node_id ?? null
   const open = now.focus && href
-    ? <AppLink href={href} onNavigate={onNavigate} className="run-now-open">Open {now.focus.label} ›</AppLink>
+    ? <AppLink href={href} onNavigate={onOpenFocus && focusId !== null ? () => onOpenFocus(focusId) : onNavigate} className="run-now-open" data-testid="now-open">Open {now.focus.label} ›</AppLink>
     : null
   return (
     <section className={`run-now run-now-${now.tone}`} data-testid="run-now" data-situation={now.situation} aria-labelledby="run-now-title">
@@ -91,36 +91,6 @@ export function NowBanner({ now: exported, clock, focusHref, onNavigate }: Props
       </p>
       {now.reason !== null && <Reason after={open}><RichText text={now.reason} now={clock} /></Reason>}
       <CommandBlock next={now.next} />
-    </section>
-  )
-}
-
-/**
- * The lanes line (docs/PRD_VIEWER_UX.md 4.2), for runs with two or more lanes: one line per lane with its worker, verify and
- * candidate steps and no durations, the Steps table's job.
- */
-export function LanesLine({ lines }: { lines: LaneLine[] }) {
-  if (lines.length < 2) return null
-  const item = (line: LaneLine) => (
-    <li key={line.lane} data-lane={line.lane}>
-      <span className="run-lane-name">{line.lane}</span>
-      <span className="run-lane-steps">
-        {line.steps.map((step, index) => (
-          <span key={step.node_id} className={`run-lane-step status-text-${step.status}`}>{index > 0 ? ' · ' : ''}{step.text}</span>
-        ))}
-      </span>
-    </li>
-  )
-  return (
-    <section className="run-lanes" data-testid="run-lanes" aria-labelledby="run-lanes-title">
-      <h3 id="run-lanes-title" className="run-lanes-title">Lanes</h3>
-      <ul className="run-lanes-list">{lines.slice(0, LANES_SHOWN).map(item)}</ul>
-      {lines.length > LANES_SHOWN && (
-        <details className="run-lanes-more">
-          <summary>+{lines.length - LANES_SHOWN} more</summary>
-          <ul className="run-lanes-list">{lines.slice(LANES_SHOWN).map(item)}</ul>
-        </details>
-      )}
     </section>
   )
 }

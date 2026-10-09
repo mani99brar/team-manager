@@ -167,7 +167,7 @@ export type RunOptions = {
    * selection, 1.4.0 the reviewer set, 1.6.0 the `sidecar` section, 1.8.0 the `sidecar` and `attack` sections, 1.9.0 also the
    * `panels` section.
    */
-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0'
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0' | '1.10.0'
   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
   reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
@@ -190,6 +190,17 @@ export type RunOptions = {
   panels?: unknown
   /** The live `<run>/panel.json` the controller rewrites while the panel runs. */
   panelFile?: unknown
+  /** Export 1.10.0: the top-level `fix_loop` section (the viewer contract's `FixLoop`, without its `contract_version`/`source` header), null without one. */
+  fixLoop?: { contract_version?: string; source?: string } | null
+  /** Export 1.10.0: the review round (1 + archived rounds), the commit its delta starts from and `<run>/review.delta.diff`, injected into the `review` section. */
+  reviewRound?: number
+  deltaFrom?: string | null
+  deltaDiff?: string
+  /** Export 1.10.0: each lane's `plan.nodes.<lane>.roles` and `.skills`, injected into the `inputs.workers` section. */
+  roles?: Record<string, { model: string | null; effort: string | null } | null>
+  skills?: Record<string, { name: string; sha256: string }[]>
+  /** Export 1.10.0: `plan.automatic.fix_rounds`, injected into `inputs.automatic`. */
+  fixRounds?: number
 }
 
 function writeRun(runsRoot: string, repository: string, runId: string, options: RunOptions) {
@@ -210,19 +221,40 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   writeJson(join(runDir, 'plan.json'), plan)
   writeFileSync(join(runDir, 'events.jsonl'), options.events.map(event => JSON.stringify(event)).join('\n') + '\n')
   if (options.diff !== undefined) writeFileSync(join(runDir, 'review.diff'), options.diff)
+  if (options.deltaDiff !== undefined) writeFileSync(join(runDir, 'review.delta.diff'), options.deltaDiff)
   if (options.sidecarLedger !== undefined) writeJson(join(runDir, 'sidecar.ledger.json'), options.sidecarLedger)
   if (options.attackFile !== undefined) writeJson(join(runDir, 'attack.json'), options.attackFile)
   if (options.panelFile !== undefined) writeJson(join(runDir, 'panel.json'), options.panelFile)
   const packets = options.packets(runDir)
+  // Export 1.10.0 injects the lane pins and `fix_rounds` into the inputs section, the review round and delta into the review
+  // section, and carries the top-level `fix_loop` (the record without its contract header); the server projects the rest.
+  const reviewSection = options.review === undefined || options.review === null ? (options.review ?? null) : {
+    ...options.review,
+    ...(options.reviewRound !== undefined ? { round: options.reviewRound } : {}),
+    ...(options.deltaFrom !== undefined ? { delta_from: options.deltaFrom } : {}),
+    ...(options.deltaDiff !== undefined ? { delta_diff: { path: 'review.delta.diff', sha256: sha256(Buffer.from(options.deltaDiff)), bytes: Buffer.byteLength(options.deltaDiff) } } : {}),
+  }
+  const inputsSection = inputs === null ? null : {
+    ...inputs,
+    ...(options.fixRounds !== undefined && inputs.automatic ? { automatic: { ...inputs.automatic, fix_rounds: options.fixRounds } } : {}),
+    workers: Object.fromEntries(Object.entries(inputs.workers).map(([lane, worker]) => [lane, {
+      ...worker,
+      ...(options.roles && lane in options.roles ? { roles: options.roles[lane] } : {}),
+      ...(options.skills && lane in options.skills ? { skills: options.skills[lane] } : {}),
+    }])),
+  }
+  const fixLoopSection = options.fixLoop == null ? null
+    : Object.fromEntries(Object.entries(options.fixLoop as Record<string, unknown>).filter(([key]) => key !== 'contract_version' && key !== 'source'))
   const state = {
     version, run_id: runId, base_commit: BASE_COMMIT, created_at: options.createdAt,
     definition: { name: options.definitionName ?? WORKFLOW_NAME, nodes: options.definitionNodes },
     values: { run_id: runId, ...options.values }, next: options.next, tasks: options.tasks, events: options.events,
     verification_packets: packets, updated_at: options.updatedAt,
-    ...(version !== '1.0.0' ? { review: options.review ?? null, inputs } : {}),
+    ...(version !== '1.0.0' ? { review: version === '1.10.0' ? reviewSection : options.review ?? null, inputs: version === '1.10.0' ? inputsSection : inputs } : {}),
     ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { sidecar: options.sidecar ?? null } : {}),
     ...(version === '1.8.0' || version === '1.9.0' ? { attack: options.attack ?? null } : {}),
     ...(version === '1.9.0' ? { panels: options.panels ?? null } : {}),
+    ...(version === '1.10.0' ? { fix_loop: fixLoopSection } : {}),
   }
   writeJson(join(runDir, 'run-state.json'), state)
   return runDir

@@ -30,7 +30,7 @@ import {
   UI_CHANGED_FILES,
   UI_QUOTE,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl, taskDetails } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, renderedText, runUrl, taskDetails } from './support.ts'
 
 installHooks()
 
@@ -61,9 +61,9 @@ async function precedes(first: Locator, second: Locator): Promise<boolean> {
   return first.evaluate((element, target) => Boolean(element.compareDocumentPosition(target!) & 4), other)
 }
 
-/** The dash pattern a graph node's outline is actually drawn with. */
-async function dashArray(node: Locator): Promise<string> {
-  return node.locator('.workflow-node-shape').evaluate(shape => shape.ownerDocument.defaultView!.getComputedStyle(shape).strokeDasharray)
+/** The line style a step card's outline is actually drawn with (solid for an agent, dashed for the verifier, dotted for the controller). */
+async function borderStyle(node: Locator): Promise<string> {
+  return node.evaluate(card => card.ownerDocument.defaultView!.getComputedStyle(card).borderTopStyle)
 }
 
 /** Whether the element's box lies inside the viewport, allowing a pixel for sub-pixel scroll positions. */
@@ -78,48 +78,54 @@ test(`[scenario:executor-marks] The graph shows solid worker and review nodes an
   await page.goto(clarityRunUrl(RUN_FILES))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
 
-  // Agents are solid: no dash on the shape, the agent class and the agent session in the accessible name.
+  // Agents are solid: a solid outline, the agent class and the agent session in the accessible name.
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node].is-agent')).toHaveCount(SOLID.length)
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node].is-controller')).toHaveCount(DASHED.length)
   for (const nodeId of SOLID) {
     const node = graphNode(page, nodeId)
     await expect(node).toHaveClass(/\bis-agent\b/)
-    await expect(node.locator('.workflow-node-shape')).not.toHaveAttribute('stroke-dasharray')
-    expect(await dashArray(node)).toBe('none')
+    await expect(node).toHaveAttribute('data-executor', 'agent')
+    expect(await borderStyle(node)).toBe('solid')
   }
-  // The controller and the trusted verifier are dashed.
+  // The controller and the trusted verifier are not solid: the verifier's outline is dashed, the controller's dotted.
   for (const nodeId of DASHED) {
     const node = graphNode(page, nodeId)
     await expect(node).toHaveClass(/\bis-controller\b/)
-    await expect(node.locator('.workflow-node-shape')).toHaveAttribute('stroke-dasharray', /\d/)
-    expect(await dashArray(node)).not.toBe('none')
+    const verifier = ['verify_ui', 'verify_adapter', 'candidate'].includes(nodeId)
+    await expect(node).toHaveAttribute('data-executor', verifier ? 'verifier' : 'controller')
+    expect(await borderStyle(node)).toBe(verifier ? 'dashed' : 'dotted')
   }
 
-  // Each accessible name ends with its executor; the meta line names it too.
-  await expect(graphNode(page, 'launch_ui')).toHaveAttribute('aria-label', /^Launch ui worker, worker, succeeded, attempt 1, executed by agent session$/)
-  await expect(graphNode(page, 'review')).toHaveAttribute('aria-label', /, executed by one agent session per reviewer$/)
-  for (const nodeId of ['verify_ui', 'verify_adapter', 'candidate']) await expect(graphNode(page, nodeId)).toHaveAttribute('aria-label', /, executed by trusted verifier$/)
-  for (const nodeId of ['handoff', 'approval', 'integrate']) await expect(graphNode(page, nodeId)).toHaveAttribute('aria-label', /, executed by controller$/)
-  await expect(graphNode(page, 'verify_ui').locator('.workflow-node-meta')).toHaveText('Succeeded · attempt 1 · verifier')
-  await expect(graphNode(page, 'handoff').locator('.workflow-node-meta')).toHaveText('Succeeded · attempt 1 · controller')
-  await expect(graphNode(page, 'launch_ui').locator('.workflow-node-meta')).toHaveText('Succeeded · attempt 1 · agent')
+  // Each accessible name names its executor after the status and attempt (only the lane and the duration follow it); the
+  // card's meta line names it too.
+  await expect(graphNode(page, 'launch_ui')).toHaveAttribute('aria-label', /^Launch ui worker, worker, succeeded, attempt 1, executed by agent session, lane ui(, [^,]+)?$/)
+  await expect(graphNode(page, 'review')).toHaveAttribute('aria-label', /, executed by one agent session per reviewer(, [^,]+)?$/)
+  for (const nodeId of ['verify_ui', 'verify_adapter', 'candidate']) await expect(graphNode(page, nodeId)).toHaveAttribute('aria-label', /, executed by trusted verifier(, lane [a-z]+)?(, [^,]+)?$/)
+  for (const nodeId of ['handoff', 'approval', 'integrate']) await expect(graphNode(page, nodeId)).toHaveAttribute('aria-label', /, executed by controller(, [^,]+)?$/)
+  await expect(graphNode(page, 'verify_ui').locator('.n-word')).toHaveText('succeeded')
+  await expect(graphNode(page, 'verify_ui').locator('.n-meta').first()).toContainText('verification · verifier')
+  await expect(graphNode(page, 'handoff').locator('.n-meta').first()).toContainText('· controller')
+  await expect(graphNode(page, 'launch_ui').locator('.n-meta').first()).toContainText('worker · agent')
 
-  // The legend lists the three executors.
+  // The legend (behind its button on the stage) lists the three executors after the six tones, then the repair re-entry.
+  await page.getByRole('button', { name: 'Legend' }).click()
   const legend = page.getByTestId('graph-legend')
   await expect(legend).toBeVisible()
-  await expect(legend.locator('li')).toHaveCount(3)
-  expect(await attributeList(legend.locator('li'), 'data-executor')).toEqual(['agent', 'verifier', 'controller'])
-  await expect(legend.locator('li')).toContainText([/Agent session/, /Trusted verifier/, /Controller/])
+  await expect(legend.locator('li')).toHaveCount(10)
+  for (const executor of ['agent session', 'trusted verifier', 'controller']) await expect(legend.locator('li').filter({ hasText: executor })).toHaveCount(1)
   await attach(page, testInfo, 'executor-marks')
 
-  // Each node page says who executed it. Node pages show the step strip instead of the graph (PRD_VIEWER_UX 4.4), so the
-  // steps are opened from the Steps table and then from the strip.
+  // Each node page says who executed it. The run page opens a step through its sheet; node pages show the step strip
+  // instead of the graph (PRD_VIEWER_UX 4.4), so the following steps are opened from the strip.
   const expected: Record<string, string> = {
     launch_ui: 'agent session', handoff: 'controller', verify_ui: 'trusted verifier', candidate: 'trusted verifier',
     review: 'one agent session per reviewer', approval: 'controller', integrate: 'controller',
   }
+  let onRunPage = true
   for (const [nodeId, executor] of Object.entries(expected)) {
-    await nodeListItem(page, nodeId).getByRole('link').click()
+    if (onRunPage) await openStep(page, nodeId)
+    else await nodeListItem(page, nodeId).getByRole('link').click()
+    onRunPage = false
     await expect(nodeDetail(page)).toHaveAttribute('data-node-id', nodeId)
     await expect(page.getByTestId('node-executor')).toHaveText(executor)
   }

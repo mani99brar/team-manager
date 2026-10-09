@@ -10,7 +10,8 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { validateReviewResult, validateRunDetail, validateRunInputs } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.ts'
 import { buildTimeline, deriveAttention, type RunData } from '../../contracts/projects/triage.ts'
-import { formatShortSpan, outageBands, shortStepLabel, stepRows, timeAxis, type StepRow } from '../../src/projects/steps.ts'
+import { formatShortSpan, outageBands, pinnedStepCounts, repairRoundCount, shortStepLabel, STEP_PHASE_ORDER, stepGroups, stepItems, stepRows, timeAxis, type StepRow } from '../../src/projects/steps.ts'
+import { REFINE_EXAMPLES } from '../../tests/project-workflows/fixtures/ux-refine.ts'
 import { formatSpan } from '../../src/projects/time.ts'
 import { ACTIVITY_PHASE_LABEL, groupActivity, nodePhase, orderActivityGroups, phaseState, type ActivityPhase } from '../../src/projects/node/model.ts'
 import { RUN_SIDECAR, RUN_SIDECAR_FROZEN, uxSidecar } from '../project-workflows/fixtures/ux-sidecar.ts'
@@ -450,5 +451,50 @@ describe('one clock: useNow is called only in RunView.tsx and ProjectsView.tsx',
     assert.ok(all.includes('WorkerInputs.tsx') && all.includes('node/WorkerSections.tsx'), 'the scan reaches nested sections')
     const offenders = all.filter(file => !ALLOWED.has(file)).flatMap(file => clockUses(readFileSync(new URL(file, root), 'utf8')).map(line => `${file}:${line}`))
     assert.deepEqual(offenders, [], 'a section takes the clock as a prop from RunView instead of starting its own')
+  })
+})
+
+describe('Steps grouped by phase with the fix loop (docs/PRD_VIEWER_REFINE 5.3)', () => {
+  const emptyTimeline = (detail: { summary: { created_at: string } }) => ({
+    runStart: { at: detail.summary.created_at, source: 'receipt' as const }, runEnd: null, lastActivity: null,
+    spans: [], markers: [], gaps: [], byNode: new Map(), activity: [],
+  })
+  const worked = REFINE_EXAMPLES.find(example => example.runId === 'run-loop-done')!.detail
+
+  test('groups rows by phase in order, repair rows under the step they answer', () => {
+    const rows = stepRows(worked, emptyTimeline(worked) as unknown as Parameters<typeof stepRows>[1], { now: Date.parse('2026-10-09T12:00:00Z') })
+    const items = stepItems(rows, worked)
+    const groups = stepGroups(items)
+    // Phases appear in canonical order (work → verify → candidate → review → integrate; no challenge on this run).
+    const phases = groups.map(group => group.phase)
+    assert.deepEqual(phases, ['work', 'verify', 'candidate', 'review', 'integrate'])
+    for (let index = 1; index < phases.length; index += 1) {
+      assert.ok(STEP_PHASE_ORDER.indexOf(phases[index]) > STEP_PHASE_ORDER.indexOf(phases[index - 1]))
+    }
+    // repair-1 is in the Verify phase (it answers verify_viewer); repair-2 is in the Review phase (it answers review).
+    const repair1 = items.find(item => item.row.node_id === 'repair-1')!
+    const repair2 = items.find(item => item.row.node_id === 'repair-2')!
+    assert.equal(repair1.phase, 'verify')
+    assert.equal(repair1.repair?.round, 1)
+    assert.equal(repair2.phase, 'review')
+    assert.equal(repair2.repair?.round, 2)
+    assert.equal(repair2.repair?.trigger, 'review')
+  })
+
+  test('the counter counts the pinned steps only, with the repair rounds beside them', () => {
+    const rows = stepRows(worked, emptyTimeline(worked) as unknown as Parameters<typeof stepRows>[1], { now: Date.parse('2026-10-09T12:00:00Z') })
+    const items = stepItems(rows, worked)
+    const counts = pinnedStepCounts(items)
+    // Nine pinned steps (two repair rows excluded), all succeeded; two repair rounds.
+    assert.equal(counts.total, 9)
+    assert.equal(counts.done, 9)
+    assert.equal(repairRoundCount(worked), 2)
+  })
+
+  test('a run without a fix loop has no repair rows and zero rounds', () => {
+    const restored = REFINE_EXAMPLES.find(example => example.runId === 'run-loop-restored')!.detail
+    const plain = REFINE_EXAMPLES.find(example => example.runId === 'run-loop-running')!.detail
+    assert.equal(repairRoundCount(restored), 1)
+    assert.equal(repairRoundCount(plain), 2)
   })
 })

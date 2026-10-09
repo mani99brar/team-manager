@@ -81,16 +81,32 @@ export function CommandBlock({ next }: { next: NextStep }) {
           <CommandLine text={`RUN=${runDir}`} caption="First, in the same shell:" codeTestId="run-dir-command" copyTestId="copy-run-dir" />
         </div>
       )}
-      {next.steps.length > 0 && (
-        <ol className="command-steps">
-          {next.steps.map((step, index) => (
-            <li key={index} className="command-step" data-testid="now-step" data-kind={step.kind}>
-              {step.kind === 'command' ? <CommandLine text={step.text} caption={step.caption} /> : <div className="command-step-body"><span className="command-prose">{step.text}</span></div>}
-            </li>
-          ))}
-        </ol>
-      )}
-      {next.caveat && <p className="command-caveat">{next.caveat}</p>}
+      {next.steps.length > 0 && (() => {
+        const renderStep = (step: NextStep['steps'][number], index: number) => (
+          <li key={index} className="command-step" data-testid="now-step" data-kind={step.kind}>
+            {step.kind === 'command' ? <CommandLine text={step.text} caption={step.caption} /> : <div className="command-step-body"><span className="command-prose">{step.text}</span></div>}
+          </li>
+        )
+        const [first, ...rest] = next.steps
+        // The first command shows with Copy; the rest are a sequence in a closed "All steps" disclosure. A later command that
+        // is an alternative (its caption starts "Or ", or the step carries the question's caveat) is named in the summary and
+        // its caveat stays visible, so the operator never copies a hidden branch as if it were the next step (decisions [L9]d, note 1).
+        const alternative = rest.find(step => step.kind === 'command' && /^Or\b/i.test(step.caption ?? '')) ?? (next.caveat ? rest.find(step => step.kind === 'command') : undefined)
+        const summary = alternative?.kind === 'command' && alternative.caption ? `All steps · ${alternative.caption.replace(/^Or\b,?\s*/i, 'or ')}` : 'All steps'
+        return (
+          <>
+            <ol className="command-steps">{renderStep(first, 0)}</ol>
+            {next.caveat && <p className="command-caveat">{next.caveat}</p>}
+            {rest.length > 0 && (
+              <details className="command-all-steps" data-testid="now-all-steps">
+                <summary>{summary}</summary>
+                <ol className="command-steps" start={2}>{rest.map((step, index) => renderStep(step, index + 1))}</ol>
+              </details>
+            )}
+          </>
+        )
+      })()}
+      {next.steps.length === 0 && next.caveat && <p className="command-caveat">{next.caveat}</p>}
       {commands && <p className="command-caption">{COMMAND_CAPTION}</p>}
     </div>
   )

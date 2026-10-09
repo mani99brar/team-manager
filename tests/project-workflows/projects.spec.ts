@@ -1,10 +1,9 @@
-import { test, expect, type APIRequestContext, type Page, type TestInfo } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { PI, currentCrumb, fileUrl, node, openGraph, roots, waitForApi } from '../helpers.ts'
-import { verificationPhase } from './harness.ts'
-import { installProjectMocks, mockResponse } from './mock.ts'
+import { PI, currentCrumb, fileUrl, node, openGraph, roots } from '../helpers.ts'
+import { mockResponse } from './mock.ts'
 import {
   APPROVAL_MESSAGE,
   CURRENT_LABEL,
@@ -25,44 +24,31 @@ import {
   WORKFLOW_NAME,
   runDetails,
 } from './fixtures.ts'
+import { apiRun, attach, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, projectUrl, projectsUrl, runUrl, stepSheet, workflowUrl, workspace } from './support.ts'
 
-const phase = verificationPhase()
-
-const projectsUrl = '/projects'
-const projectUrl = (projectId: string) => `/projects/${encodeURIComponent(projectId)}`
-const workflowUrl = (projectId: string, workflowId: string) => `${projectUrl(projectId)}/workflows/${encodeURIComponent(workflowId)}`
-const runUrl = (runId: string, nodeId?: string) => `${workflowUrl(PROJECT.project_id, WORKFLOW_ID)}/runs/${encodeURIComponent(runId)}${nodeId ? `/nodes/${encodeURIComponent(nodeId)}` : ''}`
-const apiRun = (runId: string) => `/api/projects/${PROJECT.project_id}/workflows/${WORKFLOW_ID}/runs/${runId}`
+installHooks()
 
 const rootsNav = (page: Page) => page.getByRole('navigation', { name: 'Roots' })
-const workspace = (page: Page) => page.getByTestId('projects-workspace')
-const graphNode = (page: Page, nodeId: string) => page.locator(`[data-testid="workflow-graph"] [data-graph-node="${nodeId}"]`)
-const nodeListItem = (page: Page, nodeId: string) => page.locator(`[data-testid="run-node-list"] [data-node-id="${nodeId}"]`)
-const nodeDetail = (page: Page) => page.getByTestId('node-detail')
+/** An edge of the run stage's track diagram, drawn in the stage's SVG beside the cards. */
+const stageEdge = (page: Page, from: string, to: string) => page.getByTestId('run-stage').locator(`svg.sb-edges path[data-edge="${from}>${to}"]`)
 
-/** No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only selectors). */
+/**
+ * No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only
+ * selectors). The Projects header is read-only too (P2: the earlier check did not cover it), so it is checked alongside the
+ * workspace — only its Refresh and roots links, which act on no run.
+ */
 async function expectNoExecutionControls(page: Page) {
-  const controls = workspace(page).locator('button, input, select, textarea, [role="menuitem"]')
-  await expect(controls.filter({ hasText: /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i })).toHaveCount(0)
+  const EXECUTION = /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i
+  // The run stage's cards, the live dock's event rows and its bar are buttons that only select a step or fold the dock (their
+  // text names a step, such as "Launch UI worker" or "Integrate candidate"); they act on no run, so they are left out.
+  const controls = workspace(page).locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]), input, select, textarea, [role="menuitem"]')
+  await expect(controls.filter({ hasText: EXECUTION })).toHaveCount(0)
+  // The header was actually inspected (its Refresh button is present), so the no-execution count is not vacuous.
+  await expect(page.locator('.app-header-projects .button')).toHaveCount(1)
+  const header = page.locator('.app-header-projects').locator('button, input, select, textarea, [role="menuitem"]')
+  await expect(header.filter({ hasText: EXECUTION })).toHaveCount(0)
   await expect(page.locator('form')).toHaveCount(0)
 }
-
-async function attach(page: Page, testInfo: TestInfo, id: string) {
-  const image = testInfo.outputPath(`${id}.png`)
-  await page.screenshot({ path: image, fullPage: true })
-  await testInfo.attach(`screenshot:${id}`, { path: image, contentType: 'image/png' })
-}
-
-async function waitForProjectsApi(request: APIRequestContext) {
-  if (phase !== 'candidate') return
-  await expect.poll(async () => (await request.get('/api/projects')).status(), { timeout: 30_000 }).toBe(200)
-}
-
-test.beforeEach(async ({ page, request }) => {
-  await waitForApi(request)
-  await waitForProjectsApi(request)
-  if (phase === 'worker') await installProjectMocks(page)
-})
 
 test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects opens registered projects (${phase})`, async ({ page }, testInfo) => {
   // The existing skills graph still loads at Home with only the two sources, and the roots strip offers Projects.
@@ -160,14 +146,19 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
   await expect(graphNode(page, 'verify_ui')).toHaveAttribute('aria-label', new RegExp(`^${PINNED_LABEL.replace(/[()]/g, '\\$&')}, verification, succeeded, attempt 1`))
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node]')).toHaveCount(9)
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node][data-status="succeeded"]')).toHaveCount(9)
-  await expect(page.locator('[data-testid="workflow-graph"] [data-edge-from="handoff"][data-edge-to="verify_ui"]')).toHaveCount(1)
-  await expect(page.getByTestId('node-hint')).toBeVisible()
+  await expect(stageEdge(page, 'handoff', 'verify_ui')).toHaveCount(1)
+  await expect(stepSheet(page)).toHaveCount(0)
 
-  // Keyboard: focus a graph node, move with arrows, open with Enter; the selection is reflected in the URL and list.
+  // Keyboard: focus a card, move with arrows (Down walks to the other lane of the same column), open its sheet with Enter;
+  // the sheet's "Open step page" opens the step, reflected in the URL and the node page's step strip.
   await graphNode(page, 'launch_ui').focus()
-  await page.keyboard.press('ArrowRight')
+  await page.keyboard.press('ArrowDown')
   await expect(graphNode(page, 'launch_adapter')).toBeFocused()
   await page.keyboard.press('Enter')
+  await expect(stepSheet(page)).toHaveAttribute('data-node-id', 'launch_adapter')
+  await expect(graphNode(page, 'launch_adapter')).toHaveAttribute('aria-current', 'true')
+  await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED)}$`))
+  await stepSheet(page).getByTestId('sheet-open-page').click()
   await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED, 'launch_adapter')}$`))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_adapter')
   await expect(nodeDetail(page).getByRole('heading', { level: 3 })).toContainText('Launch adapter worker')
@@ -178,7 +169,9 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
   // Back returns to the run without a selected node; a different run shows its own (current) definition.
   await page.goBack()
   await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED)}$`))
-  await expect(page.getByTestId('node-hint')).toBeVisible()
+  await expect(page.getByTestId('run-stage')).toBeVisible()
+  await expect(stepSheet(page)).toHaveCount(0)
+  await expect(graphNode(page, 'launch_adapter')).toBeFocused()
   await page.goBack()
   await expect(currentCrumb(page)).toHaveText(WORKFLOW_NAME)
   await runList.getByRole('link', { name: new RegExp(`^${RUN_FAILED}`) }).click()
@@ -208,8 +201,7 @@ test(`[scenario:run-evidence] Inspect worker checks, changed files, assumptions,
   const target = withScreenshot!.node
 
   await page.goto(runUrl(RUN_SUCCEEDED))
-  await nodeListItem(page, target.node_id).getByRole('link').click()
-  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', target.node_id)
+  await openStep(page, target.node_id)
   await expect(page.getByTestId('node-attempt')).toHaveText(String(target.attempt))
   const result = page.getByTestId('worker-result')
   await expect(result).toBeVisible()
@@ -466,14 +458,22 @@ test(`[scenario:live-refresh] A shown run re-reads its state in the background w
   await page.goto(runUrl(RUN_AWAITING))
   const view = page.getByTestId('run-view')
   await expect(view).toHaveAttribute('data-run-status', 'awaiting_approval')
+  // The waiting step's card shows its served status and carries the approval it waits on.
+  await expect(graphNode(page, changed.node_id)).toHaveAttribute('data-status', 'awaiting_approval')
   await expect(graphNode(page, changed.node_id)).toHaveClass(/is-awaiting_approval/)
+  await expect(graphNode(page, changed.node_id)).toHaveAttribute('data-attention', 'approval')
+  await expect(graphNode(page, changed.node_id)).toHaveClass(/\battn\b/)
+  await expect(graphNode(page, changed.node_id)).toHaveAttribute('aria-label', /^Independent review, review, [^,]+ · needs you, attempt 1,/)
   // The reader's place survives a poll: the page is updated in place, not reloaded behind a loading panel.
   await page.getByTestId('tab-assignment').click()
   current = moved
   await expect(view).toHaveAttribute('data-run-status', 'running', { timeout: 15_000 })
-  await expect(page.getByTestId('tab-assignment')).toHaveAttribute('aria-selected', 'true')
-  await page.getByTestId('tab-run').click()
+  await expect(page.getByRole('tablist', { name: 'Run views' }).getByTestId('tab-assignment')).toHaveAttribute('aria-selected', 'true')
+  // Back to the graph through the identity line's pill link.
+  await page.getByTestId('run-graph-link').click()
   await expect(graphNode(page, changed.node_id)).toHaveClass(/is-running/)
+  await expect(graphNode(page, changed.node_id)).not.toHaveAttribute('data-attention')
+  await expect(graphNode(page, changed.node_id)).not.toHaveClass(/\battn\b/)
   await attach(page, testInfo, 'live-refresh')
 
   // A failed poll keeps the last loaded state instead of replacing the page with an error. The second failed read

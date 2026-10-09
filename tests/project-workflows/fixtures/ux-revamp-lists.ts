@@ -46,6 +46,8 @@ export const RUN_DESK_INTERRUPTED = 'desk-interrupted'
 export const RUN_DESK_PAUSED = 'desk-paused'
 /** Live but stopped with no step to name: served `paused`, attention `paused` with `since: null` (no focus, no stop time). */
 export const RUN_DESK_HELD = 'desk-held'
+/** Paused three days before REVAMP_NOW: the Paused section's oldest row, so "since <n> days" (n >= 1) has a case. */
+export const RUN_DESK_STALE = 'desk-stale'
 
 export const REVAMP_LANES = ['ui', 'adapter'] as const
 type Lane = (typeof REVAMP_LANES)[number]
@@ -273,6 +275,7 @@ const QUIET_CREATED = at('2026-03-12', '18:30:00')
 const INTERRUPTED_CREATED = at('2026-03-12', '16:00:00')
 const PAUSED_CREATED = at('2026-03-12', '16:30:00')
 const HELD_CREATED = at('2026-03-12', '15:00:00')
+const STALE_CREATED = at('2026-03-09', '00:00:00')
 
 const FIXTURES: Fixture[] = [
   liveRun(RUN_DESK_PANE, PANE_CREATED, [[PANE_AT, 'adapter', 'interactive', PANE_MESSAGE]], {
@@ -290,6 +293,7 @@ const FIXTURES: Fixture[] = [
   }),
   interruptedRun(RUN_DESK_INTERRUPTED, INTERRUPTED_CREATED),
   pausedRun(RUN_DESK_PAUSED, PAUSED_CREATED),
+  pausedRun(RUN_DESK_STALE, STALE_CREATED),
   heldRun(RUN_DESK_HELD, HELD_CREATED),
   ...FINISHED.map(([runId, outcome, day, hour]) => (outcome === 'failed' ? failedRun(runId, day, hour) : succeededRun(runId, day, hour))),
 ]

@@ -26,13 +26,14 @@ import {
   WORKFLOW_NAME,
   reviewFindings,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openTask, phase, renderedText, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
 const lanesRunUrl = (runId: string, nodeId?: string) => runUrl(runId, nodeId, LANES_WORKFLOW_ID)
 const graphNodes = (page: Page) => page.locator('[data-testid="workflow-graph"] [data-graph-node]')
-const edge = (page: Page, from: string, to: string) => page.locator(`[data-testid="workflow-graph"] [data-edge-from="${from}"][data-edge-to="${to}"]`)
+/** An edge of the run stage's track diagram, drawn in the stage's SVG beside the cards. */
+const edge = (page: Page, from: string, to: string) => page.getByTestId('run-stage').locator(`svg.sb-edges path[data-edge="${from}>${to}"]`)
 const findings = (page: Page) => page.getByTestId('review-findings')
 const findingRows = (page: Page) => findings(page).getByTestId('finding')
 // Findings are cards (docs/PRD_VIEWER_REVAMP.md 5.4, 8): a lane's findings are the cards of its worker, counted per lane by
@@ -71,7 +72,8 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
     await expect(edge(page, 'handoff', `verify_${lane}`)).toHaveCount(1)
     await expect(edge(page, `verify_${lane}`, 'candidate')).toHaveCount(1)
   }
-  await expect(page.getByTestId('run-node-list').locator('[data-node-id]')).toHaveCount(THREE_LANE_NODES.length)
+  // The pinned facts sit behind the identity line's Details.
+  await openRunDetails(page)
   await expect(page.getByTestId('run-inputs-facts')).toContainText(LANES_FEATURE_NAME)
 
   // The Assignment tab lists the three workers in policy order, with the lane selection and each lane's required check kinds.
@@ -199,6 +201,7 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   await expect(graphNode(page, 'verify_adapter')).toHaveAttribute('aria-label', /^Verify adapter, verification, succeeded, attempt 1/)
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node][data-status="succeeded"]')).toHaveCount(GRAPH_NODES.length)
   await expect(page.getByTestId('definition-changed')).toBeVisible()
+  await openRunDetails(page)
   await expect(page.getByTestId('run-inputs-facts')).toContainText(FEATURE_NAME)
   await expect(page.getByTestId('inputs-none')).toHaveCount(0)
 
@@ -257,10 +260,12 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   await attach(page, testInfo, 'legacy-run')
 
   // The 1.0.0 export without sections still renders its graph and says what is not recorded, without an error. The run
-  // page's header says the inputs are not recorded; a node page shows the step strip instead of the graph (PRD_VIEWER_UX 4.4).
+  // page's identity line says (behind Details) the inputs are not recorded; a node page shows the step strip instead of the
+  // graph (PRD_VIEWER_UX 4.4).
   await page.goto(runUrl(RUN_LEGACY))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
   await expect(graphNodes(page)).toHaveCount(GRAPH_NODES.length)
+  await openRunDetails(page)
   await expect(page.getByTestId('inputs-none')).toBeVisible()
   await page.goto(runUrl(RUN_LEGACY, 'review'))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
