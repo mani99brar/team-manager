@@ -47,12 +47,15 @@ import {
   runDetails,
   runInputs,
 } from './fixtures.ts'
-import { apiRun, attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, openStep, phase, renderedText, runUrl } from './support.ts'
 
 installHooks()
 
 const guardedRunUrl = (nodeId?: string, runId: string = RUN_GUARDED) => runUrl(runId, nodeId, GUARDED_WORKFLOW_ID)
 const clarityRunUrl = (runId: string, nodeId?: string) => runUrl(runId, nodeId, CLARITY_WORKFLOW_ID)
+const graphNodes = (page: Page) => page.locator('[data-testid="workflow-graph"] [data-graph-node]')
+/** An edge of the run stage's track diagram, drawn in the stage's SVG beside the cards. */
+const stageEdge = (page: Page, from: string, to: string) => page.getByTestId('run-stage').locator(`svg.sb-edges path[data-edge="${from}>${to}"]`)
 const questionItems = (page: Page) => page.getByTestId('worker-questions').getByTestId('worker-question')
 const UI_BROWSER_COMMAND = 'npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts'
 
@@ -92,21 +95,19 @@ async function expectInert(rendered: Locator) {
 test(`[scenario:challenge-node-page] The graph starts with Design challenge; its page shows the status, the concerns by severity with consequences, the simpler alternative, the cheap experiment and the accepted reason (${phase})`, async ({ page }, testInfo) => {
   await page.goto(guardedRunUrl())
 
-  // The challenge is the first node of the graph and of the node list, and every launch node depends on it.
-  const listed = page.locator('[data-testid="run-node-list"] [data-node-id]')
-  await expect(listed.first()).toHaveAttribute('data-node-id', 'challenge')
-  await expect(listed.first()).toContainText('Design challenge')
-  await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node]').first()).toHaveAttribute('data-graph-node', 'challenge')
-  await expect(graphNode(page, 'challenge')).toHaveAttribute('aria-label', /^Design challenge, review, .*executed by one print job$/)
+  // The challenge is the first card of the graph, and every launch node depends on it.
+  await expect(graphNodes(page).first()).toHaveAttribute('data-graph-node', 'challenge')
+  await expect(graphNodes(page).first()).toContainText('Design challenge')
+  // The card's accessible name ends with the executor, then only what the card adds (its duration; the challenge has no lane).
+  await expect(graphNode(page, 'challenge')).toHaveAttribute('aria-label', /^Design challenge, review, .*executed by one print job(, [^,]+)?$/)
   for (const lane of TWO_LANES) {
-    await expect(page.locator(`[data-testid="workflow-graph"] [data-edge-from="challenge"][data-edge-to="launch_${lane}"]`)).toHaveCount(1)
+    await expect(stageEdge(page, 'challenge', `launch_${lane}`)).toHaveCount(1)
   }
   const challengeX = await graphNode(page, 'challenge').boundingBox()
   const launchX = await graphNode(page, 'launch_ui').boundingBox()
   expect(challengeX!.x).toBeLessThan(launchX!.x)
 
-  await graphNode(page, 'challenge').click()
-  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'challenge')
+  await openStep(page, 'challenge')
   await expect(page).toHaveURL(guardedRunUrl('challenge'))
   await expect(page.getByTestId('node-executor')).toHaveText('one print job')
   // It is not the independent review: no review panel is rendered for it.
@@ -145,8 +146,8 @@ test(`[scenario:challenge-node-page] The graph starts with Design challenge; its
 
   // A run prepared before the guardrails has no challenge node; its review node is still the independent review.
   await page.goto(clarityRunUrl(RUN_FILES))
-  await expect(nodeListItem(page, 'challenge')).toHaveCount(0)
-  await expect(page.locator('[data-testid="run-node-list"] [data-node-id]').first()).toHaveAttribute('data-node-id', 'launch_ui')
+  await expect(graphNode(page, 'challenge')).toHaveCount(0)
+  await expect(graphNodes(page).first()).toHaveAttribute('data-graph-node', 'launch_ui')
 })
 
 test(`[scenario:challenge-held] A run held after a passing design challenge shows the challenge paused with every concern, and resume --launch as its next step, never the accept command (${phase})`, async ({ page }, testInfo) => {
@@ -187,8 +188,7 @@ test(`[scenario:challenge-held] A run held after a passing design challenge show
   await expect(banner).not.toContainText('--accept-challenge')
 
   // The challenge node is paused while its record stays passed, and its page shows the hold and every concern.
-  await graphNode(page, 'challenge').click()
-  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'challenge')
+  await openStep(page, 'challenge')
   await expect(page.getByTestId('challenge-headline')).toContainText('Held after passing on attempt 1: no worker launches until the operator releases it')
   await expect(page.getByTestId('challenge')).toHaveAttribute('data-challenge-status', 'passed')
   await expect(page.getByTestId('challenge-concern')).toHaveCount(1)
@@ -423,9 +423,9 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
 test(`On a guarded graph the captured files show the independent review's findings, never a review looked up through the design challenge (${phase})`, async ({ page }) => {
   // Both nodes are of kind review and the challenge comes first; its attempt (2) is not the review's (1), so a lookup through it finds none.
   await page.goto(guardedRunUrl())
-  await expect(page.locator('[data-testid="run-node-list"] [data-node-id]').first()).toHaveAttribute('data-node-id', 'challenge')
-  await expect(nodeListItem(page, 'challenge')).toContainText('attempt 2')
-  await expect(nodeListItem(page, 'review')).toContainText('attempt 1')
+  await expect(graphNodes(page).first()).toHaveAttribute('data-graph-node', 'challenge')
+  await expect(graphNode(page, 'challenge')).toHaveAttribute('aria-label', /, attempt 2(,|$)/)
+  await expect(graphNode(page, 'review')).toHaveAttribute('aria-label', /, attempt 1(,|$)/)
 
   await page.goto(guardedRunUrl('launch_ui'))
   const file = page.locator(`[data-testid="captured-file"][data-path="${GUARDED_NOTES_PATH}"]`)

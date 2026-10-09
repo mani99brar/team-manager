@@ -279,17 +279,3 @@ export function assignmentModel(inputs: RunInputs, review: ReviewResult | null):
     })),
   }
 }
-
-// ---- The lanes strip's model pins (export 1.10.0, docs/PRD_VIEWER_REFINE 5.1) ----------------------------------
-
-/** A lane's model and effort pin (`plan.nodes.<lane>.roles`), or null for a lane without one. */
-export type LanePin = { model: string | null; effort: string | null } | null
-/** A lane's strip meta: its pin (or null for the executor) and its repair round count. */
-export type LaneMeta = { pin: LanePin; rounds: number }
-
-/** The pin as the strip and the graph show it (`opus-4-8 · medium`); null for a lane without one, which shows the executor. */
-export function lanePinText(pin: LanePin): string | null {
-  if (!pin) return null
-  const model = pin.model ? pin.model.replace(/^claude-/, '') : 'default model'
-  return `${model} · ${pin.effort ?? 'default effort'}`
-}

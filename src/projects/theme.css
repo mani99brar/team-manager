@@ -1,29 +1,38 @@
-/* Projects viewer tokens (docs/PRD_VIEWER_REVAMP.md section 4), scoped to the Projects shell so the document and skills areas keep the app's own tokens of index.css. Calm on `.projects-shell`, with a dark variant. Components take every colour from these tokens; state colours (ok, run, warn, fail, pause, idle) and severities (p0, p1, p2) are separate from the accent. Every chip text on its soft background keeps a contrast ratio of at least 4.5:1 in both themes. */
+/* The Projects viewer's faces, self-hosted (public/fonts, SIL Open Font License 1.1): the page never asks another host for
+   them, and falls back to the system stack while they load or where they are missing. Variable weight files, latin subset. */
+@font-face { font-family: "Atkinson Hyperlegible Next"; font-style: normal; font-weight: 200 800; font-display: swap; src: url(/fonts/AtkinsonHyperlegibleNext-latin.woff2) format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible Mono"; font-style: normal; font-weight: 200 800; font-display: swap; src: url(/fonts/AtkinsonHyperlegibleMono-latin.woff2) format("woff2"); }
+
+/* Projects viewer tokens (docs/PRD_VIEWER_REVAMP.md section 4, retoned by the Signal Box design of 2026-10-09), scoped to the Projects shell so the document and skills areas keep the app's own tokens of index.css. A warm-grey ground with one violet accent on `.projects-shell`, with a dark variant. Components take every colour from these tokens; state colours (ok, run, warn, fail, pause, idle) and severities (p0, p1, p2) are separate from the accent. Every chip text on its soft background keeps a contrast ratio of at least 4.5:1 in both themes. */
 .projects-shell {
-  --bg: #f4f6f9; --surface: #ffffff; --surface-2: #eceff4; --fg: #1b2130; --muted: #5d6675; --border: #dde2ea; --border-strong: #c4ccd8;
-  --accent: #3454d1; --accent-fg: #ffffff; --accent-soft: #e6ebfb;
-  --ok: #1a6b3e; --ok-soft: #dff3e6; --run: #1f4fc2; --run-soft: #e2eafc; --warn: #9a4a05; --warn-soft: #fdebd6; --fail: #a81e27; --fail-soft: #fbe1e3; --pause: #7a4e00; --pause-soft: #fff1cc; --idle: #5b6472; --idle-soft: #e9ebef;
-  --p0: #a81e27; --p1: #a93a06; --p2: #4b5563; --sev-fg: #ffffff;
-  --font-display: system-ui, "Segoe UI", Roboto, sans-serif; --font-body: system-ui, "Segoe UI", Roboto, sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace;
-  --radius: 6px; --shadow: 0 1px 2px rgba(20, 30, 50, 0.06); --band: transparent; --band-fg: var(--fg);
+  --bg: #e9ebe6; --grid: #d5d9d1; --surface: #fbfbf8; --surface-2: #f1f2ee; --fg: #151b18; --muted: #545e58; --border: #c8cdc4; --border-strong: #a3aaa0;
+  --edge: #7d8780; --edge-soft: #b8beb5; --edge-highlight: #5a3ec8;
+  --accent: #5a3ec8; --accent-fg: #ffffff; --accent-soft: #e7e2fb; --focus: #5a3ec8; --attention: #c27100;
+  --ok: #17663b; --ok-soft: #d9f0e1; --run: #1d4fc4; --run-soft: #dde7fb; --warn: #8f4700; --warn-soft: #fde6cc; --fail: #a51d27; --fail-soft: #fadcdf; --pause: #714a00; --pause-soft: #fbedc4; --idle: #56606c; --idle-soft: #e4e6e9;
+  --p0: #a51d27; --p1: #a33806; --p2: #4b5563; --sev-fg: #ffffff;
+  --font-display: "Atkinson Hyperlegible Next", system-ui, "Segoe UI", Roboto, sans-serif; --font-body: "Atkinson Hyperlegible Next", system-ui, "Segoe UI", Roboto, sans-serif; --font-mono: "Atkinson Hyperlegible Mono", ui-monospace, Menlo, Consolas, monospace;
+  --radius: 8px; --shadow: 0 1px 2px rgba(20, 30, 25, 0.06); --shadow-float: 0 10px 30px -12px rgba(20, 30, 25, 0.28), 0 2px 6px -2px rgba(20, 30, 25, 0.12); --band: transparent; --band-fg: var(--fg);
   /* The app-wide names the existing Projects rules use (index.css), read from this look's tokens inside the shell. */
-  --text: var(--fg); --text-muted: var(--muted); --surface-alt: var(--surface-2);
-  background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  --text: var(--fg); --text-muted: var(--muted); --surface-alt: var(--surface-2); --danger-text: var(--fail);
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); font-variant-numeric: tabular-nums;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .projects-shell {
-    --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
-    --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
-    --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --idle: #a9b2c2; --idle-soft: #2a3140;
-    --p0: #ff8b93; --p1: #f5ab5a; --p2: #a9b2c2; --sev-fg: #0d1220; --shadow: none; color-scheme: dark;
+    --bg: #0f1312; --grid: #1c2320; --surface: #171c1a; --surface-2: #1e2522; --fg: #e6ebe7; --muted: #9ba7a0; --border: #2b3430; --border-strong: #3e4944;
+    --edge: #7f8b85; --edge-soft: #3b4641; --edge-highlight: #a995ff;
+    --accent: #a995ff; --accent-fg: #0d1210; --accent-soft: #2a2347; --focus: #a995ff; --attention: #f0a23b;
+    --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --idle: #a9b2bf; --idle-soft: #262d33;
+    --p0: #ff8a92; --p1: #f6ad5c; --p2: #a9b2bf; --sev-fg: #0d1210; --shadow: none; --shadow-float: 0 14px 34px -12px rgba(0, 0, 0, 0.7), 0 2px 6px -2px rgba(0, 0, 0, 0.5); color-scheme: dark;
   }
 }
 :root[data-theme="dark"] .projects-shell {
-  --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
-  --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
-  --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --idle: #a9b2c2; --idle-soft: #2a3140;
-  --p0: #ff8b93; --p1: #f5ab5a; --p2: #a9b2c2; --sev-fg: #0d1220; --shadow: none; color-scheme: dark;
+  --bg: #0f1312; --grid: #1c2320; --surface: #171c1a; --surface-2: #1e2522; --fg: #e6ebe7; --muted: #9ba7a0; --border: #2b3430; --border-strong: #3e4944;
+  --edge: #7f8b85; --edge-soft: #3b4641; --edge-highlight: #a995ff;
+  --accent: #a995ff; --accent-fg: #0d1210; --accent-soft: #2a2347; --focus: #a995ff; --attention: #f0a23b;
+  --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --idle: #a9b2bf; --idle-soft: #262d33;
+  --p0: #ff8a92; --p1: #f6ad5c; --p2: #a9b2bf; --sev-fg: #0d1210; --shadow: none; --shadow-float: 0 14px 34px -12px rgba(0, 0, 0, 0.7), 0 2px 6px -2px rgba(0, 0, 0, 0.5); color-scheme: dark;
 }
+.projects-shell ::selection { background: var(--accent-soft); color: var(--fg); }
 
 /* Shared primitives (src/projects/ui). Tone classes: .tone-ok .tone-run .tone-warn .tone-fail .tone-pause .tone-idle; severities: .sev-p0 .sev-p1 .sev-p2. */
 .projects-shell .ui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }

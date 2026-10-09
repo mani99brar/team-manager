@@ -17,7 +17,7 @@ import {
   REVAMP_TITLE, RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_PANE, RUN_DESK_PAUSED, RUN_DESK_STALE, UX_REVAMP_LISTS_WORKFLOW_ID,
 } from './fixtures/ux-revamp-lists.ts'
 import { mockResponse } from './mock.ts'
-import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -356,40 +356,83 @@ for (const failure of LIST_FAILURES) {
   })
 }
 
-/** A request for a web font: a font host, or a font file by its extension. */
-const isFontRequest = (url: string) => /fonts\.googleapis\.com|fonts\.gstatic\.com|\.woff2?(\?|#|$)/i.test(url)
+/** A request for a font: a font host (Google Fonts' CSS or files), or a font file by its extension. */
+const isFontRequest = (url: string) => /fonts\.googleapis\.com|fonts\.gstatic\.com|\.(woff2?|ttf|otf|eot)(\?|#|$)/i.test(url)
+/** The two faces the Projects shell self-hosts from /fonts (src/projects/theme.css), and nothing else. */
+const SELF_HOSTED_FAMILIES = ['Atkinson Hyperlegible Mono', 'Atkinson Hyperlegible Next']
 
-test(`No web font: the Projects pages request no font and declare no @font-face (${phase})`, async ({ page }) => {
+test(`Self-hosted fonts: the Projects pages request fonts only from their own origin and declare exactly the two Atkinson Hyperlegible faces (${phase})`, async ({ page }) => {
   test.setTimeout(90_000)
-  const fonts: string[] = []
-  page.on('request', request => { if (isFontRequest(request.url()) || request.resourceType() === 'font') fonts.push(request.url()) })
+  const fonts: { url: string; status: number }[] = []
+  page.on('response', response => {
+    if (isFontRequest(response.url()) || response.request().resourceType() === 'font') fonts.push({ url: response.url(), status: response.status() })
+  })
+  const failed: string[] = []
+  page.on('requestfailed', request => { if (isFontRequest(request.url()) || request.resourceType() === 'font') failed.push(request.url()) })
   await page.clock.setFixedTime(REVAMP_NOW)
   const shell = page.getByTestId('projects-workspace')
-  /** What the document declares: every @font-face rule in a readable sheet, every FontFace in document.fonts, every font link. */
+  /**
+   * What the document declares: every @font-face rule in a readable sheet (its family and each src URL, resolved against the
+   * sheet's own URL, or the document's for an inline style), every FontFace in document.fonts, every font link.
+   */
   // Evaluated as a string: the spec compiles without the DOM library, as the other specs' page code reads the DOM untyped.
   const declared = () => page.evaluate(`(async () => {
     await document.fonts.ready
+    const unquote = value => value.trim().replace(/^["']|["']$/g, '')
     const faces = []
-    const walk = rules => {
+    const unreadable = []
+    const walk = (rules, base) => {
       for (const rule of [...rules]) {
-        if (rule instanceof CSSFontFaceRule) faces.push(rule.cssText)
-        else if (rule.cssRules) walk(rule.cssRules)
+        if (rule instanceof CSSFontFaceRule) {
+          const src = rule.style.getPropertyValue('src')
+          const urls = [...src.matchAll(/url\\(\\s*(["']?)([^"')]+)\\1\\s*\\)/g)].map(match => new URL(match[2], base).href)
+          faces.push({ family: unquote(rule.style.getPropertyValue('font-family')), urls, src })
+        } else if (rule.cssRules) walk(rule.cssRules, base)
       }
     }
     for (const sheet of [...document.styleSheets]) {
-      try { walk(sheet.cssRules) } catch { faces.push('unreadable sheet ' + sheet.href) }
+      try { walk(sheet.cssRules, sheet.href ?? document.baseURI) } catch { unreadable.push(String(sheet.href)) }
     }
-    const links = [...document.querySelectorAll('link[href]')].map(link => link.getAttribute('href') ?? '').filter(href => /font/i.test(href))
-    return { faces, fontSet: [...document.fonts].map(face => face.family + ' ' + face.status), links }
-  })()`) as Promise<{ faces: string[]; fontSet: string[]; links: string[] }>
+    const links = [...document.querySelectorAll('link[href]')].filter(link => /font/i.test(link.getAttribute('href') ?? '')).map(link => link.href)
+    return { origin: location.origin, faces, unreadable, fontSet: [...new Set([...document.fonts].map(face => unquote(face.family)))].sort(), links }
+  })()`) as Promise<{ origin: string; faces: { family: string; urls: string[]; src: string }[]; unreadable: string[]; fontSet: string[]; links: string[] }>
 
-  for (const url of [projectsUrl, projectUrl(PROJECT.project_id), workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID)]) {
+  const pages = [
+    { url: projectsUrl, ready: page.locator('.ui-section-header h2').first() },
+    { url: projectUrl(PROJECT.project_id), ready: page.locator('.ui-section-header h2').first() },
+    { url: workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.locator('.ui-section-header h2').first() },
+    // The run page (the Signal Box stage) uses the same two faces.
+    { url: runUrl(RUN_DESK_LIVE, undefined, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.getByTestId('run-stage') },
+  ]
+  let origin = ''
+  for (const { url, ready } of pages) {
     await page.goto(url)
     await expect(shell).toBeVisible()
-    await expect(page.locator('.ui-section-header h2').first()).toBeVisible()
-    expect(await declared(), url).toEqual({ faces: [], fontSet: [], links: [] })
+    await expect(ready).toBeVisible()
+    const found = await declared()
+    origin = found.origin
+    // Every sheet is readable (a cross-origin sheet, such as Google Fonts' CSS, is not), and no link names a font host.
+    expect(found.unreadable, url).toEqual([])
+    for (const link of found.links) expect(new URL(link).origin, `${url}: font link ${link}`).toBe(origin)
+    // The declared families are exactly the two self-hosted faces, each declared once, each source a file on this origin.
+    expect(found.faces.map(face => face.family).sort(), url).toEqual(SELF_HOSTED_FAMILIES)
+    for (const face of found.faces) {
+      expect(face.urls.length, `${url}: ${face.family} declares a url() source (${face.src})`).toBeGreaterThan(0)
+      for (const source of face.urls) {
+        expect(new URL(source).origin, `${url}: ${face.family} source ${source}`).toBe(origin)
+        expect(new URL(source).pathname, `${url}: ${face.family} source ${source}`).toMatch(/^\/fonts\/[^/]+\.woff2$/)
+      }
+    }
+    expect(found.fontSet, url).toEqual(SELF_HOSTED_FAMILIES)
   }
-  expect(fonts).toEqual([])
+  // Every font the pages fetched came from this origin's /fonts and was served; none went to another host.
+  expect(fonts.length, 'the pages load their self-hosted faces').toBeGreaterThan(0)
+  for (const font of fonts) {
+    expect(new URL(font.url).origin, font.url).toBe(origin)
+    expect(new URL(font.url).pathname, font.url).toMatch(/^\/fonts\/[^/]+\.woff2$/)
+    expect(font.status, font.url).toBe(200)
+  }
+  expect(failed).toEqual([])
 })
 
 /** What the feature page's run-history chip says for each own run: its status label and glyph. */
