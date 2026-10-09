@@ -10,11 +10,14 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
+import { CRITIQUE_DECIDED_WORDING, CRITIQUE_JOB_WORDING, critiqueOutcomeWording, evidenceOf, isCritiqueReviewer, missingScreenshot, reviewBlockedBy } from './critique.ts'
 import { DIFF_BYTE_LIMIT, diffTotals, fetchDiffText, MAX_DIFF_LINES, parseDiff, type DiffFile } from './diff.ts'
-import { findingsForFile, runLanes, workerWording } from './findings.ts'
+import { findingsForFile, laneWording, runLanes, workerWording } from './findings.ts'
+import { Screenshots } from './Screenshots.tsx'
+import './critique.css'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { blockedByWording, outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
+import { outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
 import { blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
@@ -66,6 +69,38 @@ type CardProps = Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenReq
   finding: ReviewFinding
   /** The run's captured files by path, with the launch node that shows each. */
   capturedFiles: Map<string, string>
+}
+
+/**
+ * A critique finding's evidence (docs/PRD_USER_CRITIQUE.md Appendix A): its numbered steps to reproduce, then its screenshot
+ * thumbnails with captions (`Screenshots.tsx`'s thumbnail and the one full-size dialog, reused). A critique P1 recorded
+ * without a screenshot says "no screenshot" — whether its `evidence` is present-but-empty or absent altogether (design
+ * challenge note 1; a dropped-steps or digest-mismatch P1 still warns). A non-critique finding, and a critique P2/P3 with no
+ * `evidence` (every other reviewer, older exports), renders nothing. Rendered in the finding card and in the "Earlier rounds"
+ * cards, never in the blocking card (design challenge note 6), so the one component shows in the live review and the rounds.
+ */
+export function CritiqueEvidence({ scope, finding }: { scope: RunScope; finding: Pick<ReviewFinding, 'severity' | 'evidence' | 'reviewer'> }) {
+  const evidence = evidenceOf(finding)
+  if (evidence === null) {
+    // No `evidence` key: only a critique P1 (which the brief required a screenshot for) still warns "no screenshot".
+    if (!missingScreenshot(finding)) return null
+    return (
+      <div className="critique-evidence" data-testid="critique-evidence">
+        <p className="critique-no-screenshot projects-muted" data-testid="critique-no-screenshot">no screenshot</p>
+      </div>
+    )
+  }
+  return (
+    <div className="critique-evidence" data-testid="critique-evidence">
+      <p className="critique-evidence-label">Steps to reproduce</p>
+      <ol className="critique-steps" data-testid="critique-steps">
+        {evidence.steps.map((step, index) => <li key={index}>{step}</li>)}
+      </ol>
+      {evidence.screenshots.length > 0
+        ? <Screenshots scope={scope} screenshots={evidence.screenshots} />
+        : <p className="critique-no-screenshot projects-muted" data-testid="critique-no-screenshot">no screenshot</p>}
+    </div>
+  )
 }
 
 /**
@@ -140,6 +175,7 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
           </dd>
         </div>
       </dl>
+      <CritiqueEvidence scope={scope} finding={finding} />
     </Card>
   )
 }
@@ -191,14 +227,15 @@ function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
           <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
             <p>
               <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+              {isCritiqueReviewer(reviewer.reviewer_id) && <><span className="reviewer-kind" data-testid="reviewer-kind">{CRITIQUE_JOB_WORDING}</span>{' '}</>}
               <ReviewerVerdict verdict={reviewer.verdict} />{' '}
-              <span data-testid="reviewer-status">{outcomeWording(reviewer)}</span>
+              <span data-testid="reviewer-status">{isCritiqueReviewer(reviewer.reviewer_id) ? critiqueOutcomeWording(reviewer) : outcomeWording(reviewer)}</span>
               <ReviewerTime reviewer={reviewer} />
             </p>
             <p className="projects-muted">
               <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
               {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
-              {reviewer.accepted_at !== null && <> · file accepted <Time iso={reviewer.accepted_at} seconds /></>}
+              {reviewer.accepted_at !== null && <> · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_DECIDED_WORDING : 'file accepted'} <Time iso={reviewer.accepted_at} seconds /></>}
             </p>
           </li>
         ))}
@@ -335,7 +372,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   const approved = review.verdict === 'approved'
   const reviewers = review.reviewers
   const several = reviewers.length > 1
-  const blockedBy = blockedByWording(review)
+  const blockedBy = reviewBlockedBy(review)
   const candidateNode = definitionNodes.some(candidate => candidate.node_id === 'candidate') ? 'candidate' : null
   const bundle = <code title={review.bundle_sha256}>{shortRevision(review.bundle_sha256)}</code>
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
@@ -390,7 +427,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
             {reviewers.map((reviewer, index) => (
               <span key={reviewer.reviewer_id} data-reviewer={reviewer.reviewer_id}>
                 {index > 0 && ', '}
-                {several && `${reviewer.reviewer_id}: `}{reviewer.session_id ? <code>{reviewer.session_id}</code> : <span className="projects-muted">no session recorded</span>} · {TRANSPORT_WORDING[reviewer.transport]}
+                {several && `${reviewer.reviewer_id}: `}{reviewer.session_id ? <code>{reviewer.session_id}</code> : <span className="projects-muted">no session recorded</span>} · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_JOB_WORDING : TRANSPORT_WORDING[reviewer.transport]}
               </span>
             ))}
             {several ? '; independent of every worker lane and of one another' : ', independent of every worker lane'}
@@ -464,13 +501,6 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
 }
 
 const DISPOSITION_TONE: Record<ReviewFinding['disposition'], Tone> = { open: 'warn', resolved: 'ok', accepted: 'idle' }
-
-/** Where a finding's worker points, said on a blocking card: the lane, several lanes, none, or not recorded. */
-function laneWording(worker: ReviewFinding['worker']): string {
-  if (worker === null) return 'worker not recorded'
-  const words = workerWording(worker)
-  return words === worker ? `lane ${worker}` : words === 'none' ? 'no worker' : words
-}
 
 /**
  * The findings that block integration, one card each, before the findings table (docs/PRD_VIEWER_UX.md 4.7): severity,

@@ -1,0 +1,23 @@
+/*
+ * The critique reviewer's evidence on the run page (docs/PRD_USER_CRITIQUE.md 4.5, Appendix A): the steps-to-reproduce and
+ * screenshots block on a critique finding, and the "Earlier rounds" list of archived review rounds. Calm tokens from
+ * theme.css; the screenshot grid and dialog are reused from Screenshots.tsx (node/verify.css), nothing new there.
+ */
+
+.projects-shell .critique-evidence { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.projects-shell .critique-evidence-label { margin: 0; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.projects-shell .critique-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.projects-shell .critique-steps li { overflow-wrap: anywhere; }
+.projects-shell .critique-no-screenshot { margin: 0; font-style: italic; }
+.projects-shell .screenshot-caption { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.projects-shell .screenshot-dialog-caption { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 0.85rem; }
+
+.projects-shell .reviewer-kind { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+
+.projects-shell .earlier-rounds-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.projects-shell .earlier-round { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.projects-shell .earlier-round-head { margin: 0; font-family: var(--font-display); font-size: 13px; font-weight: 600; color: var(--muted); }
+.projects-shell .earlier-round-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.projects-shell .earlier-finding { min-width: 0; }
+.projects-shell .earlier-finding-head { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.projects-shell .earlier-finding-message { margin: 0; overflow-wrap: anywhere; }

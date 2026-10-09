@@ -2,6 +2,7 @@ import { useCallback, useMemo, type ReactNode } from 'react'
 import { attemptResultUris, type Now, type Timeline } from '../../contracts/projects/triage.ts'
 import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
 import { ChallengeHeadline } from './Challenge.tsx'
+import { archivedRounds } from './critique.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
 import { ChallengeSections } from './node/ChallengeSections.tsx'
 import { AwaitingNotice, ControllerSections } from './node/ControllerSections.tsx'
@@ -164,6 +165,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const reviewData = review.status === 'ready' ? review.data : null
   // A review's executor wording depends on the transport its served result records.
   const reviewTransport = isReview ? reviewData?.reviewer.transport : undefined
+  // The review node's "Earlier rounds" list: the fix loop's archived review rounds (docs/PRD_USER_CRITIQUE.md 4.5).
+  const earlierRoundCount = isReview ? archivedRounds(detail.fixLoop).length : 0
   const hasNode = (nodeId: string) => definitionNodes.some(candidate => candidate.node_id === nodeId)
   const nodeLink = (nodeId: string) => ({ node_id: nodeId, href: runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), label: definitionNodes.find(candidate => candidate.node_id === nodeId)!.label })
   const launchNodeOf = (lane: string) => {
@@ -229,6 +232,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData, { requirements: verifiedWorker !== null }) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
     ...(isReview ? reviewSectionEntries(reviewData) : []),
+    // The "Earlier rounds" list of archived review rounds (docs/PRD_USER_CRITIQUE.md 4.5), on the review node only.
+    ...(isReview && earlierRoundCount > 0 ? [{ key: 'earlier-rounds', label: 'Earlier rounds', count: earlierRoundCount }] : []),
     ...(isChallenge ? challengeSectionEntries(recordedInputs?.challenge ?? null) : []),
     ...(challengePanels > 0 ? [{ key: 'panel', label: 'Panel', count: challengePanels }] : []),
     ...(isSidecar ? sidecarSectionEntries(sidecar.status === 'ready' ? sidecar.data : null) : []),
@@ -333,6 +338,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             definitionNodes={definitionNodes}
             snapshotNodes={snapshotNodes}
             inputs={inputs}
+            fixLoop={detail.fixLoop ?? null}
             refreshToken={refreshToken}
             onNavigate={onNavigate}
             onOpenRequirement={onOpenRequirement}
