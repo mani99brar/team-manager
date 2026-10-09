@@ -2293,6 +2293,20 @@ class ActorTests(unittest.TestCase):
                     else:
                         self.assertNotIn("--by maintainer is refused", output)
 
+    def test_the_panel_runs_only_answer_accept_challenge_and_approve_before_it_reads_the_run(self):
+        from .actor import PANEL_ACTIONS
+        with tempfile.TemporaryDirectory() as temp:
+            for action, main, argv in self.gates(Path(temp) / "missing"):
+                code, output = self.run_main(main, [*argv, "--by", "panel"])
+                with self.subTest(action=action):
+                    self.assertNotEqual(code, 0)  # The run does not exist: the panel's three actions stop on the missing run.
+                    if action in PANEL_ACTIONS:
+                        self.assertNotIn("--by panel", output)
+                    elif action in OPERATOR_ONLY:
+                        self.assertIn(f"{action} is the operator's decision: --by panel is refused", output)
+                    else:  # The maintainer's mechanical recovery is not the panel's either.
+                        self.assertIn(f"{action} is refused for --by panel", output)
+
     def test_the_actor_text_names_a_claude_code_session_without_refusing_it(self):
         from .actor import actor_text, require_actor
         with patch.dict(os.environ, {"CLAUDECODE": "1"}):
@@ -2300,6 +2314,8 @@ class ActorTests(unittest.TestCase):
             self.assertEqual(require_actor(SimpleNamespace(by="operator"), "approve"), "operator")
         with patch.dict(os.environ, {"CLAUDECODE": ""}):
             self.assertEqual(actor_text("maintainer"), "the maintainer")
+            self.assertEqual(actor_text("panel"), "the panel")
+            self.assertEqual(require_actor(SimpleNamespace(by="panel"), "approve"), "panel")
 
 
 if __name__ == "__main__":

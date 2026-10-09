@@ -1,4 +1,4 @@
-"""Who acted (C17): every gate action names its actor with `--by operator|maintainer`, with no default.
+"""Who acted (C17): every gate action names its actor with `--by operator|maintainer|panel`, with no default.
 
 The operator is the person who owns the run. The maintainer is a Claude session acting for them, limited to mechanical
 recovery (decision 2a): it may retry, reconcile, supervise again (`automatic --live`), start, and resume a design
@@ -7,6 +7,10 @@ challenge, the release of a held challenge (`resume --launch`, C8), a repair, an
 cleaning one up, a tryout verdict (C7) and launching past the untried-feature limit (`--allow-untried`, C29). `resume` refuses it on a paused challenge itself (guardrails.resume_challenge), and, with no record or
 after an interrupted rerun, while a pinned feature file holds a later edit, because only the run's state says whether a
 rerun would decide anything.
+
+The panel is the night-shift panel acting for the away operator within the goals they set (shadow-panel decisions [G4],
+[O5]): it may take three of the operator's decisions, an answer, an accepted challenge and an approval, and is refused
+every other action, the maintainer's mechanical recovery included.
 
 The label is cooperative: nothing checks it. The actor goes into the event text, the questions record (answered_by), the
 repair journal and the note file, never into challenge.json, whose schema is closed. When CLAUDECODE=1 the command ran
@@ -17,22 +21,26 @@ from __future__ import annotations
 
 import os
 
-ACTORS = ("operator", "maintainer")
+ACTORS = ("operator", "maintainer", "panel")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
 OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean", "tryout",
                            "--allow-untried", "attack-pass", "attack-label"})
+# The only actions the panel may run: the three operator decisions it takes within the night's goals ([G2], [G4]).
+PANEL_ACTIONS = frozenset({"answer", "accept-challenge", "approve"})
 # What every printed next-step command carries: they are addressed to the operator.
 BY_OPERATOR = "--by operator"
 VIA_CLAUDE_CODE = " (via a Claude Code session)"
 
 
 def add_actor_argument(parser) -> None:
-    parser.add_argument("--by", choices=ACTORS, help="Required: who runs this, the operator or the maintainer (a Claude session "
-                                                     "acting for the operator, mechanical recovery only)")
+    parser.add_argument("--by", choices=ACTORS, help="Required: who runs this, the operator, the maintainer (a Claude session "
+                                                     "acting for the operator, mechanical recovery only) or the panel (the night "
+                                                     "shift: answer, accept-challenge and approve only)")
 
 
 def require_actor(args, action: str) -> str:
-    """The actor `args.by` names for `action`; ValueError when it is missing, or when the maintainer asks for an operator decision."""
+    """The actor `args.by` names for `action`; ValueError when it is missing, when the maintainer asks for an operator decision, or
+    when the panel asks for anything outside PANEL_ACTIONS."""
     actor = getattr(args, "by", None)
     if actor not in ACTORS and action in OPERATOR_ONLY:
         raise ValueError(f"{action} requires --by operator: it is the operator's decision, so --by maintainer is refused")
@@ -41,6 +49,11 @@ def require_actor(args, action: str) -> str:
                          "the operator)")
     if actor == "maintainer" and action in OPERATOR_ONLY:
         raise ValueError(f"{action} is the operator's decision: --by maintainer is refused; the operator runs it with {BY_OPERATOR}")
+    if actor == "panel" and action in OPERATOR_ONLY - PANEL_ACTIONS:
+        raise ValueError(f"{action} is the operator's decision: --by panel is refused; the operator runs it with {BY_OPERATOR}")
+    if actor == "panel" and action not in PANEL_ACTIONS:
+        raise ValueError(f"{action} is refused for --by panel: the panel only answers, accepts a paused challenge or approves; "
+                         "the operator or the maintainer runs it")
     return actor
 
 
@@ -49,7 +62,7 @@ def via_claude_code(environ=None) -> bool:
 
 
 def actor_text(actor: str, environ=None) -> str:
-    """`the operator`, or `the maintainer`, with ` (via a Claude Code session)` when the command ran from one."""
+    """`the operator`, `the maintainer` or `the panel`, with ` (via a Claude Code session)` when the command ran from one."""
     return f"the {actor}" + (VIA_CLAUDE_CODE if via_claude_code(environ) else "")
 
 

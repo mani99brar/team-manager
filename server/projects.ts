@@ -513,7 +513,7 @@ const PID_ROW = /^Automatic checkpoint controller PID (\d+)\b/
  */
 const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Code was unavailable/, /failed identically/, /^Repair \d+ applied/, /^\[Errno/,
   /^Source feature branch changed\b/, /^Automatic supervision requires a completed start\b/, /^Controller blocked: /,
-  /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/,
+  /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer|panel)\b/,
   // automatic.py note_controller_drift: the step runs another controller commit than prepare pinned (a `warning`, served status-less).
   /^Controller commit [0-9a-f]+ runs this step\b/,
   // abandon.py: the run's `cancelled` row.

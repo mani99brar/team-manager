@@ -148,8 +148,8 @@ export function handoffWait(workers: RunInputs['workers'], freezeAt: string | nu
   return Number.isNaN(wait) || wait < 0 ? null : { ms: wait, from: latest.at, lane: latest.lane }
 }
 
-/** approve's row on the approval node (workflow/pipeline.py, C51): `Approved by the operator[ (via a Claude Code session)]: ...`. */
-const APPROVED_BY = /^Approved by (the (?:operator|maintainer)(?: \(via a Claude Code session\))?):/
+/** approve's row on the approval node (workflow/pipeline.py, C51): `Approved by the operator|maintainer|panel[ (via a Claude Code session)]: ...`. */
+const APPROVED_BY = /^Approved by (the (?:operator|maintainer|panel)(?: \(via a Claude Code session\))?):/
 
 /**
  * The approval's line (4.9): its instant from the timeline (an event, else ≈ the integration), and who approved: the finish
