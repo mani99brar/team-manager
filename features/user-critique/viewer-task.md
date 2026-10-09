@@ -2,12 +2,12 @@
 
 ## Goal
 
-On the run page, each finding of the critique reviewer shows its proof: its lane, its numbered steps to reproduce and its screenshots (thumbnails with captions that open the full-size dialog), in the current review and in every archived review round. A P1 critique finding without a screenshot says "no screenshot"; other reviewers' findings look exactly as today. `docs/PRD_USER_CRITIQUE.md` section 4.5 and Appendix A are the specification; `features/user-critique/decisions.md` records the operator's decisions.
+This lane runs alone after the `engine` lane's run is integrated (PRD 4.8): the export 1.11.0, the contract and its critique examples are already in your base. On the run page, each finding of the critique reviewer shows its proof: its lane, its numbered steps to reproduce and its screenshots (thumbnails with captions that open the full-size dialog), in the current review and in one "Earlier rounds" list in the review section that shows each archived round's findings (all reviewers') with the critique's evidence. The critique's reviewer entry is worded as a headless critique job (its launch time and status), never "native session". A P1 critique finding without a screenshot says "no screenshot"; other reviewers' findings look exactly as today. `docs/PRD_USER_CRITIQUE.md` section 4.5 and Appendix A are the specification; `features/user-critique/decisions.md` records the operator's decisions.
 
 ## Context
 
-- The data: the export 1.11.0 adds `evidence: {steps, screenshots: [{artifact_id, caption}]}` to critique findings (PRD Appendix A). The `engine` lane owns `contracts/projects` and adds a critique finding with evidence to the contract examples (`contracts/projects/examples.ts`); build your fixtures from those examples, and until they land, from Appendix A exactly. `ReviewFinding` comes from `contracts/projects/v1.ts` through `src/projects/api.ts`; a finding without `evidence` (older exports, other reviewers) has none.
-- The screens: `src/projects/ReviewDetail.tsx` and `src/projects/findings.ts` render findings; `src/projects/Screenshots.tsx` has the thumbnail and the native-dialog viewer the check rows use, and the artifact URL helper in `paths` (`src/projects/api.ts`). Reuse them; do not add a second dialog.
+- The data: the export 1.11.0 adds `evidence: {steps, screenshots: [{artifact_id, caption}]}` to critique findings (PRD Appendix A). The `engine` lane owns `contracts/projects` and adds a critique finding with evidence to the contract examples (`contracts/projects/examples.ts`); build your fixtures from those examples (they are in your base). `ReviewFinding` comes from `contracts/projects/v1.ts` through `src/projects/api.ts`; a finding without `evidence` (older exports, other reviewers) has none.
+- The screens: `src/projects/ReviewDetail.tsx` and `src/projects/findings.ts` render findings; the live review reaches them through `src/projects/NodeDetail.tsx` and `src/projects/node/ReviewSections.tsx`, and the archived rounds are in the run detail's `fix_loop.review_rounds[].findings`; `src/projects/Screenshots.tsx` has the thumbnail and the native-dialog viewer the check rows use, and the artifact URL helper in `paths` (`src/projects/api.ts`). Reuse them; do not add a second dialog.
 - The look: Calm tokens in `src/projects/theme.css` and the existing findings styles; `PRODUCT.md` and `DESIGN.md` at the repository root. Read-only viewer: nothing here acts on a run.
 
 ## Constraints
@@ -34,4 +34,4 @@ Then check the report with the verifier's own rules: run the exact `check-report
 
 ## Stop
 
-Stop and report `blocked` or `question` when the evidence cannot be shown without editing a file another lane owns, or when the contract examples' shape differs from PRD Appendix A. Do not redesign the review section beyond adding the evidence block.
+Stop and report `blocked` or `question` when the evidence cannot be shown without editing a file another lane owns, or when the contract examples' shape differs from PRD Appendix A. Do not redesign the review section beyond the evidence block and the one "Earlier rounds" list.

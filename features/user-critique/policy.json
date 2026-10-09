@@ -79,6 +79,8 @@
         "src/projects/ReviewDetail.tsx",
         "src/projects/findings.ts",
         "src/projects/Screenshots.tsx",
+        "src/projects/NodeDetail.tsx",
+        "src/projects/node/ReviewSections.tsx",
         "src/projects/critique.ts",
         "src/projects/critique.css",
         "tests/project-workflows/critique.spec.ts",
@@ -146,7 +148,7 @@
           "scenarios": [
             {
               "id": "critique-evidence",
-              "description": "On a run-detail fixture built from the contract example with a critique reviewer (Appendix A of docs/PRD_USER_CRITIQUE.md): the review section lists the critique as a reviewer; its P1 finding shows its lane, its numbered steps to reproduce and its screenshot thumbnails with captions; activating a thumbnail opens the full-size screenshot dialog (Escape closes it and focus returns); a P1 finding with no screenshot says 'no screenshot'; findings of other reviewers show no evidence block; an archived round's critique finding shows its evidence too; the viewer stays read-only; at 390 px nothing scrolls the page sideways"
+              "description": "On a run-detail fixture built from the contract example with a critique reviewer (Appendix A of docs/PRD_USER_CRITIQUE.md): the review section lists the critique as a reviewer; its P1 finding shows its lane, its numbered steps to reproduce and its screenshot thumbnails with captions; activating a thumbnail opens the full-size screenshot dialog (Escape closes it and focus returns); a P1 finding with no screenshot says 'no screenshot'; findings of other reviewers show no evidence block; an 'Earlier rounds' list in the review section shows each archived round's findings and an archived critique finding shows its own evidence (not another finding's); the critique reviewer entry reads as a headless critique job with its launch time and status, never 'native session'; the viewer stays read-only; at 390 px nothing scrolls the page sideways"
             }
           ]
         }
