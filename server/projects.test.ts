@@ -205,7 +205,8 @@ const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Sh
 const ADAPTER_TASK = '# Adapter worker\n\nServe the review route from the export section.\n\nApproved ownership and checks:\n{"node_id": "adapter", "owned_paths": ["server"]}'
 const TEXT_LIMIT = 65536
 
-type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null; reviewer?: string | null }
+type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null; reviewer?: string | null
+  evidence?: { steps: string[]; screenshots: { artifact_id: string; caption?: string }[] } }
 type ReviewerSection = {
   reviewer_id: string; transport: 'native' | 'print' | 'manual'; session_id: string | null; verdict: 'approved' | 'blocked' | null; findings: Finding[]
   launched_at: string | null; accepted_at: string | null; status: 'accepted' | 'blocked' | 'superseded' | 'pending'
@@ -213,6 +214,7 @@ type ReviewerSection = {
 type ReviewSection = {
   attempt: number; transport: 'native' | 'print' | 'manual'; reviewer_session_id: string; independent: true; bundle_sha256: string; candidate_commit: string
   verdict: 'approved' | 'blocked'; findings: Finding[]; reviewers?: ReviewerSection[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
+  critique_artifacts?: { id: string; kind: 'screenshot'; path: string; sha256: string; bytes: number }[]
 }
 type WorkerInput = {
   role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
