@@ -71,6 +71,18 @@ built from `plan.panels` while no panel.json exists yet, a `failed` record (each
 prepared before). The graph definition is NOT changed (no panel node this slice) and the `costs`
 section is not changed (panel costs live in panel.json only), so every older run exports
 byte-for-byte as under 1.8.0 apart from the version and the null section.
+
+Version 1.10.0 (additive, docs/PRD_VIEWER_REFINE.md Appendix A.1) records the in-run fix loop (RUNBOOK "In-run fix loop"):
+the top-level `fix_loop` section (`{version, rounds, repairs, review_rounds}`) is built from `<run>/repairs.json` (session
+repairs only; an operator `--commit` repair stays a timeline marker), `<run>/review-rounds.json`, the repair receipts
+`repair-<n>.interactive.json` and the archived `review.round-<k>.json`; it is `null` for a plan without
+`automatic.fix_rounds` and without a `repairs.json`, and the error form `{version, error, rounds: null, repairs: [],
+review_rounds: []}` for a journal that is malformed (never a crash). `review` gains `round` (1 + the archived rounds; 1
+without rounds), `delta_from` and `delta_diff` (an artifact reference to `review.delta.diff`, null without the file);
+`inputs.automatic` gains `fix_rounds` (left out for a plan without it) and `inputs.workers.<lane>` gains `roles`
+(plan.nodes.<lane>.roles, null before lane pins) and `skills` (plan.nodes.<lane>.skills, [] without). The graph
+definition is NOT changed: the server projects one `repair-<n>` node per session repair from `fix_loop`. A run without
+those records exports its 1.9.0 content plus the version and the new keys.
 """
 from __future__ import annotations
 
@@ -90,7 +102,7 @@ from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.9.0"
+EXPORT_VERSION = "1.10.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -205,7 +217,36 @@ def reviewer_entries(directory: Path, review: dict, findings: list, transport: s
     return result
 
 
-def review_section(directory: Path) -> dict | None:
+DELTA_DIFF = "review.delta.diff"
+
+
+def artifact_reference(directory: Path, name: str) -> dict | None:
+    """`{path, sha256, bytes}` of a regular file of the run directory, served as `review.diff` is; null without it."""
+    path = directory / name
+    if path.is_symlink() or not path.is_file():
+        return None
+    with path.open("rb") as handle:
+        return {"path": name, "sha256": hashlib.file_digest(handle, "sha256").hexdigest(), "bytes": path.stat().st_size}
+
+
+def raw_review_rounds(directory: Path) -> list[dict]:
+    """The records of review-rounds.json that are objects; [] when it is absent or malformed (the `review` section never fails on it)."""
+    item = load_optional(directory / "review-rounds.json")
+    rounds = item.get("rounds") if isinstance(item, dict) else None
+    return [entry for entry in rounds if isinstance(entry, dict)] if isinstance(rounds, list) else []
+
+
+def delta_from(receipt: dict, plan: dict | None, delta_diff: dict | None) -> str | None:
+    """The combined status's `delta_from` when recorded, else the followed run's candidate when a delta diff exists, else null."""
+    if isinstance(receipt.get("delta_from"), str):
+        return receipt["delta_from"]
+    follows = (plan or {}).get("follows")
+    if delta_diff is not None and isinstance(follows, dict) and isinstance(follows.get("candidate_commit"), str):
+        return follows["candidate_commit"]
+    return None
+
+
+def review_section(directory: Path, plan: dict | None = None) -> dict | None:
     review = load_optional(directory / "review.json")
     if review is None:
         return None
@@ -215,18 +256,131 @@ def review_section(directory: Path) -> dict | None:
     if not isinstance(reviewed_at, str):
         times = [event["time"] for event in read_events(directory) if event.get("node") == "review"]
         reviewed_at = times[-1] if times else utc((directory / "review.json").stat().st_mtime)
-    diff = None
-    patch = directory / "review.diff"
-    if patch.is_file() and not patch.is_symlink():
-        with patch.open("rb") as handle:
-            diff = {"path": "review.diff", "sha256": hashlib.file_digest(handle, "sha256").hexdigest(), "bytes": patch.stat().st_size}
+    diff = artifact_reference(directory, "review.diff")
+    delta_diff = artifact_reference(directory, DELTA_DIFF)
     findings = [{"severity": finding["severity"], "message": finding["message"], "disposition": finding["disposition"],
                  "worker": finding.get("worker"), "requirement": finding.get("requirement"),
                  "reviewer": finding.get("reviewer", DEFAULT_REVIEWER)} for finding in review["findings"]]
     return {"attempt": 1, "transport": transport, "reviewer_session_id": review["reviewer"], "independent": review["independent"],
             "bundle_sha256": review["bundle_sha256"], "candidate_commit": review["candidate_commit"], "verdict": review["verdict"],
             "findings": findings, "reviewers": reviewer_entries(directory, review, findings, transport, reviewed_at),
-            "reviewed_at": reviewed_at, "diff": diff}
+            "reviewed_at": reviewed_at, "diff": diff,
+            "round": 1 + sum(1 for entry in raw_review_rounds(directory) if entry.get("archived") is True),
+            "delta_from": delta_from(receipt, plan, delta_diff), "delta_diff": delta_diff}
+
+
+FIX_LOOP_VERSION = "1.0.0"
+REPAIR_STATUSES = ("launched", "captured", "recorded", "applied", "blocked")
+REPAIR_TRIGGERS = ("verify", "candidate", "review")
+DELTA_BRIEF = re.compile(r"review\.delta(?:\.round-\d+)?\.diff")
+
+
+def fix_loop_error(why: str) -> dict:
+    return {"version": FIX_LOOP_VERSION, "error": why, "rounds": None, "repairs": [], "review_rounds": []}
+
+
+def string_or_none(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def blocked_step(trigger: str, lane: str) -> str:
+    """The pinned step a repair answers, as the server's repair node `depends_on` names it."""
+    return {"verify": f"verify_{lane}", "candidate": "candidate", "review": "review"}[trigger]
+
+
+def repair_entry(directory: Path, entry: dict) -> dict:
+    """One session repair of repairs.json in the export's shape (Appendix A.1 item 2). `n`, `status`, `mode`, `trigger`, `round`,
+    `rounds`, `lanes` (one key), `recorded_at`, `workspace_commit` and `by` must be there; every other key defaults to null or []."""
+    for key, kind in (("n", int), ("round", int), ("rounds", int), ("status", str), ("trigger", str), ("by", str), ("recorded_at", str), ("workspace_commit", str)):
+        if type(entry.get(key)) is not kind:
+            raise ValueError(f"a repair entry has no {key}" if key not in entry else f"a repair entry has a malformed {key}")
+    lanes = entry.get("lanes")
+    if not isinstance(lanes, dict) or len(lanes) != 1:
+        raise ValueError(f"repair {entry['n']} does not name exactly one lane")
+    if entry["status"] not in REPAIR_STATUSES or entry["trigger"] not in REPAIR_TRIGGERS or entry["by"] not in ("controller", "operator", "maintainer"):
+        raise ValueError(f"repair {entry['n']} has a status, trigger or actor the export does not know")
+    lane = next(iter(lanes))
+    trigger, number = entry["trigger"], entry["n"]
+    step = blocked_step(trigger, lane)
+    blocked = entry.get("blocked") if isinstance(entry.get("blocked"), dict) else {}
+    packets = [packet for packet in (blocked.get("packets") if isinstance(blocked.get("packets"), list) else []) if isinstance(packet, dict)]
+    reentered = list(dict.fromkeys(f"verify_{packet['node_id']}" for packet in packets if isinstance(packet.get("node_id"), str))) if trigger == "verify" else []
+    brief = entry.get("brief") if isinstance(entry.get("brief"), dict) else {}
+    findings = brief.get("findings")
+    delta = brief.get("delta")
+    receipt = load_optional(directory / f"repair-{number}.interactive.json")
+    receipt = receipt if isinstance(receipt, dict) else {}
+    requested = receipt.get("requested") if isinstance(receipt.get("requested"), dict) else None
+    fix_files = lanes[lane].get("fix_files") if isinstance(lanes[lane], dict) else None
+    gate = next((packet.get("reasons") for packet in packets if packet.get("node_id") == lane), None)
+    session = entry.get("session") if isinstance(entry.get("session"), dict) else {}
+    left_behind = entry.get("left_behind")
+    return {"n": number, "node_id": f"repair-{number}", "mode": "session", "lane": lane, "trigger": trigger, "round": entry["round"], "rounds": entry["rounds"],
+            "status": entry["status"], "by": entry["by"], **({"via": entry["via"]} if isinstance(entry.get("via"), str) else {}),
+            "recorded_at": entry["recorded_at"], "applied_at": string_or_none(entry.get("applied_at")),
+            "blocked_step": step, "reentered_steps": reentered or [step], "reason": string_or_none(entry.get("reason")),
+            "workspace_commit": entry["workspace_commit"], "session_id": string_or_none(session.get("session_id")),
+            "review_round": entry["review_round"] if type(entry.get("review_round")) is int else None,
+            "findings": list(findings) if isinstance(findings, list) else [],
+            "delta": isinstance(delta, str) and DELTA_BRIEF.fullmatch(Path(delta).name) is not None,
+            "fix_files": strings(fix_files), "left_behind": strings(left_behind),
+            "requested": {"model": requested.get("model"), "effort": requested.get("effort")} if requested is not None else None,
+            "gate_reasons": list(gate) if isinstance(gate, list) else []}
+
+
+def strings(value) -> list[str]:
+    """The string items of a journal list (the live read filters the same way)."""
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def round_reviewers(directory: Path, number: int) -> list[dict]:
+    """The reviewers of an archived round, from `review.round-<k>.json`: id, verdict (`approved | blocked | null`) and session id.
+    A record before parallel reviewers has the single reviewer `review`; an unreadable archive (or a restored round) has none."""
+    review = load_optional(directory / f"review.round-{number}.json")
+    if not isinstance(review, dict):
+        return []
+    recorded = review.get("reviewers")
+    entries = recorded if isinstance(recorded, list) else [{"reviewer_id": DEFAULT_REVIEWER, "session_id": review.get("reviewer"), "verdict": review.get("verdict")}]
+    return [{"reviewer_id": entry["reviewer_id"], "verdict": entry["verdict"] if entry.get("verdict") in ("approved", "blocked") else None,
+             "session_id": string_or_none(entry.get("session_id"))} for entry in entries if isinstance(entry, dict) and isinstance(entry.get("reviewer_id"), str)]
+
+
+def review_round_entry(directory: Path, entry: dict, repairs: list[dict]) -> dict:
+    for key, kind in (("round", int), ("verdict", str), ("candidate", str), ("lane", str), ("findings", list), ("reviewer_sessions", list), ("started_at", str), ("archived", bool)):
+        if type(entry.get(key)) is not kind:
+            raise ValueError(f"a review round has no {key}" if key not in entry else f"a review round has a malformed {key}")
+    return {"round": entry["round"], "verdict": entry["verdict"], "candidate": entry["candidate"], "lane": entry["lane"], "findings": list(entry["findings"]),
+            "reviewer_sessions": list(entry["reviewer_sessions"]), "started_at": entry["started_at"], "archived": entry["archived"],
+            "restored_at": string_or_none(entry.get("restored_at")),
+            "repair_n": next((repair["n"] for repair in repairs if repair["review_round"] == entry["round"]), None),
+            "reviewers": round_reviewers(directory, entry["round"]) if entry["archived"] else []}
+
+
+def fix_loop_section(directory: Path, plan: dict) -> dict | None:
+    """The in-run fix loop (1.10.0): null for a plan without `automatic.fix_rounds` and without a repairs.json, the error form for
+    a journal or round list that does not parse (the panel's `failed` precedent), else the repairs and the review rounds."""
+    automatic = plan.get("automatic") if isinstance(plan.get("automatic"), dict) else {}
+    journal = directory / "repairs.json"
+    if "fix_rounds" not in automatic and not journal.exists():
+        return None
+    try:
+        repairs_item = read_json(journal) if journal.exists() else {"repairs": []}
+        rounds_path = directory / "review-rounds.json"
+        rounds_item = read_json(rounds_path) if rounds_path.exists() else {"rounds": []}
+        if not isinstance(repairs_item, dict) or not isinstance(repairs_item.get("repairs"), list):
+            raise ValueError("repairs.json has no repairs list")
+        if not isinstance(rounds_item, dict) or not isinstance(rounds_item.get("rounds"), list):
+            raise ValueError("review-rounds.json has no rounds list")
+        sessions = [item for item in repairs_item["repairs"] if isinstance(item, dict) and item.get("mode") == "session"]
+        repairs = [repair_entry(directory, item) for item in sessions]
+        if not all(isinstance(item, dict) for item in rounds_item["rounds"]):
+            raise ValueError("review-rounds.json holds an entry that is not an object")
+        rounds = [review_round_entry(directory, item, repairs) for item in rounds_item["rounds"]]
+    except (ValueError, OSError) as error:
+        return fix_loop_error(str(error))
+    configured = automatic.get("fix_rounds")
+    return {"version": FIX_LOOP_VERSION, "rounds": configured if type(configured) is int else (repairs[-1]["rounds"] if repairs else 0),
+            "repairs": repairs, "review_rounds": rounds}
 
 
 def launch_receipt(item) -> dict | None:
@@ -364,6 +518,18 @@ def stop_confirmation(path: Path) -> dict | None:
     return {"stopped": item["stopped"], "confirmed_at": utc(path.stat().st_mtime) if item["stopped"] else None}
 
 
+def lane_roles(plan: dict, node: str) -> dict | None:
+    """plan.nodes.<lane>.roles as `{model, effort}`; null for a plan without lane pins (never the run-wide pin)."""
+    roles = plan["nodes"][node].get("roles")
+    return {"model": roles.get("model"), "effort": roles.get("effort")} if isinstance(roles, dict) else None
+
+
+def lane_skills(plan: dict, node: str) -> list[dict]:
+    """plan.nodes.<lane>.skills (`[{name, sha256}]`, feature.json 2.8.0); [] for a plan without."""
+    skills = plan["nodes"][node].get("skills")
+    return [{"name": item["name"], "sha256": item["sha256"]} for item in skills if isinstance(item, dict)] if isinstance(skills, list) else []
+
+
 def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> dict:
     node = worker["node_id"]
     prompt = directory / f"{node}.prompt.txt"
@@ -379,7 +545,8 @@ def worker_inputs(directory: Path, plan: dict, policy: dict, worker: dict) -> di
             "completion": completion_signal(directory, plan, node, questions),
             "handoff": accepted_handoff(load_optional(directory / f"{node}.handoff.json")),
             "stop": stop_confirmation(directory / f"{node}.stop.json"),
-            "questions": questions}
+            "questions": questions,
+            "roles": lane_roles(plan, node), "skills": lane_skills(plan, node)}
 
 
 def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
@@ -395,7 +562,8 @@ def inputs_section(directory: Path, plan: dict, policy: dict) -> dict:
                    "worker_timeout_seconds": automatic["worker_timeout_seconds"], "review_timeout_seconds": automatic["review_timeout_seconds"],
                    # Plans pinned before the setting: the transport the receipts record, null before any reviewer ran.
                    "reviewer_transport": automatic["reviewer_transport"] if "reviewer_transport" in automatic else recorded_transport(directory),
-                   **({"profile": automatic["profile"]} if "profile" in automatic else {})},
+                   **({"profile": automatic["profile"]} if "profile" in automatic else {}),
+                   **({"fix_rounds": automatic["fix_rounds"]} if "fix_rounds" in automatic else {})},
                "setup": [{"argv": list(item["argv"]), "command": shlex.join(item["argv"]), "timeout_seconds": item["timeout_seconds"]}
                          for item in policy.get("setup", [])],
                "max_verification_attempts": policy.get("max_verification_attempts", 3),
@@ -434,12 +602,13 @@ def export_state(runtime, state) -> dict:
              "created_at": created, "definition": definition(plan_workers(runtime.plan), previous, has_challenge(runtime.plan), has_sidecar(runtime.plan), has_attack(runtime.plan)),
              "values": dict(state.values), "next": list(state.next), "tasks": tasks, "events": events,
              "verification_packets": packets,
-             "review": review_section(runtime.directory),
+             "review": review_section(runtime.directory, runtime.plan),
              "inputs": inputs_section(runtime.directory, runtime.plan, policy) if policy else None,
              "sidecar": sidecar_section(runtime.directory, runtime.plan),
              "attack": attack_section(runtime.directory, runtime.plan),
              "panels": panel_section(runtime.directory, runtime.plan),
-             "costs": costs_section(runtime.directory, runtime.plan)}
+             "costs": costs_section(runtime.directory, runtime.plan),
+             "fix_loop": fix_loop_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:
         return previous
     value["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

@@ -3426,7 +3426,7 @@ class ExportSeam(unittest.TestCase):
             directory = legacy_run(Path(root))
             before = export_run(ExportRuntime(directory))
             self.assertEqual(before["version"], EXPORT_VERSION)
-            self.assertEqual(EXPORT_VERSION, "1.9.0")
+            self.assertEqual(EXPORT_VERSION, "1.10.0")
             self.assertIsNone(before["sidecar"])  # A run prepared without a sidecar (every run before 1.6.0).
             self.assertEqual((before["inputs"]["decisions"], before["inputs"]["challenge"]), (None, None))
             self.assertEqual([worker["questions"] for worker in before["inputs"]["workers"].values()], [[], []])
@@ -3553,7 +3553,7 @@ class GrillSkill(unittest.TestCase):
         intro, read, ask, write, back = (body[body.index(start):body.index(end)] for start, end in (
             ("You interview", "## 1."), ("## 1.", "## 2."), ("## 2.", "## 3."), ("## 3.", "## 4."), ("## 4.", "The design challenge then")))
         # Line 10: both guarded versions, and only the operator's answers bind (C4, decision 8).
-        self.assertIn("A `feature.json` 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0 or 2.7.0 feature cannot launch without a non-empty `decisions.md`", intro)
+        self.assertIn("A `feature.json` 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, 2.7.0 or 2.8.0 feature cannot launch without a non-empty `decisions.md`", intro)
         self.assertIn("Only the operator's answers bind the run", intro)
         self.assertNotIn("binds the whole run", body)
         # §1: the target's CLAUDE.md, values kept by hand that the repository records (C3), and every limit played back (C1).

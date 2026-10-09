@@ -379,7 +379,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.9.0")
+            self.assertEqual(exported["version"], "1.10.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -1073,7 +1073,7 @@ class PreflightAttackGuard(unittest.TestCase):
                   "attack_check": {"argv": ["sh", "{file}"], "timeout_seconds": 60}})
         stub = self.tmp / "claude"  # --help lacks --max-budget-usd on purpose; everything else preflight needs is present.
         stub.write_text('#!/bin/sh\ncase "$1" in\n  --version) echo stub;;\n'
-                        '  --help) echo "--bg --settings --safe-mode --tools --permission-mode --effort";;\n'
+                        '  --help) echo "--bg --settings --safe-mode --setting-sources --plugin-dir --tools --permission-mode --effort";;\n'
                         '  auth) echo \'{"loggedIn": true}\';;\n  *) exit 2;;\nesac\n')
         stub.chmod(0o755)
         path = patch.dict(os.environ, {"PATH": f"{self.tmp}{os.pathsep}{os.environ.get('PATH', '')}"})
@@ -1604,6 +1604,72 @@ class RecordTests(unittest.TestCase):
         code, _, err = pipeline_cli("start", str(self.fixture.root / "lane-run"), "--lane-model", "ui=claude-sonnet-5")
         self.assertNotEqual(code, 0)
         self.assertIn("apply to prepare only", err)
+
+    def _skills_home(self, name="skills-home", advisor="fable"):
+        from . import skills
+        home = self.fixture.root / name
+        skill = skills.skills_root(home) / "impeccable"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: impeccable\n---\n# Impeccable\n")
+        (skill / "ref.md").write_text("design references\n")
+        claude = home / ".claude"
+        claude.mkdir(exist_ok=True)
+        if advisor is not None:
+            (claude / "settings.json").write_text(json.dumps({"advisorModel": advisor, "model": "x", "hooks": {"PreToolUse": "y"}}))
+        return home, skill
+
+    def test_prepare_pins_a_skills_lanes_plugin_tree_and_the_authority(self):
+        # feature.json 2.8.0 / PRD_WORKER_SKILLS acceptance 1 (prepare side) and 3 (advisorModel from a temp HOME's file).
+        import hashlib
+        from . import skills
+        from .sessions import lane_skills, worker_settings
+        from .pipeline import run_status
+        home, skill = self._skills_home()
+        run, code, err = self.prepare_cli("skills-run", "--worker-effort", "low", "--lane-skills", "ui=impeccable", env={"HOME": str(home)})
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertTrue((run / "skills" / "ui" / ".claude-plugin" / "plugin.json").is_file())
+        self.assertEqual((run / "skills" / "ui" / "skills" / "impeccable" / "SKILL.md").read_text().splitlines()[-1], "# Impeccable")
+        self.assertEqual(read_json(run / "skills" / "ui" / ".claude-plugin" / "plugin.json"),
+                         {"name": "workflow-ui", "description": f"Skills pinned for lane ui of run {run.name}", "version": "1.0.0"})
+        self.assertEqual(plan["nodes"]["ui"]["skills"], [{"name": "impeccable", "sha256": skills.skill_digest("ui", "impeccable", skill)}])
+        self.assertEqual(plan["nodes"]["ui"]["advisor_model"], "fable")  # read from the temp HOME, never the operator's real file
+        self.assertNotIn("skills", plan["nodes"]["adapter"])
+        self.assertEqual(lane_skills(plan, "adapter"), [])
+        authority = plan["worker_authority"]
+        self.assertEqual(authority["worker_settings_sha256"], hashlib.sha256(worker_settings(run)[1].encode()).hexdigest())
+        self.assertEqual(authority["skills_sha256"]["ui"], skills.tree_digest(run / "skills" / "ui"))
+        self.assertEqual(authority["skills_settings_sha256"]["ui"],
+                         hashlib.sha256(worker_settings(run, skills_lane="ui", advisor_model="fable")[1].encode()).hexdigest())
+        status, _ = run_status(run)
+        self.assertEqual(status["skills"], {"ui": ["impeccable"]})
+        # Absent advisorModel key means no pinned advisor and no flag (acceptance 3).
+        home2, _ = self._skills_home(name="no-advisor", advisor=None)
+        run2, code, err = self.prepare_cli("no-advisor-run", "--lane-skills", "ui=impeccable", env={"HOME": str(home2)})
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(read_json(run2 / "plan.json")["nodes"]["ui"]["advisor_model"])
+
+    def test_each_skills_refusal_before_the_run_directory_exists(self):
+        # PRD_WORKER_SKILLS acceptance 4: every refusal of section 4.5 names the lane and the skill, and writes nothing.
+        from . import skills
+        home, _ = self._skills_home(name="refusal-home")
+        hooked = skills.skills_root(home) / "hooked"
+        hooked.mkdir()
+        (hooked / "SKILL.md").write_text("---\nname: hooked\nhooks:\n  PreToolUse: ./x.sh\n---\n# h\n")
+        big = skills.skills_root(home) / "big"
+        big.mkdir()
+        (big / "SKILL.md").write_text("---\nname: big\n---\n# b\n")
+        (big / "ref.bin").write_text("A" * (skills.MAX_FILE_BYTES + 1))
+        for value, pattern in (("ui=ghost", r"lane ui names skill ghost.*does not exist"),
+                               ("ui=hooked", r"lane ui skill hooked: SKILL.md declares hooks"),
+                               ("ui=big", r"lane ui skill big: ref.bin is .* over the 2 MB"),
+                               ("ui=Bad", r"must match"),
+                               ("ui=impeccable,impeccable", r"lists impeccable twice")):
+            with self.subTest(value):
+                run, code, err = self.prepare_cli("refused-skills-run", "--lane-skills", value, env={"HOME": str(home)})
+                self.assertNotEqual(code, 0, value)
+                self.assertRegex(err, pattern)
+                self.assertFalse(run.exists(), value)
 
     def test_prepare_says_when_a_scrubbed_model_or_effort_override_would_have_chosen_the_model(self):
         # The sessions' environment drops ANTHROPIC_MODEL and the CLI's other overrides (scrub_env): a launch line that relied on
@@ -2343,13 +2409,14 @@ class PanelLaunchGuards(unittest.TestCase):
         self.assertEqual(printed["guardrails"]["feature_version"], "2.6.0")
         self.assertFalse((self.tmp / "runs").exists())
 
-    def test_a_2_7_0_feature_keeps_every_gate_a_2_6_0_feature_has(self):
+    def test_a_2_8_0_feature_keeps_every_gate_a_2_6_0_feature_has(self):
         # The version gates are sets, not ranges: a 2.4.0 bump once silently dropped every guardrail. A 2.7.0 feature (per-lane
-        # worker pins) keeps the guardrails, the sidecar, the attack pass, the panels and `critical` exactly as 2.6.0 does.
+        # worker pins) and a 2.8.0 feature (per-lane skills) keep the guardrails, the sidecar, the attack pass, the panels and
+        # `critical` exactly as 2.6.0 does (PRD_WORKER_SKILLS acceptance 5: every 2.7.0 feature still launches unchanged).
         from . import attack, guardrails, panel, sidecar
         from .launch import load_feature
         flags = {}
-        for version in ("2.6.0", "2.7.0"):
+        for version in ("2.6.0", "2.7.0", "2.8.0"):
             self.write_feature(version=version)
             manifest = load_feature(self.folder)
             self.assertTrue(guardrails.is_guarded(manifest), version)
@@ -2363,8 +2430,45 @@ class PanelLaunchGuards(unittest.TestCase):
             for flag in ("--guardrails", "--decisions", "--prd", "--critical", "--sidecar-brief", "--attack-settings", "--panel-settings"):
                 self.assertIn(flag, prepare, version)
         self.assertEqual(flags["2.7.0"], flags["2.6.0"])
-        self.write_feature(version="2.7.0", tryout=True)
+        self.assertEqual(flags["2.8.0"], flags["2.7.0"])  # a 2.8.0 feature without skills launches with the same flags
+        self.write_feature(version="2.8.0", tryout=True)
         self.assertTrue(load_feature(self.folder)["tryout"])
+
+    def test_the_dry_run_prints_a_lanes_skills_and_the_advisor(self):
+        # PRD_WORKER_SKILLS 4.4 / Design: launch --dry-run prints per lane its skills and the plugin directory, and a
+        # note that advisorModel is read at prepare. [L1] b: the dry run reads the plan, never the file, so it names
+        # what prepare will do without reading ~/.claude/settings.json (a settings file is present to prove no read).
+        from .launch import main
+        skill = self.tmp / "home" / ".claude" / "skills" / "impeccable"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: impeccable\n---\n# Impeccable\n")
+        (self.tmp / "home" / ".claude" / "settings.json").write_text(json.dumps({"advisorModel": "fable", "hooks": {}}))
+        self.write_feature(version="2.8.0", workers=[{"node_id": "ui", "task": "ui-task.md", "skills": ["impeccable"]},
+                                                     {"node_id": "adapter", "task": "adapter-task.md"}])
+        out = io.StringIO()
+        # No call path reads the operator's settings file in a dry run ([L1] b): advisor_model raises if reached.
+        with patch("workflow.skills.advisor_model", side_effect=AssertionError("the dry run read ~/.claude/settings.json")), \
+             patch("workflow.panel.prove_transports", return_value={"pi_bin": "/nvm/bin"}), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.tmp / "runs"), "--dry-run", "--automatic"])
+        printed = json.loads(out.getvalue())
+        self.assertEqual(printed["skills"]["ui"]["skills"], ["impeccable"])
+        self.assertTrue(printed["skills"]["ui"]["plugin_dir"].endswith("/skills/ui"))
+        self.assertNotIn("adapter", printed["skills"])
+        self.assertNotIn("value", printed["advisor_model"])  # no advisorModel value: the file is not read in a dry run
+        self.assertEqual(printed["advisor_model"]["note"], "read at prepare from ~/.claude/settings.json, pinned as plan.nodes[<lane>].advisor_model")
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_skills_need_version_2_8_0(self):
+        # PRD_WORKER_SKILLS acceptance 5: `skills` on a 2.7.0 feature is refused, naming the lane, before any Git action.
+        from .launch import load_feature
+        self.write_feature(version="2.7.0", workers=[{"node_id": "ui", "task": "ui-task.md", "skills": ["impeccable"]},
+                                                     {"node_id": "adapter", "task": "adapter-task.md"}])
+        with self.assertRaisesRegex(ValueError, r"workers\[ui\]\.skills needs version 2\.8\.0"):
+            load_feature(self.folder)
+        with self.assertRaisesRegex(ValueError, r"workers\[ui\]\.skills needs version 2\.8\.0"):
+            self.launch()
+        self.assertFalse((self.tmp / "runs").exists())
 
     def test_a_2_7_0_lane_pin_reaches_prepare_for_its_selected_lane_only(self):
         workers = [{"node_id": "ui", "task": "ui-task.md", "model": "claude-sonnet-5", "effort": "xhigh"},

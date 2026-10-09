@@ -1,0 +1,214 @@
+{
+  "version": "1.0.0",
+  "repairs": [
+    {
+      "n": 1,
+      "status": "applied",
+      "mode": "session",
+      "reason": "repair session round 1: verify",
+      "by": "controller",
+      "trigger": "verify",
+      "round": 1,
+      "rounds": 2,
+      "workspace": "/home/agentops/.local/state/md-manager-workflows/worker-skills/worker-skills-001/repair-workspace-1",
+      "workspace_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+      "what": "the engine snapshot",
+      "session": {
+        "node": "repair-1",
+        "launch_token": "68df547c-f4c2-4cfb-aeae-8036c0be79e2",
+        "session_id": "47cfd666-feb1-4f4a-a527-05bb8798f8dd"
+      },
+      "captured_at": "2026-10-08T14:00:56.774522Z",
+      "summary": "Repaired the 4 workflow-unit failures from engine attempt 1, all inside owned paths (workflow/); only test fixtures changed, no implementation code. (1) The engine added --setting-sources and --plugin-dir to the universal preflight required_flags (pipeline.py:1483) per decisions.md [L1](c), which also states 'the fake --help outputs in the tests gain both flags' - the stubs were not updated. Added both flags to the three inline `claude --help` stubs: test_portable.py:202 (NoTargetSchema), test_portable.py:239-241 (PreflightClaudeFlags, all three flag tuples so the two code=1 cases still fail only for their stated missing --settings/--effort), test_pipeline.py:1076 (PreflightAttackGuard, --max-budget-usd kept absent). (2) PortablePrompts (test_portable.py:700) was a pre-existing failure, not the engine's: RUN_REPORT (guardrails.py:198) and the automatic-mode prompt (automatic.py:184) embed sys.executable, which here is /home/agentops/dev/md-manager/.venv/bin/python. The test strips the tool root (str(TOOL)) but TOOL is the worktree, not the venv's parent, so 'md-manager' in the interpreter path survived. The three involved lines blame to 6cfa308 and bdeefec, both ancestors of the feature base 3b2a4d7 (confirmed `git merge-base --is-ancestor`); the engine diff touches neither automatic.py, RUN_REPORT, nor test_portable.py; it passes against the main checkout and fails in any worktree. Fixed in the test's own spirit (its comment already strips 'the tool's own path') by also stripping the interpreter path at test_portable.py:714: text.replace(PY, '<python>').replace(str(TOOL), '<tool>').\n\nChecks executed in the controller's exact mode (cwd=worktree, no PYTHONSAFEPATH/PYTHONPATH, so TOOL=worktree): the four target tests pass - `python -m unittest workflow.test_portable.PreflightClaudeFlags workflow.test_portable.NoTargetSchema workflow.test_portable.PortablePrompts workflow.test_pipeline.PreflightAttackGuard` -> OK (4).\n\nFull `python -m workflow.run_tests` here is NOT clean and I could not make it green within the deadline. Two distinct effects, neither reachable by my four string-literal edits: (a) Running it via the prescribed `run-report` wrapper with PYTHONSAFEPATH=1 PYTHONPATH=<worktree> (per the task command) leaks those into the nested target subprocesses the integration tests spawn, breaking their `unittest discover` - discarded that run. (b) Run directly, several heavy nested-pipeline classes fail DETERMINISTICALLY even run alone (test_automatic.AutomaticGraphTests/AutomaticTwoReviewerGraphTests/NativeReviewerGraphTests/PrintReviewerGraphTests/ControllerStopTests, test_pipeline.PipelineTests) with 'candidate/ui failed identically on attempts 1 and 2' - the nested run's ui check fails. These SAME classes are logged `ok` in engine attempt 1's verification of this exact commit (e5f9d0c), so the difference is environmental to this repair worktree, which per the launch is a fresh checkout where the policy setup (npm ci) has not run, unlike the controller's set-up verification worktree; unsetting the CLAUDE_CODE_* session vars did not change it. Lighter integration classes (ThreeLaneRun, DeclaredReviewers, FixLoop) pass alone here. My edits are fixture strings in test_portable.py/test_pipeline.py with no path to test_automatic/test_lanes/test_repair. I did not run npm ci (not in scope; the task states setup has not run). The controller reruns the lane's checks and judges acceptance; attempt 1 shows those checks run green for all non-target tests in its environment.\n\nNot run: npm run test:contracts (shared-contract) - npm ci has not run and the repair changed nothing under contracts/.\n\nProof table (Acceptance lines, then Design (settled) lines; the repair changed only test fixtures, so feature behaviour is proven by the engine's existing tests, verified present in-tree):\n| Item | Proof |\n| --- | --- |\n| A1 prepare plugin tree+pins+full argv both lanes | test_pipeline.py::RecordTests.test_prepare_pins_a_skills_lanes_plugin_tree_and_the_authority; test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today (unchanged by repair) |\n| A2 run_repair same flags | test_interactive.py::InteractiveTests.test_a_repair_session_of_a_skills_lane_gets_the_same_flags (unchanged) |\n| A3 advisorModel from temp HOME; absent key absent flag | test_skills.py::SkillsModuleTests.test_advisor_model_reads_only_that_key (unchanged) |\n| A4 each PRD 4.5 refusal | test_pipeline.py::RecordTests.test_each_skills_refusal_before_the_run_directory_exists; test_skills.py::SkillsModuleTests refusal tests (unchanged) |\n| A5 2.7.0+skills refused; gate-set test | test_pipeline.py::PanelLaunchGuards.test_skills_need_version_2_8_0; test_pipeline.py::PanelLaunchGuards.test_a_2_8_0_feature_keeps_every_gate_a_2_6_0_feature_has (unchanged) |\n| A6 test:contracts validates 2.8.0; full suite green | shared-contract (not executed - see untested); workflow-unit (full-suite caveat above) |\n| D1 Schema 2.8.0 + example | contracts/workflow/feature.schema.json + examples/feature.2.8.0.json via shared-contract (unchanged; not run here) |\n| D2 Prepare copy/pin digest+advisor | test_pipeline.py::RecordTests.test_prepare_pins_a_skills_lanes_plugin_tree_and_the_authority (unchanged) |\n| D3 Launch flags + preflight flags [L1](c) | test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode...; preflight-flags FIXED by this repair: test_portable.py::PreflightClaudeFlags, ::NoTargetSchema, test_pipeline.py::PreflightAttackGuard |\n| D4 nine challenge notes [L1](a)-(i) | (c) preflight = the three fixed tests; rest unchanged (test_skills/test_pipeline/test_interactive) |\n| D5 Docs RUNBOOK/README/handoff | self-report (docs/handoff/worker-skills.md + RUNBOOK/README in engine diff; not re-verified by this repair) |\n| D6 PolicyLintTests counts 13 policies | test_verification.py::PolicyLintTests (unchanged) |\n| repair's own PortablePrompts fix | test_portable.py::PortablePrompts (FIXED) |",
+      "left_behind": [],
+      "recorded_at": "2026-10-08T13:26:48.172656Z",
+      "blocked": {
+        "step": "verify_engine",
+        "packets": [
+          {
+            "phase": "worker",
+            "node_id": "engine",
+            "path": "verification/worker/engine/1/packet.json",
+            "sha256": "baad78514602bf8eec841a124b4d3ed11fd28df037dcbfb28ccf6dcb8161a011",
+            "attempt": 1,
+            "output_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+            "reasons": [
+              "Executed check failed: /home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests",
+              "workflow-unit: no passing test evidence or failed tests",
+              "workflow-unit: exit 1"
+            ]
+          }
+        ]
+      },
+      "source_commit": "9ce41f8a4f14d56dbb733f1bba265450980c81e7",
+      "base_kind": "snapshot",
+      "base_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+      "expected_candidate_tree": null,
+      "lanes": {
+        "engine": {
+          "previous_commit": "e5f9d0c79892e720d00610aad93f4de42b0608a0",
+          "fix_files": [
+            "workflow/test_pipeline.py",
+            "workflow/test_portable.py"
+          ],
+          "commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+          "changed_files": [
+            "contracts/workflow/contract.test.ts",
+            "contracts/workflow/examples/feature.2.8.0.json",
+            "contracts/workflow/feature.schema.json",
+            "docs/handoff/worker-skills.md",
+            "workflow/README.md",
+            "workflow/RUNBOOK.md",
+            "workflow/attack.py",
+            "workflow/guardrails.py",
+            "workflow/interactive.py",
+            "workflow/launch.py",
+            "workflow/panel.py",
+            "workflow/pipeline.py",
+            "workflow/sessions.py",
+            "workflow/sidecar.py",
+            "workflow/skills.py",
+            "workflow/skills/workflow-grill/SKILL.md",
+            "workflow/test_guardrails.py",
+            "workflow/test_interactive.py",
+            "workflow/test_pipeline.py",
+            "workflow/test_portable.py",
+            "workflow/test_skills.py"
+          ]
+        }
+      },
+      "attempt_targets": {
+        "worker:engine": 2
+      },
+      "attempt_floors": {
+        "worker:engine": 2
+      },
+      "fork_from": "1f1c31a0-f98f-6bff-8002-b1efa94e57ee",
+      "head_before": "1f1c31a0-f98f-6bff-8002-b1efa94e57ee",
+      "applied_at": "2026-10-08T14:00:56.942847Z",
+      "head_after": "1f1c320a-f1ae-62ba-8003-04af9e2da1c3"
+    },
+    {
+      "n": 2,
+      "status": "applied",
+      "mode": "session",
+      "reason": "repair session round 2: review",
+      "by": "controller",
+      "trigger": "review",
+      "round": 2,
+      "rounds": 2,
+      "workspace": "/home/agentops/.local/state/md-manager-workflows/worker-skills/worker-skills-001/repair-workspace-2",
+      "workspace_commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+      "what": "the reviewed candidate",
+      "brief": {
+        "findings": [
+          {
+            "severity": "P1",
+            "message": "The skills lane's pinned plugin gets an Edit deny but no Write deny, which contradicts the task's Constraints line and decisions.md [L1](g) (\"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\"). Input: any lane with `skills`, e.g. `worker_settings(run, skills_lane=\"ui\", advisor_model=\"fable\")`. Expected: both an `Edit(//<run>/skills/ui/**)` and a `Write(//<run>/skills/ui/**)` rule. Actual: workflow/sessions.py:302-304 appends only the `Edit(...)` rule. The tests also require the Write rule to be absent: workflow/test_skills.py:108 and workflow/test_interactive.py:529 assert that no deny rule starts with `Write(`. workflow/RUNBOOK.md (\"The pinned plugin\" bullet) documents the Edit-only deny. The worker followed advisory challenge note 6, which argues that a `Write(...)` rule never matches (interactive.py:421-424). That argument does not show the bullet cannot hold: adding the rule costs nothing. The departure is not named with its bullet id ([L1] g) in the completion's open_assumptions, which list only the CLAUDE_CONFIG_DIR and the ~/.claude.json trust write. The handoff says \"No departures from decisions.md Operator decisions or grill defaults\", but [L1] is a Changes-after-launch bullet. The worker's prompt (line 144) also required a `question` completion before building on a reading that departs from a task line's plain words, and none was written. Fix: add the `Write(...)` deny beside the Edit rule and adjust the two tests and the RUNBOOK sentence, or get the operator's decision recorded. Consequence: the merged controller's settings bytes, its skills_settings_sha256 and its RUNBOOK differ from what the operator decided for every skills lane in viewer-refine and later runs, through an unrecorded departure. The operator, who decided [L1](g), is not told it was overridden.",
+            "disposition": "open",
+            "worker": "engine",
+            "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+            "reviewer": "general"
+          },
+          {
+            "severity": "P1",
+            "message": "Contradicted task Constraint and [L1](g) (case 2, also disclosed in the completion, case 3). The task says a skills lane \"gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g)\". decisions.md [L1](g) says the same: \"The deny list gains, for a skills lane only, `Edit` and `Write` on `<run>/skills/<lane>/**`\". The candidate adds only `Edit(/<run>/skills/<lane>/**)` (workflow/sessions.py:305). Tests assert that no Write rule exists: workflow/test_interactive.py::InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today (`assertFalse(any(rule.startswith(\"Write(\") ...))`) and workflow/test_skills.py::WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_only_an_edit_deny_and_the_advisor. The RUNBOOK says the same. The worker's summary discloses it: \"one Edit deny on the lane's own plugin, note 6: Edit only never Write\", and its Proof table row reads \"[L1]g Edit-only plugin deny\". decisions.md lets a worker depart from a change after launch to apply a design-challenge note, but only when the departure is \"named, with the bullet's id, in the completion's open_assumptions\". The two open_assumptions entries (CLAUDE_CONFIG_DIR, the ~/.claude.json trust write) do not name [L1](g), so this is an unnamed departure, which the rule calls a contradicted requirement. Inputs: any plan with a skills lane. Expected: both Edit and Write denies on <run>/skills/<lane>/**. Actual: Edit only. Fix: either add the Write rule, or have the operator amend [L1](g) and the task line. Consequence: a requirement the operator settled is silently replaced, and the plan's skills_settings_sha256 pins settings bytes that differ from the ones the operator approved.",
+            "disposition": "open",
+            "worker": "engine",
+            "requirement": "The deny list loses nothing; a skills lane gains `Edit` and `Write` denies on its pinned plugin (decisions.md [L1] g).",
+            "reviewer": "coverage"
+          },
+          {
+            "severity": "P1",
+            "message": "Contradicted [L1](b), which the task's Design (settled) adopts (\"Follow them as the task\") (case 2). [L1](b): \"every launch, `launch --dry-run` and a repair session hours later read the plan, never the file.\" The candidate's dry run reads the operator's file: workflow/launch.py:659 `printed[\"advisor_model\"] = {\"value\": advisor_model(), \"note\": \"read again at prepare from ~/.claude/settings.json\"}`. workflow/test_pipeline.py::PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor asserts this file read. The change follows design-challenge note 3, but the completion's open_assumptions does not name [L1](b), so under decisions.md's rule (\"An unnamed or out-of-lane departure is a contradicted requirement\") it contradicts the requirement. Inputs: `launch <feature> --dry-run` on a 2.8.0 feature with a skills lane. Expected: no read of ~/.claude/settings.json. Actual: the file is read and its advisorModel printed. Fix: either stop the dry run from reading the file, or name the departure in open_assumptions and have the operator settle it. Consequence: the dry run reads the operator's settings file, which the operator ruled out, and no decision records the change.",
+            "disposition": "open",
+            "worker": "engine",
+            "requirement": "The nine challenge notes are settled in decisions.md [L1] (a) to (i): the judges' settings untouched, `advisor_model` pinned at prepare, preflight flags, argv placement, the gate list, the lost settings keys, the plugin deny, `status` and the `hooks` refusal, and a `claude --bg` canary. Follow them as the task.",
+            "reviewer": "coverage"
+          },
+          {
+            "severity": "P1",
+            "message": "Contradicted Design (settled) Prepare line (case 2). The line says \"each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)\". workflow/skills.py:75-80 resolves only the folder (`(Path(root) / name).resolve()`), then refuses `manifest.is_symlink()` as \"not a regular file\". Inputs: ~/.claude/skills/foo/SKILL.md is a symlink to a regular file, for example foo/SKILL.md -> ../../shared/foo.md, or a link to a file inside the folder. Expected: the symlink is followed and the skill resolves. Actual: launch and prepare raise \"Blocked: lane <lane> skill foo: .../SKILL.md is not a regular file\" (skills.py:79-80). The inline comment \"resolve() left a real file\" is wrong: resolve() was applied to the folder, not to SKILL.md. No test covers a symlinked SKILL.md: test_resolve_refuses_a_missing_or_irregular_skill_md_naming_the_lane_and_skill uses a directory, and test_copy_preserves_an_executable_bit_and_follows_a_symlinked_folder links only the folder. Consequence: an operator whose skill keeps SKILL.md as a symlink (common when skills live in a shared clone, as impeccable does) has every launch and prepare of that lane refused.",
+            "disposition": "open",
+            "worker": "engine",
+            "requirement": "each name resolves to `~/.claude/skills/<name>/SKILL.md` (symlinks followed)",
+            "reviewer": "coverage"
+          }
+        ],
+        "delta": "/home/agentops/.local/state/md-manager-workflows/worker-skills/worker-skills-001/review.round-1.diff"
+      },
+      "session": {
+        "node": "repair-2",
+        "launch_token": "449301aa-18bd-4b97-964b-6104febfdbec",
+        "session_id": "2a16e9fa-a209-449a-b2f9-7297e9dd25d4"
+      },
+      "captured_at": "2026-10-08T15:03:38.721189Z",
+      "summary": "Repaired the four P1 findings inside owned paths (workflow, docs/handoff/worker-skills.md); no contracts change was needed (the 2.8.0 schema/example already validate). (1+2) decisions.md [L1] g / task Constraints: a skills lane's pinned-plugin deny now gains BOTH Edit and Write on <run>/skills/<lane>/** (sessions.py worker_settings appends Write beside Edit; nothing removed from the list). Reverted round 1's Edit-only departure that had followed design-challenge note 6 without naming [L1] g. Updated the sessions.py docstring (dropped the 'only the Edit rule family / a Write rule never matches' argument), RUNBOOK 'The pinned plugin' sentence, README 'What a worker can reach' sentence, and the handoff (both the 'What changed' sessions.py bullet and the Decisions section); tests test_skills.WorkerSettingsSkillsVariantTests (renamed to ..._adds_edit_and_write_denies...) and test_interactive:528 now assert the Write rule present. Left interactive.py:421-424 (reviewer completion-file allow logic) and the controller-checkout deny at sessions.py:302 untouched; the Write deny is skills-lane-only ([L1] g). (3) decisions.md [L1] b: launch --dry-run no longer reads ~/.claude/settings.json (launch.py dropped the advisor_model() call and import; it prints a note only, since a dry run has no plan yet). test_pipeline.PanelLaunchGuards.test_the_dry_run_prints_a_lanes_skills_and_the_advisor now patches workflow.skills.advisor_model to raise if reached and asserts no 'value' key. prepare still reads the file once (pipeline.py:1607), per [L1] b. (4) Design (settled) Prepare 'symlinks followed': skills.resolve_skill no longer refuses a symlinked SKILL.md (dropped `or manifest.is_symlink()`; is_file() follows the link). Added test_resolve_follows_a_skill_md_symlinked_to_a_regular_file_inside_the_folder (resolves, check_skill passes, copy yields a real non-symlink file) and test_check_refuses_a_skill_md_symlinked_outside_the_folder (the PRD 4.5 escape boundary in _walk still refuses an out-of-folder link). Checks executed via run-report: shared-contract `npm run test:contracts` 31 passed/0 failed; targeted unit modules test_feature_launch, test_guardrails, test_skills, test_interactive, test_sessions 253 passed/0 failed; the exact falsifying_check command 4 passed/0 failed. The full workflow-unit suite (`python -m workflow.run_tests`) reports 1104 ran / 181 failures, ALL in the full-graph integration classes (test_automatic, test_repair, test_lanes, test_panel, test_pipeline Bundle/Record/Pipeline) whose simulated lane checks run real commands. Root cause confirmed environmental: those checks invoke argv ['python', '-m', 'unittest', 'discover', ...] but bare `python` is NOT on this background job's PATH (only /usr/bin/python3 is), so every adapter unit check yields 'no passing test evidence' and the ui browser checks need playwright browsers; `npm ci` was run and does not clear them. I verified two (RecordTests.test_export_refreshes_report_html, test_a_finished_run_records_attention_once) fail identically on the untouched base commit with my changes stashed, so they are pre-existing, not introduced by this repair. Changed files: workflow/sessions.py, workflow/launch.py, workflow/skills.py, workflow/RUNBOOK.md, workflow/README.md, workflow/test_skills.py, workflow/test_interactive.py, workflow/test_pipeline.py, docs/handoff/worker-skills.md.\n\nProof table (Acceptance + Design settled lines):\n| Line | Proof |\n| Acceptance 1 (2.8.0 prepares plugin tree, pins name+digest, both lanes' argv asserted) | test_pipeline.PanelLaunchGuards prepare test + test_interactive.InteractiveTests.test_a_skills_lane_drops_safe_mode_and_a_plain_lane_launches_byte_for_byte_as_today |\n| Acceptance 2 (run_repair same flags) | test_interactive.InteractiveTests.test_a_repair_session_of_a_skills_lane_gets_the_same_flags |\n| Acceptance 3 (advisorModel from temp HOME; absent key, absent flag) | test_skills.SkillsModuleTests.test_advisor_model_reads_only_that_key + test_pipeline prepare advisor pinning |\n| Acceptance 4 (each PRD 4.5 refusal, nothing written) | test_skills.SkillsModuleTests.test_resolve_refuses_a_missing_or_irregular_skill_md..., test_check_refuses_hooks_frontmatter..., test_check_refuses_an_oversized_file_and_an_oversized_folder, test_check_refuses_a_symlink_that_escapes_the_folder, test_check_refuses_a_skill_md_symlinked_outside_the_folder, PrintTransportSkillsRefusalTests |\n| Acceptance 5 (2.7.0+skills refused; every 2.7.0 feature still launches; gate sets) | test_pipeline.test_skills_need_version_2_8_0 + test_feature_launch gate-set test |\n| Acceptance 6 (test:contracts validates 2.8.0 example; full suite green) | check id `shared-contract` (31 passed); full-suite caveat in untested |\n| Design: Schema 2.8.0 + example | check id `shared-contract` / contracts/workflow/contract.test.ts |\n| Design: Prepare resolves ~/.claude/skills/<name>/SKILL.md (symlinks followed), copies, pins digests | test_skills.SkillsModuleTests.test_resolve_follows_a_skill_md_symlinked_to_a_regular_file_inside_the_folder (REPAIR finding 4) + existing copy/digest tests |\n| Design: nine notes [L1] a-i | a: test_pipeline worker_authority (worker_settings_sha256 unchanged); b: test_pipeline.PanelLaunchGuards dry-run test (REPAIR finding 3) + prepare advisor; c: preflight required_flags test; d: test_interactive argv-before-tools assertion; e: test_feature_launch gate-set test; f: RUNBOOK sentence (self-report); g: test_skills.WorkerSettingsSkillsVariantTests.test_the_skills_variant_adds_edit_and_write_denies_and_the_advisor + test_interactive:528 (REPAIR findings 1+2); h: status/hooks-frontmatter tests; i: canary recorded in handoff (self-report) |\n| Design: Docs (RUNBOOK section, README, handoff) | self-report: RUNBOOK 'Skills for a lane', README 'What a worker can reach', docs/handoff/worker-skills.md updated |\n| Design: PolicyLint counts 13 feature policies | test_verification.PolicyLintTests (unchanged) |",
+      "review_round": 1,
+      "left_behind": [],
+      "recorded_at": "2026-10-08T14:28:01.496698Z",
+      "blocked": {
+        "step": "review",
+        "phase": "candidate",
+        "candidate_commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+        "packets": []
+      },
+      "source_commit": "3bef93a7dd09419ff456b072113580ee1589a4e6",
+      "base_kind": "candidate",
+      "base_commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+      "expected_candidate_tree": "1231e86a216794f433687e1272cac286444141c6",
+      "lanes": {
+        "engine": {
+          "previous_commit": "56c8ebd521a1b252e9ec7242784977c1a188ed61",
+          "fix_files": [
+            "docs/handoff/worker-skills.md",
+            "workflow/README.md",
+            "workflow/RUNBOOK.md",
+            "workflow/launch.py",
+            "workflow/sessions.py",
+            "workflow/skills.py",
+            "workflow/test_interactive.py",
+            "workflow/test_pipeline.py",
+            "workflow/test_skills.py"
+          ],
+          "commit": "afc9456e536b209aa5f0ab89dfc686542c73d798",
+          "changed_files": [
+            "contracts/workflow/contract.test.ts",
+            "contracts/workflow/examples/feature.2.8.0.json",
+            "contracts/workflow/feature.schema.json",
+            "docs/handoff/worker-skills.md",
+            "workflow/README.md",
+            "workflow/RUNBOOK.md",
+            "workflow/attack.py",
+            "workflow/guardrails.py",
+            "workflow/interactive.py",
+            "workflow/launch.py",
+            "workflow/panel.py",
+            "workflow/pipeline.py",
+            "workflow/sessions.py",
+            "workflow/sidecar.py",
+            "workflow/skills.py",
+            "workflow/skills/workflow-grill/SKILL.md",
+            "workflow/test_guardrails.py",
+            "workflow/test_interactive.py",
+            "workflow/test_pipeline.py",
+            "workflow/test_portable.py",
+            "workflow/test_skills.py"
+          ]
+        }
+      },
+      "attempt_targets": {
+        "worker:engine": 3,
+        "candidate:engine": 2
+      },
+      "attempt_floors": {
+        "worker:engine": 3,
+        "candidate:engine": 2
+      },
+      "fork_from": "1f1c320a-f1ae-62ba-8003-04af9e2da1c3",
+      "head_before": "1f1c3238-bf91-6f61-8005-41650120f98b",
+      "applied_at": "2026-10-08T15:03:38.835627Z",
+      "head_after": "1f1c3297-15ea-63d3-8004-1174b1b646fe"
+    }
+  ]
+}

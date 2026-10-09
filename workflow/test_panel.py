@@ -1181,7 +1181,7 @@ class GraphRun(GraphFixture):
         self.assertEqual(panel.context_labels((f.directory / "panel" / "review-panel" / "context.txt").read_text())[:2], ["backend.py", "ui.txt"])
         self.assertEqual([event for event in self.events() if str(event.get("node", "")).startswith("panel")], [])
         exported = read_json(f.directory / "run-state.json")
-        self.assertEqual(exported["version"], "1.9.0")
+        self.assertEqual(exported["version"], "1.10.0")
         self.assertEqual(exported["panels"], record)
         self.assertEqual(exported["definition"]["nodes"], graph_nodes(["ui", "adapter"]))
         self.assertEqual(exported["definition"], definition(["ui", "adapter"], None))

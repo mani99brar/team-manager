@@ -1299,6 +1299,11 @@ def run_status(directory: Path) -> tuple[dict, str]:
               "next": exported.get("next") if exported else None,
               "pending": [item.get("kind") if isinstance(item, dict) else None for task in tasks for item in task.get("interrupts") or []] if exported else None,
               "errors": [task["error"] for task in tasks if task.get("error")] if exported else None}
+    from .sessions import lane_skills
+    lane_skill_map = {node: names for node in plan_workers(plan)
+                      if (names := [skill["name"] for skill in lane_skills(plan, node)])}
+    if lane_skill_map:  # feature.json 2.8.0: the skills each lane loads.
+        status["skills"] = lane_skill_map
     if (directory / "challenge.json").exists():
         from .guardrails import is_held
         record = read_json(directory / "challenge.json")
@@ -1380,6 +1385,9 @@ def main():
                         help="prepare: one lane's worker model, pinned as plan.nodes[<lane>].roles (feature.json 2.7.0 workers[].model; default: --worker-model)")
     parser.add_argument("--lane-effort", action="append", metavar="LANE=LEVEL",
                         help="prepare: one lane's worker effort, pinned likewise (feature.json 2.7.0 workers[].effort; default: --worker-effort)")
+    parser.add_argument("--lane-skills", action="append", metavar="LANE=A,B",
+                        help="prepare: one lane's skills, comma-separated names (feature.json 2.8.0 workers[].skills); the controller "
+                             "resolves each under ~/.claude/skills, copies it into <run>/skills/<lane> and pins its digest")
     parser.add_argument("--judge-model", help="prepare: the model of the design challenge, the reviewers and the review sidecar, pinned (default: Claude Code's default)")
     parser.add_argument("--judge-effort", choices=EFFORT_LEVELS, help="prepare: their effort, pinned (default high)")
     parser.add_argument("--herdr", action="store_true")
@@ -1430,7 +1438,7 @@ def main():
         parser.error("--allow-untried applies with --tryout: a launch that asks for no tryout is never held by the limit")
     if args.action != "prepare" and any(value is not None for value in (args.profile, args.worker_model, args.worker_effort,
                                                                          args.judge_model, args.judge_effort, args.restore_from,
-                                                                         args.lane_model, args.lane_effort)):
+                                                                         args.lane_model, args.lane_effort, args.lane_skills)):
         # Prepare pins them (C52, C12); any other action would ignore them silently, `automatic --live` resuming a run included.
         parser.error("--profile, --restore-from and the role flags apply to prepare only; the pins cannot change after it")
     if args.action != "prepare" and args.fix_rounds is not None:
@@ -1471,7 +1479,8 @@ def main():
                     raise ValueError(f"Missing executable: {executable}")
             help_text = run_claude(["claude", "--help"], stdout=subprocess.PIPE, text=True, check=True, timeout=15).stdout
             # Every --bg launch passes --settings: the auto-updater off inside its session (sessions.background_settings).
-            required_flags = ["--bg", "--settings", "--safe-mode", "--tools", "--permission-mode"]
+            # --setting-sources and --plugin-dir: a feature.json 2.8.0 skills lane launches without --safe-mode, with these two ([L1] c).
+            required_flags = ["--bg", "--settings", "--safe-mode", "--setting-sources", "--plugin-dir", "--tools", "--permission-mode"]
             if args.automatic:
                 # Workers: --dangerously-skip-permissions. Native reviewer: --add-dir and --allowedTools.
                 # Print-mode reviewer (--reviewer-transport print): --json-schema, --print, --permission-prompts.
@@ -1586,6 +1595,16 @@ def main():
             lane_efforts = parse_lane_values(args.lane_effort, "--lane-effort", selected)
             lane_roles = {node: role_pin(lane_models.get(node, roles["worker"]["model"]), lane_efforts.get(node, roles["worker"]["effort"]),
                                          f"lane {node} --worker") for node in selected}
+            # feature.json 2.8.0: each selected lane's skills, re-resolved and checked on this host before the run directory
+            # exists (note 3), so a refusal leaves no run directory or worktree. advisorModel is read once here ([L1] b).
+            from . import skills as skills_mod
+            lane_skill_names = {}
+            for node, value in parse_lane_values(args.lane_skills, "--lane-skills", selected).items():
+                names = skills_mod.validate_names(node, [name for name in value.split(",") if name])
+                for name in names:
+                    skills_mod.check_skill(node, name, skills_mod.skills_root())
+                lane_skill_names[node] = names
+            advisor_model = skills_mod.advisor_model() if lane_skill_names else None
             note = override_note(os.environ, args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
             if note:
                 print(f"Note: {note}", file=sys.stderr, flush=True)
@@ -1601,6 +1620,21 @@ def main():
             from .launch import launch_notes
             notes = launch_notes(args.repo.resolve(), policy, selected, directory)  # As the launch printed them, before this run exists.
             plan = prepare(directory, args.repo, "HEAD", tasks, True, declared=declared)
+            # feature.json 2.8.0: write each skills lane's pinned plugin under the run directory now that it exists, copy each
+            # named skill (symlinks resolved, modes preserved), and pin name + per-skill digest and the advisor (PRD 4.2, [L1] b).
+            skills_authority = {}
+            for node, names in lane_skill_names.items():
+                lane_plugin = skills_mod.plugin_dir(directory, node)
+                (lane_plugin / ".claude-plugin").mkdir(parents=True)
+                save_json(lane_plugin / ".claude-plugin" / "plugin.json", skills_mod.plugin_json(node, directory.name))
+                pinned = []
+                for name in names:
+                    folder = skills_mod.check_skill(node, name, skills_mod.skills_root())
+                    skills_mod.copy_skill(node, name, folder, lane_plugin / "skills" / name)
+                    pinned.append({"name": name, "sha256": skills_mod.skill_digest(node, name, folder)})
+                plan["nodes"][node]["skills"] = pinned
+                plan["nodes"][node]["advisor_model"] = advisor_model  # string or null; the plan, not the file, is read at launch
+                skills_authority[node] = {"plugin_sha256": skills_mod.tree_digest(lane_plugin), "advisor_model": advisor_model}
             if follows:
                 plan["follows"] = follows
             plan["tryout"] = bool(args.tryout)  # C7: the operator tries each integrated run (tryout.py); false for every other launch.
@@ -1614,7 +1648,7 @@ def main():
             # Every launch runs as the operator's account, with no sandbox (C14 slice 1): the run records it with the digest of
             # the workers' --settings. There is no per-launch choice.
             plan.update(mode="interactive", policy_sha256=policy_digest(policy), created_at=now(), source_branch=git(args.repo.resolve(), "symbolic-ref", "--short", "HEAD"),
-                        failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory),
+                        failure_drill=None if drill_skipped else drill, worker_authority=worker_authority(directory, skills_authority or None),
                         roles=roles, controller=controller_record())
             for node in selected:  # Beside the lane's worktree and task; plan.roles stays {worker, judges} (sessions.plan_roles).
                 plan["nodes"][node]["roles"] = lane_roles[node]

@@ -1,0 +1,795 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-08T12:25:08+00:00",
+  "title": "Design System: MD Manager Projects viewer (Calm)",
+  "extensions": {
+    "tokenCarrier": {
+      "selector": ".projects-shell",
+      "element": "<main class=\"workspace workspace-projects projects-shell\" data-testid=\"projects-workspace\"> in src/projects/ProjectsView.tsx",
+      "darkSelectors": [
+        "@media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) .projects-shell }",
+        ":root[data-theme=\"dark\"] .projects-shell"
+      ],
+      "note": "Calm tokens are not on :root, so snippets use var(--token, light-hex) fallbacks to render outside the shell. focus, attention, edge and danger-text are app-level :root tokens (index.css, run.css)."
+    },
+    "colorMeta": {
+      "bg": {
+        "role": "neutral",
+        "displayName": "Cool Paper",
+        "canonical": "#f4f6f9",
+        "dark": "#121620",
+        "cssVar": "--bg",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#0a0b0d",
+          "#232426",
+          "#3e4042",
+          "#5c5e60",
+          "#7c7d80",
+          "#9d9ea1",
+          "#c2c4c7",
+          "#edeff1"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Sheet White",
+        "canonical": "#ffffff",
+        "dark": "#1a1f2b",
+        "cssVar": "--surface",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#242424",
+          "#404040",
+          "#5d5d5d",
+          "#7d7d7d",
+          "#9e9e9e",
+          "#c4c4c4",
+          "#eeeeee"
+        ]
+      },
+      "surface-2": {
+        "role": "neutral",
+        "displayName": "Inset Grey",
+        "canonical": "#eceff4",
+        "dark": "#232a38",
+        "cssVar": "--surface-2",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#090b0e",
+          "#222428",
+          "#3d4044",
+          "#5b5e62",
+          "#7b7d82",
+          "#9c9ea3",
+          "#c1c4c9",
+          "#eceff4"
+        ]
+      },
+      "fg": {
+        "role": "neutral",
+        "displayName": "Desk Ink",
+        "canonical": "#1b2130",
+        "dark": "#e8ecf3",
+        "cssVar": "--fg",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#060a18",
+          "#1e2433",
+          "#393f50",
+          "#565d6f",
+          "#757d90",
+          "#969eb2",
+          "#bbc4d8",
+          "#e7eeff"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Pencil Grey",
+        "canonical": "#5d6675",
+        "dark": "#9aa4b5",
+        "cssVar": "--muted",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#050b16",
+          "#1d2431",
+          "#38404e",
+          "#555e6d",
+          "#747e8d",
+          "#959faf",
+          "#bbc5d6",
+          "#e6efff"
+        ]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#dde2ea",
+        "dark": "#2c3444",
+        "cssVar": "--border",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#080b10",
+          "#21242a",
+          "#3c4046",
+          "#5a5e65",
+          "#797e85",
+          "#9a9fa6",
+          "#c0c4cc",
+          "#eaeff7"
+        ]
+      },
+      "border-strong": {
+        "role": "neutral",
+        "displayName": "Rule Grey",
+        "canonical": "#c4ccd8",
+        "dark": "#3b4556",
+        "cssVar": "--border-strong",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#070b13",
+          "#1e242d",
+          "#3a404a",
+          "#575e69",
+          "#767e89",
+          "#979faa",
+          "#bdc5d1",
+          "#e7effc"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Desk Blue",
+        "canonical": "#3454d1",
+        "dark": "#7b96ff",
+        "cssVar": "--accent",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#020132",
+          "#0a0573",
+          "#1828a5",
+          "#2f4dca",
+          "#4b71f0",
+          "#7599fc",
+          "#acc3fd",
+          "#e8eefe"
+        ]
+      },
+      "accent-fg": {
+        "role": "primary",
+        "displayName": "Desk Blue Ink",
+        "canonical": "#ffffff",
+        "dark": "#0d1220",
+        "cssVar": "--accent-fg",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#242424",
+          "#404040",
+          "#5d5d5d",
+          "#7d7d7d",
+          "#9e9e9e",
+          "#c4c4c4",
+          "#eeeeee"
+        ]
+      },
+      "accent-soft": {
+        "role": "primary",
+        "displayName": "Desk Blue Wash",
+        "canonical": "#e6ebfb",
+        "dark": "#232c4d",
+        "cssVar": "--accent-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#080b15",
+          "#20232f",
+          "#3b3f4c",
+          "#595d6b",
+          "#787d8b",
+          "#999ead",
+          "#bfc4d3",
+          "#e9eefe"
+        ]
+      },
+      "ok": {
+        "role": "secondary",
+        "displayName": "Ledger Green",
+        "canonical": "#1a6b3e",
+        "dark": "#5fd08c",
+        "cssVar": "--ok",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#001005",
+          "#022d15",
+          "#054d29",
+          "#1f6e41",
+          "#448f60",
+          "#66b280",
+          "#8cd8a5",
+          "#c7ffd7"
+        ]
+      },
+      "ok-soft": {
+        "role": "secondary",
+        "displayName": "Ledger Green Soft",
+        "canonical": "#dff3e6",
+        "dark": "#173424",
+        "cssVar": "--ok-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#020f07",
+          "#19281f",
+          "#34443a",
+          "#516258",
+          "#708277",
+          "#91a498",
+          "#b6cabd",
+          "#e0f4e7"
+        ]
+      },
+      "run": {
+        "role": "secondary",
+        "displayName": "Signal Blue",
+        "canonical": "#1f4fc2",
+        "dark": "#86aaff",
+        "cssVar": "--run",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#00062b",
+          "#001765",
+          "#042ea0",
+          "#2252c5",
+          "#4075eb",
+          "#6c9bfd",
+          "#a7c4fd",
+          "#e7effe"
+        ]
+      },
+      "run-soft": {
+        "role": "secondary",
+        "displayName": "Signal Blue Soft",
+        "canonical": "#e2eafc",
+        "dark": "#1a2746",
+        "cssVar": "--run-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#070b16",
+          "#1e2431",
+          "#39404e",
+          "#575e6d",
+          "#767d8d",
+          "#979eaf",
+          "#bcc4d5",
+          "#e7efff"
+        ]
+      },
+      "warn": {
+        "role": "secondary",
+        "displayName": "Needs-You Amber",
+        "canonical": "#9a4a05",
+        "dark": "#f5ab5a",
+        "cssVar": "--warn",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#170600",
+          "#3c1901",
+          "#652e02",
+          "#914606",
+          "#b7642c",
+          "#dc864f",
+          "#fdb082",
+          "#feeade"
+        ]
+      },
+      "warn-soft": {
+        "role": "secondary",
+        "displayName": "Needs-You Amber Soft",
+        "canonical": "#fdebd6",
+        "dark": "#3d2a12",
+        "cssVar": "--warn-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#130900",
+          "#2e2111",
+          "#4b3d2c",
+          "#6a5b49",
+          "#8a7a67",
+          "#ac9b88",
+          "#d2c1ad",
+          "#fdebd6"
+        ]
+      },
+      "fail": {
+        "role": "secondary",
+        "displayName": "Stop Red",
+        "canonical": "#a81e27",
+        "dark": "#ff8b93",
+        "cssVar": "--fail",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#1e0002",
+          "#4a0108",
+          "#7c0213",
+          "#a92028",
+          "#d04848",
+          "#f76b68",
+          "#feaba5",
+          "#ffe9e6"
+        ]
+      },
+      "fail-soft": {
+        "role": "secondary",
+        "displayName": "Stop Red Soft",
+        "canonical": "#fbe1e3",
+        "dark": "#45191d",
+        "cssVar": "--fail-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#150608",
+          "#301e20",
+          "#4e3a3c",
+          "#6d5759",
+          "#8e7778",
+          "#b09799",
+          "#d6bdbf",
+          "#ffe8ea"
+        ]
+      },
+      "pause": {
+        "role": "secondary",
+        "displayName": "Hold Ochre",
+        "canonical": "#7a4e00",
+        "dark": "#ecc24a",
+        "cssVar": "--pause",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#130900",
+          "#341f02",
+          "#583804",
+          "#7f5309",
+          "#a17333",
+          "#c49456",
+          "#ecba7b",
+          "#ffebd4"
+        ]
+      },
+      "pause-soft": {
+        "role": "secondary",
+        "displayName": "Hold Ochre Soft",
+        "canonical": "#fff1cc",
+        "dark": "#3b3113",
+        "cssVar": "--pause-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#100a00",
+          "#2e2302",
+          "#4a3f1f",
+          "#695d3c",
+          "#897c5b",
+          "#ab9e7b",
+          "#d1c39f",
+          "#fceec9"
+        ]
+      },
+      "idle": {
+        "role": "secondary",
+        "displayName": "Idle Slate",
+        "canonical": "#5b6472",
+        "dark": "#a9b2c2",
+        "cssVar": "--idle",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#050b16",
+          "#1d2430",
+          "#38404d",
+          "#555e6c",
+          "#757e8d",
+          "#959fae",
+          "#bbc5d5",
+          "#e5efff"
+        ]
+      },
+      "idle-soft": {
+        "role": "secondary",
+        "displayName": "Idle Slate Soft",
+        "canonical": "#e9ebef",
+        "dark": "#2a3140",
+        "cssVar": "--idle-soft",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#0a0b0e",
+          "#232427",
+          "#3e4043",
+          "#5c5e61",
+          "#7b7d81",
+          "#9c9ea2",
+          "#c2c4c8",
+          "#eceef2"
+        ]
+      },
+      "p0": {
+        "role": "tertiary",
+        "displayName": "P0 Red",
+        "canonical": "#a81e27",
+        "dark": "#ff8b93",
+        "cssVar": "--p0",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#1e0002",
+          "#4a0108",
+          "#7c0213",
+          "#a92028",
+          "#d04848",
+          "#f76b68",
+          "#feaba5",
+          "#ffe9e6"
+        ]
+      },
+      "p1": {
+        "role": "tertiary",
+        "displayName": "P1 Rust",
+        "canonical": "#a93a06",
+        "dark": "#f5ab5a",
+        "cssVar": "--p1",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#1a0400",
+          "#421201",
+          "#6f2303",
+          "#9f3607",
+          "#c7562b",
+          "#ed784f",
+          "#fead92",
+          "#ffe9e2"
+        ]
+      },
+      "p2": {
+        "role": "tertiary",
+        "displayName": "P2 Graphite",
+        "canonical": "#4b5563",
+        "dark": "#a9b2c2",
+        "cssVar": "--p2",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#050b16",
+          "#1c2531",
+          "#37404e",
+          "#545e6d",
+          "#737e8d",
+          "#949faf",
+          "#b9c5d5",
+          "#e5f0ff"
+        ]
+      },
+      "sev-fg": {
+        "role": "tertiary",
+        "displayName": "Severity Ink",
+        "canonical": "#ffffff",
+        "dark": "#0d1220",
+        "cssVar": "--sev-fg",
+        "definedOn": ".projects-shell (src/projects/theme.css)",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#242424",
+          "#404040",
+          "#5d5d5d",
+          "#7d7d7d",
+          "#9e9e9e",
+          "#c4c4c4",
+          "#eeeeee"
+        ]
+      },
+      "focus": {
+        "role": "neutral",
+        "displayName": "Focus Orange",
+        "canonical": "#d2610c",
+        "dark": "#ffb15c",
+        "cssVar": "--focus",
+        "definedOn": "index.css :root (app-level)",
+        "tonalRamp": [
+          "#180600",
+          "#3d1701",
+          "#672c02",
+          "#944205",
+          "#c45a0a",
+          "#ed7a33",
+          "#feaf85",
+          "#ffeadf"
+        ]
+      },
+      "attention": {
+        "role": "neutral",
+        "displayName": "Attention Amber",
+        "canonical": "#b86e00",
+        "dark": "#f0a93b",
+        "cssVar": "--attention",
+        "definedOn": "run.css :root (app-level)",
+        "tonalRamp": [
+          "#140800",
+          "#361d01",
+          "#5c3502",
+          "#854f06",
+          "#b06b0b",
+          "#d78b33",
+          "#fdb264",
+          "#feebd8"
+        ]
+      },
+      "edge": {
+        "role": "neutral",
+        "displayName": "Edge Grey",
+        "canonical": "#8a96a3",
+        "dark": "#7c8894",
+        "cssVar": "--edge",
+        "definedOn": "index.css :root (app-level)",
+        "tonalRamp": [
+          "#040c15",
+          "#1b252f",
+          "#36414c",
+          "#545f6b",
+          "#737f8b",
+          "#94a0ad",
+          "#b9c6d3",
+          "#e3f0fe"
+        ]
+      },
+      "danger-text": {
+        "role": "neutral",
+        "displayName": "Warning Ink",
+        "canonical": "#8a1f1f",
+        "dark": "#ffb3b3",
+        "cssVar": "--danger-text",
+        "definedOn": "index.css :root (app-level)",
+        "tonalRamp": [
+          "#1e0001",
+          "#4b0005",
+          "#7a0a11",
+          "#9e3330",
+          "#c4564f",
+          "#ea786f",
+          "#feaba2",
+          "#fee9e6"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Page titles (h2): the run header title, the Runs home heading."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "h3/h4 inside nodes, activity phase names, card summary lines."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Running text and finding messages; inherits line-height 1.45 from index.css :root."
+      },
+      "body-dense": {
+        "displayName": "Body Dense",
+        "purpose": "Facts, captions, card context, finding fields; siblings at 0.9rem and 0.875rem fill the same role."
+      },
+      "label": {
+        "displayName": "Section Label",
+        "purpose": "Uppercase section headers in --muted; smaller variants for rail titles, day rows and figure labels."
+      },
+      "chip": {
+        "displayName": "Chip",
+        "purpose": "Status and lane chips."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "Values in a node figures row, tabular numbers."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Commands and raw messages (--font-mono); run ids use it at 0.95rem 600-700, severity chips at 11px 600."
+      }
+    },
+    "shadows": [
+      {
+        "name": "shadow",
+        "value": "0 1px 2px rgba(20, 30, 50, 0.06)",
+        "purpose": "Hairline lift on cards, figures, the run header and the node area in light."
+      },
+      {
+        "name": "shadow-dark",
+        "value": "none",
+        "purpose": "The dark scheme sets --shadow to none; depth comes from surface steps."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ui-pulse",
+        "value": "1.6s infinite; opacity 0.35 at 50%",
+        "purpose": "The dot of a live running chip; only under prefers-reduced-motion: no-preference."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "rail-row",
+        "value": "860px",
+        "purpose": "max-width: the rail moves above the content as a row of pills."
+      },
+      {
+        "name": "phone",
+        "value": "760px",
+        "purpose": "max-width: graph hidden, rows stack, 44px targets, 10px workspace padding."
+      },
+      {
+        "name": "steps-narrow",
+        "value": "680px",
+        "purpose": "container query on the Steps section: rows wrap to two lines."
+      },
+      {
+        "name": "board-split",
+        "value": "measured (about 1100px)",
+        "purpose": "Pipeline and Steps side by side when the compact graph at its 0.83 floor and a 400px Steps column fit (node/board.ts)."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "A state in a pill: a currentColor dot, the tone colour on its soft fill; plain drops the dot; a live running chip pulses its dot unless reduced motion is requested.",
+      "html": "<span class=\"ds-chip ds-tone-ok\">succeeded</span> <span class=\"ds-chip ds-tone-run ds-live\">running</span> <span class=\"ds-chip ds-tone-warn\">needs you</span> <span class=\"ds-chip ds-tone-fail\">failed</span> <span class=\"ds-chip ds-tone-pause\">paused</span> <span class=\"ds-chip\">idle</span> <span class=\"ds-chip ds-plain\">ui</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft, #e9ebef); color: var(--idle, #5b6472); } .ds-chip::before { content: \"\"; width: 7px; height: 7px; border-radius: 50%; background: currentColor; } .ds-chip.ds-plain::before { display: none; } .ds-chip.ds-tone-ok { background: var(--ok-soft, #dff3e6); color: var(--ok, #1a6b3e); } .ds-chip.ds-tone-run { background: var(--run-soft, #e2eafc); color: var(--run, #1f4fc2); } .ds-chip.ds-tone-warn { background: var(--warn-soft, #fdebd6); color: var(--warn, #9a4a05); } .ds-chip.ds-tone-fail { background: var(--fail-soft, #fbe1e3); color: var(--fail, #a81e27); } .ds-chip.ds-tone-pause { background: var(--pause-soft, #fff1cc); color: var(--pause, #7a4e00); } @media (prefers-reduced-motion: no-preference) { .ds-chip.ds-tone-run.ds-live::before { animation: ds-pulse 1.6s infinite; } } @keyframes ds-pulse { 50% { opacity: 0.35; } }"
+    },
+    {
+      "name": "Run Row",
+      "kind": "card",
+      "refersTo": "run-row",
+      "description": "One run in a list: a single link, 4px tone stripe, glyph + mono id + context + status, time on the right, the outcome ellipsised; a run waiting on the operator gets an amber ring and a ?.",
+      "html": "<ul class=\"ds-run-rows\"><li><a class=\"ds-run-row ds-stripe-ok\" href=\"#\"><span class=\"ds-run-row-head\"><span class=\"ds-run-row-glyph ds-text-ok\" aria-hidden=\"true\">✓</span><span class=\"ds-run-row-id\">viewer-revamp-008</span><span class=\"ds-run-row-context\">Projects viewer revamp · md-manager</span><span class=\"ds-chip ds-tone-ok\">succeeded</span></span><span class=\"ds-run-row-when\">14:02 · 2 h ago · <span class=\"ds-num\">1 h 12 m</span></span><span class=\"ds-run-row-detail\"><span class=\"ds-run-row-summary\">Integrated: candidate merged after review passed with 8 P2 findings accepted</span></span></a></li><li><a class=\"ds-run-row ds-stripe-warn ds-attention\" href=\"#\"><span class=\"ds-run-row-head\"><span class=\"ds-run-row-glyph\" aria-hidden=\"true\">?</span><span class=\"ds-run-row-id\">worker-skills-001</span><span class=\"ds-run-row-context\">Worker skills · md-manager</span><span class=\"ds-chip ds-tone-run\">running</span></span><span class=\"ds-run-row-when\">started 09:40 · <span class=\"ds-num\">38 m</span></span><span class=\"ds-run-row-detail\"><span class=\"ds-run-row-summary\">Question from lane engine at launch_engine</span><span> · since 10:11</span></span></a></li></ul>",
+      "css": ".ds-run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); } .ds-run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: baseline; min-height: 44px; box-sizing: border-box; padding: 8px 12px; border: 1px solid var(--border, #dde2ea); border-left: 4px solid var(--border-strong, #c4ccd8); border-radius: var(--radius, 6px); background: var(--surface, #ffffff); color: var(--fg, #1b2130); text-decoration: none; } .ds-run-row:hover { background: var(--surface-2, #eceff4); } .ds-run-row:focus-visible { outline: 2px solid var(--accent, #3454d1); outline-offset: 2px; } .ds-run-row.ds-stripe-ok { border-left-color: var(--ok, #1a6b3e); } .ds-run-row.ds-stripe-run { border-left-color: var(--run, #1f4fc2); } .ds-run-row.ds-stripe-warn { border-left-color: var(--warn, #9a4a05); } .ds-run-row.ds-stripe-fail { border-left-color: var(--fail, #a81e27); } .ds-run-row.ds-stripe-pause { border-left-color: var(--pause, #7a4e00); } .ds-run-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; } .ds-run-row-glyph { width: 1.1em; text-align: center; color: var(--muted, #5d6675); } .ds-text-ok { color: var(--ok, #1a6b3e); } .ds-run-row-id { font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-weight: 600; font-size: 0.95rem; } .ds-run-row-context { color: var(--muted, #5d6675); } .ds-run-row-when { color: var(--muted, #5d6675); font-size: 0.9rem; text-align: right; white-space: nowrap; } .ds-num { font-variant-numeric: tabular-nums; color: var(--fg, #1b2130); } .ds-run-row-detail { grid-column: 1 / -1; display: flex; min-width: 0; color: var(--muted, #5d6675); font-size: 0.9rem; padding-left: calc(1.1em + 8px); white-space: nowrap; } .ds-run-row-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; } .ds-run-row.ds-attention { border-color: var(--warn, #9a4a05); box-shadow: inset 3px 0 0 var(--warn, #9a4a05); } .ds-run-row.ds-attention .ds-run-row-glyph { color: var(--warn, #9a4a05); font-weight: 700; } .ds-run-row.ds-attention .ds-run-row-detail { color: var(--warn, #9a4a05); }"
+    },
+    {
+      "name": "Now Banner with Command Block",
+      "kind": "custom",
+      "refersTo": "now-banner-waiting",
+      "description": "The run page answer-first strip: tone rule and soft fill, glyph headline, reason, then the likely next step with each command in a mono box and its own Copy button.",
+      "html": "<section class=\"ds-now ds-now-waiting\"><p class=\"ds-now-headline\"><span aria-hidden=\"true\">?</span><span>Waiting on you: the candidate awaits approval since 10:11</span><a class=\"ds-link\" href=\"#\">Open approve ›</a></p><p class=\"ds-now-reason\">Review passed with no blocking finding; integration waits for the operator to approve the candidate bundle.</p><div class=\"ds-command-block\"><div class=\"ds-command-label\"><strong>Likely next step</strong><span>— approve the candidate</span><span class=\"ds-muted\">RUNBOOK “Approve”</span></div><ol class=\"ds-command-steps\"><li><div class=\"ds-command-step\"><span class=\"ds-command-line\"><span class=\"ds-prompt\" aria-hidden=\"true\">$ </span><code>\"$PY\" -m workflow approve \"$RUN\" --bundle-sha256 3f9c…e21a --by operator</code></span><button type=\"button\" class=\"ds-copy-btn\">Copy</button><span class=\"ds-muted\" role=\"status\">Copied</span></div></li></ol><p class=\"ds-caption\">Run these in your terminal; this viewer never changes a run.</p></div></section>",
+      "css": ".ds-now { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border, #dde2ea); border-left: 4px solid var(--idle, #5b6472); border-radius: var(--radius, 6px); background: var(--surface, #ffffff); color: var(--fg, #1b2130); font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); font-size: 0.9rem; line-height: 21px; } .ds-now.ds-now-waiting { border-left-color: var(--warn, #9a4a05); background: var(--warn-soft, #fdebd6); } .ds-now.ds-now-failed { border-left-color: var(--fail, #a81e27); background: var(--fail-soft, #fbe1e3); } .ds-now.ds-now-running { border-left-color: var(--run, #1f4fc2); background: var(--run-soft, #e2eafc); } .ds-now-headline { margin: 0; font-size: 1rem; font-weight: 600; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; } .ds-now-waiting .ds-now-headline { color: var(--warn, #9a4a05); } .ds-now-failed .ds-now-headline { color: var(--fail, #a81e27); } .ds-now-reason { margin: 0; } .ds-link { color: var(--accent, #3454d1); font-size: 0.85rem; font-weight: 400; white-space: nowrap; } .ds-link:focus-visible { outline: 3px solid var(--focus, #d2610c); outline-offset: 2px; } .ds-command-block { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; } .ds-command-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; } .ds-muted { color: var(--muted, #5d6675); font-size: 0.85rem; } .ds-command-steps { margin: 0; padding-left: 1.6em; } .ds-command-step { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; } .ds-command-line { display: inline-block; max-width: 100%; overflow-x: auto; white-space: pre; padding: 0 6px; border: 1px solid var(--border, #dde2ea); border-radius: 4px; background: var(--surface, #ffffff); font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 0.8rem; line-height: 20px; } .ds-prompt { color: var(--muted, #5d6675); user-select: none; } .ds-caption { margin: 0; font-size: 0.8rem; line-height: 18px; color: var(--muted, #5d6675); } .ds-copy-btn { font: inherit; font-size: 0.75rem; color: var(--fg, #1b2130); background: var(--surface, #ffffff); border: 1px solid var(--border, #dde2ea); border-radius: 6px; padding: 0 10px; min-height: 22px; cursor: pointer; } .ds-copy-btn:hover { background: var(--surface-2, #eceff4); } .ds-copy-btn:focus-visible { outline: 3px solid var(--focus, #d2610c); outline-offset: 2px; }"
+    },
+    {
+      "name": "Workflow Graph Node",
+      "kind": "custom",
+      "refersTo": "graph-node",
+      "description": "A step in the run graph: tone soft fill and stroke, 6px status bar, label, meta line, glyph badge; dash pattern for the executor; amber ring and ? when waiting; dashed orange focus ring.",
+      "html": "<svg class=\"ds-graph\" viewBox=\"-8 -12 470 76\" width=\"470\" height=\"76\" role=\"img\" aria-label=\"Three workflow nodes\"><g class=\"ds-node ds-node-ok\" transform=\"translate(0 0)\" tabindex=\"0\"><rect class=\"ds-node-focus\" x=\"-3\" y=\"-3\" width=\"142\" height=\"62\" rx=\"10\"/><rect class=\"ds-node-shape\" width=\"136\" height=\"56\" rx=\"8\"/><rect class=\"ds-node-bar\" width=\"6\" height=\"56\" rx=\"3\"/><text class=\"ds-node-label\" x=\"14\" y=\"24\">launch ui</text><g transform=\"translate(133 3)\"><circle class=\"ds-node-badge\" r=\"8\"/><text class=\"ds-node-glyph\" y=\"4\" text-anchor=\"middle\">✓</text></g><text class=\"ds-node-meta\" x=\"14\" y=\"46\">Succeeded · attempt 1 · agent</text></g><g class=\"ds-node ds-node-run\" transform=\"translate(160 0)\" tabindex=\"0\"><rect class=\"ds-node-focus\" x=\"-3\" y=\"-3\" width=\"142\" height=\"62\" rx=\"10\"/><rect class=\"ds-node-shape\" width=\"136\" height=\"56\" rx=\"8\" stroke-dasharray=\"8 4\"/><rect class=\"ds-node-bar\" width=\"6\" height=\"56\" rx=\"3\"/><text class=\"ds-node-label\" x=\"14\" y=\"24\">verify</text><g transform=\"translate(133 3)\"><circle class=\"ds-node-badge\" r=\"8\"/><text class=\"ds-node-glyph\" y=\"4\" text-anchor=\"middle\">●</text></g><text class=\"ds-node-meta\" x=\"14\" y=\"46\">Running · verifier</text></g><g class=\"ds-node ds-node-warn ds-node-attention\" transform=\"translate(320 0)\" tabindex=\"0\"><rect class=\"ds-node-ring\" x=\"-5\" y=\"-5\" width=\"146\" height=\"66\" rx=\"12\"/><rect class=\"ds-node-focus\" x=\"-3\" y=\"-3\" width=\"142\" height=\"62\" rx=\"10\"/><rect class=\"ds-node-shape\" width=\"136\" height=\"56\" rx=\"8\" stroke-dasharray=\"3 3\"/><rect class=\"ds-node-bar\" width=\"6\" height=\"56\" rx=\"3\"/><text class=\"ds-node-label\" x=\"14\" y=\"24\">approve</text><g transform=\"translate(133 3)\"><circle class=\"ds-node-badge\" r=\"8\"/><text class=\"ds-node-glyph\" y=\"4\" text-anchor=\"middle\">?</text></g><text class=\"ds-node-meta\" x=\"14\" y=\"46\">Awaiting · controller</text></g></svg>",
+      "css": ".ds-graph { font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); overflow: visible; } .ds-node { outline: none; cursor: pointer; --ds-tone: var(--idle, #5b6472); --ds-tone-soft: var(--idle-soft, #e9ebef); } .ds-node-ok { --ds-tone: var(--ok, #1a6b3e); --ds-tone-soft: var(--ok-soft, #dff3e6); } .ds-node-run { --ds-tone: var(--run, #1f4fc2); --ds-tone-soft: var(--run-soft, #e2eafc); } .ds-node-warn { --ds-tone: var(--warn, #9a4a05); --ds-tone-soft: var(--warn-soft, #fdebd6); } .ds-node-fail { --ds-tone: var(--fail, #a81e27); --ds-tone-soft: var(--fail-soft, #fbe1e3); } .ds-node-shape { fill: var(--ds-tone-soft); stroke: var(--ds-tone); stroke-width: 1.5; } .ds-node-bar { fill: var(--ds-tone); } .ds-node-label { font-size: 12px; font-weight: 600; fill: var(--fg, #1b2130); } .ds-node-meta { font-size: 10px; fill: var(--fg, #1b2130); } .ds-node-badge { fill: var(--surface, #ffffff); stroke: var(--ds-tone); stroke-width: 1.5; } .ds-node-glyph { font-size: 11px; font-weight: 700; fill: var(--ds-tone); } .ds-node-ring { fill: none; stroke: none; } .ds-node-attention .ds-node-ring { stroke: var(--attention, #b86e00); stroke-width: 3; } .ds-node-attention .ds-node-glyph { fill: var(--attention, #b86e00); } .ds-node-attention .ds-node-badge { stroke: var(--attention, #b86e00); stroke-width: 2.5; } .ds-node-focus { fill: none; stroke: var(--focus, #d2610c); stroke-width: 3; stroke-dasharray: 4 3; display: none; } .ds-node:focus-visible .ds-node-focus { display: block; }"
+    },
+    {
+      "name": "Finding Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "A review finding: 4px stripe in the severity colour, severity chip, disposition chip, blocks-integration chip when unresolved P0/P1, the message, then uppercase-labelled fields.",
+      "html": "<article class=\"ds-card ds-finding ds-sev-p1\"><div class=\"ds-finding-head\"><span class=\"ds-sev ds-sev-p1\">P1</span><span class=\"ds-fchip ds-plain ds-tone-warn\">open</span><span class=\"ds-fchip ds-tone-fail\">blocks integration</span></div><p class=\"ds-finding-message\">The stop path closes the round before the session is confirmed stopped, so a second launch can overlap the first.</p><dl class=\"ds-finding-fields\"><div><dt>Worker</dt><dd>engine</dd></div><div><dt>Reviewer</dt><dd>claude</dd></div></dl></article><article class=\"ds-card ds-finding ds-sev-p2\"><div class=\"ds-finding-head\"><span class=\"ds-sev\">P2</span><span class=\"ds-fchip ds-plain ds-tone-ok\">resolved</span></div><p class=\"ds-finding-message\">The legend wraps under the graph at 1,024 px.</p></article>",
+      "css": ".ds-card { background: var(--surface, #ffffff); color: var(--fg, #1b2130); border: 1px solid var(--border, #dde2ea); border-left: 4px solid var(--border-strong, #c4ccd8); border-radius: var(--radius, 6px); padding: 12px 14px; box-shadow: var(--shadow, 0 1px 2px rgba(20, 30, 50, 0.06)); display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); } .ds-finding.ds-sev-p0 { border-left-color: var(--p0, #a81e27); } .ds-finding.ds-sev-p1 { border-left-color: var(--p1, #a93a06); } .ds-finding.ds-sev-p2 { border-left-color: var(--p2, #4b5563); } .ds-finding-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; } .ds-sev { display: inline-block; font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; color: var(--sev-fg, #ffffff); background: var(--p2, #4b5563); } .ds-sev.ds-sev-p0 { background: var(--p0, #a81e27); } .ds-sev.ds-sev-p1 { background: var(--p1, #a93a06); } .ds-fchip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--idle-soft, #e9ebef); color: var(--idle, #5b6472); } .ds-fchip::before { content: \"\"; width: 7px; height: 7px; border-radius: 50%; background: currentColor; } .ds-fchip.ds-plain::before { display: none; } .ds-fchip.ds-tone-ok { background: var(--ok-soft, #dff3e6); color: var(--ok, #1a6b3e); } .ds-fchip.ds-tone-warn { background: var(--warn-soft, #fdebd6); color: var(--warn, #9a4a05); } .ds-fchip.ds-tone-fail { background: var(--fail-soft, #fbe1e3); color: var(--fail, #a81e27); } .ds-finding-message { margin: 0; } .ds-finding-fields { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 18px; font-size: 0.85rem; } .ds-finding-fields > div { display: flex; gap: 6px; align-items: baseline; } .ds-finding-fields dt { color: var(--muted, #5d6675); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; } .ds-finding-fields dd { margin: 0; }"
+    },
+    {
+      "name": "Section Header",
+      "kind": "custom",
+      "refersTo": "section-header",
+      "description": "One uppercase muted label per section, a one-line sub-header with counts or the empty state, tools on the right.",
+      "html": "<section class=\"ds-section\"><header class=\"ds-section-header\"><h2>Recent · 44</h2><span class=\"ds-section-sub\">3 failed this week</span><div class=\"ds-section-tools\"><div class=\"ds-filters\" role=\"group\"><button type=\"button\" class=\"ds-filter\" aria-pressed=\"true\">All</button><button type=\"button\" class=\"ds-filter\" aria-pressed=\"false\">Failed 3</button><button type=\"button\" class=\"ds-filter\" aria-pressed=\"false\">Today</button></div></div></header></section>",
+      "css": ".ds-section { display: flex; flex-direction: column; gap: 10px; font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); color: var(--fg, #1b2130); } .ds-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; } .ds-section-header h2 { margin: 0; font-family: var(--font-display, system-ui, \"Segoe UI\", Roboto, sans-serif); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted, #5d6675); font-weight: 600; } .ds-section-sub { color: var(--muted, #5d6675); font-size: 13px; } .ds-section-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; } .ds-filters { display: flex; gap: 6px; flex-wrap: wrap; } .ds-filter { font: inherit; color: inherit; background: none; border: 1px solid var(--border-strong, #c4ccd8); border-radius: 999px; padding: 4px 12px; cursor: pointer; } .ds-filter[aria-pressed=\"true\"] { background: var(--fg, #1b2130); color: var(--bg, #f4f6f9); border-color: var(--fg, #1b2130); } .ds-filter:focus-visible { outline: 2px solid var(--accent, #3454d1); outline-offset: 2px; }"
+    },
+    {
+      "name": "Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "The toolbar button: Sheet White, hairline border, 6px corner; hover Inset Grey, pressed Desk Blue, focus a 3px Focus Orange outline; a small variant for Copy and More.",
+      "html": "<button type=\"button\" class=\"ds-btn\">Refresh</button> <button type=\"button\" class=\"ds-btn\" aria-pressed=\"true\">UTC</button> <button type=\"button\" class=\"ds-btn ds-btn-small\">Expand all</button> <button type=\"button\" class=\"ds-btn\" disabled>Loading</button>",
+      "css": ".ds-btn { font-family: var(--font-body, system-ui, \"Segoe UI\", Roboto, sans-serif); font-size: 0.875rem; color: var(--fg, #1b2130); background: var(--surface, #ffffff); border: 1px solid var(--border, #dde2ea); border-radius: 6px; padding: 6px 12px; min-width: 40px; min-height: 36px; cursor: pointer; } .ds-btn:hover:not(:disabled) { background: var(--surface-2, #eceff4); } .ds-btn:focus-visible { outline: 3px solid var(--focus, #d2610c); outline-offset: 2px; } .ds-btn[aria-pressed=\"true\"] { background: var(--accent, #3454d1); color: var(--accent-fg, #ffffff); border-color: var(--accent, #3454d1); } .ds-btn:disabled { opacity: 0.5; cursor: default; } .ds-btn.ds-btn-small { min-height: 30px; padding: 4px 10px; font-size: 0.8rem; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operator's Desk",
+    "overview": "_The qualitative language in this file (the North Star, the descriptive names, the philosophy lines) was inferred by the documenting session on 2026-10-08 from the code and `docs/PRD_VIEWER_REVAMP.md`, and can be revised by the operator._\n\nThe Projects viewer is a desk one operator sits at between other work: a cool, neutral surface where every sheet is laid out the same way and nothing competes for the eye except what changed. The look is the \"Calm\" set of tokens chosen on 2026-10-02 (the \"Bold\" alternative was removed); it is flat, dense and quiet, so that the few coloured marks on a page are the answer to \"what needs me, what failed, what is moving\".\n\nStructure comes from sections, weight and hairline borders, never from decoration. Every page is a stack of sections with one small-caps header each, cards and rows with a 4 px stripe in their state's tone, and monospace for identifiers and commands. Colour is a vocabulary of six state tones and three severities, applied identically on chips, stripes, rail dots, graph nodes, step bars and finding cards; the single cool-blue accent is kept for links, focus and pressed controls and never says anything about a run.\n\nBoth colour schemes are first-class. The light values in the frontmatter are canonical; the dark scheme redefines every Calm token on the same element with lighter, desaturated tones over a near-black blue surface, and drops the only shadow.",
+    "keyCharacteristics": [
+      "Cool neutral surfaces (page, card, inset) separated by 1 px hairlines; effectively flat.",
+      "One accent hue, never used for state.",
+      "Six state tones plus three severities, each as a strong colour and a soft background pair.",
+      "A 4 px tone stripe on the left of cards, rows and activity groups, and on the top of run and node headers.",
+      "A text glyph or a word repeats every state that colour shows.",
+      "System font stacks only; small uppercase labels for section headers; tabular numbers for times and counts.",
+      "Dense desktop rhythm (2 to 20 px), 44 px tap targets and a single column on phones."
+    ],
+    "rules": [
+      {
+        "name": "The State-Only Colour Rule",
+        "body": "Colour on a Projects page means state and only state: the six tones and three severities. Structure, grouping and emphasis come from sections, weight and borders, never from a tint.",
+        "section": "colors"
+      },
+      {
+        "name": "The Accent-Is-Not-A-State Rule",
+        "body": "The accent hue is never a tone. A link, a focus ring or a pressed button is blue; a running run is Signal Blue from its own token, and no status ever borrows `accent`.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Mapping Rule",
+        "body": "Every element drawn in a tone takes it from the one mapping in `src/projects/tone.ts` (`statusTone`, `attentionTone`, `severityTone`, `stateTone`); an unknown status is idle, an unknown severity is P2, and an attention wins over a status, so a running run that waits on the operator is Needs-You Amber everywhere.",
+        "section": "colors"
+      },
+      {
+        "name": "The Soft-Pair Rule",
+        "body": "Tone text sits only on its own soft background, at 4.5:1 or better in both schemes. A link on a tinted card takes Desk Ink, underlined, because the accent can fall under 4.5:1 there.",
+        "section": "colors"
+      },
+      {
+        "name": "The System Stack Rule",
+        "body": "System font stacks only; no web font request. A new face is a separate decision, not a refinement.",
+        "section": "typography"
+      },
+      {
+        "name": "The Small-Caps Header Rule",
+        "body": "A section is named by one uppercase 13 px Pencil Grey label at 600 with 0.08em tracking, with an optional one-line sub-header of counts and tools pushed right. Section headers are never coloured and never banded.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Numbers Rule",
+        "body": "Times, durations, counts and figures set `font-variant-numeric: tabular-nums` so columns of them align.",
+        "section": "typography"
+      },
+      {
+        "name": "The No Page Scroll Rule",
+        "body": "Nothing widens the page: anything wider than the column scrolls inside its own container.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat Desk Rule",
+        "body": "Surfaces do not lift on hover or focus; hover changes the fill to Inset Grey, focus draws an outline. No new shadow is added for state.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Stripe Rule",
+        "body": "A container shows its state as one 4 px edge in its tone (left on cards and rows, top on headers) over a neutral Sheet White body; only the Now banner, blocking cards and chips fill with the soft tone.",
+        "section": "shapes"
+      },
+      {
+        "name": "The Dash-For-Executor Rule",
+        "body": "On the workflow graph the outline's dash says who executes a step (solid for an agent, `8 4` for the trusted verifier, `3 3` for the controller) and colour says its status; neither ever carries the other's meaning.",
+        "section": "shapes"
+      },
+      {
+        "name": "The Glyph Repeats Rule",
+        "body": "Wherever a tone appears, a glyph or a word says the same state: ✓ succeeded, ✗ failed, ● running, ○ pending or cancelled, ‖ paused, ? waiting on the operator, plus the chip text or a dot's title. Colour never carries state alone.",
+        "section": "components"
+      },
+      {
+        "name": "The Attention Ring Rule",
+        "body": "A step or run that waits on the operator keeps its own status colour and adds Attention Amber on top (a ring, a `?` glyph, an inset rule); the wait is shown, the status is not rewritten.",
+        "section": "components"
+      },
+      {
+        "name": "The Selection Is Not State Rule",
+        "body": "Selection and the current item are drawn in Desk Ink (a thick outline, an inner ring, 600 weight), never in a tone and never in Signal Blue.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "**Do** take every colour inside the Projects viewer from the Calm tokens on `.projects-shell`, and define new tokens there with a dark counterpart under both dark selectors.",
+      "**Do** route every state through `tone.ts` and draw it with the tone classes (`tone-ok`, `tone-run`, `tone-warn`, `tone-fail`, `tone-pause`, `tone-idle`, `sev-p0` to `sev-p2`).",
+      "**Do** pair every tone with a glyph or a word, and keep tone text on its own soft background at 4.5:1 or better in both schemes.",
+      "**Do** show a container's state as a 4 px stripe in its tone over Sheet White, and use the soft fill only for chips, the Now banner and blocking cards.",
+      "**Do** name each section with one uppercase 13 px Pencil Grey label, a one-line sub-header and tools on the right.",
+      "**Do** set identifiers and commands in the monospace stack, and give every command its own Copy button outside the command text.",
+      "**Do** keep 44 px tap targets and a single scroll-free column at phone width; let wide content scroll inside its own box.",
+      "**Do** gate any motion behind `prefers-reduced-motion: no-preference`."
+    ],
+    "donts": [
+      "**Don't** use the accent (Desk Blue) for any status, and don't use Signal Blue for anything but running.",
+      "**Don't** tint a surface, header or section for emphasis or grouping; colour is for state only.",
+      "**Don't** let colour carry a state alone, or draw selection in a tone colour.",
+      "**Don't** define Projects tokens on `:root`; the document and skills areas use the same names for their own values.",
+      "**Don't** add shadows for hover, focus or emphasis, and don't add a shadow in the dark scheme.",
+      "**Don't** request a web font or add a second display face.",
+      "**Don't** reuse the graph's dash patterns for anything but the executor."
+    ]
+  }
+}

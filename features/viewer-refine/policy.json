@@ -1,0 +1,391 @@
+{
+  "version": "1.2.0",
+  "feature": "Viewer refine: the run page shows the fix loop and opens on an answer; export 1.10.0 and the viewer contract; Assignment and the inline diff (S7); Runs home ranked by need; the revamp's eight P2s; a refinement of the Calm look made with the impeccable skill",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "adapter",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract",
+        "build"
+      ],
+      "owned_paths": [
+        "workflow/export_state.py",
+        "workflow/test_export.py",
+        "contracts/projects",
+        "server",
+        "tests/unit/triage.test.ts",
+        "docs/handoff/refine-adapter.md",
+        "workflow/test_pipeline.py",
+        "workflow/test_lanes.py",
+        "workflow/test_guardrails.py",
+        "workflow/test_panel.py",
+        "workflow/test_sidecar.py"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "pages",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/RunView.tsx",
+        "src/projects/RunHeader.tsx",
+        "src/projects/StepStrip.tsx",
+        "src/projects/StepsTimeline.tsx",
+        "src/projects/WorkflowGraph.tsx",
+        "src/projects/dag.ts",
+        "src/projects/NodeDetail.tsx",
+        "src/projects/NodeHeader.tsx",
+        "src/projects/SectionIndex.tsx",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/Checks.tsx",
+        "src/projects/WorkerInputs.tsx",
+        "src/projects/Assignment.tsx",
+        "src/projects/CreatedFiles.tsx",
+        "src/projects/Challenge.tsx",
+        "src/projects/Screenshots.tsx",
+        "src/projects/panels.tsx",
+        "src/projects/providerPanel.tsx",
+        "src/projects/providerPanel.css",
+        "src/projects/reviewers.ts",
+        "src/projects/attack.ts",
+        "src/projects/capture.ts",
+        "src/projects/files.ts",
+        "src/projects/findings.ts",
+        "src/projects/status.ts",
+        "src/projects/steps.ts",
+        "src/projects/diff.ts",
+        "src/projects/node",
+        "src/projects/run.css",
+        "src/projects/node.css",
+        "src/projects/assignment.css",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/fixtures/ux-attack.ts",
+        "tests/project-workflows/fixtures/ux-launch.ts",
+        "tests/project-workflows/fixtures/ux-node.ts",
+        "tests/project-workflows/fixtures/ux-panel.ts",
+        "tests/project-workflows/fixtures/ux-revamp-pages.ts",
+        "tests/project-workflows/fixtures/ux-review.ts",
+        "tests/project-workflows/fixtures/ux-run.ts",
+        "tests/project-workflows/fixtures/ux-sidecar.ts",
+        "tests/project-workflows/fixtures/ux-verify.ts",
+        "tests/project-workflows/fixtures/ux-refine.ts",
+        "tests/project-workflows/mock.ts",
+        "tests/project-workflows/seed.ts",
+        "tests/project-workflows/fixtures.ts",
+        "tests/project-workflows/attack.spec.ts",
+        "tests/project-workflows/clarity.spec.ts",
+        "tests/project-workflows/guardrails.spec.ts",
+        "tests/project-workflows/inputs.spec.ts",
+        "tests/project-workflows/lanes.spec.ts",
+        "tests/project-workflows/panel.spec.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "tests/project-workflows/review.spec.ts",
+        "tests/project-workflows/reviewers.spec.ts",
+        "tests/project-workflows/sidecar.spec.ts",
+        "tests/project-workflows/ux-launch.spec.ts",
+        "tests/project-workflows/ux-node.spec.ts",
+        "tests/project-workflows/ux-review.spec.ts",
+        "tests/project-workflows/ux-run.spec.ts",
+        "tests/project-workflows/ux-verify.spec.ts",
+        "tests/project-workflows/ux-refine.spec.ts",
+        "tests/unit/attack.test.ts",
+        "tests/unit/challenge.test.ts",
+        "tests/unit/gate.test.ts",
+        "tests/unit/inputs.test.ts",
+        "tests/unit/launch.test.ts",
+        "tests/unit/model.test.ts",
+        "tests/unit/node.test.ts",
+        "tests/unit/panels.test.ts",
+        "tests/unit/providerPanel.test.ts",
+        "tests/unit/sidecar.test.ts",
+        "tests/unit/steps.test.ts",
+        "tests/unit/diff.test.ts",
+        "tests/unit/assignment.test.ts",
+        "tests/unit/dag.test.ts",
+        "docs/handoff/refine-pages.md",
+        "src/projects/NowBanner.tsx",
+        "src/projects/CommandBlock.tsx"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "run-first-screen",
+              "description": "At 1440 px the run page's own DOM ([data-testid=run-view]) of a paused, a running and a succeeded fixture opens on: the run title on its first line (the feature name truncated, the run id in full; the breadcrumb above it is the shell's and is not asserted); a one-sentence state line in the state's colour with its glyph (what it does, waits on, or how it ended); the cause as one quoted line with its open link; the next step's first command with Copy and its remaining steps, in their order, in a closed disclosure named All steps; the lanes strip with each lane's model pin (or the executor only when the lane has no pin) and its repair round count; then the graph. The metadata (branch, commit, mode, definition hash) sits in a closed disclosure under the title, the worker and review durations as two chips; nothing in the run view's first screen is a paragraph; the viewer stays read-only (no control acts on a run)"
+            },
+            {
+              "id": "fix-loop-graph",
+              "description": "On run-detail fixtures the lane builds from the contract examples (contracts/projects/examples.ts fixLoop, fixLoopLaunched, fixLoopRestored) by projecting the repair nodes as Appendix A.1 item 1 says, with a second lane 'shell' added whose roles are null (the worked example: lane viewer, repair-1 applied after a verify block, repair-2 applied after review round 1, round 2 approved; the mid-round example: repair-2 launched, its session not yet bound; the restored-round example: repair-1 blocked after review round 1, the round restored) the graph shows repair-1 after verify_viewer and repair-2 after review, each with a dashed return mark to the step it answers, a meta line 'round <r> of <rounds> \u00b7 <trigger>', status glyph and tone (succeeded for an applied repair, running for a launched one, failed for a blocked one); the viewer lane's launch node shows its pin (opus-4-8 \u00b7 medium) and the shell lane's shows the executor only; the review node shows 'round 2' and 'delta from <7 chars>' on the worked example, 'round 2 in review' on the mid-round example, and 'round 1' with the restored note on the restored example; its attempt 1 page shows round 1's verdict, findings and reviewers marked superseded; the repair node page shows its round, trigger, the findings verbatim, the outcome and why; the verify attempt after repair-1 says 'after repair 1' and links to it; a running repair is the run's focus and the state line says so; keyboard order visits every node; the legend names the return mark; the lane chips show a failed and a running tone (the two lanes in different states); the Steps table groups by phase with repair rows indented under their step and Activity folds each challenge attempt and repair round into a one-line summary"
+            },
+            {
+              "id": "assignment-and-diff",
+              "description": "The Assignment tab opens on one setup line (feature, mode, profile, base commit, fix_rounds, and the reviewers from the latest review result's reviewer ids, 'reviewers not recorded' before a review) and one table row per lane (lane, role, model and effort or 'no pin', skills, owned paths count, checks count, task length) before any long text, with each lane's task, prompt and decisions in closed disclosures; the review node's Diff section renders the diff inline: a file list with added and removed counts, each file a disclosure with hunks and line numbers in add, remove and context tones, a GIT binary patch section as a stat with no hunks, the raw patch still downloadable; on a fixture with review.delta_diff the delta diff is the default view and the full diff a second tab; a file over 2,000 diff lines is a stat with a show button"
+            },
+            {
+              "id": "run-phone",
+              "description": "At 390 px the run view ([data-testid=run-view]) is a single column with no horizontal scroll of the page (the graph box scrolls inside itself; the 16 px gutter of the page is the shell lane's App.css rule and is not asserted here), the state line and next step come before the graph, the Pipeline stacks above the Steps (data-layout=stacked asserted), every control inside the run view is at least 44 px tall, and tables scroll inside their container; in dark theme too"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "shell",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/App.tsx",
+        "src/App.css",
+        "src/index.css",
+        "src/projects/theme.css",
+        "src/projects/tone.ts",
+        "src/projects/ui",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/RunsHome.tsx",
+        "src/projects/RunRow.tsx",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/LiveStatus.tsx",
+        "src/projects/Time.tsx",
+        "src/projects/TimeZoneToggle.tsx",
+        "src/projects/time.ts",
+        "src/projects/useNow.ts",
+        "src/projects/api.ts",
+        "src/projects/useRunData.ts",
+        "src/projects/usePoll.ts",
+        "src/projects/useResource.ts",
+        "src/projects/resource.ts",
+        "src/projects/scroll.ts",
+        "src/projects/routes.ts",
+        "tests/project-workflows/fixtures/ux-lists.ts",
+        "tests/project-workflows/fixtures/ux-revamp-lists.ts",
+        "tests/project-workflows/fixtures/ux-time.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/ux-time.spec.ts",
+        "tests/unit/tone.test.ts",
+        "tests/unit/lists.test.ts",
+        "tests/unit/time.test.ts",
+        "tests/unit/routes.test.ts",
+        "docs/handoff/refine-shell.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "home-sections",
+              "description": "At 1440 px Runs home shows, in order: Needs you as cards with cause and next-step label (one line when zero); Running as one compact row per run (id, feature, step, since, lane chips) with a sub-header counting steps; Paused as compact rows sorted oldest first with 'since <n> days' in the paused tone and its own sub-header; Recent with its day groups, search, filters and group-by, where the Failed and Succeeded filter counts equal the filtered set's counts; the feature header lists the run's actual reviewers from the export, not the definition's review steps; the project rail keeps its state dots; a fetch of the Runs home data path against the mock is recorded; the Projects header passes the read-only check (no control acts on a run)"
+            },
+            {
+              "id": "home-phone",
+              "description": "At 390 px Runs home and the Projects header are a single column with 16 px gutters and no horizontal page scroll, every header control and every row control is at least 44 px tall, the rail collapses as the revamp specified, and the page renders in dark theme without a horizontal overflow"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

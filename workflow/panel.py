@@ -48,7 +48,7 @@ from .verification import CONTRACTS, validate_schema
 
 PANEL = "panel"
 PANEL_VERSION = "2.6.0"  # The feature version that may declare `panels`.
-PANEL_VERSIONS = frozenset({PANEL_VERSION, "2.7.0"})  # 2.7.0 (per-lane worker pins) keeps the panels.
+PANEL_VERSIONS = frozenset({PANEL_VERSION, "2.7.0", "2.8.0"})  # 2.7.0 (per-lane worker pins) and 2.8.0 (per-lane skills) keep the panels.
 RECORD_VERSION = "1.0.0"
 SCHEMA = CONTRACTS / "panel.schema.json"
 RECORD = "panel.json"

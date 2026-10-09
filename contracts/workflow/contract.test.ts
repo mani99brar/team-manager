@@ -165,7 +165,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
@@ -193,6 +193,22 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     Object.assign(value.workers[0], bad)
     assert.equal(feature.safeParse({ ...value, version: '2.7.0' }).success, false, JSON.stringify(bad))
   }
+  // 2.8.0 adds a lane's own skills: 1 to 8 unique names ^[a-z][a-z0-9-]{0,63}$ (workflow/launch.py refuses them on an earlier version, naming the lane).
+  const skilled = structuredClone(reviewed)
+  Object.assign(skilled.workers[0], { skills: ['impeccable'] })
+  feature.parse({ ...skilled, version: '2.8.0' })
+  feature.parse({ ...structuredClone(pinned), version: '2.8.0' })  // skills alongside a lane's model and effort (PRD section 3)
+  feature.parse({ ...structuredClone(reviewed), version: '2.8.0' })  // a 2.8.0 feature with no skills still validates
+  for (const bad of [[], ['Up'], ['a'.repeat(65)], ['x', 'x'], ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'], ['-x'], ['']]) {
+    const value = structuredClone(reviewed)
+    Object.assign(value.workers[0], { skills: bad })
+    assert.equal(feature.safeParse({ ...value, version: '2.8.0' }).success, false, JSON.stringify(bad))
+  }
+  // The committed 2.8.0 example (docs/PRD_WORKER_SKILLS.md section 3): one lane with skills, one with its own model and effort.
+  const skillsExample = readJson('./examples/feature.2.8.0.json')
+  assert.equal(skillsExample.version, '2.8.0')
+  feature.parse(skillsExample)
+  assert.deepEqual(skillsExample.workers[0].skills, ['impeccable'])
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)

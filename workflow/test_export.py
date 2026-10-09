@@ -294,7 +294,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.9.0")
+        self.assertEqual(exported["version"], "1.10.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -323,7 +323,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.9.0")
+        self.assertEqual(exported["version"], "1.10.0")
         self.assertIsNone(exported["panels"])  # 1.9.0: null for a run without plan.panels.
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
@@ -345,7 +345,7 @@ class ExportRunTests(unittest.TestCase):
         from .test_sidecar import appendix_b
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual((exported["version"], exported["sidecar"]), ("1.9.0", None))
+        self.assertEqual((exported["version"], exported["sidecar"]), ("1.10.0", None))
         self.assertNotIn("sidecar", [node["node_id"] for node in exported["definition"]["nodes"]])
         plan = read_json(directory / "plan.json")
         plan["sidecar"] = {"prompt": "Brief", "cadence_seconds": 900, "pass_timeout_seconds": 600, "max_passes": 16, "max_messages_per_lane": 6}
@@ -369,7 +369,7 @@ class ExportRunTests(unittest.TestCase):
         """Export 1.7.0 (C52), additive: inputs.roles, inputs.controller and inputs.automatic.profile as prepare pinned them."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.9.0")
+        self.assertEqual(exported["version"], "1.10.0")
         self.assertFalse({"roles", "controller"} & set(exported["inputs"]))
         self.assertNotIn("profile", exported["inputs"]["automatic"])
         plan = read_json(directory / "plan.json")
@@ -388,7 +388,7 @@ class ExportRunTests(unittest.TestCase):
         """Within 1.7.0 (C7, C29): inputs.tryout {required, verdicts, allow_untried} from plan.tryout and tryout.json."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.9.0")
+        self.assertEqual(exported["version"], "1.10.0")
         self.assertNotIn("tryout", exported["inputs"])  # A plan from before C7.
         plan = read_json(directory / "plan.json")
         save_json(directory / "plan.json", {**plan, "tryout": False})
@@ -482,10 +482,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.9.0", result.stdout)
+        self.assertIn("version 1.10.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.9.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.10.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")
@@ -629,3 +629,195 @@ class CostTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIX_LOOP = REPO / "contracts/projects/examples/fix-loop"
+# What the fix loop copies from run worker-skills-001 (the viewer's live-helper test reads the same folder).
+FIX_LOOP_FILES = ("repairs.json", "review-rounds.json", "review.round-1.json", "repair-1.interactive.json", "repair-2.interactive.json",
+                  "automatic-review.json", "review.delta.diff")
+NEW_REVIEW_KEYS = ("round", "delta_from", "delta_diff")
+
+
+def fix_loop_run(root: Path, *, files: bool = True) -> Path:
+    """The legacy run with the fix loop's real journals of worker-skills-001 beside it and `automatic.fix_rounds` pinned."""
+    directory = legacy_run(root)
+    plan = read_json(directory / "plan.json")
+    plan["automatic"]["fix_rounds"] = 2
+    for node in ("ui", "adapter"):
+        plan["nodes"][node]["roles"] = {"model": "claude-opus-4-8", "effort": None}
+    plan["nodes"]["ui"]["skills"] = [{"name": "impeccable", "sha256": "a" * 64}]
+    save_json(directory / "plan.json", plan)
+    if files:
+        for name in FIX_LOOP_FILES:
+            (directory / name).write_bytes((FIX_LOOP / name).read_bytes())
+    return directory
+
+
+def export_of(directory: Path) -> dict:
+    return export_run(ExportRuntime(directory))
+
+
+class FixLoopExportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_the_copied_journals_of_worker_skills_001_export_the_expected_fix_loop(self):
+        (self.root / "a").mkdir()
+        (self.root / "b").mkdir()
+        bare = export_of(fix_loop_run(self.root / "a", files=False))
+        directory = fix_loop_run(self.root / "b")
+        exported = export_of(directory)
+        self.assertEqual(exported["fix_loop"], json.loads((FIX_LOOP / "expected.json").read_text()))
+        self.assertEqual(exported["definition"], bare["definition"])  # Repair nodes are the server's projection; the export never writes them.
+        self.assertFalse(any(node["node_id"].startswith("repair-") for node in exported["definition"]["nodes"]))
+        review = exported["review"]
+        self.assertEqual((review["round"], review["attempt"]), (2, 1))
+        self.assertEqual(review["delta_from"], "56c8ebd521a1b252e9ec7242784977c1a188ed61")
+        delta = FIX_LOOP / "review.delta.diff"
+        self.assertEqual(review["delta_diff"], {"path": "review.delta.diff", "sha256": digest_file(delta), "bytes": delta.stat().st_size})
+        self.assertEqual(exported["inputs"]["automatic"]["fix_rounds"], 2)
+        self.assertEqual(exported["inputs"]["workers"]["ui"]["roles"], {"model": "claude-opus-4-8", "effort": None})
+        self.assertEqual(exported["inputs"]["workers"]["ui"]["skills"], [{"name": "impeccable", "sha256": "a" * 64}])
+        self.assertEqual(exported["inputs"]["workers"]["adapter"]["skills"], [])
+        # Re-exporting is stable.
+        written = (directory / "run-state.json").read_bytes()
+        export_of(directory)
+        self.assertEqual((directory / "run-state.json").read_bytes(), written)
+
+    def test_a_run_without_the_records_exports_its_1_9_0_content_plus_the_new_keys(self):
+        directory = legacy_run(self.root)
+        exported = export_of(directory)
+        self.assertEqual(exported["version"], "1.10.0")
+        self.assertIsNone(exported["fix_loop"])
+        review = exported["review"]
+        self.assertEqual((review["round"], review["delta_from"], review["delta_diff"]), (1, None, None))
+        self.assertNotIn("fix_rounds", exported["inputs"]["automatic"])
+        for worker in exported["inputs"]["workers"].values():
+            self.assertEqual((worker["roles"], worker["skills"]), (None, []))
+        # Everything but the version and the new keys is what 1.9.0 exported.
+        stripped = json.loads(json.dumps(exported))
+        stripped.pop("fix_loop")
+        for key in NEW_REVIEW_KEYS:
+            stripped["review"].pop(key)
+        for worker in stripped["inputs"]["workers"].values():
+            worker.pop("roles"), worker.pop("skills")
+        self.assertEqual(set(stripped), {"version", "run_id", "base_commit", "created_at", "definition", "values", "next", "tasks", "events",
+                                         "verification_packets", "review", "inputs", "sidecar", "attack", "panels", "costs", "updated_at"})
+        self.assertEqual(set(stripped["review"]), {"attempt", "transport", "reviewer_session_id", "independent", "bundle_sha256", "candidate_commit",
+                                                   "verdict", "findings", "reviewers", "reviewed_at", "diff"})
+        self.assertEqual(set(stripped["inputs"]["automatic"]), {"finish", "permission_mode", "worker_timeout_seconds", "review_timeout_seconds", "reviewer_transport"})
+        self.assertEqual(set(stripped["inputs"]["workers"]["ui"]), {"role", "required_check_kinds", "task", "prompt", "owned_paths", "checks", "launch",
+                                                                     "completion", "handoff", "stop", "questions"})
+
+    def test_a_plan_with_fix_rounds_and_no_journal_exports_the_empty_loop(self):
+        directory = fix_loop_run(self.root, files=False)
+        self.assertEqual(export_of(directory)["fix_loop"], {"version": "1.0.0", "rounds": 2, "repairs": [], "review_rounds": []})
+
+    def test_a_malformed_journal_exports_the_error_form(self):
+        error = lambda directory: export_of(directory)["fix_loop"]
+        directory = fix_loop_run(self.root)
+        (directory / "repairs.json").write_text("{not json")
+        value = error(directory)
+        self.assertEqual((value["version"], value["rounds"], value["repairs"], value["review_rounds"]), ("1.0.0", None, [], []))
+        self.assertIsInstance(value["error"], str)
+        self.assertTrue(value["error"])
+        # A missing key of an entry, an unknown status, a lane-less entry and a malformed round list are errors too, never a crash.
+        entries = read_json(FIX_LOOP / "repairs.json")["repairs"]
+        for mutate in (lambda e: e.pop("trigger"), lambda e: e.update(status="done"), lambda e: e.update(lanes={}), lambda e: e.update(n="1")):
+            damaged = json.loads(json.dumps(entries))
+            mutate(damaged[0])
+            save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": damaged})
+            self.assertIn("error", error(directory))
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": entries})
+        self.assertNotIn("error", error(directory))
+        (directory / "review-rounds.json").write_text(json.dumps({"version": "1.0.0", "rounds": [{"round": 1}]}))
+        self.assertIn("error", error(directory))
+        exported = export_of(directory)
+        self.assertEqual(exported["review"]["round"], 1)  # The review section never fails on the round list.
+
+    def test_a_malformed_blocked_or_receipt_never_crashes_the_export(self):
+        """The live read takes a non-object `blocked`, non-list `packets` and a non-object receipt as empty; so does the export."""
+        directory = fix_loop_run(self.root)
+        entries = read_json(FIX_LOOP / "repairs.json")["repairs"]
+        for blocked in ("verify_ui", ["x"], True, {"packets": 1}, {"packets": "x"}, {"packets": True}):
+            damaged = json.loads(json.dumps(entries))
+            damaged[0]["blocked"] = blocked
+            save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": damaged})
+            value = export_of(directory)["fix_loop"]
+            self.assertNotIn("error", value, blocked)
+            self.assertEqual(value["repairs"][0]["gate_reasons"], [])
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": entries})
+        for text in ("[1]", '"x"', "7"):
+            (directory / "repair-1.interactive.json").write_text(text)
+            value = export_of(directory)["fix_loop"]
+            self.assertNotIn("error", value, text)
+            self.assertIsNone(value["repairs"][0]["requested"])
+
+    def test_an_operator_commit_repair_is_not_listed(self):
+        directory = fix_loop_run(self.root)
+        entries = read_json(FIX_LOOP / "repairs.json")["repairs"]
+        commit = {"n": 3, "status": "applied", "mode": "commit", "reason": "by hand", "by": "operator", "via": "claude-code", "lanes": {"ui": {}, "adapter": {}},
+                  "recorded_at": "2026-10-08T16:00:00Z", "workspace_commit": "c" * 40}
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": [*entries, commit]})
+        self.assertEqual([repair["n"] for repair in export_of(directory)["fix_loop"]["repairs"]], [1, 2])
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": [commit]})
+        self.assertEqual(export_of(directory)["fix_loop"]["repairs"], [])
+
+    def test_a_launched_round_exports_without_an_error_and_with_nulls_for_what_is_not_written(self):
+        """The entry `launch_session` writes (repair.py) before the receipt: no session id, no fix files, no outcome, no brief."""
+        directory = fix_loop_run(self.root)
+        launched = {"n": 3, "status": "launched", "mode": "session", "by": "controller", "trigger": "candidate", "round": 1, "rounds": 2,
+                    "lanes": {"adapter": {}}, "recorded_at": "2026-10-08T16:00:00Z", "blocked": {"step": "candidate", "packets": []},
+                    "workspace": "/w", "workspace_commit": "d" * 40, "what": "the candidate",
+                    "session": {"node": "repair-3", "launch_token": "t", "session_id": None}}
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": [launched]})
+        value = export_of(directory)["fix_loop"]
+        self.assertNotIn("error", value)
+        self.assertEqual(value["repairs"], [{
+            "n": 3, "node_id": "repair-3", "mode": "session", "lane": "adapter", "trigger": "candidate", "round": 1, "rounds": 2, "status": "launched",
+            "by": "controller", "recorded_at": "2026-10-08T16:00:00Z", "applied_at": None, "blocked_step": "candidate", "reentered_steps": ["candidate"],
+            "reason": None, "workspace_commit": "d" * 40, "session_id": None, "review_round": None, "findings": [], "delta": False, "fix_files": [],
+            "left_behind": [], "requested": None, "gate_reasons": []}])
+
+    def test_two_lane_verify_block_reenters_every_failed_lane_and_gate_reasons_are_the_lanes_own(self):
+        directory = fix_loop_run(self.root)
+        entry = {"n": 1, "status": "recorded", "mode": "session", "by": "operator", "via": "claude-code", "trigger": "verify", "round": 1, "rounds": 2,
+                 "lanes": {"adapter": {"fix_files": ["a.py"]}}, "recorded_at": "2026-10-08T16:00:00Z", "workspace_commit": "d" * 40,
+                 "blocked": {"step": "verify_ui, verify_adapter", "packets": [{"node_id": "ui", "reasons": ["ui broke"]}, {"node_id": "adapter", "reasons": ["adapter broke"]}]},
+                 "brief": {"findings": [], "delta": "/run/review.delta.round-1.diff"}, "session": {"node": "repair-1", "launch_token": "t", "session_id": "s"}}
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": [entry]})
+        repair = export_of(directory)["fix_loop"]["repairs"][0]
+        self.assertEqual((repair["blocked_step"], repair["reentered_steps"], repair["gate_reasons"]), ("verify_adapter", ["verify_ui", "verify_adapter"], ["adapter broke"]))
+        self.assertEqual((repair["by"], repair["via"], repair["delta"], repair["fix_files"]), ("operator", "claude-code", True, ["a.py"]))
+
+    def test_a_non_string_item_in_fix_files_or_left_behind_is_dropped_like_the_live_read(self):
+        directory = fix_loop_run(self.root)
+        entry = {"n": 1, "status": "recorded", "mode": "session", "by": "controller", "trigger": "review", "round": 1, "rounds": 2,
+                 "lanes": {"ui": {"fix_files": ["a.ts", 7, None, "b.ts"]}}, "left_behind": ["x", {"y": 1}, "z"], "recorded_at": "2026-10-08T16:00:00Z",
+                 "workspace_commit": "d" * 40, "session": {"node": "repair-1", "launch_token": "t", "session_id": "s"}}
+        save_json(directory / "repairs.json", {"version": "1.0.0", "repairs": [entry]})
+        repair = export_of(directory)["fix_loop"]["repairs"][0]
+        self.assertEqual((repair["fix_files"], repair["left_behind"]), (["a.ts", "b.ts"], ["x", "z"]))
+
+    def test_a_restored_round_is_one_attempt_with_no_reviewers(self):
+        directory = fix_loop_run(self.root)
+        rounds = read_json(FIX_LOOP / "review-rounds.json")
+        rounds["rounds"][0].update(archived=False, restored_at="2026-10-08T17:00:00Z")
+        save_json(directory / "review-rounds.json", rounds)
+        value = export_of(directory)
+        self.assertEqual((value["review"]["round"], value["fix_loop"]["review_rounds"][0]["reviewers"], value["fix_loop"]["review_rounds"][0]["restored_at"]),
+                         (1, [], "2026-10-08T17:00:00Z"))
+
+    def test_delta_from_falls_back_to_the_followed_candidate_only_with_a_delta_diff(self):
+        directory = fix_loop_run(self.root)
+        status = read_json(directory / "automatic-review.json")
+        status.pop("delta_from")
+        save_json(directory / "automatic-review.json", status)
+        plan = read_json(directory / "plan.json")
+        plan["follows"] = {"candidate_commit": "e" * 40}
+        save_json(directory / "plan.json", plan)
+        self.assertEqual(export_of(directory)["review"]["delta_from"], "e" * 40)
+        (directory / "review.delta.diff").unlink()
+        self.assertIsNone(export_of(directory)["review"]["delta_from"])

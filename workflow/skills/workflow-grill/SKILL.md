@@ -7,7 +7,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit
 
 # Workflow grill: settle a feature's decisions before launch
 
-You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0 or 2.7.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
+You interview the operator about the one feature named in the argument, then write its `decisions.md`. A `feature.json` 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, 2.7.0 or 2.8.0 feature cannot launch without a non-empty `decisions.md`, and every worker and reviewer prompt of the run includes it after the task. Only the operator's answers bind the run: the `## Operator decisions` you record win over the task, while your own defaults stay open to the design challenge, and a worker may depart from one when the code shows it cannot hold.
 
 ## 1. Read before asking
 
