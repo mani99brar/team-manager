@@ -96,6 +96,8 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
     warn: (message, details) => app.log.warn(details, message),
   })
   app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })
+  // The first Runs home visit finds every workflow's summaries cached: projected once in the background after boot.
+  app.addHook('onReady', async () => { void store.warmSummaries() })
   app.get('/api/entries', async (_request, reply) => {
     try {
       return await registry.list()

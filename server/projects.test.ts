@@ -2392,6 +2392,52 @@ async function fakeProc(root: string, name: string, child?: { pid: number; argv:
   return proc
 }
 
+test('the run list keeps a run\'s summary while its files are unchanged, re-projects it when a file changes, and still re-reads the controller\'s liveness', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-cache-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    await mkdir(runsRoot, { recursive: true })
+    const config = await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }])), 'test registry')
+    const pid = 4242
+    const pidRow: RawEvent = { sequence: 5, time: T1, node: 'controller', status: 'running', message: `Automatic checkpoint controller PID ${pid} (automatic-step)` }
+    const inputs = inputsSection({}, { ui: liveWorker, adapter: liveWorker })
+    const liveDir = await writeRun(runsRoot, { ...waitingRun, runId: 'live', events: [...launchEvents, pidRow], inputs })
+    await writeRun(runsRoot, { runId: 'done', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_ui'],
+      events: [...launchEvents, { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' }], inputs: inputsSection({ mode: 'manual', automatic: null }) })
+    const step = ['/home/you/dev/md-manager/.venv/bin/python', '-m', 'workflow', 'automatic-step', liveDir, '--live']
+    const procRoot = await fakeProc(root, 'proc-cache', { pid, argv: step, startedAt: '2026-03-01T10:04:30Z' })
+    const store = new RunStore(config, { procRoot })
+    const scope = store.scope('alpha', 'main')
+    const first = await store.listRuns(scope)
+    const second = await store.listRuns(scope)
+    // Unchanged files: the very same summary objects come back, for every status.
+    assert.equal(second.find(summary => summary.run_id === 'done'), first.find(summary => summary.run_id === 'done'))
+    assert.equal(second.find(summary => summary.run_id === 'live'), first.find(summary => summary.run_id === 'live'))
+    assert.equal(first.find(summary => summary.run_id === 'live')!.activity?.controller, 'running')
+    // The controller dies without any run file changing: the next list says so.
+    await rm(join(procRoot, String(pid)), { recursive: true, force: true })
+    const third = await store.listRuns(scope)
+    assert.equal(third.find(summary => summary.run_id === 'live')!.activity?.controller, 'not_running')
+    assert.equal(third.find(summary => summary.run_id === 'done'), first.find(summary => summary.run_id === 'done'))
+    // A live file appears (a worker asks a question): the run is projected again and the question counts.
+    await writeFile(join(liveDir, 'ui.questions.json'), JSON.stringify({ node_id: 'ui', questions: [{ n: 1, question: 'May I rename the field?', asked_at: '2026-03-01T10:06:00+00:00', answer: null, answered_at: null }] }))
+    const fourth = await store.listRuns(scope)
+    const asked = fourth.find(summary => summary.run_id === 'live')!
+    assert.notEqual(asked, third.find(summary => summary.run_id === 'live'))
+    assert.equal(asked.activity?.waiting_questions, 1)
+    // Rewriting the export in place with a later time is seen too (size or mtime differ), and the cache can be turned off.
+    const exported = JSON.parse(await readFile(join(liveDir, 'run-state.json'), 'utf8')) as { updated_at: string }
+    exported.updated_at = '2026-03-01T11:00:00.000000Z'
+    await writeFile(join(liveDir, 'run-state.json'), JSON.stringify(exported))
+    assert.equal((await store.listRuns(scope)).find(summary => summary.run_id === 'live')!.updated_at, '2026-03-01T11:00:00.000000Z')
+    const uncached = new RunStore(config, { procRoot, summaryCache: false })
+    const a = await uncached.listRuns(scope)
+    const b = await uncached.listRuns(scope)
+    assert.notEqual(a.find(summary => summary.run_id === 'done'), b.find(summary => summary.run_id === 'done'))
+    assert.deepEqual(a, b)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
 test('[B2] controller liveness: this run\'s automatic-step, started by its PID row, is running; a gone or reused PID is not; anything unclear is unknown', async () => {
   const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-proc-'))
   try {

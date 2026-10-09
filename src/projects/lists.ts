@@ -63,7 +63,7 @@ export const endedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run
 /** When a run last moved, for ordering live rows: the served last activity, else its last update. */
 export const movedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run.activity?.last_activity_at ?? run.updated_at
 
-export type HomeSections<T> = { needsYou: T[]; running: T[]; paused: T[]; recent: T[] }
+export type HomeSections<T> = { needsYou: T[]; today: T[]; running: T[]; paused: T[]; recent: T[] }
 
 /**
  * Sorts rows into the four sections of Runs home (PRD_VIEWER_REFINE 5.7); a run appears in one section only. Needs you: a
@@ -72,24 +72,40 @@ export type HomeSections<T> = { needsYou: T[]; running: T[]; paused: T[]; recent
  * its last activity. Running: every other run that is not finished, latest activity first. Recent: finished runs that ended
  * within the seven days before `now`, newest first; older ones stay on their project page only.
  */
-export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number): HomeSections<T> {
+/**
+ * Runs home's sections (docs/PRD_VIEWER_REVAMP.md 5.1, Today first since 2026-10-09): what waits on the operator; every run
+ * that moved today (running ones first, then latest activity first), whatever its status; the runs still running since an
+ * earlier day; the runs paused since an earlier day, longest paused first; and the runs finished in the last seven days
+ * before today. A run sits in exactly one section. `zone` decides where today begins; without it, today is the UTC day.
+ */
+export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone = 'utc'): HomeSections<T> {
   const needsYou: T[] = []
+  const today: T[] = []
   const running: T[] = []
   const paused: T[] = []
   const recent: T[] = []
+  const todayKey = dayKey(now, zone)
   for (const row of rows) {
+    const finished = isFinished(row.run.status)
+    const moved = finished ? endedAt(row.run) : movedAt(row.run)
     if (waitingKind(row.run) !== null) needsYou.push(row)
-    else if (isFinished(row.run.status)) { if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row) }
+    else if (dayKey(moved, zone) === todayKey && ms(moved) <= now + 60_000) today.push(row)
+    else if (finished) { if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row) }
     else if (row.run.status === 'paused') paused.push(row)
     else running.push(row)
   }
   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
+  const moved = (row: T) => ms(isFinished(row.run.status) ? endedAt(row.run) : movedAt(row.run))
   needsYou.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
+  today.sort((a, b) => Number(b.run.status === 'running') - Number(a.run.status === 'running') || moved(b) - moved(a) || a.run.run_id.localeCompare(b.run.run_id))
   running.sort((a, b) => ms(movedAt(b.run)) - ms(movedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
   paused.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
   recent.sort((a, b) => ms(endedAt(b.run)) - ms(endedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
-  return { needsYou, running, paused, recent }
+  return { needsYou, today, running, paused, recent }
 }
+
+/** How many paused runs the Paused section shows before the rest fold behind "Show all". */
+export const PAUSED_SHOWN = 5
 
 /** Whole days from an instant to `now`, floored; never negative. */
 const daysSince = (iso: string, now: number) => Math.max(0, Math.floor((now - ms(iso)) / (24 * 60 * 60 * 1000)))

@@ -31,7 +31,7 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   await expect(currentCrumb(page)).toHaveText('Projects')
   await expect(page.getByTestId('projects-info')).toContainText('Read-only')
   const needs = page.getByTestId('needs-you')
-  const running = page.getByTestId('running-runs')
+  const today = page.getByTestId('today-runs')
   const recent = page.getByTestId('recent-runs')
 
   // Needs you: grouped by what waits (served activity.attention.kind), each row one link in an li, named by its run id first.
@@ -53,12 +53,12 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   await expect(row(needs, RUN_LISTS_ASKING)).toContainText(PROJECT.name)
   await expect(needs).not.toContainText(UX_LISTS_WORKFLOW_NAME)
 
-  // Running: the other live runs, never repeated in another section.
-  await expect(row(running, RUN_LISTS_LIVE)).toHaveAttribute('data-status', 'running')
-  await expect(row(running, RUN_LISTS_STOPPED)).toHaveAttribute('data-status', 'running')
-  await expect(row(running, RUN_LISTS_LIVE)).not.toHaveAttribute('data-attention', /.+/)
-  await expect(running.getByRole('link', { name: new RegExp(`^${RUN_LISTS_LIVE}(?:\\s|$)`) })).toHaveCount(1)
-  for (const runId of [RUN_LISTS_ASKING, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL]) await expect(row(running, runId)).toHaveCount(0)
+  // Today: the other live runs moved today, so they are Today rows, never repeated in another section.
+  await expect(row(today, RUN_LISTS_LIVE)).toHaveAttribute('data-status', 'running')
+  await expect(row(today, RUN_LISTS_STOPPED)).toHaveAttribute('data-status', 'running')
+  await expect(row(today, RUN_LISTS_LIVE)).not.toHaveAttribute('data-attention', /.+/)
+  await expect(today.getByRole('link', { name: new RegExp(`^${RUN_LISTS_LIVE}(?:\\s|$)`) })).toHaveCount(1)
+  for (const runId of [RUN_LISTS_ASKING, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL]) await expect(row(today, runId)).toHaveCount(0)
 
   // Recent: finished in the last seven days, newest first, with the finish time and the duration from the served activity.
   expect(await ownIds(recent)).toEqual([RUN_LISTS_FAILED, RUN_LISTS_FAILED_EARLIER])
