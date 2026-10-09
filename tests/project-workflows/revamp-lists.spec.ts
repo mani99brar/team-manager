@@ -436,7 +436,8 @@ test(`Self-hosted fonts: the Projects pages request fonts only from their own or
   for (const font of fonts) {
     expect(new URL(font.url).origin, font.url).toBe(origin)
     expect(new URL(font.url).pathname, font.url).toMatch(/^\/fonts\/[^/]+\.woff2$/)
-    expect(font.status, font.url).toBe(200)
+    // 304: the browser revalidated a face it already holds from this origin (a later page of the walk), also served.
+    expect([200, 304], font.url).toContain(font.status)
   }
   expect(failed).toEqual([])
 })
