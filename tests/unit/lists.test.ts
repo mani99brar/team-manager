@@ -88,20 +88,30 @@ describe('Runs home sections', () => {
   test('Needs you holds the questions, panes and approvals, longest waiting first', () => {
     assert.deepEqual(ids(sections.needsYou), ['approval', 'pane', 'asking'])
   })
-  test('Running holds the unfinished runs that are not paused and wait on nobody, including one without activity, latest activity first', () => {
-    assert.deepEqual(ids(sections.running), ['live', 'legacy-running'])
+  test('Today holds every run that moved today and waits on nobody, running first, then latest activity first', () => {
+    assert.deepEqual(ids(sections.today), ['live', 'interrupted'])
+    // A run finished today is Today's, not Recent's; a run that moved today in UTC but yesterday in a zone west of it follows the zone.
+    const done = summary('done-today', 'succeeded', { activity: activity({ finished_at: '2026-03-20T00:30:00Z' }) })
+    assert.deepEqual(ids(homeSections([row(done)], NOW).today), ['done-today'])
+    const west = homeSections([row(done)], NOW, 'local')
+    const sameDay = new Date(NOW).getDate() === new Date('2026-03-20T00:30:00Z').getDate()
+    assert.deepEqual(ids(west.today), sameDay ? ['done-today'] : [])
+    assert.deepEqual(ids(west.recent), sameDay ? [] : ['done-today'])
   })
-  test('Paused holds the paused runs that wait on nobody, oldest first (longest stopped at the top)', () => {
-    assert.deepEqual(ids(sections.paused), ['interrupted'])
+  test('Running holds the unfinished runs since an earlier day that are not paused and wait on nobody, latest activity first', () => {
+    assert.deepEqual(ids(sections.running), ['legacy-running'])
+  })
+  test('Paused holds the paused runs since an earlier day that wait on nobody, oldest first (longest stopped at the top)', () => {
+    assert.deepEqual(ids(sections.paused), [])
     // Two paused runs: the one stopped longer ago leads; a since-less paused run orders by its last activity.
     const older = summary('paused-older', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-18T08:00:00Z' } }) })
     const newer = summary('paused-newer', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-20T08:00:00Z' } }) })
     const sinceless = summary('paused-sinceless', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: null, since: null }, last_activity_at: '2026-03-19T08:00:00Z' }) })
     assert.deepEqual(ids(homeSections([row(newer), row(older), row(sinceless)], NOW).paused), ['paused-older', 'paused-sinceless', 'paused-newer'])
   })
-  test('Recent holds finished runs of the last seven days, newest first; an older run is absent, and no run appears twice', () => {
+  test('Recent holds finished runs of the last seven days before today, newest first; an older run is absent, and no run appears twice', () => {
     assert.deepEqual(ids(sections.recent), ['legacy-recent', 'failed-now', 'failed-earlier'])
-    const all = [...ids(sections.needsYou), ...ids(sections.running), ...ids(sections.recent)]
+    const all = [...ids(sections.needsYou), ...ids(sections.today), ...ids(sections.running), ...ids(sections.paused), ...ids(sections.recent)]
     assert.equal(new Set(all).size, all.length)
     assert.ok(!all.includes('too-old') && !all.includes('legacy-old'))
   })
@@ -426,10 +436,13 @@ describe('Runs home cards', () => {
   test('a paused run served without attention.since waits on nobody: a Paused row, not a Needs-you card (run 007)', () => {
     const held = summary('held', 'paused', { created: '2026-03-20T07:00:00Z', activity: activity({ last_activity_at: '2026-03-20T07:00:16Z', attention: { kind: 'paused', node_id: 'handoff', since: null } }) })
     assert.equal(waitingKind(held), null)
+    // Held today: a Today row (it moved today); held since an earlier day: a Paused row. Never a Needs-you card.
     const sections = homeSections([{ run: held }], NOW)
-    assert.deepEqual(sections.paused.map(row => row.run.run_id), ['held'])
-    assert.equal(sections.running.length, 0)
-    assert.equal(sections.needsYou.length, 0)
+    assert.deepEqual(sections.today.map(row => row.run.run_id), ['held'])
+    assert.equal(sections.paused.length + sections.running.length + sections.needsYou.length, 0)
+    const earlier = homeSections([{ run: held }], NOW + 2 * DAY)
+    assert.deepEqual(earlier.paused.map(row => row.run.run_id), ['held'])
+    assert.equal(earlier.today.length + earlier.needsYou.length, 0)
     assert.deepEqual(cardElapsed(held, NOW), { elapsed: 'paused · started 5h00m ago', since: null, started: null })
   })
   test('sincePausedLabel: whole days from the paused since, else today under a day', () => {

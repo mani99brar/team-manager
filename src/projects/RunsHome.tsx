@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
 import { describeApiError, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
 import {
+  PAUSED_SHOWN,
   filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
   projectFacts, projectTone, railEntries, RECENT_SHOWN, recentCounts, rowSummary, searchRows, sincePausedLabel, stepTally, waitingKind, workflowTitle,
   type ListRow, type RecentFilter, type WaitingKind,
@@ -120,7 +121,9 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
-  const sections = homeSections(rows, now)
+  const sections = homeSections(rows, now, zone)
+  const [allPaused, setAllPaused] = useState(false)
+  const pausedShown = allPaused ? sections.paused : sections.paused.slice(0, PAUSED_SHOWN)
   const errors = (loaded ?? []).flatMap(entry => entry.error !== null
     ? [{ what: entry.project.name, error: entry.error }]
     : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error })))
@@ -148,12 +151,29 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
     const entry = entryOf(project)
     return entry && entry.error === null ? projectTone(entry.workflows.flatMap(item => item.runs)) : 'idle'
   }
-  const jumpToNeeds = (event: MouseEvent<HTMLAnchorElement>) => {
+  // A jump link scrolls its section into view and hands the focus to its first run, so the keyboard continues from there.
+  const jumpTo = (id: string) => (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
-    const target = document.getElementById('needs-you')
+    const target = document.getElementById(id)
     target?.scrollIntoView({ block: 'start' })
     target?.querySelector<HTMLElement>('a[data-run-id]')?.focus({ preventScroll: true })
   }
+  const jumpToNeeds = jumpTo('needs-you')
+  const jumps: { id: string; label: string; count: number | null }[] = [
+    { id: 'needs-you', label: 'Needs you', count: needsCount },
+    { id: 'today-runs', label: 'Today', count: count(sections.today) },
+    { id: 'running-runs', label: 'Running', count: count(sections.running) },
+    { id: 'paused-runs', label: 'Paused', count: count(sections.paused) },
+    { id: 'recent-runs', label: 'Recent', count: count(sections.recent) },
+  ]
+  const rowsList = (items: Row[], trailing?: (row: Row) => { text: string; tone: 'pause' } | null): ReactNode => (
+    <ul className="run-rows">
+      {items.map(row => (
+        <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
+          trailing={trailing?.(row) ?? null} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+      ))}
+    </ul>
+  )
 
   return (
     <div className="home-layout">
@@ -190,6 +210,15 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
         <div className="runs-home-head">
           <h2 id="runs-home-title">Runs</h2>
           {loaded !== null && <LiveStatus status="running" meta={meta} now={now} />}
+          {loaded !== null && (
+            <nav className="home-jumps" aria-label="Sections" data-testid="home-jumps">
+              {jumps.map(jump => (
+                <a key={jump.id} href={`#${jump.id}`} className={jump.count ? 'has-rows' : ''} onClick={jumpTo(jump.id)} data-section={jump.id}>
+                  {jump.label}{jump.count !== null && <span className="home-jump-count">{jump.count}</span>}
+                </a>
+              ))}
+            </nav>
+          )}
         </div>
         {runs.status === 'loading' || runs.status === 'idle' ? <LoadingPanel>Loading the runs of every project…</LoadingPanel> : (
           <>
@@ -201,25 +230,19 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
                 </ul>
               )}
             </Section>
-            <Section headingId="running-title" data-testid="running-runs" className="home-section" title={`Running${count(sections.running) !== null ? ` · ${count(sections.running)}` : ''}`}
-              sub={sections.running.length === 0 ? 'nothing is running' : stepTally(sections.running) || 'latest activity first'}>
-              {sections.running.length > 0 && (
-                <ul className="run-rows">
-                  {sections.running.map(row => (
-                    <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
-                  ))}
-                </ul>
-              )}
+            <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" title={`Today${count(sections.today) !== null ? ` · ${count(sections.today)}` : ''}`}
+              sub={sections.today.length === 0 ? 'nothing moved today' : `every run that moved today, running first · ${stepTally(sections.today) || 'latest activity first'}`}>
+              {sections.today.length > 0 && rowsList(sections.today)}
             </Section>
-            <Section headingId="paused-title" data-testid="paused-runs" className="home-section" title={`Paused${count(sections.paused) !== null ? ` · ${count(sections.paused)}` : ''}`}
-              sub={sections.paused.length === 0 ? 'nothing is paused' : stepTally(sections.paused) || 'longest paused first'}>
-              {sections.paused.length > 0 && (
-                <ul className="run-rows">
-                  {sections.paused.map(row => (
-                    <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
-                      trailing={{ text: sincePausedLabel(row.run, now), tone: 'pause' }} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
-                  ))}
-                </ul>
+            <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" title={`Running${count(sections.running) !== null ? ` · ${count(sections.running)}` : ''}`}
+              sub={sections.running.length === 0 ? 'nothing else is running' : `since an earlier day · ${stepTally(sections.running) || 'latest activity first'}`}>
+              {sections.running.length > 0 && rowsList(sections.running)}
+            </Section>
+            <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={`Paused${count(sections.paused) !== null ? ` · ${count(sections.paused)}` : ''}`}
+              sub={sections.paused.length === 0 ? 'nothing is paused' : `since an earlier day, longest paused first · ${stepTally(sections.paused) || ''}`}>
+              {sections.paused.length > 0 && rowsList(pausedShown, row => ({ text: sincePausedLabel(row.run, now), tone: 'pause' }))}
+              {sections.paused.length > pausedShown.length && (
+                <button type="button" className="home-show-older" data-testid="paused-show-all" onClick={() => setAllPaused(true)}>Show all {sections.paused.length} paused</button>
               )}
             </Section>
             <Recent rows={sections.recent} now={now} zone={zone} onNavigate={onNavigate} />
@@ -264,7 +287,7 @@ function Recent({ rows, now, zone, onNavigate }: { rows: Row[]; now: number; zon
   const shown = expandedFor === view ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
   const filters = (['all', 'failed', 'succeeded', 'today'] as const).map(id => ({ id, label: FILTER_LABEL[id], count: id === 'failed' || id === 'succeeded' ? counts[id] : undefined }))
   return (
-    <Section headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${rows.length}`} sub="finished in the last 7 days">
+    <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${rows.length}`} sub="finished in the last 7 days, before today">
       <div className="home-tools">
         <label htmlFor="runs-search" className="visually-hidden">Search runs</label>
         <input id="runs-search" className="home-search" type="search" value={query} placeholder="Search run id, feature or outcome" autoComplete="off"

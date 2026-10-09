@@ -102,32 +102,38 @@ test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards
   await expect(pane.getByTestId('next-step')).toHaveText('Next: attend the pane')
   await expect(pane.getByTestId('run-cause')).toContainText(PANE_MESSAGE.slice(0, 30))
 
-  // Running: one compact row per running run (a run-row, not a six-line card), each with its lane chips; a sub-header counts
-  // the step each row sits at. The paused runs are not here, and a failed run is finished so it is never a Running row.
-  const running = page.getByTestId('running-runs')
-  await expect(running.locator('.ui-section-header h2')).toHaveText(/^Running · \d+$/)
+  // The section jumps name every section with its count and lead to it.
+  const jumps = page.getByTestId('home-jumps')
+  await expect(jumps.getByRole('link')).toHaveText([/^Needs you\d+$/, /^Today\d+$/, /^Running\d+$/, /^Paused\d+$/, /^Recent\d+$/])
+
+  // Today: every run that moved today and waits on nobody, the running ones first, then the ones paused or finished today,
+  // latest activity first. A running row is a compact row (a run-row, not a six-line card) with its lane chips; a sub-header
+  // counts the step each row sits at, derived from the rows, never a literal total.
+  const today = page.getByTestId('today-runs')
+  await expect(today.locator('.ui-section-header h2')).toHaveText(/^Today · \d+$/)
   for (const runId of [RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET]) {
-    const liveRow = row(running, runId)
+    const liveRow = row(today, runId)
     await expect(liveRow).toHaveAttribute('data-status', 'running')
     expect(await liveRow.evaluate(link => link.parentElement?.className ?? '')).toMatch(/\brun-row-item\b/)
     await expect(liveRow.locator('[data-lane]')).toHaveText([...REVAMP_LANES])
   }
-  for (const runId of PAUSED_OLDEST_FIRST) await expect(row(running, runId)).toHaveCount(0)
-  for (const runId of REVAMP_FAILED_RUNS) await expect(row(running, runId)).toHaveCount(0)
-  // The sub-header counts a step ("<n> at <label>"), derived from the rows, never a literal total.
-  await expect(running.locator('.ui-section-header .ui-sub')).toHaveText(/\d+ at \S/)
+  expect((await ownIds(today)).slice(0, 2).sort()).toEqual([RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET].sort())
+  for (const runId of PAUSED_OLDEST_FIRST.filter(id => id !== RUN_DESK_STALE)) await expect(row(today, runId)).toHaveAttribute('data-status', 'paused')
+  await expect(today.locator('.ui-section-header .ui-sub')).toHaveText(/\d+ at \S/)
 
-  // Paused: its own section of compact rows, oldest-stopped first, each with "since <n> days" in the paused tone, and its
-  // own step sub-header. desk-stale stopped three days before the clock, so it leads and says "since 3 days".
+  // Running: the runs still running since an earlier day; none in this fixture, so no row and the sub-header says so.
+  const running = page.getByTestId('running-runs')
+  await expect(running.locator('.ui-section-header h2')).toHaveText(/^Running · \d+$/)
+  for (const runId of [RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, ...PAUSED_OLDEST_FIRST, ...REVAMP_FAILED_RUNS]) await expect(row(running, runId)).toHaveCount(0)
+
+  // Paused: the runs paused since an earlier day, longest stopped first, each with "since <n> days" in the paused tone and
+  // its own step sub-header. desk-stale stopped three days before the clock, so it is the one here and says "since 3 days".
   const paused = page.getByTestId('paused-runs')
   await expect(paused.locator('.ui-section-header h2')).toHaveText(/^Paused · \d+$/)
   await expect(paused.locator('.ui-section-header .ui-sub')).not.toHaveText('nothing is paused')
-  expect(await ownIds(paused)).toEqual(PAUSED_OLDEST_FIRST)
-  for (const runId of PAUSED_OLDEST_FIRST) {
-    await expect(row(paused, runId)).toHaveAttribute('data-status', 'paused')
-    await expect(row(paused, runId).locator('.run-row-paused-since.tone-pause-text')).toHaveText(/since /)
-  }
-  await expect(row(paused, RUN_DESK_STALE).locator('.run-row-paused-since')).toHaveText(/ · since 3 days$/)
+  expect(await ownIds(paused)).toEqual([RUN_DESK_STALE])
+  await expect(row(paused, RUN_DESK_STALE)).toHaveAttribute('data-status', 'paused')
+  await expect(row(paused, RUN_DESK_STALE).locator('.run-row-paused-since.tone-pause-text')).toHaveText(/ · since 3 days$/)
 
   // Recent: the Failed and Succeeded filter counts equal the rows that filter keeps over the searched set (P2 1).
   const recent = page.getByTestId('recent-runs')
@@ -288,7 +294,7 @@ test(`Runs home with nothing waiting: "Needs you · 0" with the empty state in t
   await page.goto(projectsUrl)
   const needs = page.getByTestId('needs-you')
   // The rest of Runs home still reads its runs, so the empty state is not a page that failed to load.
-  await expect(row(page.getByTestId('running-runs'), RUN_DESK_LIVE)).toHaveCount(1)
+  await expect(row(page.getByTestId('today-runs'), RUN_DESK_LIVE)).toHaveCount(1)
   await expect(needs.locator('.ui-section-header h2')).toHaveText('Needs you · 0')
   await expect(needs.locator('.ui-section-header .ui-sub')).toHaveText('nothing waits on you')
   await expect(needs.locator('li, a[data-run-id]')).toHaveCount(0)
