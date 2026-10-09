@@ -2,7 +2,7 @@
  * The review sidecar in the viewer (docs/PRD_REVIEW_SIDECAR.md 4.9 and section 6): its node page opens on one headline with
  * the pass, open-finding, message and last-pass counts, then the open findings (P0/P1 first), escalations, the closed ones,
  * the messages each lane received, the passes and the handoff, History last; it follows the ledger live while the workers
- * run and stops reading it once the run has finished; on the run page it is an agent node in the launch column that never
+ * run and stops reading it once the run has finished; on the run page it is an agent card in the launch column that never
  * takes the Now banner from a lane. Both phases:
  * the worker phase serves `fixtures/ux-sidecar.ts` through the mocks, the candidate phase seeds the same runs, the live
  * `sidecar.ledger.json` beside an older export section.
@@ -12,7 +12,7 @@ import {
   ESCALATION_TEXT, HANDOFF_GAP, HANDOFF_UNRESOLVED, PANE_BUSY_TEXT, RUN_SIDECAR, RUN_SIDECAR_FROZEN, RUN_SIDECAR_INTEGRATED, RUN_SIDECAR_NO_LEDGER, RUN_SIDECAR_PLAIN, S3_PROBLEM, S4_RESOLUTION,
   SIDECAR_LEDGERS, UX_SIDECAR_WORKFLOW_ID, ledgerAfterNextPass,
 } from './fixtures/ux-sidecar.ts'
-import { apiRun, attach, expectNoExecutionControls, fetchFromPage, graphNode, installHooks, nodeDetail, nodeListItem, phase, renderedText, runUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, fetchFromPage, graphNode, installHooks, nodeDetail, openStepSheet, phase, renderedText, runUrl, stepSheet } from './support.ts'
 
 installHooks()
 
@@ -213,22 +213,27 @@ test(`[scenario:sidecar-run] The run page draws the sidecar as an agent in the l
   await expect(node).toHaveClass(/\bis-agent\b/)
   await expect(node).toHaveAttribute('data-executor', 'agent')
   await expect(node).toHaveAttribute('aria-label', /^Review sidecar, review, running, attempt 1, executed by /)
-  expect(await node.locator('.workflow-node-shape').getAttribute('stroke-dasharray')).toBeNull()
+  // An agent session's card has a solid outline (a verifier's is dashed, the controller's dotted).
+  expect(await node.evaluate(element => (globalThis as unknown as { getComputedStyle: (target: unknown) => { borderTopStyle: string } }).getComputedStyle(element).borderTopStyle)).toBe('solid')
   // The launch column: the same x as the launch nodes, right of the challenge.
   const x = async (id: string) => (await graphNode(page, id).boundingBox())!.x
   expect(await x('sidecar')).toBeCloseTo(await x('launch_engine'), 0)
   expect(await x('sidecar')).toBeGreaterThan(await x('challenge'))
+  // The legend (behind its button) names the six tones and the four outlines; a sidecar adds nothing to it.
+  await page.getByRole('button', { name: 'Legend' }).click()
   const legend = page.getByTestId('graph-legend')
-  await expect(legend.locator('li')).toHaveCount(3)
+  await expect(legend).toBeVisible()
+  await expect(legend.locator('li')).toHaveCount(10)
 
-  // Steps: its row right after the challenge, its span from its first pass, running.
-  const row = nodeListItem(page, 'sidecar')
-  await expect(row).toHaveCount(1)
-  await expect(row).toHaveAttribute('data-status', 'running')
-  const order = await attributes(page.locator('[data-testid="run-node-list"] [data-node-id]'), 'data-node-id')
-  expect(order.slice(0, 3)).toEqual(['challenge', 'sidecar', 'launch_engine'])
-  await expect(row).toContainText('12:10')
-  await expect(row).toContainText('1h44m')
+  // Its step, running, with its span from its first pass: on the card's name and in its sheet's facts.
+  await expect(node).toHaveAttribute('data-status', 'running')
+  await expect(node).toHaveAttribute('aria-label', /, 1h44m$/)
+  await openStepSheet(page, 'sidecar')
+  const facts = stepSheet(page).getByTestId('sheet-facts')
+  await expect(facts).toContainText('12:10')
+  await expect(facts).toContainText('1h44m')
+  await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
+  await expect(stepSheet(page)).toHaveCount(0)
 
   // The Now banner names the lanes, not the sidecar, and reads exactly as the run without a sidecar.
   const banner = page.getByTestId('now-headline')
@@ -244,9 +249,9 @@ test(`[scenario:sidecar-run] The run page draws the sidecar as an agent in the l
   await expect(page.getByTestId('run-now')).toHaveAttribute('data-situation', 'running')
   await expect(page.getByTestId('now-headline')).toHaveText(withSidecar)
   // Without a sidecar: no such node or step, the legend unchanged, and its sidecar route is "not recorded".
+  await expect(graphNode(page, 'launch_engine')).toHaveCount(1)
   await expect(graphNode(page, 'sidecar')).toHaveCount(0)
-  await expect(nodeListItem(page, 'sidecar')).toHaveCount(0)
-  await expect(page.getByTestId('graph-legend').locator('li')).toHaveCount(3)
+  await expect(page.getByTestId('graph-legend').locator('li')).toHaveCount(10)
   // The page itself never asks for a ledger of the run without a sidecar; the one request below is this test's own.
   const plainRequests = () => sidecarRequests.filter(path => path === sidecarApi(RUN_SIDECAR_PLAIN))
   expect(plainRequests()).toEqual([])

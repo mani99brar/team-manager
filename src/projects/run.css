@@ -1,4 +1,4 @@
-/* ---- Run page (docs/PRD_VIEWER_UX.md 4.2-4.4, 10): header, Now banner, lanes, graph, Steps, Activity, step strip ---- */
+/* ---- Run page (docs/PRD_VIEWER_UX.md 4.2-4.4, 10, redrawn by the Signal Box design of 2026-10-09): the Now banner and command block (inside the live dock), the definition graph of the feature page, the node pages' run bar and step strip ---- */
 
 /* Attention and warning tokens for both schemes: text 4.5:1 on its background, the amber ring 3:1 on the surface. */
 :root {
@@ -36,36 +36,11 @@
 /* Section headers of the run and node pages are h3/h4: they take the primitives' h2 look (theme.css). */
 .projects-shell .ui-section-header :is(h3, h4) { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 
-/* ---- Header card: two lines on a desktop, a top rule in the run's tone ---- */
-.run-header { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-top: 4px solid var(--idle); border-radius: var(--radius); padding: 6px 10px; box-shadow: var(--shadow); }
-.run-header.tone-ok { border-top-color: var(--ok); }
-.run-header.tone-run { border-top-color: var(--run); }
-.run-header.tone-warn { border-top-color: var(--warn); }
-.run-header.tone-fail { border-top-color: var(--fail); }
-.run-header.tone-pause { border-top-color: var(--pause); }
-.projects-shell .run-header h2 { font-family: var(--font-display); }
-.run-header-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 30px; }
-/* A long title gives way (ellipsized, in full in its tooltip) so the status, span, chip and toggle keep one row. */
-.workspace-projects .run-header h2 { flex: 0 1 auto; max-width: 29%; min-width: 0; margin: 0; font-size: 1.15rem; line-height: 1.3; display: flex; align-items: baseline; gap: 0 8px; }
-.run-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.run-id { flex: none; font-size: 0.95rem; font-weight: 400; color: var(--text-muted); }
-.run-header-line > .run-status-line, .run-header-line > .run-span { flex: none; }
+/* ---- The status line (the identity line and the node pages' run bar): badge, meaning and chips on one wrapping row ---- */
 .run-status-line { margin: 0; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .run-status-meaning { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
-.run-span { margin: 0; font-size: 0.9rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.run-freshness { flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px; }
-.run-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-height: 24px; font-size: 0.85rem; color: var(--text-muted); overflow-wrap: anywhere; }
-.run-facts-line code, .run-definition code { color: var(--text); }
-.run-definition { white-space: nowrap; }
-.run-definition.projects-warning { white-space: normal; }
-.run-details > summary { cursor: pointer; color: var(--accent); list-style: none; padding: 2px 6px; border-radius: 4px; }
-.run-details > summary::-webkit-details-marker { display: none; }
-.run-details > summary::after { content: ' ▸'; }
-.run-details[open] > summary::after { content: ' ▾'; }
-.run-details > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-.run-details[open] { flex-basis: 100%; }
-.run-details-facts { margin: 4px 0 0; color: var(--text); font-size: 0.9rem; }
 
+/* ---- The run bar of a node page (the run page's identity line lives in signal/signal.css) ---- */
 /* The run bar of a node page: one line, the Now headline ellipsized. */
 .run-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
 .workspace-projects .run-bar h2 { margin: 0; font-size: 1rem; }
@@ -116,33 +91,12 @@
 .command-caveat { margin: 0; font-size: 0.85rem; }
 .command-caption { margin: 0; font-size: 0.8rem; line-height: 18px; color: var(--text-muted); }
 
-/* ---- Lanes line (two or more lanes) as chips: each toned by its steps (a failed step wins, then a running one, then a
-   paused or waiting one; all passed is ok), the steps' glyphs and words unchanged ---- */
-.run-lanes { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; font-size: 0.875rem; line-height: 20px; padding: 2px 0; min-width: 0; }
-.workspace-projects .run-lanes-title { margin: 0; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
-.run-lanes-list { list-style: none; margin: 0; padding: 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
-.run-lanes-list li { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; max-width: 100%; padding: 2px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--idle-soft); }
-.run-lanes-list li:not(:has(.run-lane-step:not(.status-text-succeeded))) { background: var(--ok-soft); border-color: var(--ok); }
-.run-lanes-list li:has(.status-text-paused, .status-text-awaiting_approval) { background: var(--pause-soft); border-color: var(--pause); }
-.run-lanes-list li:has(.status-text-running) { background: var(--run-soft); border-color: var(--run); }
-.run-lanes-list li:has(.status-text-failed) { background: var(--fail-soft); border-color: var(--fail); }
-.run-lane-name { flex: none; font-weight: 600; }
-.run-lane-steps { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.run-lanes-more > summary { cursor: pointer; color: var(--accent); }
-
 /* ---- Tabs above the graph, touching their panel ---- */
 .workspace-projects:has(> .run-view) { padding-top: 8px; }
 .run-views { min-width: 0; }
 .run-tabs { padding: 0; margin: 0 0 4px; flex-wrap: wrap; }
 .run-body, .assignment { min-width: 0; }
 .run-body { display: flex; flex-direction: column; gap: 0; }
-
-/* ---- Pipeline and Steps: side by side once the board fits the compact graph at its 83 % floor and a 400 px Steps column
-   (RunView measures it, node/board.ts), stacked otherwise ---- */
-.run-board { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.run-board > section { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-/* The graph's column takes the graph's full size when there is room, never less than its floor (its min-content). */
-.run-board.is-split { display: grid; grid-template-columns: minmax(min-content, max-content) minmax(400px, 1fr); align-items: start; gap: 12px 16px; }
 
 /* ---- Workflow DAG: fitted to the width, dashes for the executor only, colour for the status only (tone classes) ---- */
 .workflow-graph-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 4px; }
@@ -189,79 +143,6 @@
 .workflow-graph-legend { list-style: none; margin: 0; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 0.8rem; line-height: 20px; color: var(--text-muted); }
 .workflow-graph-legend li { display: inline-flex; align-items: center; gap: 6px; }
 
-/* ---- Steps table: one 28 px line per step ---- */
-.run-steps { min-width: 0; }
-.steps-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
-.run-steps { container: steps / inline-size; }
-.steps-table th, .steps-table td { height: 28px; padding: 0 8px; text-align: left; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--border); font-weight: 400; }
-.steps-table thead th { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; color: var(--text-muted); }
-.steps-table th.step-name { width: 22%; }
-.steps-table .step-started { width: 92px; }
-.steps-table .step-took { width: 88px; }
-.steps-table .step-attempts { width: 184px; }
-.steps-table .step-bar { width: 22%; }
-.steps-hint { caption-side: bottom; text-align: left; padding-top: 6px; font-size: 0.85rem; color: var(--text-muted); }
-.step-link { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--text); font-weight: 600; text-decoration: none; }
-.workspace-projects .step-link { color: var(--text); }
-.step-link:hover .step-label { text-decoration: underline; }
-.step-label { overflow: hidden; text-overflow: ellipsis; }
-.step-glyph { flex: none; width: 1.1em; text-align: center; font-weight: 700; }
-.step-row[data-attention] .step-glyph { color: var(--attention); }
-.step-row:hover { background: var(--surface-alt); }
-.step-marks { letter-spacing: 0.08em; }
-.step-outcome { color: var(--text-muted); }
-.step-bar-track { position: relative; display: block; height: 10px; border-radius: 2px; background: var(--idle-soft); }
-/* A row's tone as a thin rule before its step; the glyph says the status in text. */
-.steps-table .step-row > th.step-name { box-shadow: inset 3px 0 var(--idle); }
-.steps-table .step-row.tone-ok > th.step-name { box-shadow: inset 3px 0 var(--ok); }
-.steps-table .step-row.tone-run > th.step-name { box-shadow: inset 3px 0 var(--run); }
-.steps-table .step-row.tone-warn > th.step-name { box-shadow: inset 3px 0 var(--warn); }
-.steps-table .step-row.tone-fail > th.step-name { box-shadow: inset 3px 0 var(--fail); }
-.steps-table .step-row.tone-pause > th.step-name { box-shadow: inset 3px 0 var(--pause); }
-/* A step that waits on the operator keeps its amber rule over any tone. */
-.steps-table .step-row[data-attention] > th.step-name { box-shadow: inset 3px 0 var(--attention), inset 6px 0 var(--attention); }
-.step-bar-segment { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; }
-/* A shortened silence: a gap in the track. */
-/* A controller outage over a worker's bar: hatched, so it reads apart from the status fill in both schemes. */
-.step-bar-outage { position: absolute; top: 0; bottom: 0; min-width: 2px; background: repeating-linear-gradient(135deg, var(--surface) 0 2px, transparent 2px 5px); box-shadow: inset 0 0 0 1px var(--text-muted); border-radius: 2px; }
-.step-bar-break { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: var(--surface); border-left: 1px dashed var(--text-muted); }
-.step-axis { display: flex; align-items: center; gap: 6px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-.step-axis-rule { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: center; border-bottom: 1px solid var(--border); line-height: 1.2; }
-
-/* ---- Activity: one disclosure per phase, open by default, a left rule in the phase's tone ---- */
-.run-activity { margin-top: 16px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-.activity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
-.activity-group { border: 1px solid var(--border); border-left: 4px solid var(--idle); border-radius: var(--radius); background: var(--surface); padding: 0 10px; min-width: 0; }
-.activity-group.tone-ok { border-left-color: var(--ok); }
-.activity-group.tone-run { border-left-color: var(--run); }
-.activity-group.tone-warn { border-left-color: var(--warn); }
-.activity-group.tone-fail { border-left-color: var(--fail); }
-.activity-group.tone-pause { border-left-color: var(--pause); }
-.activity-group-summary { cursor: pointer; display: flex; align-items: baseline; gap: 10px; padding: 6px 0; list-style: none; }
-.activity-group-summary::-webkit-details-marker { display: none; }
-.activity-group-summary::before { content: '▸'; color: var(--muted); width: 1em; }
-.activity-group[open] > .activity-group-summary::before { content: '▾'; }
-.activity-group-summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-.activity-phase { font-family: var(--font-display); font-weight: 600; }
-.activity-phase-count { color: var(--muted); font-size: 0.85rem; }
-.activity-group[open] > .activity-group-summary { border-bottom: 1px solid var(--border); }
-.activity-list { list-style: none; margin: 0; padding: 0; font-size: 0.875rem; }
-.activity-list > li:last-child { border-bottom: none; }
-.activity-row { display: grid; grid-template-columns: 6.5em minmax(8em, 15em) minmax(0, 1fr) auto; gap: 0 12px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--surface-alt); }
-.activity-time { font-variant-numeric: tabular-nums; color: var(--text-muted); white-space: nowrap; }
-.activity-who { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity-text { min-width: 0; overflow-wrap: anywhere; }
-.activity-row[data-marker='diagnosis'], .activity-row[data-marker='repair'] { background: var(--warn-soft); }
-.activity-row[data-marker='diagnosis'] .activity-who, .activity-row[data-marker='repair'] .activity-who { color: var(--warn); }
-.activity-log { color: var(--text-muted); }
-.activity-gap { display: block; color: var(--text-muted); font-style: italic; padding-left: calc(6.5em + 12px); }
-.activity-open { white-space: nowrap; }
-/* The event number opens the served message under the row; a button, so keyboard and touch reach it. */
-.activity-more { margin-left: 4px; min-height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text-muted); font: inherit; font-size: 0.75rem; font-variant-numeric: tabular-nums; cursor: pointer; vertical-align: baseline; }
-.activity-more:hover { color: var(--text); border-color: var(--border); }
-.activity-more[aria-expanded='true'] { color: var(--text); border-color: var(--text-muted); }
-.activity-raw { display: block; margin-top: 2px; padding: 4px 8px; border-left: 2px solid var(--border); color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
-
 /* ---- Node pages: the sticky step strip and the node in full width ---- */
 .step-strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); min-width: 0; }
 .step-strip-run, .step-strip-step { flex: none; white-space: nowrap; font-size: 0.85rem; }
@@ -286,75 +167,24 @@
 .run-node-area .node-detail h3:focus { outline: none; }
 .run-node-area .node-detail h3:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 
-/* ---- Steps in a narrow column (beside the Pipeline): each row on two lines, the bar kept on the second ---- */
-@container steps (max-width: 680px) {
-  /* The hint follows the rows, as the table's bottom caption does. */
-  .steps-table { display: flex; flex-direction: column; }
-  .steps-table tbody { display: block; }
-  .steps-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  .steps-table caption { display: block; order: 1; }
-  .steps-table tr { display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--border); padding: 2px 0 4px; }
-  .steps-table th, .steps-table td { display: block; height: auto; border-bottom: none; padding: 0 4px; }
-  .steps-table th.step-name { flex: 1 1 calc(100% - 10em); width: auto; min-width: 0; }
-  .steps-table .step-started { flex: 0 0 4.5em; width: auto; text-align: right; }
-  .steps-table .step-took { flex: 0 0 5.5em; width: auto; text-align: right; }
-  .steps-table .step-attempts { flex: none; width: auto; color: var(--muted); font-size: 0.8rem; }
-  .steps-table .step-outcome { flex: 1 1 0; min-width: 0; font-size: 0.8rem; }
-  .steps-table td.step-bar { flex: 0 0 22%; width: auto; }
-}
-
 /* ---- Phones and narrow windows ---- */
 @media (max-width: 760px) {
-  /* The graph is hidden; the Steps table and the step strip are the navigators. */
-  .run-graph, .run-board > .run-graph { display: none; }
-  /* The header collapses to title, status, span and freshness (and a changed definition, which is a warning); every other
-     fact is behind Details. */
-  .run-header-line { gap: 2px 8px; }
-  .run-header { padding: 4px 8px; border-top-width: 3px; }
-  /* The banner headline says it too; screen readers keep it, the badge and the span share a line. */
-  .run-header .run-status-meaning { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  .workspace-projects .run-header h2 { flex-basis: 100%; max-width: none; flex-wrap: wrap; }
-  .run-title { white-space: normal; }
-  .run-freshness { flex-wrap: wrap; }
-  .run-freshness { margin-left: 0; }
-  .run-facts-line, .run-definition:not(.projects-warning) { display: none; }
-  .run-lanes { flex-direction: column; gap: 2px; padding: 2px 0; }
-  .run-lane-steps { white-space: normal; }
   .command-copy, .run-now-more { min-height: 44px; min-width: 44px; }
   /* A command and its Copy button share a line; the command scrolls sideways inside its box, never the page. */
   .command-step-body { flex-wrap: nowrap; }
   .command-step-caption { display: none; }
   .command-line { flex: 1 1 0; }
-  /* The Steps rows stack into two lines; explicit roles keep the table's semantics. */
-  .steps-table, .steps-table tbody { display: block; }
-  .steps-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-  .steps-table caption { display: block; }
-  /* Line 1: the step, its start and how long it took; line 2: its attempts and outcome. */
-  .steps-table tr { display: flex; flex-wrap: wrap; align-items: center; border-bottom: 1px solid var(--border); padding: 2px 0 4px; }
-  .steps-table th, .steps-table td { display: block; height: auto; border-bottom: none; padding: 0 4px; }
-  .steps-table th.step-name { flex: 1 1 calc(100% - 9em); width: auto; min-width: 0; }
-  .steps-table .step-started { flex: 0 0 4em; width: auto; text-align: right; }
-  .steps-table .step-took { flex: 0 0 5em; width: auto; text-align: right; }
-  .steps-table .step-attempts { flex: none; width: auto; color: var(--text-muted); font-size: 0.8rem; }
-  .steps-table .step-outcome { flex: 1 1 0; min-width: 0; font-size: 0.8rem; }
-  .steps-table .step-bar { display: none; }
-  .step-link { min-height: 44px; }
-  .activity-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .activity-text { grid-column: 1 / -1; }
-  .activity-gap { padding-left: 0; }
-  .activity-open { grid-column: 3; grid-row: 1; }
   /* One sideways-scrolling row of chips on a phone. */
   .step-strip-list { grid-template-rows: auto; }
   .step-strip-list li { grid-column: auto; grid-row: auto; }
   .step-strip-nav { display: none; }
   .step-chip { min-height: 44px; }
   /* Every other control is a full tap target too. */
-  .activity-head .button { min-height: 44px; }
-  .run-details > summary, .command-legend > summary, .run-lanes-more > summary { display: inline-flex; align-items: center; min-height: 44px; }
-  .activity-open, .step-strip-run, .run-now-open { display: inline-flex; align-items: center; min-height: 44px; }
+  .run-details > summary, .command-legend > summary { display: inline-flex; align-items: center; min-height: 44px; }
+  .step-strip-run, .run-now-open { display: inline-flex; align-items: center; min-height: 44px; }
 }
 
-/* ---- viewer-refine: the fix loop in the graph, the lanes strip, the steps phases and the inline diff ---- */
+/* ---- viewer-refine: the fix loop's return mark on the definition graph, the next step's disclosure and the inline diff ---- */
 
 /* The return mark: a repair session answers the step it points back to (a drawing from the fix loop, dashed, edge tone). */
 .workflow-return {
@@ -366,19 +196,6 @@
 }
 .workflow-return-arrow { fill: var(--edge); }
 
-/* The lanes strip: per-lane head with the model pin chip and the repair round count. */
-.run-lane-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.run-lane-status { font-variant-numeric: tabular-nums; }
-.run-lane-rounds { font-size: 12px; }
-
-/* Two deadline chips beside the state line. */
-.run-deadline-chips { display: inline-flex; gap: 6px; margin-left: 6px; vertical-align: middle; }
-
 /* The next step's "All steps" disclosure: the first command shows, the rest fold. */
 .command-all-steps { margin-top: 6px; }
 .command-all-steps > summary {
@@ -388,21 +205,6 @@
   padding: 2px 0;
 }
 .command-all-steps[open] > summary { margin-bottom: 4px; }
-
-/* The Steps table grouped by phase: a quiet header row per phase, repair rows indented beneath their step. */
-.steps-phase-head .steps-phase-label {
-  text-align: left;
-  padding: 3px 8px 1px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  line-height: 1.2;
-  color: var(--muted);
-}
-.steps-phase-group:first-of-type .steps-phase-head .steps-phase-label { padding-top: 0; }
-.step-row-repair .step-name { padding-left: 20px; }
-.step-row-repair .step-label { color: var(--muted); }
 
 /* The review diff rendered inline: a file list, each file a disclosure of its hunks in add/remove/context tones. */
 .review-diff-inline { margin: 12px 0; }
@@ -439,7 +241,7 @@
 .diff-line-remove { background: var(--fail-soft); }
 .diff-sign { display: inline-block; width: 1ch; }
 
-/* Phone: the steps table and the diff scroll inside their own box, not the page; every run-view button is a 44 px target. */
+/* Phone: the diff scrolls inside its own box, not the page; every run-view button is a 44 px target. */
 @media (max-width: 760px) {
   .diff-hunks, .review-diff-files { max-width: 100%; }
   .run-view button { min-height: 44px; }

@@ -277,6 +277,8 @@
 .app-projects { height: auto; min-height: 100%; gap: 4px; }
 .app-projects .breadcrumbs li { min-height: 28px; }
 .app-projects .breadcrumbs a, .app-projects .breadcrumb-current { padding: 2px 6px; }
+/* A workflow named by its feature can run to a paragraph: the trail keeps one line per crumb and says the rest in the tooltip. */
+.app-projects .breadcrumbs a, .app-projects .breadcrumb-current { max-width: min(48ch, 60vw); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .workspace-projects { overflow: visible; flex: 1 0 auto; padding: 16px; }
 .workspace-projects h2 { margin: 0 0 8px; font-size: 1.15rem; overflow-wrap: anywhere; }
 .workspace-projects h3 { margin: 16px 0 8px; font-size: 1rem; }

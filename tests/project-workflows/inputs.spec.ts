@@ -19,7 +19,7 @@ import {
   uiPathQuote,
   uiTask,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, openTask, phase, renderedText, runUrl, taskDetails } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, taskDetails } from './support.ts'
 
 installHooks()
 
@@ -29,14 +29,15 @@ const assignmentWorker = (page: Page, lane: string) => page.locator(`[data-testi
 
 test(`[scenario:run-assignment] The Assignment tab shows what the run was asked to do, with tasks rendered as Markdown (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED))
+  // The run page has no tabs: its identity line links to the Assignment view, which carries the Run views tablist.
   const tablist = page.getByRole('tablist', { name: 'Run views' })
-  await expect(tablist.getByRole('tab')).toHaveText(['Run', 'Assignment'])
-  const runTab = page.getByTestId('tab-run')
-  const assignmentTab = page.getByTestId('tab-assignment')
-  await expect(runTab).toHaveAttribute('aria-selected', 'true')
-  await expect(assignmentTab).toHaveAttribute('aria-selected', 'false')
+  await expect(tablist).toHaveCount(0)
+  const assignmentLink = page.getByTestId('tab-assignment')
+  await expect(assignmentLink).toHaveText('Assignment')
+  await expect(assignmentLink).toHaveAttribute('href', `${runUrl(RUN_SUCCEEDED)}/assignment`)
 
-  // The run header carries the pinned inputs as facts, deadlines computed from the automatic settings.
+  // The identity line keeps the pinned inputs as facts behind Details, deadlines computed from the automatic settings.
+  await openRunDetails(page)
   const facts = page.getByTestId('run-inputs-facts')
   await expect(facts).toContainText(FEATURE_NAME)
   await expect(facts).toContainText(BASE_COMMIT.slice(0, 12))
@@ -47,7 +48,10 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
   await expect(facts).toContainText('verified-feature-branch')
   await expect(page.getByTestId('inputs-none')).toHaveCount(0)
 
-  await assignmentTab.click()
+  await assignmentLink.click()
+  await expect(tablist.getByRole('tab')).toHaveText(['Run', 'Assignment'])
+  const runTab = tablist.getByTestId('tab-run')
+  const assignmentTab = tablist.getByTestId('tab-assignment')
   await expect(assignmentTab).toHaveAttribute('aria-selected', 'true')
   await expect(runTab).toHaveAttribute('aria-selected', 'false')
   const assignment = page.getByTestId('assignment')
@@ -81,16 +85,17 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'run-assignment')
 
-  // Tabs are keyboard operable: Left from Assignment selects Run and the graph is back.
+  // Tabs are keyboard operable: Left from Assignment selects Run and the graph is back (the run page has no tablist, so
+  // there is no Run tab left to hold the focus).
   await assignmentTab.focus()
   await page.keyboard.press('ArrowLeft')
-  await expect(runTab).toBeFocused()
-  await expect(runTab).toHaveAttribute('aria-selected', 'true')
+  await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED)}$`))
   await expect(page.getByTestId('workflow-graph')).toBeVisible()
   await expect(assignment).toHaveCount(0)
 
   // A manual run states its mode and has no automatic deadlines to show.
   await page.goto(runUrl(RUN_AWAITING))
+  await openRunDetails(page)
   await expect(page.getByTestId('run-inputs-facts')).toContainText('manual')
   await expect(page.getByTestId('run-inputs-facts')).not.toContainText('review 30m')
 })
@@ -243,6 +248,7 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
 test(`[scenario:inputs-legacy] A run exported before run inputs says they are not recorded, without an error (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_LEGACY))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
+  await openRunDetails(page)
   await expect(page.getByTestId('inputs-none')).toContainText('Inputs not recorded for this run')
   await expect(page.getByTestId('run-inputs-facts')).toHaveCount(0)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
@@ -267,8 +273,9 @@ test(`[scenario:inputs-legacy] A run exported before run inputs says they are no
 
 test(`[scenario:inputs-paths-redacted] No absolute path from the seeded inputs reaches the rendered assignment or worker panels (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED))
+  await openRunDetails(page)
   await expect(page.getByTestId('run-inputs-facts')).toBeVisible()
-  await renderedText(page.locator('.run-summary'))
+  await renderedText(page.getByTestId('run-header'))
   await page.getByTestId('tab-assignment').click()
   const assignment = page.getByTestId('assignment')
   await expect(assignment.getByTestId('assignment-worker')).toHaveCount(2)

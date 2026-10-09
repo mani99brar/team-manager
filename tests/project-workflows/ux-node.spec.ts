@@ -4,13 +4,14 @@
  * strip with the controller's diagnosis and the operator's repair, and the run's next step when the node is its focus),
  * then a section index whose counts match the sections, where empty sections are absent and History comes last. A
  * result shared by the launch and verify nodes is said once: its facts on verify, the worker's narrative on launch. Every
- * earlier attempt has its own page, reached from the strip and from Activity.
+ * earlier attempt has its own page, reached from the strip; the run page's step sheet lists the failed attempts' events and
+ * leads to the step's page.
  */
 import { test, expect, type Page, type Route } from '@playwright/test'
 import { OUTPUT_COMMIT_UI, RUN_FAILED } from './fixtures.ts'
 import { RUN_IDENTICAL, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
 import { NODE_ASSUMPTION, NODE_VERIFY_FAILURE, NODE_WORKER_SUMMARY, REPAIRED_COMMIT, RUN_THIRD_ATTEMPT, UX_NODE_WORKFLOW_ID } from './fixtures/ux-node.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, openStepSheet, phase, runUrl, stepSheet } from './support.ts'
 
 installHooks()
 
@@ -118,7 +119,7 @@ test(`[scenario:node-header] A node opens on its status by cause, its timing and
   await expectNoExecutionControls(page)
 })
 
-test(`[scenario:node-attempts] Earlier attempts have their own pages, linked from the attempt strip once their result loads and from Activity (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:node-attempts] Earlier attempts have their own pages, linked from the attempt strip once their result loads; the run page's step sheet lists the failed attempts and leads to the step (${phase})`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   // Attempt 1's result is held until released, and attempt 2's is gone: a chip waits for its result, and never links a missing one.
   let release!: () => void
@@ -181,13 +182,16 @@ test(`[scenario:node-attempts] Earlier attempts have their own pages, linked fro
   await expect(page.getByTestId('attempt-banner')).toHaveCount(0)
   await expect(page.getByTestId('gate-outcome')).toHaveAttribute('data-passed', 'true')
 
-  // Activity's attempt rows open that attempt's page.
+  // On the run page the step's sheet lists both failed attempts among its events and names the latest attempt; its step
+  // page's strip opens attempt 2.
   await page.goto(nodeUrl())
-  const failed = page.getByTestId('run-timeline').locator('li[data-node-id="verify_ui"][data-status="failed"]')
-  await expect(failed).toHaveCount(2)
-  await expect(failed.first().getByRole('link')).toHaveAttribute('href', attemptUrl('verify_ui', 1))
-  await expect(failed.last().getByRole('link')).toHaveAttribute('href', attemptUrl('verify_ui', 2))
-  await failed.last().getByRole('link').click()
+  await openStepSheet(page, 'verify_ui')
+  await expect(stepSheet(page).getByTestId('sheet-facts').locator('div').filter({ hasText: /^Attempt/ }).locator('dd')).toHaveText('3')
+  await expect(stepSheet(page).getByTestId('sheet-events').locator('li').filter({ has: page.locator('.ew', { hasText: /^failed$/ }) })).toHaveCount(2)
+  await stepSheet(page).getByTestId('sheet-open-page').click()
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'verify_ui')
+  await expect(chip(page, 2)).toHaveAttribute('href', attemptUrl('verify_ui', 2))
+  await chip(page, 2).click()
   await expect(page.getByTestId('node-attempt')).toHaveText('2')
   await expect(page.getByTestId('attempt-banner')).toContainText('You are viewing attempt 2 of 3.')
   await expect(page.getByTestId('node-attempt-revision')).toHaveText(' (2 of 3 on this revision)')

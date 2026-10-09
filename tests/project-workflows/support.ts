@@ -22,6 +22,31 @@ export const graphNode = (page: Page, nodeId: string) => page.locator(`[data-tes
 export const nodeListItem = (page: Page, nodeId: string) => page.locator(`[data-testid="run-node-list"] [data-node-id="${nodeId}"]`)
 export const nodeDetail = (page: Page) => page.getByTestId('node-detail')
 export const taskDetails = (page: Page) => page.getByTestId('task-details')
+/** The run page's step sheet (the Signal Box design): opened by selecting a card on the stage. */
+export const stepSheet = (page: Page) => page.getByTestId('node-sheet')
+/** The run page's live dock: the Now banner (`run-now`), the latest events and the figures live inside it. */
+export const liveDock = (page: Page) => page.getByTestId('live-dock')
+
+/** Opens a step's sheet from the stage: the card is clicked where it lies (a card behind the dock or off the stage still opens). */
+export async function openStepSheet(page: Page, nodeId: string) {
+  await expect(graphNode(page, nodeId)).toHaveCount(1)
+  await graphNode(page, nodeId).dispatchEvent('click')
+  await expect(stepSheet(page)).toHaveAttribute('data-node-id', nodeId)
+}
+
+/** Opens a step's page from the run page: its sheet, then "Open step page". */
+export async function openStep(page: Page, nodeId: string) {
+  await openStepSheet(page, nodeId)
+  await stepSheet(page).getByTestId('sheet-open-page').click()
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', nodeId)
+}
+
+/** The identity line keeps the pinned facts (branch, base commit, mode, deadlines, times) behind Details; this opens it. */
+export async function openRunDetails(page: Page) {
+  const details = page.getByTestId('run-details')
+  if ((await details.getAttribute('open')) === null) await details.locator('summary').click()
+  await expect(details).toHaveAttribute('open', '')
+}
 
 /** A launch node shows its task behind a disclosure, closed by default (PRD_VIEWER_CLARITY 4.2); this opens it. */
 export async function openTask(page: Page) {
@@ -32,7 +57,9 @@ export async function openTask(page: Page) {
 
 /** No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only selectors). */
 export async function expectNoExecutionControls(page: Page) {
-  const controls = workspace(page).locator('button, input, select, textarea, [role="menuitem"]')
+  // The stage's step cards, the dock's event rows and the dock bar are buttons that only select a step; their text names steps
+  // ("Launch UI worker", "Integrate candidate"), so they are left out of the wording check.
+  const controls = workspace(page).locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]), input, select, textarea, [role="menuitem"]')
   await expect(controls.filter({ hasText: /approve|retry|launch|start|resume|delete|cancel|integrate|edit|save/i })).toHaveCount(0)
   await expect(page.locator('form')).toHaveCount(0)
 }

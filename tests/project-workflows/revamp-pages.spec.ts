@@ -1,7 +1,7 @@
 /**
- * Projects viewer revamp, lane `pages` (docs/PRD_VIEWER_REVAMP.md sections 5.3-5.5 and 7): the run page opens on a header card
- * with a rule in the run's tone, the lanes as chips, Pipeline and Steps side by side on a wide screen with graph nodes filled
- * by status, and Activity grouped by phase with every group open; a review node opens on four figures, its findings as
+ * Projects viewer revamp, lane `pages` (docs/PRD_VIEWER_REVAMP.md sections 5.3-5.5 and 7), on the Signal Box run page: the
+ * identity line and the Now banner carry the run's tone, each lane's cards name the lane, the graph fits the stage with its
+ * cards toned by status, and the live dock lists the latest events newest first; a review node opens on four figures, its findings as
  * severity-striped cards in P0/P1/P2 then lane order, one filter row whose toggles combine, the blocking card first and the
  * reviewer cards. The `revamp-pages` runs (`fixtures/ux-revamp-pages.ts`) are dated before 2026-03-13; the clock sits just after.
  */
@@ -12,14 +12,15 @@ import { RUN_REJECTED_CHECKS, UX_VERIFY_WORKFLOW_ID } from './fixtures/ux-verify
 import {
   BLOCKED_FINDINGS, DONE_FINDINGS, REVAMP_NOW, REVAMP_PAGES_WORKFLOW_ID, REVAMP_QUESTION, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING,
 } from './fixtures/ux-revamp-pages.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, phase, runUrl, workspace } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, stepSheet, workspace } from './support.ts'
 
 installHooks()
 
+/** The run page's stage controls that are read-only selectors, not actions: the step cards, the dock's event rows and its bar. */
+const STAGE_SELECTORS = ':not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"])'
+
 const revampUrl = (runId: string, nodeId?: string) => runUrl(runId, nodeId, REVAMP_PAGES_WORKFLOW_ID)
 const now = (page: Page) => page.getByTestId('run-now')
-const activity = (page: Page) => page.getByTestId('run-timeline')
-const groups = (page: Page) => activity(page).getByTestId('activity-group')
 const findings = (page: Page) => page.getByTestId('review-findings')
 const cards = (page: Page) => findings(page).getByTestId('finding')
 const filters = (page: Page) => findings(page).getByTestId('findings-filters')
@@ -57,18 +58,15 @@ async function openRun(page: Page, url: string, situation: string) {
   await expect(now(page)).toHaveAttribute('data-situation', situation)
 }
 
-test(`[scenario:revamp-run] The run page shows the toned header rule, lane chips, Pipeline and Steps side by side on a wide screen and stacked narrower, graph nodes filled by status, and Activity grouped by phase, every group open (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:revamp-run] The run page shows the run's tone on the identity line and the Now banner, the lanes on their cards, the graph fitted to the stage on a wide screen and narrower, cards toned by status, and the latest events newest first (${phase})`, async ({ page }, testInfo) => {
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   await openRun(page, revampUrl(RUN_REVAMP_DONE), 'succeeded')
 
-  // The header card: a top rule in the run's tone (succeeded: ok), the status badge and its words kept.
+  // The identity line carries the run's tone (succeeded: ok), the status badge and its words kept.
   const header = page.getByTestId('run-header')
   await expect(header).toHaveAttribute('data-tone', 'ok')
   await expect(header).toHaveClass(/tone-ok/)
-  const rule = await style(header, 'borderTopColor', 'borderTopWidth')
-  expect(rule.borderTopColor).toBe(await token(page, '--ok'))
-  expect(parseFloat(rule.borderTopWidth)).toBeGreaterThanOrEqual(3)
   await expect(page.getByTestId('run-status').locator('.status-badge')).toHaveText('Succeeded')
   await expect(page.getByTestId('run-status-meaning')).toBeVisible()
 
@@ -78,121 +76,73 @@ test(`[scenario:revamp-run] The run page shows the toned header rule, lane chips
   expect(parseFloat(banner.borderLeftWidth)).toBeGreaterThanOrEqual(3)
   expect(banner.backgroundColor).toBe(await token(page, '--ok-soft'))
 
-  // The lanes line as chips, one per lane, toned by its steps (all passed: ok), with the same text as before.
-  const lanes = page.getByTestId('run-lanes').locator('li[data-lane]')
-  await expect(lanes).toHaveCount(2)
-  expect(await attributes(lanes, 'data-lane')).toEqual(['ui', 'adapter'])
-  await expect(lanes.first()).toContainText('worker ✓')
-  for (const lane of await lanes.all()) {
-    const chip = await style(lane, 'borderTopLeftRadius', 'backgroundColor')
-    expect(parseFloat(chip.borderTopLeftRadius)).toBeGreaterThanOrEqual(10)
-    expect(chip.backgroundColor).toBe(await token(page, '--ok-soft'))
+  // Each lane's steps carry the lane on their cards, toned by their status (all passed: ok).
+  for (const lane of ['ui', 'adapter']) {
+    for (const id of [`launch_${lane}`, `verify_${lane}`]) {
+      await expect(graphNode(page, id)).toHaveAccessibleName(new RegExp(`, lane ${lane}, `))
+      await expect(graphNode(page, id)).toHaveAttribute('data-tone', 'ok')
+      await expect(graphNode(page, id).locator('.lane')).toHaveText(lane)
+    }
   }
 
-  // Pipeline and Steps side by side at 1440 px: the graph fits its column without scrolling, Steps to its right, tops aligned.
-  const pipeline = page.getByTestId('run-pipeline')
-  const steps = page.getByTestId('run-steps')
-  await expect(pipeline.getByRole('heading', { name: 'Pipeline' })).toBeVisible()
-  await expect(steps.getByRole('heading', { name: 'Steps' })).toBeVisible()
-  await expect(page.getByTestId('run-board')).toHaveAttribute('data-layout', 'side-by-side')
-  const left = await box(pipeline)
-  const right = await box(steps)
-  expect(left.x + left.width, 'Steps sit to the right of the Pipeline').toBeLessThanOrEqual(right.x)
-  expect(Math.abs(left.y - right.y), 'Pipeline and Steps start on one line').toBeLessThan(4)
-  const scroller = page.getByTestId('workflow-graph').locator('xpath=..')
-  const { scroll, client } = await scroller.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
-  expect(scroll, 'the graph does not scroll sideways beside the Steps').toBeLessThanOrEqual(client)
+  // The graph fits the stage at 1440 px: the stage does not scroll sideways, the last step is in view, nor does the page.
+  const stage = page.getByTestId('run-stage')
+  await expect(stage).toHaveAttribute('data-direction', 'LR')
+  const fit = await stage.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
+  expect(fit.scroll, 'the stage does not scroll sideways').toBeLessThanOrEqual(fit.client)
   await expect(graphNode(page, 'integrate')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1440)
 
-  // Graph nodes filled by status: the soft tone for the fill, the tone for the stroke; the glyph repeats it; three legend entries.
-  for (const id of ['challenge', 'verify_ui', 'integrate']) {
+  // Cards toned by status: the band in the tone, the status word on the tone's soft colour, the glyph repeats it; the legend.
+  for (const id of ['challenge', 'verify_ui', 'integrate', 'review']) {
     const node = graphNode(page, id)
     await expect(node).toHaveAttribute('data-tone', 'ok')
-    const shape = await style(node.locator('.workflow-node-shape'), 'fill', 'stroke')
-    expect(shape.fill).toBe(await token(page, '--ok-soft'))
-    expect(shape.stroke).toBe(await token(page, '--ok'))
-    await expect(node.locator('.workflow-node-glyph')).toHaveText('✓')
+    expect((await style(node.locator('.band'), 'backgroundColor')).backgroundColor).toBe(await token(page, '--ok'))
+    const word = await style(node.locator('.n-word'), 'backgroundColor', 'color')
+    expect(word.backgroundColor).toBe(await token(page, '--ok-soft'))
+    expect(word.color).toBe(await token(page, '--ok'))
+    await expect(node.locator('.n-word')).toHaveText('succeeded')
+    await expect(node.locator('.n-top use')).toHaveAttribute('href', '#sb-g-ok')
   }
-  await expect(page.getByTestId('graph-legend').locator('li')).toHaveCount(3)
-  // Steps keep their rows and their bars take the tone colours.
-  await expect(nodeListItem(page, 'review').locator('.step-bar-segment')).toHaveCount(1)
-  expect((await style(nodeListItem(page, 'review').locator('.step-bar-segment'), 'backgroundColor')).backgroundColor).toBe(await token(page, '--ok'))
+  await page.getByRole('button', { name: 'Legend' }).click()
+  await expect(page.getByTestId('graph-legend').locator('li')).toHaveCount(10)
+  await page.getByRole('button', { name: 'Legend' }).click()
 
-  // Activity grouped by phase, in run order, every group open so every row is visible without a click.
-  await expect(groups(page)).toHaveCount(4)
-  expect(await attributes(groups(page), 'data-phase')).toEqual(['challenge', 'workers', 'verification', 'review'])
-  await expect(groups(page).locator('summary')).toContainText(['Challenge', 'Workers', 'Freeze and verification', 'Review and integration'])
-  // A group says where it stands in words too, so a closed one is never colour only.
-  await expect(groups(page).locator('summary')).toContainText(['all passed', 'all passed', 'all passed', 'all passed'])
-  expect(await attributes(groups(page), 'data-tone')).toEqual(['ok', 'ok', 'ok', 'ok'])
-  for (const group of await groups(page).all()) await expect(group).toHaveAttribute('open', '')
-  await expect(groups(page).last()).toHaveAttribute('open', '')
-  const rows = activity(page).locator('li')
-  const count = await rows.count()
-  expect(count).toBeGreaterThanOrEqual(16)
-  const order = await rows.allInnerTexts()
+  // The live dock's latest events: five rows, newest first, the last event (the integration at 09:53:52) on top.
+  const rows = liveDock(page).getByTestId('live-dock-events').locator('li')
+  await expect(rows).toHaveCount(5)
+  await expect(rows.first().locator('time')).toHaveAttribute('datetime', /T09:53:52/)
+  const times = await attributes(rows.locator('time'), 'datetime')
+  expect(times, 'newest first').toEqual([...times].sort().reverse())
   for (const row of await rows.all()) await expect(row).toBeVisible()
-  await expect(rows.first()).toContainText('09:00:00')
-  await expect(rows.last()).toContainText('09:53:52')
-  // Each step's rows sit in its own phase: the launches with the workers, the integration with the review.
-  expect(await groups(page).nth(1).locator('li[data-node-id="launch_adapter"]').count()).toBeGreaterThan(0)
-  await expect(groups(page).nth(1).locator('li[data-node-id^="verify_"]')).toHaveCount(0)
-  expect(await groups(page).nth(3).locator('li[data-node-id="integrate"]').count()).toBeGreaterThan(0)
-  await page.evaluate('window.scrollTo(0, 0)')
+  // Each step keeps all its events, newest first, in its sheet: the integration's last row is the run's last event.
+  await openStepSheet(page, 'integrate')
+  await expect(stepSheet(page).getByTestId('sheet-events').locator('li').first().locator('time')).toHaveAttribute('datetime', /T09:53:52/)
+  await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
   await attach(page, testInfo, 'revamp-run')
 
-  // Collapse all closes every group; Expand all brings back every row, in the same order.
-  const expand = page.getByTestId('activity-expand')
-  await expect(expand).toHaveText('Collapse all')
-  await expand.click()
-  for (const group of await groups(page).all()) await expect(group).not.toHaveAttribute('open', '')
-  await expect(rows.first()).toBeHidden()
-  await expect(expand).toHaveText('Expand all')
-  await expand.click()
-  for (const group of await groups(page).all()) await expect(group).toHaveAttribute('open', '')
-  await expect(rows).toHaveCount(count)
-  for (const row of await rows.all()) await expect(row).toBeVisible()
-  expect(await rows.allInnerTexts()).toEqual(order)
-  // One group closes on its own summary and opens again.
-  await groups(page).first().locator('summary').click()
-  await expect(groups(page).first()).not.toHaveAttribute('open', '')
-  await expect(expand).toHaveText('Expand all')
-  await groups(page).first().locator('summary').click()
-  await expect(expand).toHaveText('Collapse all')
-
-  // Newest first reverses the groups and the rows inside them: the first row is the last event.
-  await page.getByTestId('activity-order').click()
-  expect(await attributes(groups(page), 'data-phase')).toEqual(['review', 'verification', 'workers', 'challenge'])
-  await expect(rows.first()).toContainText('09:53:52')
-  expect(await rows.allInnerTexts()).toEqual([...order].reverse())
-  // Each phase keeps its tone and its words in either order.
-  expect(await attributes(groups(page), 'data-tone')).toEqual(['ok', 'ok', 'ok', 'ok'])
-  await expect(groups(page).locator('summary')).toContainText(['all passed', 'all passed', 'all passed', 'all passed'])
-  await page.getByTestId('activity-order').click()
-  await expect(rows.first()).toContainText('09:00:00')
-
-  // Narrower than both fit, they stack: Pipeline above Steps, each the full width.
+  // Narrower, the graph is fitted again: still left to right, the last step in view, the page never wider than the window.
   await page.setViewportSize({ width: 1024, height: 900 })
-  await expect(page.getByTestId('run-board')).toHaveAttribute('data-layout', 'stacked')
-  const above = await box(pipeline)
-  const below = await box(steps)
-  expect(above.y + above.height).toBeLessThanOrEqual(below.y)
-  expect(Math.abs(above.x - below.x)).toBeLessThan(2)
+  await expect(stage).toHaveAttribute('data-direction', 'LR')
+  await expect(graphNode(page, 'integrate')).toBeInViewport()
+  await expect(graphNode(page, 'challenge')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1024)
 
-  // A failed review: its node and its Steps bar take the fail tone, its glyph says it; the run header's rule is fail.
+  // A failed review: its card takes the fail tone and its glyph says it; the identity line's tone is fail.
   await page.setViewportSize({ width: 1440, height: 900 })
   await openRun(page, revampUrl(RUN_REVAMP_BLOCKED), 'review_blocked')
   await expect(page.getByTestId('run-header')).toHaveAttribute('data-tone', 'fail')
-  expect((await style(page.getByTestId('run-header'), 'borderTopColor')).borderTopColor).toBe(await token(page, '--fail'))
   await expect(graphNode(page, 'review')).toHaveAttribute('data-tone', 'fail')
-  expect((await style(graphNode(page, 'review').locator('.workflow-node-shape'), 'fill')).fill).toBe(await token(page, '--fail-soft'))
-  await expect(graphNode(page, 'review').locator('.workflow-node-glyph')).toHaveText('✗')
+  expect((await style(graphNode(page, 'review').locator('.band'), 'backgroundColor')).backgroundColor).toBe(await token(page, '--fail'))
+  expect((await style(graphNode(page, 'review').locator('.n-word'), 'backgroundColor')).backgroundColor).toBe(await token(page, '--fail-soft'))
+  await expect(graphNode(page, 'review').locator('.n-top use')).toHaveAttribute('href', '#sb-g-fail')
   await expect(graphNode(page, 'approval')).toHaveAttribute('data-tone', 'idle')
-  expect((await style(nodeListItem(page, 'review').locator('.step-bar-segment'), 'backgroundColor')).backgroundColor).toBe(await token(page, '--fail'))
+  const blockedBanner = await style(now(page), 'borderLeftColor', 'backgroundColor')
+  expect(blockedBanner.borderLeftColor).toBe(await token(page, '--fail'))
+  expect(blockedBanner.backgroundColor).toBe(await token(page, '--fail-soft'))
 
-  // A running run with a question waiting: the header and the waiting step take the needs-you tone; Activity has two phases so far.
+  // A running run with a question waiting: the identity line and the waiting step take the needs-you tone; the question is
+  // the latest event.
   await openRun(page, revampUrl(RUN_REVAMP_RUNNING), 'question')
   await expect(now(page)).toContainText('adapter')
   await expect(page.getByTestId('run-header')).toHaveAttribute('data-tone', 'warn')
@@ -201,34 +151,37 @@ test(`[scenario:revamp-run] The run page shows the toned header rule, lane chips
   expect(waitingBanner.borderLeftColor).toBe(await token(page, '--warn'))
   expect(waitingBanner.backgroundColor).toBe(await token(page, '--warn-soft'))
   await expect(graphNode(page, 'launch_adapter')).toHaveAttribute('data-attention', 'question')
-  // What waits on the operator wins over the status (tone.ts `stateTone`): the node and its Steps row are warn, the glyph `?`.
+  // What waits on the operator wins over the status (tone.ts `stateTone`): the card is warn, the glyph the needs-you one.
   await expect(graphNode(page, 'launch_adapter')).toHaveAttribute('data-tone', 'warn')
-  await expect(graphNode(page, 'launch_adapter').locator('.workflow-node-glyph')).toHaveText('?')
-  await expect(nodeListItem(page, 'launch_adapter')).toHaveClass(/tone-warn/)
-  await expect(nodeListItem(page, 'launch_ui')).toHaveClass(/tone-run/)
-  await expect(groups(page).last()).toHaveAttribute('data-tone', 'warn')
-  await expect(groups(page).last().locator('summary')).toContainText('waiting on you')
+  await expect(graphNode(page, 'launch_adapter').locator('.n-top use')).toHaveAttribute('href', '#sb-g-warn')
   await expect(graphNode(page, 'launch_ui')).toHaveAttribute('data-tone', 'run')
-  expect(await attributes(groups(page), 'data-phase')).toEqual(['challenge', 'workers'])
-  await expect(groups(page).last().locator('li').last()).toContainText(REVAMP_QUESTION)
+  await expect(liveDock(page).getByTestId('live-dock-bar')).toContainText('needs you')
+  await expect(liveDock(page).getByTestId('live-dock-events').locator('li').first()).toContainText(REVAMP_QUESTION)
+  await openStepSheet(page, 'launch_adapter')
+  await expect(stepSheet(page).getByTestId('sheet-questions')).toContainText(REVAMP_QUESTION)
   await expectNoExecutionControls(page)
 
-  // The node-less diagnosis and repair rows sit, open, in the phase where they occurred.
+  // The node-less diagnosis and repair rows show in the latest events, leading to the verification step they concern.
   await openRun(page, runUrl(RUN_REPAIRED, undefined, UX_RUN_WORKFLOW_ID), 'interrupted')
-  for (const marker of ['diagnosis', 'repair']) {
-    const row = activity(page).locator(`li[data-marker="${marker}"]`)
+  const repairedRows = liveDock(page).getByTestId('live-dock-events').locator('li')
+  for (const text of ['ui failed identically on attempts 1 and 2', 'Repair 1 applied']) {
+    const row = repairedRows.filter({ hasText: text })
     await expect(row).toBeVisible()
-    await expect(groups(page).filter({ has: page.locator(`li[data-marker="${marker}"]`) })).toHaveAttribute('data-phase', 'verification')
+    await expect(row.locator('button')).toHaveAttribute('data-go', 'verify_ui')
   }
 
-  // At 390 px the board is one column: the Steps take the full width, the page never scrolls sideways.
+  // At 390 px the stage takes the full width and lays the flow top to bottom; the page never scrolls sideways.
   await page.setViewportSize({ width: 390, height: 844 })
   await openRun(page, revampUrl(RUN_REVAMP_DONE), 'succeeded')
-  const narrow = await box(page.getByTestId('run-node-list'))
-  expect(narrow.width).toBeGreaterThan(330)
+  // The stage spans the content column, as wide as the identity line inside the frame's 1 px borders.
+  const narrow = await box(page.getByTestId('run-stage'))
+  const column = await box(page.getByTestId('run-header'))
+  expect(column.width).toBeGreaterThan(330)
+  expect(narrow.width).toBeGreaterThanOrEqual(column.width - 2)
+  await expect(page.getByTestId('run-stage')).toHaveAttribute('data-direction', 'TB')
   expect(await pageWidth(page)).toBeLessThanOrEqual(390)
-  await expect(groups(page)).toHaveCount(4)
-  await expect(activity(page).locator('li').first()).toBeVisible()
+  await expect(liveDock(page).getByTestId('live-dock-events').locator('li')).toHaveCount(5)
+  await expect(liveDock(page).getByTestId('live-dock-events').locator('li').first()).toBeVisible()
   await expectNoExecutionControls(page)
 })
 
@@ -462,11 +415,11 @@ test(`One clock: a running run's ages tick together from the run page clock; a f
   await page.clock.runFor(3_000)
   await expect(question).toContainText('(5 min ago)')
 
-  // On the run page the header's span and the Now banner run off the same clock: a minute later both have moved.
+  // On the run page the dock's running span and the Now banner run off the same clock: a minute later both have moved.
   await page.goto(revampUrl(RUN_REVAMP_RUNNING))
   await expect(now(page)).toHaveAttribute('data-situation', 'question')
-  const span = page.getByTestId('run-span')
-  await expect(span).toContainText('running')
+  const span = liveDock(page).getByTestId('run-span')
+  await expect(span).toHaveText(/^\d+h\d+m$|^\d+m\d+s$/)
   const before = await span.innerText()
   await page.clock.runFor(61_000)
   await expect(span).not.toHaveText(before)
@@ -474,7 +427,7 @@ test(`One clock: a running run's ages tick together from the run page clock; a f
   // A finished run: the page reads the same after two minutes, polls included.
   await page.goto(revampUrl(RUN_REVAMP_DONE))
   await expect(now(page)).toHaveAttribute('data-situation', 'succeeded')
-  await expect(groups(page)).toHaveCount(4)
+  await expect(liveDock(page).getByTestId('live-dock-events').locator('li')).toHaveCount(5)
   const still = await settled(page)
   await page.clock.runFor(120_000)
   expect(await workspace(page).innerText()).toBe(still)
@@ -531,14 +484,16 @@ const contrasts = (roots: Locator, where: string): Promise<Reading[]> => roots.e
   return readings
 }, where)
 
-test(`The run and node pages' chips, figures, phase summaries, cards, gate lines, check chips and step strip read at 4.5:1 in light and dark (${phase})`, async ({ page }) => {
+test(`The run and node pages' identity line, live dock, step cards, step sheet, figures, cards, gate lines, check chips and step strip read at 4.5:1 in light and dark (${phase})`, async ({ page }) => {
   test.setTimeout(180_000)
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   // Each page and the elements of its own measured on it.
   const pages: { url: string; ready: (page: Page) => Promise<void>; roots: string[] }[] = [
-    { url: revampUrl(RUN_REVAMP_DONE), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'succeeded') }, roots: ['[data-testid="run-header"]', '[data-testid="run-now"]', '[data-testid="run-lanes"] li[data-lane]', '[data-testid="activity-group"] > summary', '[data-testid="run-steps"] .ui-section-header', '[data-testid="run-pipeline"] .ui-section-header'] },
-    { url: revampUrl(RUN_REVAMP_RUNNING), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'question') }, roots: ['[data-testid="run-now"] .run-now-headline', '[data-testid="run-lanes"] li[data-lane]', '[data-testid="activity-group"] > summary'] },
+    { url: revampUrl(RUN_REVAMP_DONE), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'succeeded') }, roots: ['[data-testid="run-header"]', '[data-testid="run-now"]', '[data-testid="live-dock-bar"]', '[data-testid="live-dock-events"]', '[data-testid="live-dock-figures"]', '[data-testid="workflow-graph"] [data-graph-node]'] },
+    { url: revampUrl(RUN_REVAMP_RUNNING), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'question') }, roots: ['[data-testid="run-now"] .run-now-headline', '[data-testid="live-dock-bar"]', '[data-testid="live-dock-events"]', '[data-testid="workflow-graph"] [data-graph-node]'] },
+    // The step sheet of the blocked review: its facts, reviewers, findings with their severity chips, and events.
+    { url: revampUrl(RUN_REVAMP_BLOCKED), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'review_blocked'); await openStepSheet(page, 'review') }, roots: ['[data-testid="node-sheet"] .sh-head', '[data-testid="sheet-facts"]', '[data-testid="sheet-reviewers"]', '[data-testid="sheet-findings"]', '[data-testid="sheet-events"]'] },
     { url: revampUrl(RUN_REVAMP_BLOCKED, 'review'), ready: async page => { await expect(cards(page)).toHaveCount(4) }, roots: ['[data-testid="review-figures"] .ui-figure', '[data-testid="finding"] .finding-card-head', '[data-testid="findings-filters"] button', '[data-testid="reviewer-entry"]', '[data-testid="run-node-list"] .step-chip', '[data-testid="blocking-finding"]'] },
     { url: revampUrl(RUN_REVAMP_DONE, 'verify_ui'), ready: async page => { await expect(page.getByTestId('checks-list').locator('.check-exit')).toHaveCount(3) }, roots: ['[data-testid="verify-figures"] .ui-figure', '.gate-line', '[data-testid="checks-list"] .check-exit', '[data-testid="run-node-list"] .step-chip'] },
     // A failed gate (ux-verify's rejected checks): the fail-toned gate line, rejected rows on --fail-soft with their reasons.
@@ -576,23 +531,27 @@ test(`The run and node pages' chips, figures, phase summaries, cards, gate lines
 
 /**
  * The read-only allow-list on the run and node pages (PRD_VIEWER_UX 12.3 plus PRD_VIEWER_REVAMP section 8, and the controls
- * PRD_VIEWER_UX itself specifies on these pages: the Activity order, the controller log, an event's message, Less after More,
- * Hide contents after Show contents, Rendered/Source, a screenshot dialog's Close), each filter label being a reviewer or lane id
- * with its count; no button holds a path or a command.
+ * PRD_VIEWER_UX itself specifies on these pages: an event's message, Less after More, Hide contents after Show contents,
+ * Rendered/Source, a screenshot dialog's Close; the Signal Box stage's Legend, zoom, fit and sheet Close, read by their
+ * accessible names), each filter label being a reviewer or lane id with its count; no button holds a path or a command. The
+ * stage's step cards and the dock's event rows and bar are read-only selectors whose text is the run's own data (step labels,
+ * event messages); they are left out of the allow-list and checked to open the step's sheet and nothing else.
  */
 test(`Every button on the run and node pages is on the read-only allow-list and holds no path or command (${phase})`, async ({ page }) => {
   test.setTimeout(120_000)
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   const ids = ['general', 'coverage', 'ui', 'adapter']
-  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Expand all|Collapse all|Newest first|Controller log \\(\\d+\\)|Rendered|Source|Close|All \\d+|#\\d+|message|Open only \\d+|(?:${ids.join('|')}) \\d+)$`)
+  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Rendered|Source|Close|All \\d+|Show all \\d+|#\\d+|message|Open only \\d+|Legend|Zoom out|Zoom in|Fit the graph|Close step details|(?:${ids.join('|')}) \\d+)$`)
   const command = /[/\\$`]|\b(npm|npx|git|workflow|node|python|bash)\b/
   const seen = new Set<string>()
   const check = async (where: string) => {
     // Read every button at once, so a re-render between reads cannot skip one.
-    const buttons = await workspace(page).locator('button').evaluateAll(elements => elements.map(element => {
-      const node = element as unknown as { textContent: string | null; querySelector: (selector: string) => unknown }
-      return { text: (node.textContent ?? '').replace(/\s+/g, ' ').trim(), image: node.querySelector('img') !== null }
+    const buttons = await workspace(page).locator(`button${STAGE_SELECTORS}`).evaluateAll(elements => elements.map(element => {
+      const node = element as unknown as { textContent: string | null; querySelector: (selector: string) => unknown; getAttribute: (name: string) => string | null }
+      // An icon button (the stage's zoom, fit and sheet Close) is read by its accessible name.
+      const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim()
+      return { text: text === '' ? node.getAttribute('aria-label') ?? '' : text, image: node.querySelector('img') !== null }
     }))
     expect(buttons.length, `${where} has buttons`).toBeGreaterThan(0)
     for (const { text, image } of buttons) {
@@ -606,18 +565,34 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
   }
   for (const [runId, situation] of [[RUN_REVAMP_DONE, 'succeeded'], [RUN_REVAMP_BLOCKED, 'review_blocked'], [RUN_REVAMP_RUNNING, 'question']] as const) {
     await openRun(page, revampUrl(runId), situation)
-    await expect(groups(page).first()).toBeVisible()
+    await expect(liveDock(page).getByTestId('live-dock-events').locator('li').first()).toBeVisible()
     await check(runId)
-    // The Activity tools in their other states.
-    await page.getByTestId('activity-expand').click()
-    await page.getByTestId('activity-order').click()
-    await check(`${runId} (collapsed, newest first)`)
-    await page.getByTestId('activity-order').click()
-    await page.getByTestId('activity-expand').click()
+    // The stage's tools in their other states: the legend open, a step's sheet open, the dock folded.
+    await page.getByRole('button', { name: 'Legend' }).click()
+    await openStepSheet(page, 'review')
+    await check(`${runId} (legend and review sheet open)`)
+    await liveDock(page).getByTestId('live-dock-bar').click()
+    await expect(liveDock(page)).toHaveAttribute('data-open', 'false')
+    await check(`${runId} (dock folded)`)
+    await liveDock(page).getByTestId('live-dock-bar').click()
+    await expect(liveDock(page)).toHaveAttribute('data-open', 'true')
+  }
+  // The read-only selectors: every card and every event row only opens its step's sheet; the run's page stays put.
+  await openRun(page, revampUrl(RUN_REVAMP_BLOCKED), 'review_blocked')
+  const runPage = page.url()
+  for (const row of await liveDock(page).getByTestId('live-dock-events').locator('button.lv-row').all()) {
+    const target = await row.getAttribute('data-go')
+    await row.click()
+    await expect(stepSheet(page)).toHaveAttribute('data-node-id', target!)
+    expect(page.url()).toBe(runPage)
+  }
+  for (const nodeId of await attributes(page.getByTestId('workflow-graph').locator('[data-graph-node]'), 'data-graph-node')) {
+    await openStepSheet(page, nodeId!)
+    expect(page.url()).toBe(runPage)
   }
   // Every step of the finished run, the blocked review and the waiting worker.
   await openRun(page, revampUrl(RUN_REVAMP_DONE), 'succeeded')
-  const steps = await attributes(page.getByTestId('run-node-list').locator('[data-node-id]'), 'data-node-id')
+  const steps = await attributes(page.getByTestId('workflow-graph').locator('[data-graph-node]'), 'data-graph-node')
   expect(steps.length).toBeGreaterThanOrEqual(10)
   for (const nodeId of steps) {
     await page.goto(revampUrl(RUN_REVAMP_DONE, nodeId!))
@@ -633,5 +608,5 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
   await expect(page.getByTestId('worker-figures')).toBeVisible()
   await check(`${RUN_REVAMP_RUNNING}/launch_adapter`)
   // The new run-page tools and the filter row were among the buttons read.
-  for (const text of ['Collapse all', 'Expand all', 'Newest first', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2']) expect(seen.has(text), text).toBe(true)
+  for (const text of ['Legend', 'Zoom in', 'Fit the graph', 'Zoom out', 'Close step details', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2']) expect(seen.has(text), text).toBe(true)
 })

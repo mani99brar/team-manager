@@ -1,30 +1,26 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
-  buildTimeline, deriveAttention, deriveNow, laneLines, nowResultUris, textToString,
+  buildTimeline, deriveAttention, deriveNow, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
 import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { AttackPassBody } from './node/AttackSections.tsx'
-import { LanesLine, NowBanner } from './NowBanner.tsx'
-import { boardSplitWidth } from './node/board.ts'
-import { nodePhase } from './node/model.ts'
-import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
+import { AppLink, ErrorPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
-import { assignmentPathname, attemptPathname, runPathname } from './routes.ts'
-import { RunBar, RunHeader } from './RunHeader.tsx'
-import { isAttackNode, isSidecarNode, lanePinText, type LanePin } from './status.ts'
+import { assignmentPathname, runPathname } from './routes.ts'
+import { RunBar } from './RunHeader.tsx'
+import { IdentityLine } from './signal/IdentityLine.tsx'
+import { SignalRun } from './signal/SignalRun.tsx'
+import { isAttackNode, isSidecarNode } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
-import { repairRoundCount, stepRows, withoutGlyph } from './steps.ts'
-import { isRepairNode } from './dag.ts'
-import { Activity, StepsTable } from './StepsTimeline.tsx'
+import { stepRows, withoutGlyph } from './steps.ts'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
-import { stateTone } from './tone.ts'
+import { stateTone, TONE_LABEL } from './tone.ts'
 import { useNow, useTimeReference, useTimeZone } from './useNow.ts'
 import { useResource, type ResourceMeta } from './useResource.ts'
 import { useRunResults, useRunReview } from './useRunData.ts'
-import { WorkflowGraph, type GraphNodeView } from './WorkflowGraph.tsx'
 import './run.css'
 
 type Tab = 'run' | 'assignment'
@@ -66,29 +62,11 @@ function emptyTimeline(detail: RunDetail): Timeline {
 }
 
 /**
- * Whether the board is wide enough for the Pipeline and the Steps side by side (`boardSplitWidth`): measured on the board
- * itself, so it follows the space the page gives it, not only the window.
- */
-function useBoardSplit(needed: number) {
-  const [board, setBoard] = useState<HTMLDivElement | null>(null)
-  const [split, setSplit] = useState(false)
-  useLayoutEffect(() => {
-    if (board === null) return
-    const measure = () => setSplit(board.clientWidth >= needed)
-    measure()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(measure)
-    observer.observe(board)
-    return () => observer.disconnect()
-  }, [board, needed])
-  return [setBoard, split] as const
-}
-
-/**
- * One run (docs/PRD_VIEWER_UX.md 4.2-4.4). The run page: the header, the Now banner with the likely next step, the lanes
- * line, then the Run and Assignment tabs; the Run view holds the fitted graph, the Steps table and Activity. A node page:
- * the one-line run bar, the tabs, the sticky step strip and the node in full width. One clock ticks here while the run can
- * still change; selecting a step moves the focus to its heading, and coming back returns it to the step's row.
+ * One run (docs/PRD_VIEWER_UX.md 4.2-4.4, redrawn by the Signal Box design of 2026-10-09). The run page: the identity line,
+ * then the stage with the run's graph, the live dock (the situation and the likely next step) and the step sheet. The
+ * Assignment view keeps the identity line over the assignment. A node page: the one-line run bar, the tabs, the sticky step
+ * strip and the node in full width. One clock ticks here while the run can still change; selecting a step's page moves the
+ * focus to its heading, and coming back returns it to the step's card on the stage.
  */
 export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
   const { summary, definition, snapshot } = detail
@@ -138,35 +116,18 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const settled = run !== null && (inputs.status === 'ready' || inputs.status === 'error') && (reviewPath === null || review.status === 'ready' || review.status === 'error') && pending === 0
   const now = useMemo(() => (settled && run ? deriveNow(run) : null), [settled, run])
   const attention = useMemo(() => (run ? deriveAttention(run) : null), [run])
-  const lanes = useMemo(() => (run ? laneLines(run) : []), [run])
   // buildTimeline keeps its own cache (PRD 5.1), which deriveNow and laneLines share; the memo only spares the clock ticks
   // its key check. The Steps rows are read on every tick, since a running step's duration grows with the clock.
   const timeline = useMemo(() => (run ? buildTimeline(run) : null), [run])
   const rows = stepRows(detail, timeline ?? emptyTimeline(detail), { now: clock, attention: attention ?? undefined })
-  const labels = useMemo(() => new Map(definition.nodes.map(node => [node.node_id, node.label])), [definition.nodes])
-  const phaseOf = useMemo(() => {
-    const phases = new Map(definition.nodes.map(node => [node.node_id, nodePhase(node)]))
-    return (nodeId: string) => phases.get(nodeId) ?? null
-  }, [definition.nodes])
-  const [boardRef, split] = useBoardSplit(useMemo(() => boardSplitWidth(definition.nodes), [definition.nodes]))
   // The run's one tone (docs/PRD_VIEWER_REVAMP.md 4): what waits on the operator wins over the status.
   const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null })
-  const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
-    const state = snapshotById.get(node.node_id)!
-    return { node_id: node.node_id, label: node.label, kind: node.kind, depends_on: node.depends_on, status: state.status, attempt: state.attempt, attention: attention?.nodes.get(node.node_id)?.kind ?? null }
-  })
 
-  // The in-run fix loop (export 1.10.0): the repair sessions, the lane pins and the review-node label the graph and the lanes
-  // strip read. The repair nodes are projected into `definition`/`snapshot` by the server; here we only draw their marks.
+  // The in-run fix loop (export 1.10.0): the review node's round line follows the fix loop, not the snapshot attempt
+  // (docs/PRD_VIEWER_REFINE 5.2, decisions [L12]/[L13]). The repair nodes themselves are projected into `definition`/`snapshot`
+  // by the server; the stage model reads their entries.
   const fixLoopRepairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
   const fixLoopRounds = detail.fixLoop && 'review_rounds' in detail.fixLoop ? detail.fixLoop.review_rounds : []
-  const pinOf = (lane: string): LanePin => inputsData?.workers.find(worker => worker.node_id === lane)?.roles ?? null
-  const laneMeta = new Map(lanes.map(line => [line.lane, {
-    pin: pinOf(line.lane),
-    rounds: fixLoopRepairs.filter(repair => repair.lane === line.lane).reduce((max, repair) => Math.max(max, repair.round), 0),
-  }]))
-  const graphReturns = fixLoopRepairs.map(repair => ({ from: repair.node_id, to: repair.blocked_step }))
-  // The review node's label follows the fix loop, not the snapshot attempt (docs/PRD_VIEWER_REFINE 5.2, decisions [L12]/[L13]).
   const reviewMeta = (): string | null => {
     const running = fixLoopRepairs.find(repair => repair.trigger === 'review' && repair.review_round !== null && REPAIR_RUNNING_STATUSES.has(repair.status))
     if (running?.review_round != null) return `round ${running.review_round + 1} in review`
@@ -179,15 +140,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     }
     return null
   }
-  const pinnedStepTotal = definition.nodes.filter(node => !isRepairNode(node.node_id)).length
-  const repairRounds = repairRoundCount(detail)
-  const graphMeta = (node: GraphNodeView): string | null => {
-    const repair = fixLoopRepairs.find(entry => entry.node_id === node.node_id)
-    if (repair) return `round ${repair.round} of ${repair.rounds} · ${repair.trigger}`
-    if (node.node_id === 'review') return reviewMeta()
-    if (node.node_id.startsWith('launch_')) return lanePinText(pinOf(node.node_id.slice('launch_'.length)))
-    return null
-  }
+  const reviewRound = reviewMeta()
 
   // A requirement quote handed from a review finding to a worker's task; it applies to one node and is dropped once applied or when leaving it.
   const [pendingHighlight, setPendingHighlight] = useState<Highlight | null>(null)
@@ -200,7 +153,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
-  const attemptHref = useCallback((nodeId: string, attempt: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, nodeId, attempt), [scope])
   const tabHref = (id: Tab) => (id === 'assignment' ? assignmentPathname(scope.projectId, scope.workflowId, scope.runId) : runHref)
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
@@ -238,7 +190,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       window.scrollTo(0, 0)
       document.getElementById('node-detail-title')?.focus({ preventScroll: true })
     } else if (previous !== null) {
-      document.querySelector<HTMLElement>(`[data-testid="run-node-list"] [data-node-id="${CSS.escape(previous)}"] a`)?.focus()
+      document.querySelector<HTMLElement>(`[data-testid="workflow-graph"] [data-graph-node="${CSS.escape(previous)}"]`)?.focus({ preventScroll: true })
     }
   }, [selectedNodeId, selectedAttempt])
 
@@ -287,61 +239,76 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     </div>
   )
 
+  // The run-level records without a step of their own open in the sheet of the step they belong to: the attack pass on its
+  // node, the multi-provider panel on the review's.
+  const sheetExtras = (nodeId: string): ReactNode => {
+    const node = definition.nodes.find(candidate => candidate.node_id === nodeId)
+    if (!node) return null
+    if (hasAttack && isAttackNode(node)) {
+      return (
+        <section className="sb-sheet-record" data-testid="attack-section" aria-labelledby="run-attack-title">
+          <h4 id="run-attack-title">Attack pass</h4>
+          <AttackPassBody record={attack} onRetry={reloadAttack} />
+        </section>
+      )
+    }
+    if (hasPanels && nodeId === 'review' && node.kind === 'review') {
+      return (
+        <section className="sb-sheet-record" data-testid="panel-section" aria-labelledby="run-panels-title">
+          <h4 id="run-panels-title">Panel</h4>
+          <ProviderPanelBody record={panels} onRetry={reloadPanels} />
+        </section>
+      )
+    }
+    return null
+  }
+  const attentionWord = attention?.top ? `${TONE_LABEL.warn.toLowerCase()}: ${attention.top.kind === 'question' ? 'a question waits' : attention.top.kind === 'pane' ? 'a pane needs attention' : 'an approval waits'}` : null
+  const identity = (other: { label: string; href: string; testId: string }) => (
+    <IdentityLine detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} clock={clock} tone={tone} attentionWord={attentionWord} other={other} onNavigate={onNavigate} />
+  )
+
   return (
     <div className="run-view" data-testid="run-view" data-run-id={summary.run_id} data-run-status={summary.status}>
-      {selectedNodeId === null ? (
-        <>
-          <RunHeader detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} timeline={timeline} clock={clock} tone={tone} />
-          {events.status === 'error'
-            ? <ErrorPanel error={events.error} what="The run's events" onRetry={reloadEvents}><span>Without them the situation and the next step cannot be read.</span></ErrorPanel>
-            : <NowBanner now={now} clock={clock} focusHref={now?.focus ? nodeHref(now.focus.node_id) : null} onNavigate={onNavigate} />}
-          <LanesLine lines={lanes} meta={laneMeta} />
-        </>
-      ) : (
-        <RunBar detail={detail} now={now} clock={clock} runHref={runHref} freshness={freshness} onNavigate={onNavigate} />
+      {selectedNodeId === null && tab === 'run' && (
+        <div className="sb-run">
+          {identity({ label: 'Assignment', href: assignmentPathname(scope.projectId, scope.workflowId, scope.runId), testId: 'tab-assignment' })}
+          {events.status === 'error' && (
+            <ErrorPanel error={events.error} what="The run's events" onRetry={reloadEvents}><span>Without them the situation and the next step cannot be read.</span></ErrorPanel>
+          )}
+          <SignalRun
+            detail={detail}
+            rows={rows}
+            timeline={timeline}
+            events={eventsData ?? []}
+            inputs={inputsData}
+            review={reviewData}
+            attention={attention}
+            now={now}
+            clock={clock}
+            reviewRound={reviewRound}
+            nodeHref={nodeHref}
+            onNavigate={onNavigate}
+            sheetExtras={sheetExtras}
+          />
+        </div>
       )}
 
-      <div className="run-views">
-      {tabs}
+      {selectedNodeId === null && tab === 'assignment' && (
+        <>
+          {identity({ label: 'Run graph', href: runHref, testId: 'run-graph-link' })}
+          <div className="run-views">
+            {tabs}
+            <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-tab-assignment" />
+          </div>
+        </>
+      )}
 
-      {tab === 'assignment' ? (
-        <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-tab-assignment" />
-      ) : (
-        <div role="tabpanel" id="run-panel-run" aria-labelledby="run-tab-run" className="run-body">
-          {selectedNodeId === null ? (
-            <>
-              {/* Pipeline and Steps side by side where both fit at the graph's legible floor, stacked otherwise (docs/PRD_VIEWER_REVAMP.md 5.3). */}
-              <div ref={boardRef} className={split ? 'run-board is-split' : 'run-board'} data-testid="run-board" data-layout={split ? 'side-by-side' : 'stacked'}>
-                <section className="run-graph run-pipeline" data-testid="run-pipeline" aria-labelledby="run-pipeline-title">
-                  <header className="ui-section-header">
-                    <h3 id="run-pipeline-title">Pipeline</h3>
-                    <span className="ui-sub">{pinnedStepTotal} steps{repairRounds > 0 ? ` · ${repairRounds} repair ${repairRounds === 1 ? 'round' : 'rounds'}` : ''}</span>
-                  </header>
-                  <WorkflowGraph title={`Graph of run ${summary.run_id}`} nodes={graphNodes} selectedId={null} focusId={now?.focus?.node_id ?? null} onSelect={nodeId => onNavigate(nodeHref(nodeId))} compact metaOf={graphMeta} returns={graphReturns} />
-                </section>
-                <StepsTable rows={rows} detail={detail} timeline={timeline} now={clock} live={summary.status === 'running' || summary.status === 'awaiting_approval'} nodeHref={nodeHref} onNavigate={onNavigate} />
-              </div>
-              {hasAttack && (
-                <section className="run-attack" data-testid="attack-section" aria-labelledby="run-attack-title">
-                  <header className="ui-section-header">
-                    <h3 id="run-attack-title">Attack pass</h3>
-                  </header>
-                  <AttackPassBody record={attack} onRetry={reloadAttack} />
-                </section>
-              )}
-              {hasPanels && (
-                <section className="run-panels" data-testid="panel-section" aria-labelledby="run-panels-title">
-                  <header className="ui-section-header">
-                    <h3 id="run-panels-title">Panel</h3>
-                  </header>
-                  <ProviderPanelBody record={panels} onRetry={reloadPanels} />
-                </section>
-              )}
-              {(events.status === 'loading' || events.status === 'idle') && <LoadingPanel>Loading the run's events…</LoadingPanel>}
-              {timeline && <Activity timeline={timeline} labels={labels} phaseOf={phaseOf} attentionOf={nodeId => attention?.nodes.get(nodeId)?.kind ?? null} nodeHref={nodeHref} attemptHref={attemptHref} onNavigate={onNavigate} />}
-            </>
-          ) : (
-            <>
+      {selectedNodeId !== null && (
+        <>
+          <RunBar detail={detail} now={now} clock={clock} runHref={runHref} freshness={freshness} onNavigate={onNavigate} />
+          <div className="run-views">
+            {tabs}
+            <div role="tabpanel" id="run-panel-run" aria-labelledby="run-tab-run" className="run-body">
               <StepStrip detail={detail} rows={rows} current={selectedNodeId} runHref={runHref} nodeHref={nodeHref} onNavigate={onNavigate} />
               <div className="run-node-area">
                 {(selectedDefinition === null || selectedState === null) && (
@@ -382,11 +349,10 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                   />
                 )}
               </div>
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        </>
       )}
-      </div>
     </div>
   )
 }

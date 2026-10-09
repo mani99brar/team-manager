@@ -10,7 +10,7 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { PROJECT, RUN_FAILED, RUN_SUCCEEDED, WORKFLOW_ID } from './fixtures.ts'
 import { RUN_SHORT_CHECK, UX_TIME_WORKFLOW_ID } from './fixtures/ux-time.ts'
-import { apiRun, attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl, workflowUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, installHooks, nodeDetail, openRunDetails, phase, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -41,9 +41,12 @@ test.describe('in a zone west of UTC', () => {
     await expect(view).toHaveAttribute('data-run-status', 'succeeded')
 
     // The run started at 10:00 UTC, 02:00 in Los Angeles; every time carries its ISO value and the full UTC time as tooltip.
-    // The start is read against today, so it names its day; the page's other times are read against the start's day.
+    // The start is read against today, so it names its day; the page's other times are read against the start's day. The
+    // created and export times are pinned facts behind the identity line's Details.
+    await openRunDetails(page)
     const created = timeAt(view, '2026-03-01 10:00:00 UTC')
     const updated = timeAt(view, '2026-03-01 10:45:00 UTC')
+    await expect(created).toBeVisible()
     await expect(created).toHaveText('yesterday 02:00')
     await expect(created).toHaveAttribute('datetime', /^2026-03-01T10:00:00/)
     await expect(updated).toHaveText('02:45')
@@ -63,6 +66,7 @@ test.describe('in a zone west of UTC', () => {
     await page.clock.setFixedTime('2026-09-24T12:00:00Z')
     await page.reload()
     await expect(zoneButton(page, 'UTC')).toHaveAttribute('aria-pressed', 'true')
+    await openRunDetails(page)
     await expect(timeAt(page.getByTestId('run-view'), '2026-03-01 10:00:00 UTC')).toHaveText('Mar 1 10:00')
     await expect(timeAt(page.getByTestId('run-view'), '2026-03-01 10:45:00 UTC')).toHaveText('10:45')
 
