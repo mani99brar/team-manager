@@ -183,7 +183,7 @@
             },
             {
               "id": "controls-answer",
-              "description": "On a run where lane ui waits on question 2, the Controls list and the dock offer Answer the question; its dialog shows the question text and a text field; Confirm stays disabled while the field is empty; an answer is sent once and the record shows succeeded with the controller's output line"
+              "description": "On a run where lane ui waits on question 2 and has a pane recorded in terminals.json, the Controls list and the dock offer Answer the question; its dialog shows the question text and a text field; Confirm stays disabled while the field is empty; an answer is sent once and the record shows succeeded with the controller's output line"
             },
             {
               "id": "controls-typed-confirm",
