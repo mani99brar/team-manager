@@ -1294,7 +1294,9 @@ def pass_main(argv=None):
     directory = args.directory.resolve()
     try:
         from .abandon import refuse_abandoned
+        from .accept import refuse_accepted
         refuse_abandoned(directory)
+        refuse_accepted(directory)
         plan = read_json(directory / "plan.json")
         if not has_sidecar(plan):
             raise ValueError("This run has no review sidecar (its feature declares no sidecar, or it was prepared before 2.3.0)")

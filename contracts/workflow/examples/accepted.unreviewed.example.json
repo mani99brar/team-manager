@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "run_id": "shared-memory-004",
+  "candidate": "1032b1032b1032b1032b1032b1032b1032b1032b",
+  "reason": "No review ran before the operator merged the candidate by hand.",
+  "by": "operator",
+  "accepted_at": "2026-10-08T12:05:00Z",
+  "on_main": false,
+  "review": "none",
+  "open_findings": []
+}

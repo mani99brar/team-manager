@@ -1219,7 +1219,8 @@ def pass_main(argv=None) -> None:
     `automatic-supervisor.lock` and then the `controller.lock`, non-blocking (as clean does), and holds both for its whole
     run, so it is refused with "Another controller owns this run" while either is busy and an automatic run can neither slip
     a pass between its steps nor start a second child beside it. Also refused for a plan without `attack`, before a candidate
-    exists, and when attack.json already exists."""
+    exists, and when attack.json already exists. It also refuses a run accepted by an operator override ([L6], design note 2):
+    an accepted run is integrated and changes no more, so no paid attacker/skeptic session runs against it."""
     from .actor import add_actor_argument, require_actor
     parser = argparse.ArgumentParser(prog="python -m workflow attack-pass", description="Run the attack pass once in the foreground.")
     parser.add_argument("run", help="the run directory")
@@ -1234,6 +1235,11 @@ def pass_main(argv=None) -> None:
         raise SystemExit("No candidate yet: the attack pass runs at the review gate, after the candidate is frozen.")
     if record_path(directory).exists():
         raise SystemExit(f"{record_path(directory)} already exists: the attack pass has run (inspect it, or clean to rerun).")
+    from .accept import refuse_accepted
+    try:
+        refuse_accepted(directory)  # An accepted run (operator override) changes no more: [L6], design note 2.
+    except ValueError as error:
+        raise SystemExit(str(error))
     try:
         # Both the supervisor and the controller lock, non-blocking and held for the whole foreground run (clean.py, [L14]).
         with run_lock(directory, "automatic-supervisor.lock"), run_lock(directory):

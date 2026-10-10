@@ -24,7 +24,7 @@ import os
 ACTORS = ("operator", "maintainer", "panel")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
 OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean", "tryout",
-                           "--allow-untried", "attack-pass", "attack-label"})
+                           "--allow-untried", "attack-pass", "attack-label", "accept"})
 # The only actions the panel may run: the three operator decisions it takes within the night's goals ([G2], [G4]).
 PANEL_ACTIONS = frozenset({"answer", "accept-challenge", "approve"})
 # What every printed next-step command carries: they are addressed to the operator.
