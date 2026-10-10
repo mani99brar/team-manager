@@ -1,0 +1,41 @@
+{
+  "version": "2.9.0",
+  "name": "Run controls (PRD_RUN_CONTROLS): the run page can run the controller's own recovery and decision commands (restart or pause the supervisor, retry a check, reconcile, resume or accept the design challenge, release a hold, answer, approve, repair a lane, abandon, clean) as the operator, behind pairing, origin and host checks, confirmations and a stale-state guard, and shows each control's progress and result; off by default, no engine change",
+  "branch_prefix": "feature/run-controls",
+  "prd": "docs/PRD_RUN_CONTROLS.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "server",
+      "task": "server-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md",
+      "skills": [
+        "impeccable"
+      ]
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critique": {
+    "lanes": [
+      "viewer"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "timeout_minutes": 45
+  },
+  "critical": false,
+  "tryout": false
+}
