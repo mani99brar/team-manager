@@ -1,0 +1,1445 @@
+diff --git a/contracts/projects/triage.ts b/contracts/projects/triage.ts
+index 55fb74f..984ea0f 100644
+--- a/contracts/projects/triage.ts
++++ b/contracts/projects/triage.ts
+@@ -9,7 +9,7 @@
+  * placeholders; every other value the viewer cannot know (a feature name, a run id, a commit, a reason) stays a `<…>`
+  * placeholder. Nothing here runs a command or changes a run.
+  */
+-import { isBlockingFinding, type ReviewResult, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
++import { isBlockingFinding, type ReviewResult, type RunAccepted, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
+ import type { WorkerResult, WorkflowEvent } from '../workflow/v1.ts'
+ 
+ export type NodeStatus = RunDetail['snapshot']['status']
+@@ -114,7 +114,7 @@ export type Timeline = {
+ 
+ /** The `run-now[data-situation]` ids, in the order `deriveNow` checks them (6.2). */
+ export type Situation = 'question' | 'pane_attention' | 'awaiting_approval' | 'challenge_held' | 'challenge_paused' | 'interrupted' | 'blocked_before_freeze'
+-  | 'blocked_identical' | 'check_failed' | 'review_blocked' | 'running' | 'succeeded' | 'inactive' | 'no_rule_matched'
++  | 'blocked_identical' | 'check_failed' | 'review_blocked' | 'running' | 'accepted' | 'succeeded' | 'inactive' | 'no_rule_matched'
+ 
+ /**
+  * Rich text: plain strings and times the UI renders in the viewer's zone (`clock` as `<time>`), relative to its ticking
+@@ -149,8 +149,8 @@ export type Now = {
+   situation: Situation
+   /** Rule 5's case: (a) a controller row, (b) the focus node's own note, (c) the controller not running, (d) a repair not yet continued. */
+   interruption: 'a' | 'b' | 'c' | 'd' | null
+-  tone: 'failed' | 'blocked' | 'paused' | 'interrupted' | 'waiting' | 'running' | 'succeeded' | 'inactive'
+-  glyph: '✗' | '‖' | '?' | '●' | '✓' | '○'
++  tone: 'failed' | 'blocked' | 'paused' | 'interrupted' | 'waiting' | 'running' | 'succeeded' | 'override' | 'inactive'
++  glyph: '✗' | '‖' | '?' | '●' | '✓' | '◆' | '○'
+   focus: Focus | null
+   /** The lane (or comma-separated lanes) the situation concerns, when it concerns lanes. */
+   lane: string | null
+@@ -972,6 +972,8 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
+ /** Which nodes wait on the operator (6.4): a question, a pane that needs attention, or an approval; `top` by that precedence. */
+ export function deriveAttention(run: RunData & { activity?: ServedActivity | null }): RunAttention {
+   // The sidecar's rows (an escalation included) wait on nobody: no new attention kind (docs/PRD_REVIEW_SIDECAR.md 4.6).
++  // An accepted run (L12) waits on nobody.
++  if (acceptedOf(run.detail)) return { top: null, nodes: new Map() }
+   const rows = classify(run.detail, run.events.filter(event => !ADVISORY_NODE_IDS.has(event.node_id)))
+   const found = new Map<string, Attention>()
+   for (const item of waitingQuestions(run, rows)) {
+@@ -1097,7 +1099,8 @@ export function deriveNow(run: NowInput): Now {
+   // run (a gate to decide, a challenge to resume, a lane to repair or retry, steps still running) no longer apply, since
+   // abandon refuses every command they name. A review-blocked run keeps its brief and follow-up launch.
+   const live = context.status !== 'cancelled'
+-  const rules = [questionNow, paneNow, ...live ? [approvalNow, challengeHeldNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
++  // An accepted run (L12) is finished whatever its steps read: the override outcome comes before every rule.
++  const rules = [acceptedNow, questionNow, paneNow, ...live ? [approvalNow, challengeHeldNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
+     ...live ? [identicalNow, checkFailedNow] : [], reviewBlockedNow, ...live ? [runningNow] : [], succeededNow, inactiveNow, unmatchedNow]
+   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
+   return { interruption: null, lane: null, reason: null, reasonSource: null, since: focus?.since ?? null, ...now, focus, missing: [...context.missing] }
+@@ -1587,6 +1590,8 @@ function workerDeadline(inputs: RunInputs, worker: RunInputWorker): string | 'pa
+ /** C7: a succeeded run whose plan asks for a tryout (feature.json 2.4.0 `tryout: true`) and holds no verdict yet. */
+ export function isUntried(run: Pick<RunData, 'detail' | 'inputs'>): boolean {
+   const tryout = run.inputs?.tryout
++  // `tryout` refuses an accepted run, so it can never be tried: no Untried chip and no banner asking for one.
++  if (acceptedOf(run.detail)) return false
+   return run.detail.snapshot.status === 'succeeded' && tryout?.required === true && tryout.verdicts.length === 0
+ }
+ 
+@@ -1606,6 +1611,31 @@ function tryThisLines(inputs: RunInputs): Step[] {
+   })
+ }
+ 
++/** The operator override the run carries (L12), from the detail or its summary; null for every other run. */
++export const acceptedOf = (detail: RunDetail): RunAccepted | null => detail.accepted ?? detail.summary.accepted ?? null
++
++/** What an accepted run's findings line says: how many were open at acceptance, or that the review was never recorded. */
++export function acceptedFindingsText(accepted: RunAccepted): string {
++  if (accepted.review === 'none') return 'no review recorded'
++  const open = accepted.open_findings
++  if (open.length === 0) return 'no open findings at acceptance'
++  return `${open.length} open finding${open.length === 1 ? '' : 's'} at acceptance: ${open.map(finding => finding.severity).join(', ')}`
++}
++
++function acceptedNow(context: Context): Draft | null {
++  const accepted = acceptedOf(context.run.detail)
++  if (!accepted) return null
++  const { runStart, runEnd } = context.timeline
++  const headline: Text = [`◆ Integrated (operator override) ${accepted.candidate.slice(0, 7)} · ${accepted.reason}`]
++  if (runEnd) headline.push(' · took ', { kind: 'span', ms: ms(runEnd.at) - ms(runStart.at) })
++  headline.push(` · ${acceptedFindingsText(accepted)}`)
++  return {
++    situation: 'accepted', tone: 'override', glyph: '◆', since: accepted.accepted_at, headline,
++    reason: [`Accepted by ${accepted.by}: ${accepted.reason}`], reasonSource: null,
++    next: { action: 'none', label: 'Nothing to do. The operator merged this candidate by hand; follow-up work is a new run.', runbook: [], steps: [], caveat: accepted.on_main ? null : 'The candidate was not on main when it was accepted.' },
++  }
++}
++
+ function succeededNow(context: Context): Draft | null {
+   if (context.status !== 'succeeded') return null
+   const integrated = lastMessage(context, 'integrate')
+diff --git a/contracts/projects/v1.ts b/contracts/projects/v1.ts
+index a271d6a..e745703 100644
+--- a/contracts/projects/v1.ts
++++ b/contracts/projects/v1.ts
+@@ -10,7 +10,7 @@ const version = z.literal('1.0.0')
+  * and the run detail's `run_dir`; a summary that carries them says `contract_version: "1.5.0"`. 1.6.0 adds the review
+  * sidecar's ledger (`sidecarLedger`). 1.7.0 adds the run inputs' optional `roles`, `controller` and `automatic.profile`, the
+  * challenge's optional `hold` (C8) and `history` (C49), and the optional `tryout` (C7, C29). 1.8.0 adds the attack pass's
+- * record (`attackResult`). 1.9.0 adds the multi-provider panel's record (`panelResults`).
++ * record (`attackResult`). 1.9.0 adds the multi-provider panel's record (`panelResults`). Export 1.10.0 adds the run summary and detail's `accepted` (the operator override).
+  */
+ const version140 = z.literal('1.4.0')
+ const revision = z.string().regex(/^[a-f0-9]{64}$/)
+@@ -78,6 +78,50 @@ export const runActivitySchema = z.strictObject({
+  */
+ export const RUN_DIR_PATTERN = /^~(?!.*\/\.\.?(?:\/|$))\/[A-Za-z0-9._@+/-]+$/
+ 
++// ---- The operator override (viewer-owned; decisions.md L8, L12) -----------------------------------------------------
++
++/** What `accept` recorded about the review: `recorded` when the run had a review record, `none` when it had not. */
++export const ACCEPTED_REVIEWS = ['recorded', 'none'] as const
++const acceptedFindingSchema = z.strictObject({
++  severity: z.enum(['P0', 'P1', 'P2']),
++  reviewer: z.string(),
++  title: z.string(),
++  /** The lane the finding concerns, null when the review named none. */
++  lane: z.string().nullable(),
++})
++
++/**
++ * The export's top-level `accepted` as `accepted.json` is written (decisions.md L8): exactly this key set, `via` optional.
++ * `open_findings` are the blocking findings (P0/P1 not resolved) plus the P2s still open when the operator accepted.
++ */
++export const acceptedRecordSchema = z.strictObject({
++  version: z.literal('1.0.0'),
++  run_id: z.string(),
++  candidate: commit,
++  reason: z.string(),
++  by: z.string(),
++  via: z.string().optional(),
++  accepted_at: z.string(),
++  on_main: z.boolean(),
++  review: z.enum(ACCEPTED_REVIEWS),
++  open_findings: z.array(acceptedFindingSchema),
++})
++
++/**
++ * What the viewer serves of an accepted run (L12): the run's snapshot status is `succeeded` and this field says the operator
++ * merged its candidate by hand. `abandoned` is the run's abandon row when it was abandoned first (history), else null.
++ */
++export const acceptedSchema = z.strictObject({
++  candidate: commit,
++  reason: z.string(),
++  by: z.string(),
++  accepted_at: timestamp,
++  on_main: z.boolean(),
++  review: z.enum(ACCEPTED_REVIEWS),
++  open_findings: z.array(acceptedFindingSchema),
++  abandoned: z.string().nullable(),
++})
++
+ export const runSummarySchema = z.strictObject({
+   /** 1.5.0 carries `activity`; 1.0.0 (a server before it, and the viewer's worker-phase mocks) does not. */
+   contract_version: z.enum(['1.0.0', '1.5.0']),
+@@ -88,7 +132,10 @@ export const runSummarySchema = z.strictObject({
+   created_at: timestamp,
+   updated_at: timestamp,
+   activity: runActivitySchema.optional(),
++  /** Export 1.10.0: set when the operator accepted the run's candidate by hand (status is then `succeeded`); absent otherwise. */
++  accepted: acceptedSchema.nullable().optional(),
+ }).superRefine((summary, context) => {
++  if (summary.accepted && summary.status !== 'succeeded') context.addIssue({ code: 'custom', message: 'An accepted run is succeeded', path: ['accepted'] })
+   const issue = (message: string) => context.addIssue({ code: 'custom', message, path: ['activity'] })
+   const { activity } = summary
+   if ((summary.contract_version === '1.5.0') !== (activity !== undefined)) issue('A summary carries activity exactly when it is 1.5.0')
+@@ -104,6 +151,8 @@ export const runDetailSchema = z.strictObject({
+   snapshot: runSnapshotSchema,
+   /** 1.5.0: the run directory, `~`-relative, for projects the registry lists in `viewer.expose_run_dir`; null otherwise. */
+   run_dir: z.string().regex(RUN_DIR_PATTERN).nullable().optional(),
++  /** Export 1.10.0: the operator override, the same value as `summary.accepted`; absent otherwise. */
++  accepted: acceptedSchema.nullable().optional(),
+ })
+ 
+ // ---- Review results (1.1.0, finding links 1.2.0, lanes from configuration 1.3.0, parallel reviewers 1.4.0) ----
+@@ -768,6 +817,7 @@ export const schemas = {
+ export type Project = z.infer<typeof projectSchema>
+ export type WorkflowDefinition = z.infer<typeof definitionSchema>
+ export type RunSummary = z.infer<typeof runSummarySchema>
++export type RunAccepted = z.infer<typeof acceptedSchema>
+ export type RunActivity = z.infer<typeof runActivitySchema>
+ export type RunDetail = z.infer<typeof runDetailSchema>
+ export type ReviewFinding = z.infer<typeof reviewFindingSchema>
+@@ -832,6 +882,7 @@ export function validateRunDetail(input: unknown): RunDetail {
+       throw new Error('Snapshot graph differs from pinned definition')
+   }
+   if ((detail.summary.contract_version === '1.5.0') !== (detail.run_dir !== undefined)) throw new Error('A run detail carries run_dir exactly when its summary is 1.5.0')
++  if (JSON.stringify(detail.accepted ?? null) !== JSON.stringify(detail.summary.accepted ?? null)) throw new Error('Summary and detail disagree about the operator override')
+   const activity = detail.summary.activity
+   if (activity) {
+     const focus = activity.focus
+diff --git a/server/projects.test.ts b/server/projects.test.ts
+index 12374b2..308a299 100644
+--- a/server/projects.test.ts
++++ b/server/projects.test.ts
+@@ -1,11 +1,12 @@
+ import assert from 'node:assert/strict'
+ import { createHash } from 'node:crypto'
++import { readdirSync, readFileSync } from 'node:fs'
+ import { existsSync } from 'node:fs'
+ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+ import { homedir, tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ import { test } from 'node:test'
+-import { schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
++import { acceptedRecordSchema, schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+ import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
+ import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
+ import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
+@@ -111,6 +112,8 @@ type RunSpec = {
+   panels?: unknown
+   /** Content written to the live `<run>/panel.json`. */
+   livePanel?: string
++  /** Export 1.10.0: the `accepted` record as persisted (undefined leaves the key out; null is an explicit null). */
++  accepted?: unknown
+ }
+ 
+ /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
+@@ -184,6 +187,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
+     ...(spec.sidecar !== undefined ? { sidecar: spec.sidecar } : {}),
+     ...(spec.attack !== undefined ? { attack: spec.attack } : {}),
+     ...(spec.panels !== undefined ? { panels: spec.panels } : {}),
++    ...(spec.accepted !== undefined ? { accepted: spec.accepted } : {}),
+   }
+   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
+   return dir
+@@ -1288,7 +1292,7 @@ test('a retried lane whose newest packet passed is not failed by the error its c
+     // The first attempt failed (the task keeps its error until the graph moves on) and the retry passed: the packet decides.
+     await writeRun(runsRoot('alpha', 'main'), { runId: 'retried', values: reviewedValues(), next: [], events: [...reviewedEvents],
+       tasks: [{ node_id: 'verify_adapter', error: 'RuntimeError(platform verification blocked; retry raised the attempt)', interrupts: [], result: null }],
+-      packets: reviewedPackets, review: null, inputs: inputsSection(), diffFile: DIFF, updatedAt: T2 })
++      packets: reviewedPackets, review: null, inputs: inputsSection(), diffFile: DIFF, updated: T2 })
+     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'retried'))).json())
+     const node = detail.snapshot.nodes.find(item => item.node_id === 'verify_adapter')!
+     assert.equal(node.status, 'succeeded')
+@@ -1524,7 +1528,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
+     return { ...base, runId, review: reviewSection(), inputs: section }
+   }
+   const cases: RunSpec[] = [
+-    { ...base, runId: 'unknown-version', version: '1.10.0', review: reviewSection(), inputs: inputsSection() },
++    { ...base, runId: 'unknown-version', version: '1.11.0', review: reviewSection(), inputs: inputsSection() },
+     { ...base, runId: 'review-string', review: 'approved' },
+     { ...base, runId: 'inputs-array', inputs: [] },
+     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
+@@ -3198,3 +3202,100 @@ test('[tryout] a 1.7.0 export serves the tryout, its verdicts redacted and the o
+     assertError(await get(app, url('alpha', 'main', 'bad-tryout', '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
+   })
+ })
++
++
++// ---- The operator override (decisions.md L1, L8, L12, L13): export 1.10.0 `accepted` --------------------------------------
++
++/** accepted.json exactly as the engine writes it (L8): the full key set, `via` optional. */
++const acceptedRecord = (spec: Record<string, unknown> = {}) => ({
++  version: '1.0.0', run_id: 'accepted-run', candidate: OUTPUT, reason: 'merged by hand over a fail-safe P1', by: 'operator', via: 'claude-code',
++  accepted_at: '2026-10-08T09:30:00Z', on_main: true, review: 'recorded',
++  open_findings: [
++    { severity: 'P1', reviewer: 'coverage', title: 'The fail-safe path is not covered', lane: 'adapter' },
++    { severity: 'P2', reviewer: 'general', title: 'A comment is stale', lane: null }],
++  ...spec,
++})
++const blockedEvents: RawEvent[] = [...reviewingEvents, { sequence: 11, time: T2, node: 'review', status: 'blocked', message: 'coverage blocked the candidate' }]
++const abandonRow: RawEvent = { sequence: 12, time: T2, node: 'controller', status: 'cancelled', message: 'Abandoned by the operator: usage limit' }
++const acceptRow = (sequence: number): RawEvent => ({ sequence, time: T2, node: 'controller', status: 'succeeded', message: 'Accepted by the operator: merged by hand over a fail-safe P1' })
++const acceptedRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
++  runId: 'accepted-run', version: '1.10.0', values: reviewedValues(), next: ['review'], packets: reviewedPackets, events: blockedEvents, review: null, inputs: inputsSection(),
++  accepted: acceptedRecord(), ...spec,
++})
++
++test('[accepted] a 1.10.0 export with accepted is served succeeded with the override; null and absent read as before (L1, L12)', async () => {
++  await harness(async ({ app, runsRoot }) => {
++    const root = runsRoot('alpha', 'main')
++    await writeRun(root, acceptedRun({ events: [...blockedEvents, acceptRow(12)] }))
++    await writeRun(root, acceptedRun({ runId: 'accepted-after-abandon', events: [...blockedEvents, abandonRow, acceptRow(13)] }))
++    await writeRun(root, acceptedRun({ runId: 'accepted-null', accepted: null, events: [...blockedEvents, abandonRow] }))
++    await writeRun(root, acceptedRun({ runId: 'accepted-absent', accepted: undefined, events: blockedEvents }))
++    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
++    const byId = new Map(list.runs.map(run => [run.run_id, run]))
++    assert.equal(byId.size, 4)
++    const plain = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-run'))).json())
++    assert.deepEqual([plain.summary.status, plain.snapshot.status], ['succeeded', 'succeeded'])
++    assert.deepEqual(plain.summary.accepted, {
++      candidate: OUTPUT, reason: 'merged by hand over a fail-safe P1', by: 'operator', accepted_at: '2026-10-08T09:30:00Z', on_main: true, review: 'recorded',
++      open_findings: acceptedRecord().open_findings, abandoned: null,
++    })
++    assert.deepEqual(plain.accepted, plain.summary.accepted)
++    assert.deepEqual(byId.get('accepted-run')!.accepted, plain.summary.accepted)
++    // Finished: a finish time, no attention, no controller reading.
++    assert.equal(plain.summary.activity?.attention, null)
++    assert.equal(plain.summary.activity?.controller, null)
++    assert.ok(plain.summary.activity?.headline?.includes('operator override'), plain.summary.activity?.headline ?? '')
++    const abandoned = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-after-abandon'))).json())
++    assert.equal(abandoned.summary.status, 'succeeded')
++    assert.equal(abandoned.summary.accepted?.abandoned, 'Abandoned by the operator: usage limit')
++    const nulled = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-null'))).json())
++    assert.deepEqual([nulled.summary.status, nulled.summary.accepted, nulled.accepted], ['cancelled', undefined, undefined])
++    const absent = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-absent'))).json())
++    assert.deepEqual([absent.summary.status, 'accepted' in absent.summary], ['failed', false])
++    // No review recorded travels as such.
++    await writeRun(root, acceptedRun({ runId: 'accepted-no-review', accepted: acceptedRecord({ review: 'none', open_findings: [] }) }))
++    assert.equal(validateRunDetail((await get(app, url('alpha', 'main', 'accepted-no-review'))).json()).summary.accepted?.review, 'none')
++  })
++})
++
++test('[accepted] the accept row on a lane named controller belongs to the run, not the lane (L13 d)', async () => {
++  await harness(async ({ app, runsRoot }) => {
++    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: ['controller', 'ui'], excluded_workers: [] })
++    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
++    const events: RawEvent[] = [
++      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
++      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
++      acceptRow(3),
++    ]
++    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane-accept', version: '1.10.0', definition: { name: 'Feature implementation', nodes: graphNodes(['controller', 'ui']) },
++      next: ['launch_controller', 'launch_ui'], events, inputs, accepted: acceptedRecord({ run_id: 'lane-accept' }) })
++    const served = ((await get(app, url('alpha', 'main', 'lane-accept', '/events'))).json() as { events: WorkflowEvent[] }).events
++    assert.deepEqual([served[2].node_id, served[2].status], [null, 'succeeded'])
++    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane-accept'))).json())
++    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the accept row never settles the lane')
++  })
++})
++
++test('[accepted] a record outside the L8 key set, or a 1.11.0 export, is refused as an invalid run', async () => {
++  await harness(async ({ app, runsRoot }) => {
++    const root = runsRoot('alpha', 'main')
++    const withoutVia = Object.fromEntries(Object.entries(acceptedRecord()).filter(([key]) => key !== 'via'))
++    await writeRun(root, acceptedRun({ runId: 'no-via', accepted: withoutVia }))
++    assert.equal((await get(app, url('alpha', 'main', 'no-via'))).status, 200)
++    for (const [runId, record] of [['extra-key', acceptedRecord({ extra: 1 })], ['short-sha', acceptedRecord({ candidate: OUTPUT.slice(0, 7) })],
++      ['bad-severity', acceptedRecord({ open_findings: [{ severity: 'P3', reviewer: 'x', title: 'y', lane: null }] })],
++      ['no-lane-key', acceptedRecord({ open_findings: [{ severity: 'P1', reviewer: 'x', title: 'y' }] })], ['bad-review', acceptedRecord({ review: 'maybe' })],
++      ['string', 'accepted']] as const) {
++      await writeRun(root, acceptedRun({ runId, accepted: record }))
++      assertError(await get(app, url('alpha', 'main', runId)), 500, 'RUN_STORAGE_INVALID', root)
++    }
++  })
++})
++
++test('[accepted] the engine\'s accepted*.json examples parse with the viewer\'s record schema (L13 a)', () => {
++  const directory = new URL('../contracts/workflow/examples/', import.meta.url)
++  const files = readdirSync(directory).filter(name => /^accepted.*\.json$/.test(name))
++  // The candidate phase has the engine's example; an earlier phase may not have it yet.
++  if (process.env.WORKFLOW_VERIFICATION_PHASE === 'candidate') assert.ok(files.length > 0, 'no contracts/workflow/examples/accepted*.json example exists')
++  for (const name of files) acceptedRecordSchema.parse(JSON.parse(readFileSync(new URL(name, directory), 'utf8')))
++})
+diff --git a/server/projects.ts b/server/projects.ts
+index 2cbed21..32ed642 100644
+--- a/server/projects.ts
++++ b/server/projects.ts
+@@ -4,11 +4,11 @@ import { constants } from 'node:fs'
+ import { homedir } from 'node:os'
+ import { isAbsolute, join, relative, sep } from 'node:path'
+ import { z } from 'zod'
+-import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
++import { acceptedOf, buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
+ import {
+   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
+-  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+-  type AttackRecord, type AttackResult, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
++  RUN_PROFILES, acceptedRecordSchema, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
++  type AttackRecord, type RunAccepted, type AttackResult, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+   type WorkerQuestion, type WorkflowDefinition,
+ } from '../contracts/projects/v1.ts'
+ import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
+@@ -81,7 +81,7 @@ export const DEFAULT_RUN_LIMIT = 50
+ export const MAX_RUN_LIMIT = 100
+ 
+ const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0'] as const
++const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0'] as const
+ /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
+ const LEGACY_LANES = ['ui', 'adapter'] as const
+ /**
+@@ -344,6 +344,11 @@ const exportSchema = z.object({
+    * before. Kept as unknown data like the attack's: validated only when the panels route serves it.
+    */
+   panels: z.unknown().optional(),
++  /**
++   * Export 1.10.0: `accepted.json` as written (the operator merged the candidate by hand), or null for a run without one; absent
++   * before. Parsed strictly: the engine validates the record when it exports, so a bad one is the engine's fault, not a reason to hide it.
++   */
++  accepted: acceptedRecordSchema.nullable().optional(),
+ })
+ 
+ const rawEventSchema = z.object({
+@@ -484,6 +489,8 @@ const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Cod
+   /^Controller commit [0-9a-f]+ runs this step\b/,
+   // abandon.py: the run's `cancelled` row.
+   /^Abandoned by the (?:operator|maintainer)\b/,
++  // accept.py: the operator override's `succeeded` row.
++  /^Accepted by the (?:operator|maintainer)\b/,
+   // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them. Then the
+   // failed wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a fourth question
+   // from guardrails.py record_question, a missing session) and read_signal's refusals (`Invalid completion` covers
+@@ -1237,15 +1244,17 @@ export class RunStore {
+     const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes)
+     const created_at = state.created_at
+     const updated_at = laterTimestamp(laterTimestamp(state.updated_at, rawEvents.at(-1)?.time ?? created_at), created_at)
++    const accepted = state.accepted ? projectAccepted(state.accepted, rawEvents) : null
+     const summary: RunSummary = {
+       contract_version: '1.0.0', project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id,
+       definition_revision: definition.definition_revision, run_id: state.run_id, status: snapshot.status, created_at, updated_at,
++      ...accepted ? { accepted } : {},
+     }
+     const contractFailure = (what: string, error: unknown) => invalidRun(runId, `${what} violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})`)
+     // The graph projection is validated on its own first, so a contradictory graph is reported before anything derived from it.
+     let detail: RunDetail
+     try {
+-      detail = validateRunDetail({ summary, definition, snapshot })
++      detail = validateRunDetail({ summary, definition, snapshot, ...accepted ? { accepted } : {} })
+     } catch (error) {
+       throw contractFailure('projection', error)
+     }
+@@ -1276,7 +1285,7 @@ export class RunStore {
+     const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
+     const run_dir = await this.runDirectory(scope, directory)
+     try {
+-      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition, snapshot, run_dir })
++      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition, snapshot, run_dir, ...accepted ? { accepted } : {} })
+     } catch (error) {
+       throw contractFailure('run activity', error)
+     }
+@@ -1607,7 +1616,9 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
+   // An abandoned run (its controller `cancelled` row, abandon.py) is closed whatever its steps read: it leaves the running lists.
+   const abandoned = rawEvents.some(event => event.node === 'controller' && event.status === 'cancelled')
+   let status: NodeStatus
+-  if (abandoned) status = 'cancelled'
++  // An accepted run (L12) reads succeeded even when it was abandoned first; the override travels in `accepted`.
++  if (state.accepted) status = 'succeeded'
++  else if (abandoned) status = 'cancelled'
+   else if (statuses.has('failed')) status = 'failed'
+   else if (statuses.has('awaiting_approval')) status = 'awaiting_approval'
+   else if (statuses.has('paused')) status = 'paused'
+@@ -1619,6 +1630,17 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
+   return { contract_version: '1.0.0', run_id: state.run_id, status, last_sequence: rawEvents.at(-1)?.sequence ?? 0, nodes }
+ }
+ 
++/** The export's override record onto the served field (L12): redacted texts, a Z time, the abandon row kept as history. */
++function projectAccepted(record: z.infer<typeof acceptedRecordSchema>, rawEvents: readonly RawEvent[]): RunAccepted {
++  const abandon = rawEvents.filter(event => event.node === 'controller' && event.status === 'cancelled').at(-1)
++  return {
++    candidate: record.candidate, reason: redactPaths(record.reason), by: record.by, accepted_at: ledgerTime(record.accepted_at),
++    on_main: record.on_main, review: record.review,
++    open_findings: record.open_findings.map(finding => ({ ...finding, reviewer: redactPaths(finding.reviewer), title: redactPaths(finding.title) })),
++    abandoned: abandon ? redactPaths(abandon.message) : null,
++  }
++}
++
+ // ---- The review sidecar's ledger (contract 1.6.0) --------------------------------------------------------------
+ 
+ /** Redacts a model-written text and keeps it within its bound (a redaction may lengthen a very short path). */
+@@ -1762,6 +1784,9 @@ function activityAttention(status: RunSnapshot['status'], attention: RunAttentio
+  * step that recorded the last status speaks. Redacted, on one line, at most 160 characters.
+  */
+ function activityHeadline(run: RunData, focus: Focus | null, now: Now): string | null {
++  // An accepted run (L12) reads as its override, at whatever step the review stopped.
++  const accepted = acceptedOf(run.detail)
++  if (accepted) return boundedRedacted(`integrated (operator override) ${accepted.candidate.slice(0, 7)}: ${accepted.reason}`.replace(/\s+/g, ' ').trim(), HEADLINE_LIMIT)
+   const controllerRow = now.reasonSource === 0 ? (now.reason ?? []).filter(part => typeof part === 'string').join('').trim() : ''
+   // The review sidecar's rows never speak for the run (docs/PRD_REVIEW_SIDECAR.md 4.8), nor the report-only attack pass's
+   // (docs/PRD_ATTACK_PASS.md 4.6): a run reads the same without them.
+diff --git a/src/projects/ProjectsView.tsx b/src/projects/ProjectsView.tsx
+index 75716ce..da04007 100644
+--- a/src/projects/ProjectsView.tsx
++++ b/src/projects/ProjectsView.tsx
+@@ -14,10 +14,10 @@ import { projectPathname, projectsPathname, runPathname, workflowPathname, type
+ import { RunRow } from './RunRow.tsx'
+ import { ProjectRunGroups, RunsHome } from './RunsHome.tsx'
+ import { RunView } from './RunView.tsx'
+-import { shortRevision, STATUS_LABEL } from './status.ts'
++import { OVERRIDE_LABEL, shortRevision, STATUS_LABEL } from './status.ts'
+ import { STATUS_GLYPH } from './steps.ts'
+ import { Time } from './Time.tsx'
+-import { statusTone, toneClass } from './tone.ts'
++import { stateTone, toneClass } from './tone.ts'
+ import { Chip, Section } from './ui/index.tsx'
+ import { TimeReferenceContext, useNow } from './useNow.ts'
+ import { usePoll } from './usePoll.ts'
+@@ -267,9 +267,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
+                 {runs.map(run => (
+                   <li key={run.run_id}>
+                     <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate}
+-                      className={`ui-chip plain ${toneClass(statusTone(run.status))} run-history-chip`} title={`${run.run_id} · ${STATUS_LABEL[run.status]}`}
+-                      aria-label={`Run ${run.run_id}, ${STATUS_LABEL[run.status]}`}>
+-                      {STATUS_GLYPH[run.status]}
++                      className={`ui-chip plain ${toneClass(stateTone({ status: run.status, accepted: run.accepted }))} run-history-chip`} title={`${run.run_id} · ${run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]}`}
++                      aria-label={`Run ${run.run_id}, ${run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]}`}>
++                      {run.accepted ? '◆' : STATUS_GLYPH[run.status]}
+                     </AppLink>
+                   </li>
+                 ))}
+diff --git a/src/projects/RunHeader.tsx b/src/projects/RunHeader.tsx
+index d423365..d4e77d5 100644
+--- a/src/projects/RunHeader.tsx
++++ b/src/projects/RunHeader.tsx
+@@ -1,15 +1,15 @@
+-import { isUntried, type Now, type Timeline } from '../../contracts/projects/triage.ts'
+-import type { RunDetail, RunInputs, WorkflowDefinition } from './api.ts'
++import { acceptedFindingsText, acceptedOf, isUntried, type Now, type Timeline } from '../../contracts/projects/triage.ts'
++import type { RunAccepted, RunDetail, RunInputs, WorkflowDefinition } from './api.ts'
+ import { INPUTS_NONE_SENTENCE } from './Assignment.tsx'
+ import { LiveStatus } from './LiveStatus.tsx'
+ import { RichText } from './NowBanner.tsx'
+ import { AppLink, ErrorPanel, StatusBadge } from './panels.tsx'
+-import { deadlinesLabel, RUN_STATUS_SHORT, shortRevision, workflowTitle } from './status.ts'
++import { deadlinesLabel, OVERRIDE_LABEL, RUN_STATUS_SHORT, shortRevision, workflowTitle } from './status.ts'
+ import { withoutGlyph } from './steps.ts'
+ import { Time } from './Time.tsx'
+ import { formatSpan } from './time.ts'
+ import { TimeZoneToggle } from './TimeZoneToggle.tsx'
+-import { toneClass, type Tone } from './tone.ts'
++import { severityClass, severityTone, toneClass, type Tone } from './tone.ts'
+ import type { Resource, ResourceMeta } from './useResource.ts'
+ 
+ type Props = {
+@@ -37,6 +37,37 @@ function RunSpan({ detail, timeline, clock }: { detail: RunDetail; timeline: Tim
+   return <>started {start}</>
+ }
+ 
++const OVERRIDE_SHORT = 'merged by the operator, not a reviewed integration'
++
++/**
++ * The operator override's outcome (L12): the reason, who accepted it and when, the candidate, the abandon row kept as history
++ * and every finding open at acceptance. An accepted run reads as this, never as the reviewed integration it is served under.
++ */
++function AcceptedOutcome({ accepted }: { accepted: RunAccepted }) {
++  return (
++    <div className="run-accepted" data-testid="accepted-outcome">
++      <p className="run-accepted-reason" data-testid="accepted-reason"><strong>{OVERRIDE_LABEL}:</strong> {accepted.reason}</p>
++      <p className="run-accepted-facts" data-testid="accepted-facts">
++        accepted by {accepted.by} at <Time iso={accepted.accepted_at} /> · candidate <code title={accepted.candidate} data-testid="accepted-candidate">{accepted.candidate.slice(0, 7)}</code>
++        {!accepted.on_main && <> · <span data-testid="accepted-not-on-main">not on main when accepted</span></>}
++      </p>
++      {accepted.abandoned !== null && <p className="run-accepted-abandoned projects-muted" data-testid="accepted-abandoned">Abandoned earlier: {accepted.abandoned}</p>}
++      {accepted.review === 'recorded' && accepted.open_findings.length > 0
++        ? (
++          <ul className="run-accepted-findings" data-testid="accepted-findings" aria-label="Findings open at acceptance">
++            {accepted.open_findings.map((finding, index) => (
++              <li key={index} data-severity={finding.severity}>
++                <span className={`ui-chip plain ${severityClass(severityTone(finding.severity))}`}>{finding.severity}</span> {finding.title}
++                <span className="projects-muted"> · {finding.reviewer}{finding.lane ? ` · ${finding.lane}` : ''}</span>
++              </li>
++            ))}
++          </ul>
++        )
++        : <p className="projects-muted" data-testid="accepted-findings-none">{acceptedFindingsText(accepted)}</p>}
++    </div>
++  )
++}
++
+ /**
+  * The run header (docs/PRD_VIEWER_UX.md 4.2), a card with a top rule in the run's tone (docs/PRD_VIEWER_REVAMP.md 5.3): line 1
+  * names the run (its feature, else the workflow's title), its status in a few words (with an Untried chip while a succeeded run
+@@ -49,6 +80,7 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
+   const data = inputs.status === 'ready' ? inputs.data : null
+   const definitionChanged = current !== null && current.definition_revision !== definition.definition_revision
+   const title = data?.feature ?? workflowTitle(definition)
++  const accepted = acceptedOf(detail)
+ 
+   const details = (
+     <details className="run-details" data-testid="run-details">
+@@ -87,7 +119,7 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
+       <div className="run-header-line">
+         <h2 id="run-summary-title"><span className="run-title" title={title}>{title}</span> <span className="run-id">{summary.run_id}</span></h2>
+         <p className="run-status-line" data-testid="run-status">
+-          <StatusBadge status={summary.status} /> <span className="run-status-meaning" data-testid="run-status-meaning">{RUN_STATUS_SHORT[summary.status]}</span>
++          <StatusBadge status={summary.status} accepted={accepted !== null} /> <span className="run-status-meaning" data-testid="run-status-meaning">{accepted ? OVERRIDE_SHORT : RUN_STATUS_SHORT[summary.status]}</span>
+           {isUntried({ detail, inputs: data }) && (
+             <> <span className={`ui-chip ${toneClass('warn')} run-untried`} data-testid="untried-chip"
+               title="This run asks for your tryout (feature.json tryout: true) and has no verdict yet; the Now banner says what to try and how to record it.">Untried</span></>
+@@ -99,6 +131,7 @@ export function RunHeader({ detail, inputs, onRetryInputs, current, freshness, t
+           <TimeZoneToggle />
+         </div>
+       </div>
++      {accepted && <AcceptedOutcome accepted={accepted} />}
+       {inputs.status === 'error' && <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />}
+       <div className="run-facts" data-testid={data ? 'run-inputs-facts' : undefined}>
+         {data && (
+@@ -129,11 +162,12 @@ export function RunBar({ detail, now, clock, runHref, freshness, onNavigate }: {
+   onNavigate: (pathname: string) => void
+ }) {
+   const { summary } = detail
++  const accepted = acceptedOf(detail)
+   return (
+     <section className="run-summary run-bar" aria-labelledby="run-summary-title">
+       <h2 id="run-summary-title" className="run-bar-title"><AppLink href={runHref} onNavigate={onNavigate}>{summary.run_id}</AppLink></h2>
+       <p className="run-status-line run-bar-status" data-testid="run-status">
+-        <StatusBadge status={summary.status} /> <span className="run-status-meaning" data-testid="run-status-meaning">{RUN_STATUS_SHORT[summary.status]}</span>
++        <StatusBadge status={summary.status} accepted={accepted !== null} /> <span className="run-status-meaning" data-testid="run-status-meaning">{accepted ? OVERRIDE_SHORT : RUN_STATUS_SHORT[summary.status]}</span>
+         {now && (
+           <span className="run-bar-now">
+             <span aria-hidden="true"> · </span>
+diff --git a/src/projects/RunRow.tsx b/src/projects/RunRow.tsx
+index 49dab72..49ad429 100644
+--- a/src/projects/RunRow.tsx
++++ b/src/projects/RunRow.tsx
+@@ -1,3 +1,4 @@
++import { acceptedFindingsText } from '../../contracts/projects/triage.ts'
+ import type { RunSummary } from './api.ts'
+ import { rowSummary, rowTime, waitingKind } from './lists.ts'
+ import { AppLink, StatusBadge } from './panels.tsx'
+@@ -32,13 +33,13 @@ export function RunRow({ run, href, labels, context = [], now, onNavigate }: Pro
+   const names = context.filter((name): name is string => Boolean(name))
+   const summary = rowSummary(run, labels)
+   return (
+-    <li className="run-row-item" data-tone={stateTone({ status: run.status, attention: kind })}>
+-      <AppLink href={href} onNavigate={onNavigate} className="run-row" data-run-id={run.run_id} data-status={run.status} data-attention={kind ?? undefined}>
++    <li className="run-row-item" data-tone={stateTone({ status: run.status, attention: kind, accepted: run.accepted })}>
++      <AppLink href={href} onNavigate={onNavigate} className="run-row" data-run-id={run.run_id} data-status={run.status} data-outcome={run.accepted ? 'override' : undefined} data-attention={kind ?? undefined}>
+         <span className="run-row-head">
+-          <span className="run-row-glyph" aria-hidden="true">{kind === null ? STATUS_GLYPH[run.status] : '?'}</span>
++          <span className="run-row-glyph" aria-hidden="true">{kind !== null ? '?' : run.accepted ? '◆' : STATUS_GLYPH[run.status]}</span>
+           <span className="run-row-id">{run.run_id}</span>
+           {names.length > 0 && <span className="run-row-context">{names.join(' · ')}</span>}
+-          <StatusBadge status={run.status} explain />
++          <StatusBadge status={run.status} accepted={Boolean(run.accepted)} explain />
+         </span>
+         <span className="run-row-when">
+           {time.kind === 'finished' && <><Time iso={time.at} /> · {formatAgo(time.at, now)} · <span className="run-row-span">{formatSpan(time.ms)}</span></>}
+@@ -48,6 +49,7 @@ export function RunRow({ run, href, labels, context = [], now, onNavigate }: Pro
+         <span className="run-row-detail">
+           {kind !== null && <span className="visually-hidden">Waiting on you: </span>}
+           <span className="run-row-summary" title={summary}>{summary}</span>
++          {run.accepted && <span className="run-row-accepted" data-testid="row-accepted">accepted by {run.accepted.by} · {acceptedFindingsText(run.accepted)}</span>}
+           {since && <span className="run-row-since"> · since <Time iso={since} /></span>}
+         </span>
+       </AppLink>
+diff --git a/src/projects/RunView.tsx b/src/projects/RunView.tsx
+index 03deb54..899428a 100644
+--- a/src/projects/RunView.tsx
++++ b/src/projects/RunView.tsx
+@@ -146,7 +146,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
+   }, [definition.nodes])
+   const [boardRef, split] = useBoardSplit(useMemo(() => boardSplitWidth(definition.nodes), [definition.nodes]))
+   // The run's one tone (docs/PRD_VIEWER_REVAMP.md 4): what waits on the operator wins over the status.
+-  const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null })
++  const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null, accepted: summary.accepted })
+   const graphNodes: GraphNodeView[] = definition.nodes.map(node => {
+     const state = snapshotById.get(node.node_id)!
+     return { node_id: node.node_id, label: node.label, kind: node.kind, depends_on: node.depends_on, status: state.status, attempt: state.attempt, attention: attention?.nodes.get(node.node_id)?.kind ?? null }
+diff --git a/src/projects/RunsHome.tsx b/src/projects/RunsHome.tsx
+index 13af19f..d91e642 100644
+--- a/src/projects/RunsHome.tsx
++++ b/src/projects/RunsHome.tsx
+@@ -13,7 +13,7 @@ import { RunRow } from './RunRow.tsx'
+ import { shortRevision } from './status.ts'
+ import { Time } from './Time.tsx'
+ import { formatAgo } from './time.ts'
+-import { stateTone, statusTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
++import { stateTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
+ import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
+ import { useTimeZone } from './useNow.ts'
+ import type { Resource, ResourceMeta } from './useResource.ts'
+@@ -71,7 +71,7 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
+           <span className="home-card-id">{run.run_id}</span>
+           <span className="visually-hidden">Waiting on you: </span>
+           <Chip tone="warn">{WAITING_LABEL[kind]}</Chip>
+-          <StatusBadge status={run.status} />
++          <StatusBadge status={run.status} accepted={Boolean(run.accepted)} />
+         </span>
+         <span className="home-card-context">{namesOf(row)}</span>
+         <span className="home-card-summary">{rowSummary(run, row.labels)}</span>
+@@ -93,7 +93,7 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
+  */
+ function RunningCard({ row, readings, now, onNavigate }: { row: Row; readings: readonly ControllerReading[]; now: number; onNavigate: (pathname: string) => void }) {
+   const { run } = row
+-  const tone = stateTone({ status: run.status, attention: run.activity?.attention?.kind ?? null })
++  const tone = stateTone({ status: run.status, attention: run.activity?.attention?.kind ?? null, accepted: run.accepted })
+   const time = rowTime(run, now)
+   const elapsed = cardElapsed(run, now)
+   const controller = controllerSuffix(run.status, readings)
+@@ -103,7 +103,7 @@ function RunningCard({ row, readings, now, onNavigate }: { row: Row; readings: r
+       <AppLink href={hrefOf(row)} onNavigate={onNavigate} className="home-card-link" data-run-id={run.run_id} data-status={run.status}>
+         <span className="home-card-head">
+           <span className="home-card-id">{run.run_id}</span>
+-          <StatusBadge status={run.status} explain />
++          <StatusBadge status={run.status} accepted={Boolean(run.accepted)} explain />
+           {controller === 'running' && <Chip tone="run" data-controller="running">controller running</Chip>}
+           {controller === 'not_running' && <Chip tone="warn" plain data-controller="not_running">▲ controller not running</Chip>}
+         </span>
+@@ -360,13 +360,13 @@ export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }
+         return (
+           <li key={workflow.workflow_id} className="lists-group" data-workflow-id={workflow.workflow_id}>
+             <AppLink href={workflowPathname(projectId, workflow.workflow_id)} onNavigate={onNavigate}
+-              className={`projects-card lists-group-head ui-card ${toneClass(last ? statusTone(last.status) : 'idle')}`}>
++              className={`projects-card lists-group-head ui-card ${toneClass(last ? stateTone({ status: last.status, accepted: last.accepted }) : 'idle')}`}>
+               <span className="projects-card-title">{title}</span>
+               <span className="projects-muted">
+                 {workflow.workflow_id}{count !== null && <> · {count}</>} · {workflow.nodes.length} {workflow.nodes.length === 1 ? 'node' : 'nodes'} · current revision {shortRevision(workflow.definition_revision)}
+                 {title !== workflow.name && <> · {workflow.name}</>}
+               </span>
+-              {last && <span className="lists-group-last">last run <StatusBadge status={last.status} /> · last activity {formatAgo(movedAt(last), now)}</span>}
++              {last && <span className="lists-group-last">last run <StatusBadge status={last.status} accepted={Boolean(last.accepted)} /> · last activity {formatAgo(movedAt(last), now)}</span>}
+             </AppLink>
+             {entry === null && runs.status !== 'error' && <p className="projects-muted lists-empty">Loading runs…</p>}
+             {entry !== null && entry.error !== null && (
+diff --git a/src/projects/api.ts b/src/projects/api.ts
+index 24befbd..19f10ab 100644
+--- a/src/projects/api.ts
++++ b/src/projects/api.ts
+@@ -25,6 +25,7 @@ import {
+   type Project,
+   type ReviewFinding,
+   type ReviewResult,
++  type RunAccepted,
+   type RunActivity,
+   type RunDetail,
+   type RunInputs,
+@@ -38,7 +39,7 @@ import {
+ } from '../../contracts/projects/v1.ts'
+ import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
+ 
+-export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
++export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunAccepted, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
+ export { isBlockingFinding }
+ 
+ /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
+diff --git a/src/projects/lists.css b/src/projects/lists.css
+index 82b5774..d9c852a 100644
+--- a/src/projects/lists.css
++++ b/src/projects/lists.css
+@@ -99,6 +99,7 @@
+ .run-row-detail { grid-column: 1 / -1; display: flex; min-width: 0; color: var(--muted); font-size: 0.9rem; padding-left: calc(1.1em + 8px); white-space: nowrap; }
+ .run-row-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+ .run-row-since { flex: none; white-space: pre; }
++.run-row-accepted { flex: none; white-space: pre; margin-left: 0.5em; }
+ .run-row[data-status="failed"] .run-row-glyph { color: var(--fail); }
+ .run-row[data-status="succeeded"] .run-row-glyph { color: var(--ok); }
+ /* Waiting on the operator: a warn ring and a `?`; the status stays what it is. */
+@@ -112,6 +113,7 @@
+ .projects-shell .status-badge.status-running { background: var(--run-soft); color: var(--run); }
+ .projects-shell .status-badge.status-awaiting_approval { background: var(--warn-soft); color: var(--warn); }
+ .projects-shell .status-badge.status-paused { background: var(--pause-soft); color: var(--pause); }
++.projects-shell .status-badge.status-override { background: var(--override-soft); color: var(--override); }
+ .projects-shell .status-badge.status-succeeded { background: var(--ok-soft); color: var(--ok); }
+ .projects-shell .status-badge.status-failed { background: var(--fail-soft); color: var(--fail); }
+ 
+@@ -160,6 +162,6 @@
+   .run-row { grid-template-columns: minmax(0, 1fr); }
+   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
+   .run-row-detail { display: block; white-space: normal; }
+-  .run-row-summary, .run-row-since { white-space: normal; }
++  .run-row-summary, .run-row-since, .run-row-accepted { white-space: normal; }
+   .home-search { max-width: none; }
+ }
+diff --git a/src/projects/lists.ts b/src/projects/lists.ts
+index a9d27f7..8bbd7a6 100644
+--- a/src/projects/lists.ts
++++ b/src/projects/lists.ts
+@@ -11,7 +11,7 @@ import {
+   controllerNotRunning, deriveNow, type ControllerReading, type ControllerState, type Now, type Situation,
+ } from '../../contracts/projects/triage.ts'
+ import type { RunActivity, RunDetail, RunSummary } from './api.ts'
+-import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
++import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, OVERRIDE_LABEL, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
+ import { formatSpan, type Zone } from './time.ts'
+ import { statusTone, type Tone } from './tone.ts'
+ 
+@@ -27,7 +27,9 @@ const FINISHED: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled']
+ export const WAITING_KINDS = ['question', 'pane', 'approval'] as const
+ export type WaitingKind = (typeof WAITING_KINDS)[number]
+ 
+-export const isFinished = (status: RunStatus) => FINISHED.includes(status)
++/** Whether a run no longer moves. A run with the operator override (L12) is finished before its status is read. */
++export const isFinished = (run: RunStatus | Pick<RunSummary, 'status' | 'accepted'>): boolean =>
++  typeof run === 'string' ? FINISHED.includes(run) : Boolean(run.accepted) || FINISHED.includes(run.status)
+ const ms = (iso: string) => Date.parse(iso)
+ 
+ // ---- The workflow title rule (4.1, reordered in decisions.md) -------------------------------------------------------
+@@ -52,9 +54,9 @@ export const latestFeature = (runs: readonly RunSummary[]) => latestRun(runs)?.a
+ // ---- Runs home sections (4.1) -----------------------------------------------------------------------------------------
+ 
+ /** The kind a run waits on the operator for, from the served activity only; null without activity. */
+-export function waitingKind(run: Pick<RunSummary, 'status' | 'activity'>): WaitingKind | null {
++export function waitingKind(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>): WaitingKind | null {
+   const kind = run.activity?.attention?.kind
+-  if (!kind || isFinished(run.status)) return null
++  if (!kind || isFinished(run)) return null
+   return (WAITING_KINDS as readonly string[]).includes(kind) ? kind as WaitingKind : null
+ }
+ 
+@@ -77,7 +79,7 @@ export function homeSections<T extends { run: RunSummary }>(rows: readonly T[],
+   const recent: T[] = []
+   for (const row of rows) {
+     if (waitingKind(row.run) !== null) needsYou.push(row)
+-    else if (!isFinished(row.run.status)) running.push(row)
++    else if (!isFinished(row.run)) running.push(row)
+     else if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row)
+   }
+   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
+@@ -108,7 +110,9 @@ function who(nodeId: string | null): string {
+  * message (the served headline, which starts with the focus label). Without activity it is only the status; the row then
+  * shows when the run was updated and nothing else.
+  */
+-export function rowSummary(run: Pick<RunSummary, 'status' | 'activity'>, labels: ReadonlyMap<string, string> = new Map()): string {
++export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>, labels: ReadonlyMap<string, string> = new Map()): string {
++  // The override (L12) reads as its own outcome, never as the succeeded status it is served under.
++  if (run.accepted) return `${OVERRIDE_LABEL} ${run.accepted.candidate.slice(0, 7)}: ${run.accepted.reason}`
+   const status = STATUS_LABEL[run.status]
+   const activity = run.activity
+   if (!activity) return status
+@@ -131,11 +135,11 @@ export type RowTime =
+   | { kind: 'live'; started: string; last: string | null; ms: number }
+   | { kind: 'updated'; at: string }
+ 
+-export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity'>, now: number): RowTime {
++export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity' | 'accepted'>, now: number): RowTime {
+   const activity = run.activity
+   if (!activity) return { kind: 'updated', at: run.updated_at }
+   if (activity.finished_at !== null) return { kind: 'finished', at: activity.finished_at, ms: Math.max(0, ms(activity.finished_at) - ms(run.created_at)) }
+-  if (isFinished(run.status)) return { kind: 'updated', at: run.updated_at }
++  if (isFinished(run)) return { kind: 'updated', at: run.updated_at }
+   return { kind: 'live', started: run.created_at, last: activity.last_activity_at, ms: Math.max(0, now - ms(run.created_at)) }
+ }
+ 
+@@ -147,10 +151,10 @@ export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated
+  * A finished run has no such line.
+  */
+ export function cardElapsed(
+-  run: Pick<RunSummary, 'status' | 'created_at'> & { activity?: { attention: { since: string | null } | null } | null },
++  run: Pick<RunSummary, 'status' | 'created_at' | 'accepted'> & { activity?: { attention: { since: string | null } | null } | null },
+   now: number,
+ ): { elapsed: string; since: string | null; started: string | null } | null {
+-  if (isFinished(run.status)) return null
++  if (isFinished(run)) return null
+   const span = formatSpan(Math.max(0, now - ms(run.created_at)))
+   if (run.status === 'running') return { elapsed: `running for ${span}`, since: null, started: run.created_at }
+   return { elapsed: `${STATUS_LABEL[run.status].toLowerCase()} · started ${span} ago`, since: run.activity?.attention?.since ?? null, started: null }
+@@ -205,7 +209,7 @@ const BEFORE_INTERRUPTED: readonly Situation[] = ['question', 'pane_attention',
+ export function servedDisagreement(now: Now, served: ServedRun): 'question-answered' | 'question-asked' | 'controller-stopped' | null {
+   const { activity } = served
+   const status = served.detail.summary.status
+-  if (activity && !isFinished(status)) {
++  if (activity && !isFinished(served.detail.summary)) {
+     const asked = activity.waiting_questions > 0 && activity.attention?.kind === 'question'
+     if (now.situation === 'question' && !asked) return 'question-answered'
+     const lane = activity.attention?.node_id ? who(activity.attention.node_id) : null
+@@ -274,7 +278,8 @@ export function dayLabel(key: string, now: number, zone: Zone): string {
+ 
+ /** Recent's filters: Failed and Succeeded by status, Today by the day the run ended in the reader's zone. */
+ export function filterRecent<T extends { run: RunSummary }>(rows: readonly T[], filter: RecentFilter, now: number, zone: Zone): T[] {
+-  if (filter === 'failed') return rows.filter(row => row.run.status === 'failed')
++  // The override (L12) is not a failure; under Succeeded it appears only with its own marker (the row's chip), never as a reviewed success.
++  if (filter === 'failed') return rows.filter(row => !row.run.accepted && row.run.status === 'failed')
+   if (filter === 'succeeded') return rows.filter(row => row.run.status === 'succeeded')
+   if (filter === 'today') {
+     const today = dayKey(now, zone)
+@@ -359,16 +364,18 @@ export function railEntries<P extends { project_id: string }>(projects: readonly
+  * run failed, else its most pressing live run's own tone (awaiting approval, running, paused), succeeded when its latest
+  * finished run did, else idle.
+  */
+-export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at'>[]): Tone {
++export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'>[]): Tone {
+   if (runs.some(run => waitingKind(run) !== null)) return 'warn'
+-  const latest = runs.filter(run => isFinished(run.status)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at'> | null>(
++  const latest = runs.filter(run => isFinished(run)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'> | null>(
+     (last, run) => (last === null || ms(endedAt(run)) > ms(endedAt(last)) ? run : last), null)
+   if (latest?.status === 'failed') return 'fail'
+   // A live run in its own tone (statusTone): awaiting approval is warn, running is run, paused is pause, never "Running".
+-  const live = runs.filter(run => !isFinished(run.status)).map(run => statusTone(run.status))
++  const live = runs.filter(run => !isFinished(run)).map(run => statusTone(run.status))
+   const order: readonly Tone[] = ['warn', 'run', 'pause']
+   const liveTone = order.find(tone => live.includes(tone))
+   if (liveTone) return liveTone
++  // The override (L12) sits where ok does: after the live tones.
++  if (latest?.accepted) return 'override'
+   if (latest?.status === 'succeeded') return 'ok'
+   return 'idle'
+ }
+diff --git a/src/projects/panels.tsx b/src/projects/panels.tsx
+index 9543887..67bd086 100644
+--- a/src/projects/panels.tsx
++++ b/src/projects/panels.tsx
+@@ -1,8 +1,17 @@
+ import type { AnchorHTMLAttributes, ReactNode } from 'react'
+ import { describeApiError, ProjectsApiError } from './api.ts'
+-import { RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
++import { OVERRIDE_LABEL, OVERRIDE_TITLE, RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
+ 
+-export function StatusBadge({ status, explain = false }: { status: RunStatus; explain?: boolean }) {
++export function StatusBadge({ status, explain = false, accepted = false }: { status: RunStatus; explain?: boolean; accepted?: boolean }) {
++  // The operator override (L12) is served as succeeded but has its own chip: never the reviewed-integration style.
++  if (accepted) {
++    return (
++      <span className="status-badge status-override" data-status={status} data-outcome="override" data-testid="override-chip" title={OVERRIDE_TITLE}>
++        <span>{OVERRIDE_LABEL}</span>
++        {explain && <span className="visually-hidden">. {OVERRIDE_TITLE}</span>}
++      </span>
++    )
++  }
+   return (
+     <span className={`status-badge status-${status}`} data-status={status} title={STATUS_TITLE[status]}>
+       <span>{STATUS_LABEL[status]}</span>
+diff --git a/src/projects/run.css b/src/projects/run.css
+index b84974c..7761a54 100644
+--- a/src/projects/run.css
++++ b/src/projects/run.css
+@@ -353,3 +353,8 @@
+   .run-details > summary, .command-legend > summary, .run-lanes-more > summary { display: inline-flex; align-items: center; min-height: 44px; }
+   .activity-open, .step-strip-run, .run-now-open { display: inline-flex; align-items: center; min-height: 44px; }
+ }
++
++/* The operator override's outcome (L12): its own block under the header line, wrapping at any width. */
++.run-accepted { display: grid; gap: 4px; margin: 6px 0; padding: 8px 10px; border-left: 3px solid var(--override); background: var(--override-soft); border-radius: var(--radius); overflow-wrap: anywhere; min-width: 0; }
++.run-accepted p { margin: 0; }
++.run-accepted-findings { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+diff --git a/src/projects/status.ts b/src/projects/status.ts
+index 3037fec..3bcb6fc 100644
+--- a/src/projects/status.ts
++++ b/src/projects/status.ts
+@@ -11,6 +11,10 @@ export { ATTACK_NODE_ID, SIDECAR_NODE_ID }
+ export type RunStatus = RunDetail['summary']['status']
+ export type NodeKind = RunDetail['definition']['nodes'][number]['kind']
+ 
++/** The outcome of a run the operator accepted by hand (L12): served as `succeeded`, but never worded or styled as a reviewed integration. */
++export const OVERRIDE_LABEL = 'integrated (operator override)'
++export const OVERRIDE_TITLE = 'Integrated by the operator (override): the operator merged this run\'s candidate by hand, over its review. Not a reviewed integration.'
++
+ export const STATUS_LABEL: Record<RunStatus, string> = {
+   pending: 'Pending',
+   running: 'Running',
+diff --git a/src/projects/theme.css b/src/projects/theme.css
+index a0df400..2727f92 100644
+--- a/src/projects/theme.css
++++ b/src/projects/theme.css
+@@ -2,7 +2,7 @@
+ .projects-shell {
+   --bg: #f4f6f9; --surface: #ffffff; --surface-2: #eceff4; --fg: #1b2130; --muted: #5d6675; --border: #dde2ea; --border-strong: #c4ccd8;
+   --accent: #3454d1; --accent-fg: #ffffff; --accent-soft: #e6ebfb;
+-  --ok: #1a6b3e; --ok-soft: #dff3e6; --run: #1f4fc2; --run-soft: #e2eafc; --warn: #9a4a05; --warn-soft: #fdebd6; --fail: #a81e27; --fail-soft: #fbe1e3; --pause: #7a4e00; --pause-soft: #fff1cc; --idle: #5b6472; --idle-soft: #e9ebef;
++  --ok: #1a6b3e; --ok-soft: #dff3e6; --run: #1f4fc2; --run-soft: #e2eafc; --warn: #9a4a05; --warn-soft: #fdebd6; --fail: #a81e27; --fail-soft: #fbe1e3; --pause: #7a4e00; --pause-soft: #fff1cc; --override: #5b2fa0; --override-soft: #ece4fa; --idle: #5b6472; --idle-soft: #e9ebef;
+   --p0: #a81e27; --p1: #a93a06; --p2: #4b5563; --sev-fg: #ffffff;
+   --font-display: system-ui, "Segoe UI", Roboto, sans-serif; --font-body: system-ui, "Segoe UI", Roboto, sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace;
+   --radius: 6px; --shadow: 0 1px 2px rgba(20, 30, 50, 0.06); --band: transparent; --band-fg: var(--fg);
+@@ -14,14 +14,14 @@
+   :root:not([data-theme="light"]) .projects-shell {
+     --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
+     --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
+-    --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --idle: #a9b2c2; --idle-soft: #2a3140;
++    --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --override: #c4a6f5; --override-soft: #2f2447; --idle: #a9b2c2; --idle-soft: #2a3140;
+     --p0: #ff8b93; --p1: #f5ab5a; --p2: #a9b2c2; --sev-fg: #0d1220; --shadow: none; color-scheme: dark;
+   }
+ }
+ :root[data-theme="dark"] .projects-shell {
+   --bg: #121620; --surface: #1a1f2b; --surface-2: #232a38; --fg: #e8ecf3; --muted: #9aa4b5; --border: #2c3444; --border-strong: #3b4556;
+   --accent: #7b96ff; --accent-fg: #0d1220; --accent-soft: #232c4d;
+-  --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --idle: #a9b2c2; --idle-soft: #2a3140;
++  --ok: #5fd08c; --ok-soft: #173424; --run: #86aaff; --run-soft: #1a2746; --warn: #f5ab5a; --warn-soft: #3d2a12; --fail: #ff8b93; --fail-soft: #45191d; --pause: #ecc24a; --pause-soft: #3b3113; --override: #c4a6f5; --override-soft: #2f2447; --idle: #a9b2c2; --idle-soft: #2a3140;
+   --p0: #ff8b93; --p1: #f5ab5a; --p2: #a9b2c2; --sev-fg: #0d1220; --shadow: none; color-scheme: dark;
+ }
+ 
+@@ -34,6 +34,7 @@
+ .projects-shell .ui-chip.tone-warn { background: var(--warn-soft); color: var(--warn); }
+ .projects-shell .ui-chip.tone-fail { background: var(--fail-soft); color: var(--fail); }
+ .projects-shell .ui-chip.tone-pause { background: var(--pause-soft); color: var(--pause); }
++.projects-shell .ui-chip.tone-override { background: var(--override-soft); color: var(--override); }
+ @media (prefers-reduced-motion: no-preference) { .projects-shell .ui-chip.tone-run.live::before { animation: ui-pulse 1.6s infinite; } @keyframes ui-pulse { 50% { opacity: 0.35; } } }
+ .projects-shell .ui-sev { display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; color: var(--sev-fg); background: var(--p2); }
+ .projects-shell .ui-sev.sev-p0 { background: var(--p0); }
+@@ -44,6 +45,7 @@
+ .projects-shell .ui-card.tone-warn { border-left-color: var(--warn); }
+ .projects-shell .ui-card.tone-fail { border-left-color: var(--fail); }
+ .projects-shell .ui-card.tone-pause { border-left-color: var(--pause); }
++.projects-shell .ui-card.tone-override { border-left-color: var(--override); }
+ .projects-shell .ui-section { display: flex; flex-direction: column; gap: 10px; }
+ .projects-shell .ui-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+ .projects-shell .ui-section-header h2 { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+diff --git a/src/projects/tone.ts b/src/projects/tone.ts
+index e6f6cbe..e1d0792 100644
+--- a/src/projects/tone.ts
++++ b/src/projects/tone.ts
+@@ -5,7 +5,7 @@
+  */
+ import type { RunDetail, RunSummary } from '../../contracts/projects/v1.ts'
+ 
+-export type Tone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'idle'
++export type Tone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'override' | 'idle'
+ export type Severity = 'P0' | 'P1' | 'P2'
+ export type SeverityTone = 'p0' | 'p1' | 'p2'
+ 
+@@ -50,7 +50,11 @@ export function severityTone(severity: string): SeverityTone {
+  * The one tone for an element that may carry a status and an attention: attention wins, because a running run
+  * that waits on the operator is shown as "needs you" everywhere.
+  */
+-export function stateTone(input: { status?: string | null; attention?: string | null }): Tone {
++export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: undefined }): Exclude<Tone, 'override'>
++export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: unknown }): Tone
++export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: unknown }): Tone {
++  // The operator override (L12) is its own tone, whatever status it is served under; it waits on nobody.
++  if (input.accepted) return 'override'
+   if (input.attention) return attentionTone(input.attention)
+   if (input.status) return statusTone(input.status)
+   return 'idle'
+@@ -69,6 +73,7 @@ export const TONE_LABEL: Record<Tone, string> = {
+   warn: 'Needs you',
+   fail: 'Failed',
+   pause: 'Paused',
++  override: 'Integrated (operator override)',
+   idle: 'Idle',
+ }
+ 
+diff --git a/tests/project-workflows/accepted.spec.ts b/tests/project-workflows/accepted.spec.ts
+new file mode 100644
+index 0000000..1ff28bd
+--- /dev/null
++++ b/tests/project-workflows/accepted.spec.ts
+@@ -0,0 +1,105 @@
++/**
++ * The operator override in the viewer (docs/PRD_ACCEPT_OVERRIDE.md, decisions.md L8, L12): a run whose export carries `accepted`
++ * reads "integrated (operator override)" on its run page and in the runs list, in its own chip and never the reviewed-integration
++ * style, with the reason, who and when, the candidate and every finding open at acceptance; the same run without the record reads
++ * as before, and an abandoned run that was accepted shows the override with its abandon row kept as history. Both phases: the worker
++ * phase serves `fixtures/ux-accepted.ts` through the mocks, the candidate phase seeds the same runs as 1.10.0 exports.
++ */
++import { test, expect, type Page } from '@playwright/test'
++import {
++  ABANDON_MESSAGE, ACCEPTED_REASON, FAILSAFE_TITLE, RUN_ACCEPTED_ABANDONED, RUN_ACCEPTED_ABANDONED_PLAIN, RUN_ACCEPTED_BLOCKED, RUN_ACCEPTED_BLOCKED_PLAIN, STALE_TITLE,
++  UX_ACCEPTED_WORKFLOW_ID,
++} from './fixtures/ux-accepted.ts'
++import { PROJECT } from './fixtures.ts'
++import { attach, expectNoExecutionControls, installHooks, phase, runUrl, workflowUrl } from './support.ts'
++
++installHooks()
++
++const runPage = (runId: string) => runUrl(runId, undefined, UX_ACCEPTED_WORKFLOW_ID)
++const listPage = workflowUrl(PROJECT.project_id, UX_ACCEPTED_WORKFLOW_ID)
++const overflow = (page: Page) => page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>
++const row = (page: Page, runId: string) => page.locator(`a[data-run-id="${runId}"]`)
++
++test(`[scenario:accepted-run-outcome] A run the operator accepted reads integrated (operator override) on its page and in the runs list, apart from a reviewed integration, with reason, actor, time, candidate and the open findings; without the record it reads as before; no overflow at 390 px (${phase})`, async ({ page }, testInfo) => {
++  await page.goto(runPage(RUN_ACCEPTED_BLOCKED))
++  const status = page.getByTestId('run-status')
++  const chip = status.getByTestId('override-chip')
++  await expect(chip).toHaveText('integrated (operator override)')
++  await expect(chip).toHaveClass(/status-override/)
++  await expect(chip).not.toHaveClass(/status-succeeded/)
++  await expect(status.locator('.status-succeeded')).toHaveCount(0)
++  await expect(page.getByTestId('run-now')).toHaveAttribute('data-situation', 'accepted')
++  const outcome = page.getByTestId('accepted-outcome')
++  await expect(outcome.getByTestId('accepted-reason')).toContainText(ACCEPTED_REASON)
++  await expect(outcome.getByTestId('accepted-facts')).toContainText('accepted by operator')
++  await expect(outcome.getByTestId('accepted-facts').locator('time')).toHaveAttribute('datetime', /^2026-03-01T11:30:00/)
++  await expect(outcome.getByTestId('accepted-candidate')).toHaveText('ccccccc')
++  const findings = outcome.getByTestId('accepted-findings').locator('li')
++  await expect(findings).toHaveCount(2)
++  await expect(findings.nth(0)).toContainText('P1')
++  await expect(findings.nth(0)).toContainText(FAILSAFE_TITLE)
++  await expect(findings.nth(0)).toContainText('coverage')
++  await expect(findings.nth(1)).toContainText('P2')
++  await expect(findings.nth(1)).toContainText(STALE_TITLE)
++  await expect(outcome.getByTestId('accepted-abandoned')).toHaveCount(0)
++  await expectNoExecutionControls(page)
++
++  // The runs list: the override row in its own chip, its twins as before.
++  await page.goto(listPage)
++  const accepted = row(page, RUN_ACCEPTED_BLOCKED)
++  await expect(accepted).toHaveAttribute('data-outcome', 'override')
++  await expect(accepted.getByTestId('override-chip')).toContainText('integrated (operator override)')
++  await expect(accepted.locator('.status-succeeded')).toHaveCount(0)
++  await expect(accepted).toContainText(ACCEPTED_REASON)
++  // Actor and open findings sit outside the ellipsised summary, so a long reason never cuts them off (note 5).
++  const rowAccepted = accepted.getByTestId('row-accepted')
++  await expect(rowAccepted).toBeVisible()
++  await expect(rowAccepted).toContainText('accepted by operator')
++  await expect(rowAccepted).toContainText('2 open findings at acceptance: P1, P2')
++  expect(await rowAccepted.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
++  const plain = row(page, RUN_ACCEPTED_BLOCKED_PLAIN)
++  await expect(plain).toHaveAttribute('data-status', 'failed')
++  await expect(plain).not.toHaveAttribute('data-outcome', 'override')
++  await expect(plain.locator('.status-badge')).toContainText('Failed')
++  await expect(row(page, RUN_ACCEPTED_ABANDONED_PLAIN).locator('.status-badge')).toContainText('Cancelled')
++
++  // The same run without the record is untouched on its page.
++  await page.goto(runPage(RUN_ACCEPTED_BLOCKED_PLAIN))
++  await expect(page.getByTestId('accepted-outcome')).toHaveCount(0)
++  await expect(page.getByTestId('override-chip')).toHaveCount(0)
++  await expect(page.getByTestId('run-status').locator('.status-badge')).toContainText('Failed')
++
++  // 390 px: nothing scrolls sideways, on the run page or in the list.
++  await page.setViewportSize({ width: 390, height: 844 })
++  await page.goto(runPage(RUN_ACCEPTED_BLOCKED))
++  await expect(page.getByTestId('accepted-outcome')).toBeVisible()
++  expect(await overflow(page)).toBeLessThanOrEqual(0)
++  await page.goto(listPage)
++  await expect(row(page, RUN_ACCEPTED_BLOCKED)).toBeVisible()
++  expect(await overflow(page)).toBeLessThanOrEqual(0)
++  await page.setViewportSize({ width: 1280, height: 720 })
++  await page.goto(runPage(RUN_ACCEPTED_BLOCKED))
++  await expect(page.getByTestId('accepted-outcome')).toBeVisible()
++  await attach(page, testInfo, 'accepted-run-outcome')
++})
++
++test(`[scenario:accepted-after-abandon] An abandoned run that was then accepted reads as the override, not cancelled, keeps the abandon reason as history, and says when no finding was open (${phase})`, async ({ page }, testInfo) => {
++  await page.goto(runPage(RUN_ACCEPTED_ABANDONED))
++  const status = page.getByTestId('run-status')
++  await expect(status.getByTestId('override-chip')).toHaveText('integrated (operator override)')
++  await expect(status).not.toContainText('Cancelled')
++  await expect(status).not.toContainText('cancelled')
++  await expect(page.getByTestId('run-now')).toHaveAttribute('data-situation', 'accepted')
++  const outcome = page.getByTestId('accepted-outcome')
++  await expect(outcome.getByTestId('accepted-abandoned')).toContainText(ABANDON_MESSAGE)
++  await expect(outcome.getByTestId('accepted-findings-none')).toHaveText('no open findings at acceptance')
++  await expect(outcome.getByTestId('accepted-findings')).toHaveCount(0)
++  await page.goto(listPage)
++  const accepted = row(page, RUN_ACCEPTED_ABANDONED)
++  await expect(accepted).toHaveAttribute('data-outcome', 'override')
++  await expect(accepted.getByTestId('override-chip')).toContainText('integrated (operator override)')
++  await expect(accepted).not.toContainText('Cancelled')
++  await page.goto(runPage(RUN_ACCEPTED_ABANDONED))
++  await expect(page.getByTestId('accepted-outcome')).toBeVisible()
++  await attach(page, testInfo, 'accepted-after-abandon')
++})
+diff --git a/tests/project-workflows/fixtures/index.ts b/tests/project-workflows/fixtures/index.ts
+index 06fc136..a6b5847 100644
+--- a/tests/project-workflows/fixtures/index.ts
++++ b/tests/project-workflows/fixtures/index.ts
+@@ -17,6 +17,7 @@ import {
+   type ArtifactFile, type DefinitionNode,
+ } from '../fixtures.ts'
+ import type { SeedContext } from '../seed.ts'
++import { uxAccepted } from './ux-accepted.ts'
+ import { uxAttack } from './ux-attack.ts'
+ import { uxLaunch } from './ux-launch.ts'
+ import { uxLists } from './ux-lists.ts'
+@@ -65,7 +66,7 @@ export type UxFixtureModule = {
+ }
+ 
+ /** In slice order; the order the added workflows are listed in, in both phases. */
+-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel]
++export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxAccepted]
+ 
+ function mergePayloads(modules: readonly UxFixtureModule[]) {
+   for (const { payloads = {} } of modules) {
+diff --git a/tests/project-workflows/fixtures/ux-accepted.ts b/tests/project-workflows/fixtures/ux-accepted.ts
+new file mode 100644
+index 0000000..a6ab851
+--- /dev/null
++++ b/tests/project-workflows/fixtures/ux-accepted.ts
+@@ -0,0 +1,127 @@
++/**
++ * Fixtures of the operator override (`accepted.spec.ts`; docs/PRD_ACCEPT_OVERRIDE.md, decisions.md L8, L12), registered as the
++ * workflow `ux-accepted`: mock payloads for the worker phase and a `seed` for the candidate phase, merged by `index.ts`.
++ * Every run is a 1.10.0 export of the two-lane graph whose review blocked the candidate:
++ * - `accepted-blocked`: never abandoned; accepted by the operator with a P1 and a P2 open (the fail-safe P1 that blocked it).
++ * - `accepted-blocked-plain`: its twin without the record; it still reads `failed`.
++ * - `accepted-abandoned`: abandoned, then accepted with no open findings (the review was recorded).
++ * - `accepted-abandoned-plain`: its twin without the record; it still reads `cancelled`.
++ */
++import { join } from 'node:path'
++import type { RunAccepted } from '../../../contracts/projects/v1.ts'
++import {
++  ADAPTER_ARTIFACTS, ADAPTER_SESSION, adapterResult, CANDIDATE_COMMIT, definition, done, event, GRAPH_NODES, OUTPUT_COMMIT_ADAPTER, OUTPUT_COMMIT_UI, PROJECT,
++  runDetail, T1, T3, UI_ARTIFACTS, UI_SESSION, uiResult, type NodeState,
++} from '../fixtures.ts'
++import type { UxFixtureModule } from './index.ts'
++
++export const UX_ACCEPTED_WORKFLOW_ID = 'ux-accepted'
++export const UX_ACCEPTED_WORKFLOW_NAME = 'UX operator override'
++export const RUN_ACCEPTED_BLOCKED = 'accepted-blocked'
++export const RUN_ACCEPTED_BLOCKED_PLAIN = 'accepted-blocked-plain'
++export const RUN_ACCEPTED_ABANDONED = 'accepted-abandoned'
++export const RUN_ACCEPTED_ABANDONED_PLAIN = 'accepted-abandoned-plain'
++export const ACCEPTED_REASON = 'Merged by hand: the one fail-safe P1 is a known gap with a follow-up tracked for the next run, and waiting for another review round would hold the whole release for a change nobody else depends on'
++export const ABANDON_MESSAGE = 'Abandoned by the operator: usage limit; followed up by run-002. Stopped: review'
++export const FAILSAFE_TITLE = 'The fail-safe path is not covered by a test'
++export const STALE_TITLE = 'A code comment is stale'
++export const ACCEPTED_AT = '2026-03-01T11:30:00Z'
++export const BLOCKED_REVIEW_MESSAGE = 'Reviewer coverage blocked the candidate'
++
++const FINDINGS = [
++  { severity: 'P1', reviewer: 'coverage', title: FAILSAFE_TITLE, lane: 'adapter' },
++  { severity: 'P2', reviewer: 'general', title: STALE_TITLE, lane: null },
++] as const
++
++/** accepted.json as the engine writes it (decisions.md L8). */
++const exportRecord = (runId: string, openFindings: readonly object[]) => ({
++  version: '1.0.0', run_id: runId, candidate: CANDIDATE_COMMIT, reason: ACCEPTED_REASON, by: 'operator', via: 'claude-code', accepted_at: ACCEPTED_AT,
++  on_main: true, review: 'recorded', open_findings: openFindings,
++})
++/** The same record as the viewer serves it. */
++const servedRecord = (openFindings: RunAccepted['open_findings'], abandoned: string | null): RunAccepted => ({
++  candidate: CANDIDATE_COMMIT, reason: ACCEPTED_REASON, by: 'operator', accepted_at: ACCEPTED_AT, on_main: true, review: 'recorded', open_findings: [...openFindings], abandoned,
++})
++
++const UX_ACCEPTED_DEFINITION = definition(PROJECT.project_id, UX_ACCEPTED_WORKFLOW_ID, UX_ACCEPTED_WORKFLOW_NAME, GRAPH_NODES)
++
++type Spec = { runId: string; abandoned: boolean; accepted: readonly object[] | null }
++const SPECS: readonly Spec[] = [
++  { runId: RUN_ACCEPTED_BLOCKED, abandoned: false, accepted: FINDINGS },
++  { runId: RUN_ACCEPTED_BLOCKED_PLAIN, abandoned: false, accepted: null },
++  { runId: RUN_ACCEPTED_ABANDONED, abandoned: true, accepted: [] },
++  { runId: RUN_ACCEPTED_ABANDONED_PLAIN, abandoned: true, accepted: null },
++]
++
++const states: Record<string, NodeState> = {
++  launch_ui: done(UI_SESSION, 'ui'), launch_adapter: done(ADAPTER_SESSION, 'adapter'), handoff: done(), verify_ui: done(undefined, 'ui'), verify_adapter: done(undefined, 'adapter'),
++  candidate: done(), review: { status: 'failed', attempt: 1 },
++}
++
++/** The sequence of controller rows after the blocked review: the abandon row, then the accept row. */
++const tail = (spec: Spec) => [
++  ...spec.abandoned ? [{ status: 'cancelled', message: ABANDON_MESSAGE }] : [],
++  ...spec.accepted ? [{ status: 'succeeded', message: `Accepted by the operator: ${ACCEPTED_REASON}` }] : [],
++]
++
++function statusOf(spec: Spec): 'succeeded' | 'cancelled' | 'failed' {
++  return spec.accepted ? 'succeeded' : spec.abandoned ? 'cancelled' : 'failed'
++}
++
++function detailOf(spec: Spec) {
++  const base = runDetail(spec.runId, statusOf(spec), UX_ACCEPTED_DEFINITION, T1, T3, states, 8 + tail(spec).length)
++  if (!spec.accepted) return base
++  const accepted = servedRecord(spec.accepted as RunAccepted['open_findings'], spec.abandoned ? ABANDON_MESSAGE : null)
++  return { ...base, summary: { ...base.summary, accepted }, accepted }
++}
++
++export const uxAccepted: UxFixtureModule = {
++  payloads: {
++    workflows: [UX_ACCEPTED_DEFINITION],
++    runDetails: Object.fromEntries(SPECS.map(spec => [spec.runId, detailOf(spec)])),
++    runEvents: Object.fromEntries(SPECS.map(spec => [spec.runId, [
++      event(spec.runId, 1, { type: 'status_changed', node_id: 'candidate', attempt: 1, status: 'succeeded', message: 'Combined candidate checks passed' }),
++      event(spec.runId, 2, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'failed', message: BLOCKED_REVIEW_MESSAGE }),
++      ...tail(spec).map((row, index) => event(spec.runId, 3 + index, { type: 'status_changed', node_id: null, status: row.status as 'cancelled' | 'succeeded', message: row.message })),
++    ]])),
++    workerResults: Object.fromEntries(SPECS.map(spec => [spec.runId, { 'ui/1': uiResult(spec.runId), 'adapter/1': adapterResult(spec.runId, false) }])),
++    artifactFiles: Object.fromEntries(SPECS.map(spec => [spec.runId, [...UI_ARTIFACTS, ...ADAPTER_ARTIFACTS]])),
++  },
++  seed: ({ repository, runsRoot, writeRun, writePacket, receipt, internalEvent }) => {
++    const root = runsRoot(UX_ACCEPTED_WORKFLOW_ID)
++    for (const spec of SPECS) {
++      const runDir = join(root, spec.runId)
++      writeRun(root, repository, spec.runId, {
++        version: '1.10.0', createdAt: T1, updatedAt: T3, definitionNodes: GRAPH_NODES, definitionName: UX_ACCEPTED_WORKFLOW_NAME,
++        values: {
++          ui: receipt('ui', runDir, UI_SESSION, T1), adapter: receipt('adapter', runDir, ADAPTER_SESSION, T1),
++          snapshots: { ui: OUTPUT_COMMIT_UI, adapter: OUTPUT_COMMIT_ADAPTER },
++          ui_packet: 'verification/worker/ui/1/packet.json', adapter_packet: 'verification/worker/adapter/1/packet.json',
++          bundle: { run_id: spec.runId, base_commit: 'a'.repeat(40), candidate_commit: CANDIDATE_COMMIT, policy_sha256: 'e'.repeat(64) },
++        },
++        next: [],
++        tasks: [{ node_id: 'review', error: `${BLOCKED_REVIEW_MESSAGE}`, interrupts: [], result: null }],
++        events: [
++          internalEvent(1, T1, 'ui', 'running', 'Launching or reconciling the exact native session'),
++          internalEvent(2, T1, 'adapter', 'running', 'Launching or reconciling the exact native session'),
++          internalEvent(3, T1, 'freeze', 'succeeded', 'Captured both worker snapshots'),
++          internalEvent(4, T1, 'verify_ui', 'succeeded', 'UI verification passed'),
++          internalEvent(5, T1, 'verify_adapter', 'succeeded', 'Adapter verification passed'),
++          internalEvent(6, T1, 'candidate', 'succeeded', 'Combined candidate checks passed'),
++          internalEvent(7, T3, 'review', 'running', 'Launching the print-mode reviewer'),
++          internalEvent(8, T3, 'review', 'blocked', BLOCKED_REVIEW_MESSAGE),
++          ...tail(spec).map((row, index) => internalEvent(9 + index, T3, 'controller', row.status, row.message)),
++        ],
++        packets: directory => [
++          writePacket(directory, 'worker', 'ui', 1, uiResult(spec.runId), UI_ARTIFACTS, { status: 'passed', reasons: [] }),
++          writePacket(directory, 'worker', 'adapter', 1, adapterResult(spec.runId, false), ADAPTER_ARTIFACTS, { status: 'passed', reasons: [] }),
++          writePacket(directory, 'candidate', 'ui', 1, uiResult(spec.runId), UI_ARTIFACTS, { status: 'passed', reasons: [] }),
++          writePacket(directory, 'candidate', 'adapter', 1, adapterResult(spec.runId, false), ADAPTER_ARTIFACTS, { status: 'passed', reasons: [] }),
++        ],
++        review: null, inputs: null,
++        ...spec.accepted ? { accepted: exportRecord(spec.runId, spec.accepted) } : {},
++      })
++    }
++    return { workflows: [{ workflow_id: UX_ACCEPTED_WORKFLOW_ID, runs_root: root, definition: { name: UX_ACCEPTED_WORKFLOW_NAME, nodes: GRAPH_NODES } }] }
++  },
++}
+diff --git a/tests/project-workflows/seed.ts b/tests/project-workflows/seed.ts
+index 20dba06..4b597c3 100644
+--- a/tests/project-workflows/seed.ts
++++ b/tests/project-workflows/seed.ts
+@@ -167,7 +167,7 @@ export type RunOptions = {
+    * selection, 1.4.0 the reviewer set, 1.6.0 the `sidecar` section, 1.8.0 the `sidecar` and `attack` sections, 1.9.0 also the
+    * `panels` section.
+    */
+-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0'
++  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0' | '1.10.0'
+   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
+   reviewers?: readonly string[]
+   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
+@@ -190,6 +190,8 @@ export type RunOptions = {
+   panels?: unknown
+   /** The live `<run>/panel.json` the controller rewrites while the panel runs. */
+   panelFile?: unknown
++  /** Export 1.10.0: the `accepted` record (accepted.json verbatim), or null for a run the operator did not accept. */
++  accepted?: unknown
+ }
+ 
+ function writeRun(runsRoot: string, repository: string, runId: string, options: RunOptions) {
+@@ -202,7 +204,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options:
+   const plan = {
+     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
+     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
+-    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
++    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' || version === '1.9.0' || version === '1.10.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
+     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
+     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
+@@ -220,9 +222,10 @@ function writeRun(runsRoot: string, repository: string, runId: string, options:
+     values: { run_id: runId, ...options.values }, next: options.next, tasks: options.tasks, events: options.events,
+     verification_packets: packets, updated_at: options.updatedAt,
+     ...(version !== '1.0.0' ? { review: options.review ?? null, inputs } : {}),
+-    ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { sidecar: options.sidecar ?? null } : {}),
+-    ...(version === '1.8.0' || version === '1.9.0' ? { attack: options.attack ?? null } : {}),
+-    ...(version === '1.9.0' ? { panels: options.panels ?? null } : {}),
++    ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' || version === '1.10.0' ? { sidecar: options.sidecar ?? null } : {}),
++    ...(version === '1.8.0' || version === '1.9.0' || version === '1.10.0' ? { attack: options.attack ?? null } : {}),
++    ...(version === '1.9.0' || version === '1.10.0' ? { panels: options.panels ?? null } : {}),
++    ...(version === '1.10.0' ? { accepted: options.accepted ?? null } : {}),
+   }
+   writeJson(join(runDir, 'run-state.json'), state)
+   return runDir
+diff --git a/tests/unit/accepted.test.ts b/tests/unit/accepted.test.ts
+new file mode 100644
+index 0000000..67db6d4
+--- /dev/null
++++ b/tests/unit/accepted.test.ts
+@@ -0,0 +1,113 @@
++/**
++ * The operator override in the viewer (decisions.md L7, L12, L13): a run with `accepted` is served succeeded, and every
++ * status-keyed site checks `accepted` first: the chip tone, the row text, the Recent filters, the project tone, the finished
++ * test, the Needs-you and Running sections, the triage headline and the Untried test.
++ */
++import { describe, test } from 'node:test'
++import assert from 'node:assert/strict'
++import { acceptedFindingsText, acceptedOf, deriveNow, deriveAttention, isUntried } from '../../contracts/projects/triage.ts'
++import { validateRunDetail, type RunAccepted, type RunActivity, type RunSummary } from '../../contracts/projects/v1.ts'
++import { filterRecent, homeSections, isFinished, projectTone, rowSummary, rowTime, waitingKind } from '../../src/projects/lists.ts'
++import { OVERRIDE_LABEL } from '../../src/projects/status.ts'
++import { stateTone, TONE_LABEL } from '../../src/projects/tone.ts'
++import { definition, laneGraphNodes, runDetail } from '../project-workflows/fixtures.ts'
++
++const NOW = Date.parse('2026-03-20T12:00:00Z')
++const DEFINITION = definition('alpha-project', 'ux-lists', 'Feature implementation', laneGraphNodes(['ui']))
++const CANDIDATE = 'b'.repeat(40)
++
++const accepted = (fields: Partial<RunAccepted> = {}): RunAccepted => ({
++  candidate: CANDIDATE, reason: 'merged by hand', by: 'operator', accepted_at: '2026-03-20T10:00:00Z', on_main: true, review: 'recorded', abandoned: null,
++  open_findings: [{ severity: 'P1', reviewer: 'coverage', title: 'Fail-safe path uncovered', lane: 'ui' }], ...fields,
++})
++const activity = (fields: Partial<RunActivity> = {}): RunActivity => ({
++  feature: 'f', last_activity_at: null, finished_at: '2026-03-20T10:00:00Z', focus: null, attention: null, waiting_questions: 0, headline: null, controller: null, ...fields,
++})
++function summary(runId: string, status: RunSummary['status'], fields: Partial<RunSummary> = {}): RunSummary {
++  return {
++    contract_version: '1.0.0', project_id: 'alpha-project', workflow_id: 'ux-lists', definition_revision: DEFINITION.definition_revision, run_id: runId, status,
++    created_at: '2026-03-20T09:00:00Z', updated_at: '2026-03-20T10:00:00Z', ...fields,
++  }
++}
++const acceptedDetail = (override: RunAccepted | null, status: RunSummary['status'] = 'succeeded') => {
++  const base = runDetail('accepted', status, DEFINITION, '2026-03-20T09:00:00Z', '2026-03-20T10:00:00Z', {}, 4)
++  return validateRunDetail({ ...base, summary: { ...base.summary, ...override ? { accepted: override } : {} }, ...override ? { accepted: override } : {} })
++}
++
++describe('an accepted run is finished (L7, L12)', () => {
++  test('isFinished checks accepted first, for a summary and for a bare status', () => {
++    assert.equal(isFinished(summary('a', 'paused', { accepted: accepted() })), true)
++    assert.equal(isFinished(summary('a', 'paused')), false)
++    assert.equal(isFinished('succeeded'), true)
++    assert.equal(isFinished('running'), false)
++  })
++  test('an accepted run that was never abandoned is neither in Needs you nor running', () => {
++    const rows = [
++      { run: summary('plain-blocked', 'failed', { contract_version: '1.5.0', activity: activity() }) },
++      { run: summary('accepted-running-shape', 'running', { contract_version: '1.5.0', accepted: accepted(), activity: activity({ attention: { kind: 'question', node_id: 'launch_ui', since: null }, waiting_questions: 1 }) }) },
++      { run: summary('accepted-plain', 'succeeded', { contract_version: '1.5.0', accepted: accepted(), activity: activity() }) },
++    ]
++    assert.equal(waitingKind(rows[1].run), null)
++    const sections = homeSections(rows, NOW)
++    assert.deepEqual(sections.needsYou.map(row => row.run.run_id), [])
++    assert.deepEqual(sections.running.map(row => row.run.run_id), [])
++    assert.deepEqual(sections.recent.map(row => row.run.run_id).sort(), ['accepted-plain', 'accepted-running-shape', 'plain-blocked'])
++  })
++})
++
++describe('the override reads as its own outcome', () => {
++  test('rowSummary names the override, the short candidate and the reason; a run without it reads as before', () => {
++    assert.equal(rowSummary(summary('a', 'succeeded', { accepted: accepted() })), `${OVERRIDE_LABEL} bbbbbbb: merged by hand`)
++    assert.equal(rowSummary(summary('a', 'succeeded')), 'Succeeded')
++    assert.equal(rowSummary(summary('a', 'cancelled')), 'Cancelled')
++  })
++  test('rowTime treats an accepted run as finished', () => {
++    assert.equal(rowTime(summary('a', 'paused', { accepted: accepted() }), NOW).kind, 'updated')
++  })
++  test('filterRecent: not under Failed, under Succeeded with the marker', () => {
++    const rows = [{ run: summary('a', 'succeeded', { accepted: accepted() }) }, { run: summary('b', 'failed') }, { run: summary('c', 'succeeded') }]
++    assert.deepEqual(filterRecent(rows, 'failed', NOW, 'utc').map(row => row.run.run_id), ['b'])
++    assert.deepEqual(filterRecent(rows, 'succeeded', NOW, 'utc').map(row => row.run.run_id), ['a', 'c'])
++    assert.ok(rows[0].run.accepted, 'the marker the row chip reads')
++  })
++  test('projectTone and stateTone give the override its own tone, not ok', () => {
++    assert.equal(projectTone([summary('a', 'succeeded', { accepted: accepted() })]), 'override')
++    assert.equal(projectTone([summary('a', 'succeeded')]), 'ok')
++    assert.equal(stateTone({ status: 'succeeded', accepted: accepted() }), 'override')
++    assert.equal(stateTone({ status: 'succeeded' }), 'ok')
++    // A live run keeps its tone above the override; the override sits where ok does.
++    assert.equal(projectTone([summary('a', 'succeeded', { accepted: accepted() }), summary('b', 'running')]), 'run')
++    assert.equal(projectTone([summary('a', 'succeeded', { accepted: accepted() }), summary('b', 'awaiting_approval')]), 'warn')
++    assert.equal(TONE_LABEL.override, 'Integrated (operator override)')
++  })
++})
++
++describe('triage reads accepted first', () => {
++  test('an accepted run (even one that was abandoned) has the override glyph and headline, nothing to do and no attention', () => {
++    const detail = acceptedDetail(accepted({ abandoned: 'Abandoned by the operator: usage limit' }))
++    assert.deepEqual(acceptedOf(detail), detail.accepted)
++    const now = deriveNow({ detail, events: [] })
++    assert.equal(now.situation, 'accepted')
++    assert.equal(now.glyph, '◆')
++    assert.equal(now.tone, 'override')
++    assert.equal(now.next.action, 'none')
++    assert.ok(JSON.stringify(now.headline).includes('Integrated (operator override) bbbbbbb'))
++    assert.equal(deriveAttention({ detail, events: [] }).top, null)
++  })
++  test('a run without it keeps its situation', () => {
++    assert.notEqual(deriveNow({ detail: acceptedDetail(null), events: [] }).situation, 'accepted')
++  })
++  test('an accepted, tryout-required run with no verdicts is not untried', () => {
++    const inputs = { tryout: { required: true, verdicts: [], allow_untried: null } } as never
++    assert.equal(isUntried({ detail: acceptedDetail(null), inputs }), true)
++    assert.equal(isUntried({ detail: acceptedDetail(accepted()), inputs }), false)
++  })
++})
++
++describe('the findings line', () => {
++  test('lists the severities, says none when none, and says no review when none was recorded', () => {
++    assert.equal(acceptedFindingsText(accepted()), '1 open finding at acceptance: P1')
++    assert.equal(acceptedFindingsText(accepted({ open_findings: [] })), 'no open findings at acceptance')
++    assert.equal(acceptedFindingsText(accepted({ review: 'none', open_findings: [] })), 'no review recorded')
++  })
++})
+diff --git a/tests/unit/tone.test.ts b/tests/unit/tone.test.ts
+index 1002b38..5e25377 100644
+--- a/tests/unit/tone.test.ts
++++ b/tests/unit/tone.test.ts
+@@ -11,7 +11,7 @@ import {
+   toneClass, type Tone,
+ } from '../../src/projects/tone.ts'
+ 
+-const TONES: readonly Tone[] = ['ok', 'run', 'warn', 'fail', 'pause', 'idle']
++const TONES: readonly Tone[] = ['ok', 'run', 'warn', 'fail', 'pause', 'override', 'idle']
+ 
+ describe('statusTone', () => {
+   test('maps every run status of the contract to a tone', () => {
