@@ -13,7 +13,7 @@ import { RunRow } from './RunRow.tsx'
 import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
-import { statusTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
+import { stateTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
 import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
 import { useTimeZone } from './useNow.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
@@ -71,7 +71,7 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
           <span className="home-card-id">{run.run_id}</span>
           <span className="visually-hidden">Waiting on you: </span>
           <Chip tone="warn">{WAITING_LABEL[kind]}</Chip>
-          <StatusBadge status={run.status} />
+          <StatusBadge status={run.status} accepted={Boolean(run.accepted)} />
         </span>
         <span className="home-card-context">{namesOf(row)}</span>
         <span className="home-card-summary">{rowSummary(run, row.labels)}</span>
@@ -343,13 +343,13 @@ export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }
         return (
           <li key={workflow.workflow_id} className="lists-group" data-workflow-id={workflow.workflow_id}>
             <AppLink href={workflowPathname(projectId, workflow.workflow_id)} onNavigate={onNavigate}
-              className={`projects-card lists-group-head ui-card ${toneClass(last ? statusTone(last.status) : 'idle')}`}>
+              className={`projects-card lists-group-head ui-card ${toneClass(last ? stateTone({ status: last.status, accepted: last.accepted }) : 'idle')}`}>
               <span className="projects-card-title">{title}</span>
               <span className="projects-muted">
                 {workflow.workflow_id}{count !== null && <> · {count}</>} · {workflow.nodes.length} {workflow.nodes.length === 1 ? 'node' : 'nodes'} · current revision {shortRevision(workflow.definition_revision)}
                 {title !== workflow.name && <> · {workflow.name}</>}
               </span>
-              {last && <span className="lists-group-last">last run <StatusBadge status={last.status} /> · last activity {formatAgo(movedAt(last), now)}</span>}
+              {last && <span className="lists-group-last">last run <StatusBadge status={last.status} accepted={Boolean(last.accepted)} /> · last activity {formatAgo(movedAt(last), now)}</span>}
             </AppLink>
             {entry === null && runs.status !== 'error' && <p className="projects-muted lists-empty">Loading runs…</p>}
             {entry !== null && entry.error !== null && (

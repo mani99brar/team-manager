@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "run_id": "shared-memory-006",
+  "candidate": "89b1032b1032b1032b1032b1032b1032b1032b10",
+  "reason": "coverage blocked on one fail-safe P1; general approved. Merged by hand into main.",
+  "by": "operator",
+  "via": "claude-code",
+  "accepted_at": "2026-10-08T12:00:00Z",
+  "on_main": true,
+  "review": "recorded",
+  "open_findings": [
+    {"severity": "P1", "reviewer": "coverage", "title": "The retry path has no test for the exhausted-quota branch.", "lane": "engine"},
+    {"severity": "P2", "reviewer": "general", "title": "The viewer polls every two seconds; a longer cadence would do.", "lane": null}
+  ]
+}

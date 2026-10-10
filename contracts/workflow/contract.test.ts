@@ -361,6 +361,41 @@ test('review completion 1.2.0 binds a file to one reviewer node and attributes f
   assert.equal(readJson('./reviewCompletion.schema.json').properties.node_id.pattern, '^review(-[a-z0-9-]{1,32})?$')
 })
 
+test('accepted record 1.0.0: the operator-override examples validate and the field rules hold ([L8], [L10])', () => {
+  const accepted = handWritten('accepted')
+  // Both committed examples (with findings and a via; unreviewed with none) parse against the hand-written schema.
+  for (const name of ['accepted.example.json', 'accepted.unreviewed.example.json']) accepted.parse(readJson(`./examples/${name}`))
+  const example = readJson('./examples/accepted.example.json')
+  const reject = (label: string, mutate: (value: typeof example) => void) => {
+    const value = structuredClone(example)
+    mutate(value)
+    assert.equal(accepted.safeParse(value).success, false, label)
+  }
+  reject('unknown key', value => { value.extra = true })
+  reject('bad version', value => { value.version = '1.1.0' })
+  reject('by not operator', value => { value.by = 'maintainer' })
+  reject('candidate not 40-hex', value => { value.candidate = 'abc' })
+  reject('short candidate', value => { value.candidate = '89b1032' })
+  reject('unknown review', value => { value.review = 'clean' })
+  reject('blank reason', value => { value.reason = '' })
+  reject('finding severity freelanced', value => { value.open_findings[0].severity = 'high' })
+  reject('finding missing lane', value => { delete value.open_findings[0].lane })
+  reject('finding unknown key', value => { value.open_findings[0].extra = true })
+  reject('on_main not boolean', value => { value.on_main = 'yes' })
+  // accepted_at is a UTC ISO time ending in Z: a hand-edited non-ISO value is rejected here as the viewer's strict parse rejects it ([L14], note 2).
+  reject('accepted_at free text', value => { value.accepted_at = 'yesterday' })
+  reject('accepted_at missing the Z', value => { value.accepted_at = '2026-10-08T12:00:00' })
+  // via is optional; a lane may be null; open_findings may be empty.
+  accepted.parse({ ...structuredClone(example), via: undefined, open_findings: [] })
+  accepted.parse({ ...structuredClone(example), open_findings: [{ severity: 'P2', reviewer: 'general', title: 'x', lane: null }] })
+  const schema = readJson('./accepted.schema.json')
+  assert.equal(schema.properties.candidate.pattern, '^[0-9a-f]{40}$')
+  assert.equal(schema.properties.accepted_at.pattern, '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$')
+  assert.deepEqual(schema.properties.review.enum, ['recorded', 'none'])
+  assert.deepEqual(schema.properties.open_findings.items.properties.severity.enum, ['P0', 'P1', 'P2'])
+  assert.deepEqual(schema.required, ['version', 'run_id', 'candidate', 'reason', 'by', 'accepted_at', 'on_main', 'review', 'open_findings'])
+})
+
 test('registry-entry: the golden entry a live launch writes parses with the server registry schema', () => {
   const entry = readJson('./examples/registry-entry.json')
   const config = validateProjectsConfig({ version: 1, projects: [entry] })

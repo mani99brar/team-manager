@@ -1088,7 +1088,9 @@ def repair_main(argv=None):
     try:
         actor = require_actor(args, "repair")
         from .abandon import refuse_abandoned
+        from .accept import refuse_accepted
         refuse_abandoned(directory)
+        refuse_accepted(directory)
         if [bool(args.commit), args.workspace, args.session].count(True) != 1:
             raise ValueError("Give exactly one of --commit <sha> (apply a fix), --workspace (make a worktree to commit one in) and "
                              "--session --live (a repair session makes the fix)")

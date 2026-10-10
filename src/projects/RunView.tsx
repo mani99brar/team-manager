@@ -121,7 +121,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const timeline = useMemo(() => (run ? buildTimeline(run) : null), [run])
   const rows = stepRows(detail, timeline ?? emptyTimeline(detail), { now: clock, attention: attention ?? undefined })
   // The run's one tone (docs/PRD_VIEWER_REVAMP.md 4): what waits on the operator wins over the status.
-  const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null })
+  const tone = stateTone({ status: summary.status, attention: attention?.top?.kind ?? null, accepted: summary.accepted })
 
   // The in-run fix loop (export 1.10.0): the review node's round line follows the fix loop, not the snapshot attempt
   // (docs/PRD_VIEWER_REFINE 5.2, decisions [L12]/[L13]). The repair nodes themselves are projected into `definition`/`snapshot`

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Operator-override acceptance record v1.0.0",
+  "description": "`<run>/accepted.json` written by `python -m workflow accept <run> --candidate <sha> --reason \"<text>\" --by operator` (docs/PRD_ACCEPT_OVERRIDE.md; decisions.md [L8]): the operator's record that a blocked or abandoned run's candidate was merged by hand, and why. Written once, under the run's controller lock, validated with `workflow.verification.validate_schema(\"accepted\", ...)` before the write, and never rewritten. Export 1.12.0 carries this object verbatim as the top-level `accepted` key (null for a run without one; the export fails, naming the file, when accepted.json does not validate). This schema and the viewer's `accepted` field (contracts/projects, z.strictObject with `via` optional) parse exactly this key set and nothing else. `candidate` is the run's own candidate commit (brief.candidate_commit), a full 40-hex sha. `reason` and `by` are required non-empty strings and `accepted_at` is a required UTC ISO date-time ending in `Z` (what `checks.now()` writes; `pattern` enforces it so a hand-edited non-ISO value fails the export the way the viewer's strict `z.iso.datetime()` would, [L14]); `by` is always \"operator\" (accept is operator-only); `via` is present only when the command ran from a Claude Code session (actor_record adds \"claude-code\"). `on_main` says whether the candidate is an ancestor of the target's main/master/base branch (never fetched). `review` is \"recorded\" when the run has a review.json, else \"none\". `open_findings` is every finding open at acceptance (decisions.md [L5]): the blocking P0/P1 (not resolved, accepted ones included) then the P2s whose disposition is `open`; `title` is the review finding's message verbatim and `lane` is its `worker` when that is a lane id, else null.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "run_id", "candidate", "reason", "by", "accepted_at", "on_main", "review", "open_findings"],
+  "properties": {
+    "version": {"const": "1.0.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "candidate": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "reason": {"type": "string", "minLength": 1},
+    "by": {"const": "operator"},
+    "via": {"const": "claude-code"},
+    "accepted_at": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"},
+    "on_main": {"type": "boolean"},
+    "review": {"enum": ["recorded", "none"]},
+    "open_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "reviewer", "title", "lane"],
+        "properties": {
+          "severity": {"enum": ["P0", "P1", "P2"]},
+          "reviewer": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "lane": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1}]}
+        }
+      }
+    }
+  }
+}

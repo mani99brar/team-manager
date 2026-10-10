@@ -11,7 +11,7 @@ import {
   toneClass, type Tone,
 } from '../../src/projects/tone.ts'
 
-const TONES: readonly Tone[] = ['ok', 'run', 'warn', 'fail', 'pause', 'idle']
+const TONES: readonly Tone[] = ['ok', 'run', 'warn', 'fail', 'pause', 'override', 'idle']
 
 describe('statusTone', () => {
   test('maps every run status of the contract to a tone', () => {

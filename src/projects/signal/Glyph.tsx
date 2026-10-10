@@ -14,6 +14,7 @@ export function GlyphDefs() {
         <symbol id="sb-g-warn" viewBox="0 0 20 20"><path d="M10 1.5l8.5 8.5-8.5 8.5L1.5 10z" fill="currentColor" /><path d="M7.7 8a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1.1.8-1.1 1.5v.4" fill="none" stroke="var(--surface)" strokeWidth="1.9" strokeLinecap="round" /><circle cx="10" cy="14.4" r="1.1" fill="var(--surface)" /></symbol>
         <symbol id="sb-g-fail" viewBox="0 0 20 20"><rect x="1.8" y="1.8" width="16.4" height="16.4" rx="3" fill="currentColor" /><path d="M6.6 6.6l6.8 6.8M13.4 6.6l-6.8 6.8" stroke="var(--surface)" strokeWidth="2.2" strokeLinecap="round" /></symbol>
         <symbol id="sb-g-pause" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8.5" fill="currentColor" /><path d="M8 6.5v7M12 6.5v7" stroke="var(--surface)" strokeWidth="2.2" strokeLinecap="round" /></symbol>
+        <symbol id="sb-g-override" viewBox="0 0 20 20"><path d="M10 1.5l8.5 8.5-8.5 8.5L1.5 10z" fill="currentColor" /><path d="M6.8 10h6.4M10 6.8v6.4" stroke="var(--surface)" strokeWidth="2" strokeLinecap="round" /></symbol>
         <symbol id="sb-g-idle" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.4" fill="none" stroke="currentColor" strokeWidth="2.2" strokeDasharray="3.2 3" /></symbol>
       </defs>
     </svg>

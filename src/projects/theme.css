@@ -8,7 +8,7 @@
   --bg: #e9ebe6; --grid: #d5d9d1; --surface: #fbfbf8; --surface-2: #f1f2ee; --fg: #151b18; --muted: #545e58; --border: #c8cdc4; --border-strong: #a3aaa0;
   --edge: #7d8780; --edge-soft: #b8beb5; --edge-highlight: #5a3ec8;
   --accent: #5a3ec8; --accent-fg: #ffffff; --accent-soft: #e7e2fb; --focus: #5a3ec8; --attention: #c27100;
-  --ok: #17663b; --ok-soft: #d9f0e1; --run: #1d4fc4; --run-soft: #dde7fb; --warn: #8f4700; --warn-soft: #fde6cc; --fail: #a51d27; --fail-soft: #fadcdf; --pause: #714a00; --pause-soft: #fbedc4; --idle: #56606c; --idle-soft: #e4e6e9;
+  --ok: #17663b; --ok-soft: #d9f0e1; --run: #1d4fc4; --run-soft: #dde7fb; --warn: #8f4700; --warn-soft: #fde6cc; --fail: #a51d27; --fail-soft: #fadcdf; --pause: #714a00; --pause-soft: #fbedc4; --override: #5b2fa0; --override-soft: #ece4fa; --idle: #56606c; --idle-soft: #e4e6e9;
   --p0: #a51d27; --p1: #a33806; --p2: #4b5563; --sev-fg: #ffffff;
   --font-display: "Atkinson Hyperlegible Next", system-ui, "Segoe UI", Roboto, sans-serif; --font-body: "Atkinson Hyperlegible Next", system-ui, "Segoe UI", Roboto, sans-serif; --font-mono: "Atkinson Hyperlegible Mono", ui-monospace, Menlo, Consolas, monospace;
   --radius: 8px; --shadow: 0 1px 2px rgba(20, 30, 25, 0.06); --shadow-float: 0 10px 30px -12px rgba(20, 30, 25, 0.28), 0 2px 6px -2px rgba(20, 30, 25, 0.12); --band: transparent; --band-fg: var(--fg);
@@ -21,7 +21,7 @@
     --bg: #0f1312; --grid: #1c2320; --surface: #171c1a; --surface-2: #1e2522; --fg: #e6ebe7; --muted: #9ba7a0; --border: #2b3430; --border-strong: #3e4944;
     --edge: #7f8b85; --edge-soft: #3b4641; --edge-highlight: #a995ff;
     --accent: #a995ff; --accent-fg: #0d1210; --accent-soft: #2a2347; --focus: #a995ff; --attention: #f0a23b;
-    --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --idle: #a9b2bf; --idle-soft: #262d33;
+    --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --override: #c4a6f5; --override-soft: #2f2447; --idle: #a9b2bf; --idle-soft: #262d33;
     --p0: #ff8a92; --p1: #f6ad5c; --p2: #a9b2bf; --sev-fg: #0d1210; --shadow: none; --shadow-float: 0 14px 34px -12px rgba(0, 0, 0, 0.7), 0 2px 6px -2px rgba(0, 0, 0, 0.5); color-scheme: dark;
   }
 }
@@ -29,7 +29,7 @@
   --bg: #0f1312; --grid: #1c2320; --surface: #171c1a; --surface-2: #1e2522; --fg: #e6ebe7; --muted: #9ba7a0; --border: #2b3430; --border-strong: #3e4944;
   --edge: #7f8b85; --edge-soft: #3b4641; --edge-highlight: #a995ff;
   --accent: #a995ff; --accent-fg: #0d1210; --accent-soft: #2a2347; --focus: #a995ff; --attention: #f0a23b;
-  --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --idle: #a9b2bf; --idle-soft: #262d33;
+  --ok: #62d08f; --ok-soft: #163323; --run: #89abff; --run-soft: #19264a; --warn: #f6ad5c; --warn-soft: #3c2811; --fail: #ff8a92; --fail-soft: #44181c; --pause: #ecc24a; --pause-soft: #392f12; --override: #c4a6f5; --override-soft: #2f2447; --idle: #a9b2bf; --idle-soft: #262d33;
   --p0: #ff8a92; --p1: #f6ad5c; --p2: #a9b2bf; --sev-fg: #0d1210; --shadow: none; --shadow-float: 0 14px 34px -12px rgba(0, 0, 0, 0.7), 0 2px 6px -2px rgba(0, 0, 0, 0.5); color-scheme: dark;
 }
 .projects-shell ::selection { background: var(--accent-soft); color: var(--fg); }
@@ -43,6 +43,7 @@
 .projects-shell .ui-chip.tone-warn { background: var(--warn-soft); color: var(--warn); }
 .projects-shell .ui-chip.tone-fail { background: var(--fail-soft); color: var(--fail); }
 .projects-shell .ui-chip.tone-pause { background: var(--pause-soft); color: var(--pause); }
+.projects-shell .ui-chip.tone-override { background: var(--override-soft); color: var(--override); }
 @media (prefers-reduced-motion: no-preference) { .projects-shell .ui-chip.tone-run.live::before { animation: ui-pulse 1.6s infinite; } @keyframes ui-pulse { 50% { opacity: 0.35; } } }
 .projects-shell .ui-sev { display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; color: var(--sev-fg); background: var(--p2); }
 .projects-shell .ui-sev.sev-p0 { background: var(--p0); }
@@ -53,6 +54,7 @@
 .projects-shell .ui-card.tone-warn { border-left-color: var(--warn); }
 .projects-shell .ui-card.tone-fail { border-left-color: var(--fail); }
 .projects-shell .ui-card.tone-pause { border-left-color: var(--pause); }
+.projects-shell .ui-card.tone-override { border-left-color: var(--override); }
 .projects-shell .ui-section { display: flex; flex-direction: column; gap: 10px; }
 .projects-shell .ui-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .projects-shell .ui-section-header h2 { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }

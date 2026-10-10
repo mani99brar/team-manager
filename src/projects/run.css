@@ -55,6 +55,8 @@
 .run-now-waiting { border-left-color: var(--warn); background: var(--warn-soft); }
 .run-now-running { border-left-color: var(--run); background: var(--run-soft); }
 .run-now-succeeded { border-left-color: var(--ok); background: var(--ok-soft); }
+.run-now-override { border-left-color: var(--override); background: var(--override-soft); }
+.run-now-override .run-now-headline { color: var(--override); }
 .run-now-headline { margin: 0; font-size: 1rem; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .run-now-failed .run-now-headline, .run-now-blocked .run-now-headline { color: var(--fail); }
 .run-now-paused .run-now-headline, .run-now-interrupted .run-now-headline { color: var(--pause); }
@@ -116,6 +118,7 @@
 .projects-shell .workflow-node.tone-run { --node-tone: var(--run); --node-tone-soft: var(--run-soft); }
 .projects-shell .workflow-node.tone-warn { --node-tone: var(--warn); --node-tone-soft: var(--warn-soft); }
 .projects-shell .workflow-node.tone-fail { --node-tone: var(--fail); --node-tone-soft: var(--fail-soft); }
+.projects-shell .workflow-node.tone-override { --node-tone: var(--override); --node-tone-soft: var(--override-soft); }
 .projects-shell .workflow-node.tone-pause { --node-tone: var(--pause); --node-tone-soft: var(--pause-soft); }
 .projects-shell .workflow-node.tone-idle { --node-tone: var(--idle); --node-tone-soft: var(--idle-soft); }
 .projects-shell .workflow-node[data-tone] .workflow-node-shape { fill: var(--node-tone-soft); stroke: var(--node-tone); }

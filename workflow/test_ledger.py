@@ -159,8 +159,8 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual({item["commit"]: (item["class"], item["run"]) for item in record["commits"]},
                          {self.merge: ("blocked", "run-x"), self.config: ("config", None), self.hand: ("code", None),
                           self.approved: ("reviewed", "run-a"), self.base: ("code", None)})
-        self.assertEqual(record["counts"], {"reviewed": 1, "blocked": 1, "config": 1, "code": 2})
-        self.assertIn(f"Ledger of main at {self.merge[:12]}: 1 reviewed, 1 from blocked runs, 1 config and 2 code outside any run", out.getvalue())
+        self.assertEqual(record["counts"], {"reviewed": 1, "accepted": 0, "blocked": 1, "config": 1, "code": 2})
+        self.assertIn(f"Ledger of main at {self.merge[:12]}: 1 reviewed, 0 accepted (override), 1 from blocked runs, 1 config and 2 code outside any run", out.getvalue())
         self.assertEqual(self.registry.read_text(), registry_before)
         # --since narrows the range; the same repository and branch replace their record, another branch is added beside it.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -169,6 +169,72 @@ class LedgerTests(unittest.TestCase):
         records = read_json(self.registry.parent / "ledger.json")["ledgers"]
         self.assertEqual([(item["branch"], item["since"], len(item["commits"])) for item in records],
                          [("main", self.approved, 3), (self.blocked, None, 3)])
+
+    def accept_record(self, candidate: str, review: str = "recorded") -> dict:
+        return {"version": "1.0.0", "run_id": "run-x", "candidate": candidate, "reason": "shipped over the P1", "by": "operator",
+                "accepted_at": "2026-10-08T12:00:00Z", "on_main": True, "review": review, "open_findings": []}
+
+    def test_an_accepted_run_is_classified_accepted_override_directly_and_through_a_merge(self):
+        # run-x stays blocked in review.json; accepting it adds accepted.json with the same candidate ([L9], [O1]).
+        save_json(self.runs / "run-x" / "accepted.json", self.accept_record(self.blocked))
+        runs = ledger.known_runs(self.repo, ledger.runs_roots())
+        self.assertEqual(next(run["verdict"] for run in runs if run["run_id"] == "run-x"), "accepted")
+        # Directly: the accepted candidate's own first-parent tip.
+        direct = ledger.classify(self.repo, self.blocked, self.approved, runs)
+        self.assertEqual((self.entry(direct, self.blocked)["class"], self.entry(direct, self.blocked)["run"]), ("accepted", "run-x"))
+        # Through a merge: main's merge of the accepted candidate, reached by its introduced commits.
+        entries = ledger.classify(self.repo, "main", None, runs)
+        merge = self.entry(entries, self.merge)
+        self.assertEqual((merge["class"], merge["run"]), ("accepted", "run-x"))
+        self.assertEqual(ledger.label(merge), "accepted (override) by run run-x")
+        # base_unreviewed no longer lists it, and the accepted candidate anchors the list as an approved one would.
+        pinned = ledger.base_unreviewed(self.repo, self.merge, ledger.runs_roots())
+        self.assertEqual((pinned["since"], pinned["since_run"], pinned["total"]), (self.blocked, "run-x", 2))
+        self.assertEqual([item["commit"] for item in pinned["commits"]], [self.config, self.hand])
+        self.assertNotIn(self.merge, [item["commit"] for item in pinned["commits"]])
+
+    def test_an_accepted_run_with_no_review_json_is_still_classified_accepted(self):
+        # [L4]: the accepted run is built from accepted.json's candidate and plan.json's base_commit, whatever review.json says.
+        (self.runs / "run-x" / "review.json").unlink()
+        save_json(self.runs / "run-x" / "accepted.json", self.accept_record(self.blocked, review="none"))
+        runs = ledger.known_runs(self.repo, ledger.runs_roots())
+        entries = ledger.classify(self.repo, "main", None, runs)
+        self.assertEqual((self.entry(entries, self.merge)["class"], self.entry(entries, self.merge)["run"]), ("accepted", "run-x"))
+
+    def test_the_ledger_command_counts_and_prints_the_override(self):
+        save_json(self.runs / "run-x" / "accepted.json", self.accept_record(self.blocked))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ledger.ledger_main(["--repo", str(self.repo), "--branch", "main"])
+        record = read_json(self.registry.parent / "ledger.json")["ledgers"][0]
+        self.assertEqual(record["counts"], {"reviewed": 1, "accepted": 1, "blocked": 0, "config": 1, "code": 2})
+        self.assertIn("1 reviewed, 1 accepted (override), 0 from blocked runs", out.getvalue())
+        # One line per accepted run after the count names the run id and its candidate ([G5], [L14], note 4).
+        self.assertIn(f"  accepted (override) by run run-x: 1 commit, candidate {self.blocked[:12]}", out.getvalue())
+        self.assertIn("accepted", ledger.CLASSES)
+
+    def test_describe_names_an_accepted_anchor_as_an_override(self):
+        # run-x's accepted candidate anchors base_unreviewed; describe() names the run and "override" in each branch, never
+        # calling it an approved run ([G5], [L13](c), note 3).
+        save_json(self.runs / "run-x" / "accepted.json", self.accept_record(self.blocked))
+        # Branch 1: the base is the accepted candidate itself; nothing unreviewed.
+        pinned = ledger.base_unreviewed(self.repo, self.blocked, ledger.runs_roots())
+        self.assertEqual((pinned["since"], pinned["since_class"], pinned["total"]), (self.blocked, "accepted", 0))
+        self.assertEqual(ledger.describe(pinned, self.blocked),
+                         f"Base {self.blocked[:12]} is run run-x's accepted (override) candidate; nothing unreviewed.")
+        # Branch 3: N commits since the accepted anchor.
+        pinned = ledger.base_unreviewed(self.repo, self.merge, ledger.runs_roots())
+        self.assertEqual((pinned["since"], pinned["since_class"], pinned["total"]), (self.blocked, "accepted", 2))
+        self.assertEqual(ledger.describe(pinned, self.merge).splitlines()[0],
+                         f"Base {self.merge[:12]} holds 2 commits since run run-x's accepted (override) candidate {self.blocked[:12]}:")
+        # Branch 2: a later base whose only commit since the anchor is reviewed by another run (nothing unreviewed, since != base).
+        follow = self.candidate(self.blocked, {"src/follow.ts": "export const follow = 1\n"}, "Follow on from the accepted candidate")
+        later = self.candidate(follow, {"src/later.ts": "export const later = 2\n"}, "Later, reviewed by run-z")
+        self.record("run-z", self.blocked, later, "approved")
+        pinned = ledger.base_unreviewed(self.repo, follow, ledger.runs_roots())
+        self.assertEqual((pinned["since"], pinned["since_class"], pinned["total"]), (self.blocked, "accepted", 0))
+        self.assertEqual(ledger.describe(pinned, follow),
+                         f"Base {follow[:12]} holds no commit since run run-x's accepted (override) candidate {self.blocked[:12]}; nothing unreviewed.")
 
     def test_the_ledger_command_refuses_an_unknown_branch(self):
         err = io.StringIO()

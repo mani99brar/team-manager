@@ -72,6 +72,7 @@
 .sb-stage .tone-warn, .sb-sheet.tone-warn, .sb-live .tone-warn { --t: var(--warn); --ts: var(--warn-soft); }
 .sb-stage .tone-fail, .sb-sheet.tone-fail, .sb-live .tone-fail { --t: var(--fail); --ts: var(--fail-soft); }
 .sb-stage .tone-pause, .sb-sheet.tone-pause, .sb-live .tone-pause { --t: var(--pause); --ts: var(--pause-soft); }
+.sb-stage .tone-override, .sb-sheet.tone-override, .sb-live .tone-override, .sb-idline.tone-override { --t: var(--override); --ts: var(--override-soft); }
 .sb-stage .tone-idle, .sb-sheet.tone-idle, .sb-live .tone-idle { --t: var(--idle); --ts: var(--idle-soft); }
 .sb-stage .node.tone-idle { background: var(--surface-2); }
 @media (prefers-reduced-motion: no-preference) {
@@ -209,3 +210,8 @@ button.lv-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -
   .sb-legend { bottom: calc(72px + env(safe-area-inset-bottom, 0px)); }
   .lv-figs { grid-template-columns: 1fr 1fr; }
 }
+
+/* The operator override's outcome (L12): a block under the one-row identity line, wrapping at any width. */
+.sb-accepted { flex: 1 1 100%; display: grid; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--override); background: var(--override-soft); border-radius: var(--radius); overflow-wrap: anywhere; min-width: 0; order: 6; }
+.sb-accepted p { margin: 0; }
+.sb-accepted-findings { margin: 0; padding-left: 18px; display: grid; gap: 2px; }

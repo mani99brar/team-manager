@@ -1,12 +1,12 @@
-import { isUntried } from '../../../contracts/projects/triage.ts'
-import type { RunDetail, RunInputs, WorkflowDefinition } from '../api.ts'
+import { acceptedFindingsText, acceptedOf, isUntried } from '../../../contracts/projects/triage.ts'
+import type { RunAccepted, RunDetail, RunInputs, WorkflowDefinition } from '../api.ts'
 import { INPUTS_NONE_SENTENCE } from '../Assignment.tsx'
 import { LiveStatus } from '../LiveStatus.tsx'
 import { AppLink, ErrorPanel, StatusBadge } from '../panels.tsx'
-import { deadlinesLabel, RUN_STATUS_SHORT, shortRevision, workflowTitle } from '../status.ts'
+import { deadlinesLabel, OVERRIDE_LABEL, OVERRIDE_SHORT, RUN_STATUS_SHORT, shortRevision, workflowTitle } from '../status.ts'
 import { Time } from '../Time.tsx'
 import { TimeZoneToggle } from '../TimeZoneToggle.tsx'
-import { toneClass, type Tone } from '../tone.ts'
+import { severityClass, severityTone, toneClass, type Tone } from '../tone.ts'
 import type { Resource, ResourceMeta } from '../useResource.ts'
 
 type Props = {
@@ -27,6 +27,36 @@ type Props = {
 }
 
 /**
+ * The operator override's outcome (L12): the reason, who accepted it and when, the candidate, the abandon row kept as history
+ * and every finding open at acceptance. An accepted run reads as this, never as the reviewed integration it is served under.
+ * It is a block of its own under the one-row line, wrapping at any width.
+ */
+function AcceptedOutcome({ accepted }: { accepted: RunAccepted }) {
+  return (
+    <div className="sb-accepted" data-testid="accepted-outcome">
+      <p className="sb-accepted-reason" data-testid="accepted-reason"><strong>{OVERRIDE_LABEL}:</strong> {accepted.reason}</p>
+      <p className="sb-accepted-facts" data-testid="accepted-facts">
+        accepted by {accepted.by} at <Time iso={accepted.accepted_at} /> · candidate <code title={accepted.candidate} data-testid="accepted-candidate">{accepted.candidate.slice(0, 7)}</code>
+        {!accepted.on_main && <> · <span data-testid="accepted-not-on-main">not on main when accepted</span></>}
+      </p>
+      {accepted.abandoned !== null && <p className="sb-accepted-abandoned projects-muted" data-testid="accepted-abandoned">Abandoned earlier: {accepted.abandoned}</p>}
+      {accepted.review === 'recorded' && accepted.open_findings.length > 0
+        ? (
+          <ul className="sb-accepted-findings" data-testid="accepted-findings" aria-label="Findings open at acceptance">
+            {accepted.open_findings.map((finding, index) => (
+              <li key={index} data-severity={finding.severity}>
+                <span className={`ui-chip plain ${severityClass(severityTone(finding.severity))}`}>{finding.severity}</span> {finding.title}
+                <span className="projects-muted"> · {finding.reviewer}{finding.lane ? ` · ${finding.lane}` : ''}</span>
+              </li>
+            ))}
+          </ul>
+        )
+        : <p className="projects-muted" data-testid="accepted-findings-none">{acceptedFindingsText(accepted)}</p>}
+    </div>
+  )
+}
+
+/**
  * The identity line (the Signal Box design): one row that names the run in monospace, its status in colour, glyph and
  * word, its feature, the pinned definition, how fresh the page is, the Local/UTC switch and the link to its other view.
  * Every other pinned fact (branch, base commit, mode, deadlines, created and export times) waits behind Details, so the
@@ -37,12 +67,13 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
   const data = inputs.status === 'ready' ? inputs.data : null
   const title = data?.feature ?? workflowTitle(definition)
   const definitionChanged = current !== null && current.definition_revision !== definition.definition_revision
+  const accepted = acceptedOf(detail)
   return (
     <header className={`sb-idline ${toneClass(tone)}`} data-testid="run-header" data-tone={tone} aria-labelledby="run-summary-title">
       <h2 id="run-summary-title" className="sb-runid">{summary.run_id}</h2>
       <p className="run-status-line sb-state" data-testid="run-status">
-        <StatusBadge status={summary.status} />
-        <span className="run-status-meaning" data-testid="run-status-meaning">{attentionWord ?? RUN_STATUS_SHORT[summary.status]}</span>
+        <StatusBadge status={summary.status} accepted={accepted !== null} />
+        <span className="run-status-meaning" data-testid="run-status-meaning">{accepted ? OVERRIDE_SHORT : attentionWord ?? RUN_STATUS_SHORT[summary.status]}</span>
         {isUntried({ detail, inputs: data }) && (
           <span className={`ui-chip ${toneClass('warn')} run-untried`} data-testid="untried-chip"
             title="This run asks for your tryout (feature.json tryout: true) and has no verdict yet; the live dock says what to try and how to record it.">Untried</span>
@@ -58,6 +89,7 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
         <TimeZoneToggle />
       </div>
       <AppLink href={other.href} onNavigate={onNavigate} className="sb-other" data-testid={other.testId}>{other.label}</AppLink>
+      {accepted && <AcceptedOutcome accepted={accepted} />}
       <details className="run-details sb-details" data-testid="run-details">
         <summary>Details</summary>
         <div className="sb-details-body">

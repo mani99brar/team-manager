@@ -1,8 +1,17 @@
 import type { AnchorHTMLAttributes, ReactNode } from 'react'
 import { describeApiError, ProjectsApiError } from './api.ts'
-import { RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
+import { OVERRIDE_LABEL, OVERRIDE_TITLE, RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
 
-export function StatusBadge({ status, explain = false }: { status: RunStatus; explain?: boolean }) {
+export function StatusBadge({ status, explain = false, accepted = false }: { status: RunStatus; explain?: boolean; accepted?: boolean }) {
+  // The operator override (L12) is served as succeeded but has its own chip: never the reviewed-integration style.
+  if (accepted) {
+    return (
+      <span className="status-badge status-override" data-status={status} data-outcome="override" data-testid="override-chip" title={OVERRIDE_TITLE}>
+        <span>{OVERRIDE_LABEL}</span>
+        {explain && <span className="visually-hidden">. {OVERRIDE_TITLE}</span>}
+      </span>
+    )
+  }
   return (
     <span className={`status-badge status-${status}`} data-status={status} title={STATUS_TITLE[status]}>
       <span>{STATUS_LABEL[status]}</span>

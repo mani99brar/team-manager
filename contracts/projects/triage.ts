@@ -9,7 +9,7 @@
  * placeholders; every other value the viewer cannot know (a feature name, a run id, a commit, a reason) stays a `<…>`
  * placeholder. Nothing here runs a command or changes a run.
  */
-import { isBlockingFinding, type FixLoopReviewRound, type RepairEntry, type ReviewResult, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
+import { isBlockingFinding, type FixLoopReviewRound, type RepairEntry, type ReviewResult, type RunAccepted, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../workflow/v1.ts'
 
 export type NodeStatus = RunDetail['snapshot']['status']
@@ -117,7 +117,7 @@ export type Timeline = {
 
 /** The `run-now[data-situation]` ids, in the order `deriveNow` checks them (6.2). */
 export type Situation = 'question' | 'pane_attention' | 'awaiting_approval' | 'challenge_held' | 'challenge_paused' | 'interrupted' | 'blocked_before_freeze'
-  | 'blocked_identical' | 'check_failed' | 'review_blocked' | 'running' | 'succeeded' | 'inactive' | 'no_rule_matched'
+  | 'blocked_identical' | 'check_failed' | 'review_blocked' | 'running' | 'accepted' | 'succeeded' | 'inactive' | 'no_rule_matched'
 
 /**
  * Rich text: plain strings and times the UI renders in the viewer's zone (`clock` as `<time>`), relative to its ticking
@@ -152,8 +152,8 @@ export type Now = {
   situation: Situation
   /** Rule 5's case: (a) a controller row, (b) the focus node's own note, (c) the controller not running, (d) a repair not yet continued. */
   interruption: 'a' | 'b' | 'c' | 'd' | null
-  tone: 'failed' | 'blocked' | 'paused' | 'interrupted' | 'waiting' | 'running' | 'succeeded' | 'inactive'
-  glyph: '✗' | '‖' | '?' | '●' | '✓' | '○'
+  tone: 'failed' | 'blocked' | 'paused' | 'interrupted' | 'waiting' | 'running' | 'succeeded' | 'override' | 'inactive'
+  glyph: '✗' | '‖' | '?' | '●' | '✓' | '◆' | '○'
   focus: Focus | null
   /** The lane (or comma-separated lanes) the situation concerns, when it concerns lanes. */
   lane: string | null
@@ -1073,6 +1073,8 @@ function panes(run: NowInput, rows: readonly Row[]): Pane[] {
 /** Which nodes wait on the operator (6.4): a question, a pane that needs attention, or an approval; `top` by that precedence. */
 export function deriveAttention(run: RunData & { activity?: ServedActivity | null }): RunAttention {
   // The sidecar's rows (an escalation included) wait on nobody: no new attention kind (docs/PRD_REVIEW_SIDECAR.md 4.6).
+  // An accepted run (L12) waits on nobody.
+  if (acceptedOf(run.detail)) return { top: null, nodes: new Map() }
   const rows = classify(run.detail, run.events.filter(event => !ADVISORY_NODE_IDS.has(event.node_id)))
   const found = new Map<string, Attention>()
   for (const item of waitingQuestions(run, rows)) {
@@ -1198,7 +1200,8 @@ export function deriveNow(run: NowInput): Now {
   // run (a gate to decide, a challenge to resume, a lane to repair or retry, steps still running) no longer apply, since
   // abandon refuses every command they name. A review-blocked run keeps its brief and follow-up launch.
   const live = context.status !== 'cancelled'
-  const rules = [questionNow, paneNow, ...live ? [approvalNow, challengeHeldNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
+  // An accepted run (L12) is finished whatever its steps read: the override outcome comes before every rule.
+  const rules = [acceptedNow, questionNow, paneNow, ...live ? [approvalNow, challengeHeldNow, challengeNow] : [], interruptedNow, blockedBeforeFreezeNow,
     ...live ? [identicalNow, checkFailedNow] : [], reviewBlockedNow, ...live ? [runningNow] : [], succeededNow, inactiveNow, unmatchedNow]
   const now = rules.reduce<Draft | null>((found, rule) => found ?? rule(context), null)!  // The last rule always matches.
   return { interruption: null, lane: null, reason: null, reasonSource: null, since: focus?.since ?? null, ...now, focus, missing: [...context.missing] }
@@ -1692,6 +1695,8 @@ function workerDeadline(inputs: RunInputs, worker: RunInputWorker): string | 'pa
 /** C7: a succeeded run whose plan asks for a tryout (feature.json 2.4.0 `tryout: true`) and holds no verdict yet. */
 export function isUntried(run: Pick<RunData, 'detail' | 'inputs'>): boolean {
   const tryout = run.inputs?.tryout
+  // `tryout` refuses an accepted run, so it can never be tried: no Untried chip and no banner asking for one.
+  if (acceptedOf(run.detail)) return false
   return run.detail.snapshot.status === 'succeeded' && tryout?.required === true && tryout.verdicts.length === 0
 }
 
@@ -1709,6 +1714,31 @@ function tryThisLines(inputs: RunInputs): Step[] {
     const verify = worker.completion?.verify_yourself ?? null
     return [...goal ? [prose(`${worker.node_id}: ${goal}`)] : [], ...verify ? [prose(`${worker.node_id}, verify yourself: ${verify}`)] : []]
   })
+}
+
+/** The operator override the run carries (L12), from the detail or its summary; null for every other run. */
+export const acceptedOf = (detail: RunDetail): RunAccepted | null => detail.accepted ?? detail.summary.accepted ?? null
+
+/** What an accepted run's findings line says: how many were open at acceptance, or that the review was never recorded. */
+export function acceptedFindingsText(accepted: RunAccepted): string {
+  if (accepted.review === 'none') return 'no review recorded'
+  const open = accepted.open_findings
+  if (open.length === 0) return 'no open findings at acceptance'
+  return `${open.length} open finding${open.length === 1 ? '' : 's'} at acceptance: ${open.map(finding => finding.severity).join(', ')}`
+}
+
+function acceptedNow(context: Context): Draft | null {
+  const accepted = acceptedOf(context.run.detail)
+  if (!accepted) return null
+  const { runStart, runEnd } = context.timeline
+  const headline: Text = [`◆ Integrated (operator override) ${accepted.candidate.slice(0, 7)} · ${accepted.reason}`]
+  if (runEnd) headline.push(' · took ', { kind: 'span', ms: ms(runEnd.at) - ms(runStart.at) })
+  headline.push(` · ${acceptedFindingsText(accepted)}`)
+  return {
+    situation: 'accepted', tone: 'override', glyph: '◆', since: accepted.accepted_at, headline,
+    reason: [`Accepted by ${accepted.by}: ${accepted.reason}`], reasonSource: null,
+    next: { action: 'none', label: 'Nothing to do. The operator merged this candidate by hand; follow-up work is a new run.', runbook: [], steps: [], caveat: accepted.on_main ? null : 'The candidate was not on main when it was accepted.' },
+  }
 }
 
 function succeededNow(context: Context): Draft | null {

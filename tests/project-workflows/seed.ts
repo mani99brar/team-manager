@@ -167,7 +167,7 @@ export type RunOptions = {
    * selection, 1.4.0 the reviewer set, 1.6.0 the `sidecar` section, 1.8.0 the `sidecar` and `attack` sections, 1.9.0 also the
    * `panels` section.
    */
-  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0' | '1.10.0'
+  version?: '1.0.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.8.0' | '1.9.0' | '1.10.0' | '1.12.0'
   /** The reviewers the plan pins (`plan.reviewers`, export 1.4.0) in declared order; a plan without them has the single default reviewer. */
   reviewers?: readonly string[]
   /** The selected lanes the plan pins (`plan.nodes`, and `plan.workers` from 1.3.0); the two-lane runs predate the selection. */
@@ -190,6 +190,8 @@ export type RunOptions = {
   panels?: unknown
   /** The live `<run>/panel.json` the controller rewrites while the panel runs. */
   panelFile?: unknown
+  /** Export 1.12.0: the `accepted` record (accepted.json verbatim), or null for a run the operator did not accept. */
+  accepted?: unknown
   /** Export 1.10.0: the top-level `fix_loop` section (the viewer contract's `FixLoop`, without its `contract_version`/`source` header), null without one. */
   fixLoop?: { contract_version?: string; source?: string } | null
   /** Export 1.10.0: the review round (1 + archived rounds), the commit its delta starts from and `<run>/review.delta.diff`, injected into the `review` section. */
@@ -209,11 +211,13 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
   const inputs = options.inputs ?? null
   const version = options.version ?? '1.2.0'
   const lanes = options.lanes ?? ['ui', 'adapter']
+  // Export 1.12.0 carries every section of 1.10.0 (the review, inputs and fix loop injections) and `accepted`.
+  const fixed = version === '1.10.0' || version === '1.12.0'
   const pinnedTask = (lane: string) => inputs?.workers[lane]?.task ?? (lane === 'ui' ? uiTask(leakFor(runsRoot, runId)) : lane === 'adapter' ? adapterTask() : docsTask())
   const plan = {
     run_id: runId, repository, base_commit: BASE_COMMIT, allow_edits: true,
     nodes: Object.fromEntries(lanes.map(lane => [lane, { worktree: join(runDir, `worktree-${lane}`), task: pinnedTask(lane), session_id: LANE_SESSIONS[lane], observed_start_commit: BASE_COMMIT }])),
-    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
+    ...(version === '1.3.0' || version === '1.4.0' || version === '1.5.0' || version === '1.6.0' || version === '1.8.0' || version === '1.9.0' || version === '1.12.0' ? { workers: [...lanes], excluded_workers: inputs?.excluded_workers ?? [] } : {}),
     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
@@ -250,11 +254,12 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
     definition: { name: options.definitionName ?? WORKFLOW_NAME, nodes: options.definitionNodes },
     values: { run_id: runId, ...options.values }, next: options.next, tasks: options.tasks, events: options.events,
     verification_packets: packets, updated_at: options.updatedAt,
-    ...(version !== '1.0.0' ? { review: version === '1.10.0' ? reviewSection : options.review ?? null, inputs: version === '1.10.0' ? inputsSection : inputs } : {}),
-    ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' ? { sidecar: options.sidecar ?? null } : {}),
-    ...(version === '1.8.0' || version === '1.9.0' ? { attack: options.attack ?? null } : {}),
-    ...(version === '1.9.0' ? { panels: options.panels ?? null } : {}),
-    ...(version === '1.10.0' ? { fix_loop: fixLoopSection } : {}),
+    ...(version !== '1.0.0' ? { review: fixed ? reviewSection : options.review ?? null, inputs: fixed ? inputsSection : inputs } : {}),
+    ...(version === '1.6.0' || version === '1.8.0' || version === '1.9.0' || version === '1.12.0' ? { sidecar: options.sidecar ?? null } : {}),
+    ...(version === '1.8.0' || version === '1.9.0' || version === '1.12.0' ? { attack: options.attack ?? null } : {}),
+    ...(version === '1.9.0' || version === '1.12.0' ? { panels: options.panels ?? null } : {}),
+    ...(fixed ? { fix_loop: fixLoopSection } : {}),
+    ...(version === '1.12.0' ? { accepted: options.accepted ?? null } : {}),
   }
   writeJson(join(runDir, 'run-state.json'), state)
   return runDir
