@@ -352,13 +352,16 @@ def lane_positions(workers: list[str]) -> tuple[dict, list, int, int]:
 
 
 class Pipeline:
-    def __init__(self, directory: Path, sessions=None, abandoned_ok: bool = False):
-        """`abandoned_ok` is `abandon`'s own: every other command that builds a Pipeline changes the run, so an abandoned run is
-        refused here (status, export and brief never build one)."""
+    def __init__(self, directory: Path, sessions=None, abandoned_ok: bool = False, accepted_ok: bool = False):
+        """`abandoned_ok` is `abandon`'s own and `accepted_ok` is `accept`'s: every other command that builds a Pipeline changes
+        the run, so an abandoned or accepted run is refused here (status, export and brief never build one)."""
         self.directory = directory.resolve()
         if not abandoned_ok:
             from .abandon import refuse_abandoned
             refuse_abandoned(self.directory)
+        if not accepted_ok:
+            from .accept import refuse_accepted
+            refuse_accepted(self.directory)
         self.plan = read_json(self.directory / "plan.json")
         if "automatic" in self.plan:
             from .automatic import validate_automatic
@@ -1268,6 +1271,15 @@ def next_step(directory: Path, plan: dict, exported: dict | None) -> str:
     return f"{steps}: running now, or stopped mid-step (no step recorded an error). If no workflow command is running on this run, {recovery}"
 
 
+def accepted_step(directory: Path, record: dict) -> str:
+    """`status`'s next step of an accepted run (design note 3): nothing goes on in it; the override is final, and every
+    mutating command (approve, repair, retry, tryout) refuses it. The follow-up is a new run."""
+    run = shlex.quote(str(directory))
+    return (f"none: the run's candidate was accepted by the operator (override: {record.get('reason')}), and every command that would "
+            f"change it refuses. For a follow-up: {sys.executable} -m workflow brief {run}, then {sys.executable} -m workflow launch "
+            f"<feature> --repo <target repo> --run-id <feature>-00N --follows {run} --live --automatic {BY_OPERATOR}")
+
+
 def abandoned_step(directory: Path, record: dict) -> str:
     """`status`'s next step of an abandoned run: nothing goes on in it; its brief feeds a follow-up run."""
     run = shlex.quote(str(directory))
@@ -1348,7 +1360,17 @@ def run_status(directory: Path) -> tuple[dict, str]:
     record = abandoned(directory)
     if record is not None:
         status["abandoned"] = {key: record.get(key) for key in ("reason", "by", "abandoned_at", "stopped", "not_running")}
-    status["next_step"] = abandoned_step(directory, record) if record is not None else next_step(directory, plan, exported)
+    from .accept import accepted
+    override = accepted(directory)
+    if override is not None:
+        # The override names itself, its reason and the findings open at acceptance (PRD section 4; even after abandon, [O3]).
+        status["accepted"] = {key: override.get(key) for key in ("reason", "by", "on_main", "review", "open_findings", "accepted_at")}
+    if override is not None:  # Design note 3: an accepted run's own next step, before the abandoned step.
+        status["next_step"] = accepted_step(directory, override)
+    elif record is not None:
+        status["next_step"] = abandoned_step(directory, record)
+    else:
+        status["next_step"] = next_step(directory, plan, exported)
     events = complete_events(directory)
     shared_git = [event["message"] for event in events if str(event.get("message", "")).startswith("Shared .git ")]
     if shared_git:
@@ -1474,7 +1496,9 @@ def main():
                 print(f"Note: {passed}", file=sys.stderr, flush=True)
         if args.action not in {"preflight", "prepare", "status", "export"}:
             from .abandon import refuse_abandoned
+            from .accept import refuse_accepted
             refuse_abandoned(directory)  # Before `automatic` records its action: an abandoned run changes no more.
+            refuse_accepted(directory)   # An accepted run (operator override) changes no more either.
         if args.action == "preflight":
             if not args.policy:
                 parser.error("preflight requires --policy")

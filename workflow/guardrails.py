@@ -1751,7 +1751,9 @@ def resume_main(argv=None):
             raise ValueError("--drop applies to resume --launch: it leaves notes out of the prompts of the workers that launch")
         dropped = parse_drop(args.drop)
         from .abandon import refuse_abandoned
+        from .accept import refuse_accepted
         refuse_abandoned(directory)
+        refuse_accepted(directory)
     except ValueError as error:
         parser.exit(1, f"Blocked: {error}\nNothing was changed.\n")
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -1828,7 +1830,9 @@ def answer_main(argv=None):
     try:
         actor = require_actor(args, "answer")
         from .abandon import refuse_abandoned
+        from .accept import refuse_accepted
         refuse_abandoned(directory)
+        refuse_accepted(directory)
         plan = read_json(directory / "plan.json")
         if args.node not in plan_workers(plan):
             raise ValueError(f"{args.node} is not a lane of this run ({', '.join(plan_workers(plan))})")

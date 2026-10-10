@@ -131,6 +131,10 @@ def abandon(runtime, reason: str, actor: str) -> dict:
     abandon.json nor the event: the error names each one, and the identical command is rerun once they are dealt with
     (the stops it did confirm keep their markers, so they are not issued again)."""
     directory = runtime.directory
+    from .accept import accepted
+    if accepted(directory) is not None:
+        raise ValueError(f"The run's candidate was accepted by the operator (override: {accepted(directory).get('reason')}); it is "
+                         "integrated and finished, so it cannot be abandoned. accept comes after abandon, never the other way round")
     if abandoned(directory) is not None:
         raise ValueError(f"The run is already abandoned ({abandoned(directory).get('reason')}); nothing was changed")
     if (directory / "integration-intent.json").exists():
@@ -198,7 +202,8 @@ def abandon_main(argv=None):
             raise ValueError("--reason must not be empty")
         from .pipeline import Pipeline
         with run_lock(directory, "automatic-supervisor.lock"), run_lock(directory):
-            record = abandon(Pipeline(directory, abandoned_ok=True), args.reason.strip(), actor)
+            # accepted_ok: an accepted run is refused inside abandon() with its own message, past the generic guard ([L13](b)).
+            record = abandon(Pipeline(directory, abandoned_ok=True, accepted_ok=True), args.reason.strip(), actor)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\nAll work/evidence retained at {directory}.\n")
     print(f"Abandoned {directory}: {record['reason']}. Stopped: {', '.join(record['stopped']) or 'none'}; not running: "

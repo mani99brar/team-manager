@@ -149,7 +149,9 @@ def tryout_main(argv=None):
         if not (directory / "plan.json").is_file():
             raise ValueError(f"{directory} has no plan.json: name a run directory")
         from .abandon import refuse_abandoned
+        from .accept import refuse_accepted
         refuse_abandoned(directory)  # An abandoned run changes no more: status, export and brief still read it.
+        refuse_accepted(directory)   # An accepted run (operator override) changes no more either.
         plan = read_json(directory / "plan.json")
         if plan.get("tryout") is not True:
             raise ValueError("The run's plan does not ask for a tryout (feature.json 2.4.0 tryout: true pins it at launch)")

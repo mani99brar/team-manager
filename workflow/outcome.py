@@ -244,8 +244,28 @@ def run_cost(directory: Path, plan: dict) -> str | None:
         return None
 
 
+def accepted_outcome_lines(record: dict) -> list[str]:
+    """The outcome of an operator-override run ([G4], PRD section 4): the override line, then the findings open at acceptance,
+    or `no review recorded` when there was none ([L4], design note 4), or `no open findings at acceptance`."""
+    lines = [f"integrated (operator override): {record.get('reason')}"]
+    if record.get("review") == "none":
+        lines.append("  no review recorded")
+    elif not record.get("open_findings"):
+        lines.append("  no open findings at acceptance")
+    else:
+        lines.append("Open findings at acceptance:")
+        for finding in record["open_findings"]:
+            lane = f" {finding['lane']}" if finding.get("lane") else ""
+            lines.append(f"  [{finding.get('severity')} {finding.get('reviewer')}{lane}] {finding.get('title')}")
+    return lines
+
+
 def verdict_lines(directory: Path, plan: dict) -> str:
     """The block without its cost line (pipeline.outcome_lines is the whole block, printed)."""
+    from .accept import accepted
+    override = accepted(directory)
+    if override is not None:  # The run's outcome is the operator override, even when it was abandoned first ([O3]).
+        return "\n".join(accepted_outcome_lines(override))
     verdict, ids, derived, findings = reviews(directory, plan)
     items, open_ = open_items(directory, plan, findings)
     if not ids:

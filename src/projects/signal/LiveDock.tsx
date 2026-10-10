@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import type { Now, Timeline } from '../../../contracts/projects/triage.ts'
+import { acceptedOf, type Now, type Timeline } from '../../../contracts/projects/triage.ts'
 import type { RunDetail, RunInputs } from '../api.ts'
 import { NowBanner } from '../NowBanner.tsx'
-import { deadlinesLabel } from '../status.ts'
+import { deadlinesLabel, OVERRIDE_LABEL } from '../status.ts'
 import { formatAgo, formatSpan, utcTitle } from '../time.ts'
 import { stateTone, toneClass } from '../tone.ts'
 import { Time } from '../Time.tsx'
@@ -43,15 +43,17 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
     const timer = window.setInterval(() => tick(value => value + 1), 30_000)
     return () => window.clearInterval(timer)
   }, [])
-  const step = nowId === null ? null : nodes.find(node => node.id === nowId) ?? null
-  const tone = step ? step.tone : stateTone({ status: detail.summary.status, attention: null })
-  const word = step ? step.word : detail.summary.status.replace('_', ' ')
+  // An accepted run (L12) reads as its override at whatever step its review stopped: never "succeeded", never the ok tone.
+  const accepted = acceptedOf(detail)
+  const step = accepted || nowId === null ? null : nodes.find(node => node.id === nowId) ?? null
+  const tone = accepted ? stateTone({ status: detail.summary.status, accepted }) : step ? step.tone : stateTone({ status: detail.summary.status, attention: null })
+  const word = accepted ? OVERRIDE_LABEL : step ? step.word : detail.summary.status.replace('_', ' ')
   const since = now?.since ?? step?.start?.at ?? null
   const sinceText = since === null ? null : `for ${formatSpan(Math.max(0, clock - Date.parse(since)))}`
   const start = Date.parse(detail.summary.created_at)
   const end = timeline?.runEnd ? Date.parse(timeline.runEnd.at) : null
   const ran = end === null ? (detail.summary.status === 'running' ? clock - start : null) : end - start
-  const finished = detail.summary.status === 'succeeded' || detail.summary.status === 'cancelled' || detail.summary.status === 'failed'
+  const finished = accepted !== null || detail.summary.status === 'succeeded' || detail.summary.status === 'cancelled' || detail.summary.status === 'failed'
   const toggle = () => {
     rememberDockOpen(!open)
     onOpenChange(!open)

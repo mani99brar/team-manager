@@ -17,6 +17,7 @@ import {
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
 import type { SeedContext } from '../seed.ts'
+import { uxAccepted } from './ux-accepted.ts'
 import { uxAttack } from './ux-attack.ts'
 import { uxLaunch } from './ux-launch.ts'
 import { uxLists } from './ux-lists.ts'
@@ -67,7 +68,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique, uxAccepted]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {

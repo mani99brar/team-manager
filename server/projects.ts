@@ -4,11 +4,11 @@ import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import { buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
+import { acceptedOf, buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, EFFORT_LEVELS, validateFixLoop, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  RUN_PROFILES, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
-  type AttackRecord, type AttackResult, type FixLoop, type RepairEntry, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  RUN_PROFILES, acceptedRecordSchema, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  type AttackRecord, type RunAccepted, type AttackResult, type FixLoop, type RepairEntry, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -89,7 +89,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0', '1.12.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
@@ -382,6 +382,11 @@ const exportSchema = z.object({
    * before. Kept as unknown data like the attack's: validated only when the panels route serves it.
    */
   panels: z.unknown().optional(),
+  /**
+   * Export 1.12.0: `accepted.json` as written (the operator merged the candidate by hand), or null for a run without one; absent
+   * before. Parsed strictly: the engine validates the record when it exports, so a bad one is the engine's fault, not a reason to hide it.
+   */
+  accepted: acceptedRecordSchema.nullable().optional(),
   /** Export 1.10.0: the in-run fix loop as written (a record, the error form or null); kept as unknown data, validated when chosen. */
   fix_loop: z.unknown().optional(),
 })
@@ -539,6 +544,8 @@ const CONTROLLER_PROCESS_ROWS = [PID_ROW, /^Supervisor interrupted/, /Claude Cod
   /^Controller commit [0-9a-f]+ runs this step\b/,
   // abandon.py: the run's `cancelled` row.
   /^Abandoned by the (?:operator|maintainer)\b/,
+  // accept.py: the operator override's `succeeded` row.
+  /^Accepted by the (?:operator|maintainer)\b/,
   // automatic.py final_stop: off the source branch these stops are said bare, as drive and the failed wait say them. Then the
   // failed wait's own texts: wait_handoffs' (a lane's deadline, an explicit block, an unrecorded question, a fourth question
   // from guardrails.py record_question, a missing session) and read_signal's refusals (`Invalid completion` covers
@@ -1401,15 +1408,17 @@ export class RunStore {
     const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes, loop)
     const created_at = state.created_at
     const updated_at = laterTimestamp(laterTimestamp(state.updated_at, rawEvents.at(-1)?.time ?? created_at), created_at)
+    const accepted = state.accepted ? projectAccepted(state.accepted, rawEvents) : null
     const summary: RunSummary = {
       contract_version: '1.0.0', project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id,
       definition_revision: definition.definition_revision, run_id: state.run_id, status: snapshot.status, created_at, updated_at,
+      ...accepted ? { accepted } : {},
     }
     const contractFailure = (what: string, error: unknown) => invalidRun(runId, `${what} violates the contract (${error instanceof z.ZodError ? issueText(error) : (error as Error).message})`)
     // The graph projection is validated on its own first, so a contradictory graph is reported before anything derived from it.
     let detail: RunDetail
     try {
-      detail = validateRunDetail({ summary, definition: shown, snapshot, ...(loop ? { fixLoop: loop } : {}) })
+      detail = validateRunDetail({ summary, definition: shown, snapshot, ...(loop ? { fixLoop: loop } : {}), ...accepted ? { accepted } : {} })
     } catch (error) {
       throw contractFailure('projection', error)
     }
@@ -1442,7 +1451,7 @@ export class RunStore {
     const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
     const run_dir = await this.runDirectory(scope, directory)
     try {
-      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition: shown, snapshot, run_dir, ...(loop ? { fixLoop: loop } : {}) })
+      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition: shown, snapshot, run_dir, ...(loop ? { fixLoop: loop } : {}), ...accepted ? { accepted } : {} })
     } catch (error) {
       throw contractFailure('run activity', error)
     }
@@ -1898,7 +1907,9 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
   // An abandoned run (its controller `cancelled` row, abandon.py) is closed whatever its steps read: it leaves the running lists.
   const abandoned = rawEvents.some(event => event.node === 'controller' && event.status === 'cancelled')
   let status: NodeStatus
-  if (abandoned) status = 'cancelled'
+  // An accepted run (L12) reads succeeded even when it was abandoned first; the override travels in `accepted`.
+  if (state.accepted) status = 'succeeded'
+  else if (abandoned) status = 'cancelled'
   else if (statuses.has('failed')) status = 'failed'
   else if (statuses.has('awaiting_approval')) status = 'awaiting_approval'
   else if (statuses.has('paused')) status = 'paused'
@@ -1951,6 +1962,17 @@ function checkLoopGraph(loop: FixLoop, definition: WorkflowDefinition): void {
     for (const step of repair.reentered_steps) {
       if (!known.has(step)) throw new FixLoopError(`repair ${repair.n} re-enters ${step}, which is not a step of this run`)
     }
+  }
+}
+
+/** The export's override record onto the served field (L12): redacted texts, a Z time, the abandon row kept as history. */
+function projectAccepted(record: z.infer<typeof acceptedRecordSchema>, rawEvents: readonly RawEvent[]): RunAccepted {
+  const abandon = rawEvents.filter(event => event.node === 'controller' && event.status === 'cancelled').at(-1)
+  return {
+    candidate: record.candidate, reason: redactPaths(record.reason), by: record.by, accepted_at: record.accepted_at,
+    on_main: record.on_main, review: record.review,
+    open_findings: record.open_findings.map(finding => ({ ...finding, reviewer: redactPaths(finding.reviewer), title: redactPaths(finding.title) })),
+    abandoned: abandon ? redactPaths(abandon.message) : null,
   }
 }
 
@@ -2097,6 +2119,9 @@ function activityAttention(status: RunSnapshot['status'], attention: RunAttentio
  * step that recorded the last status speaks. Redacted, on one line, at most 160 characters.
  */
 function activityHeadline(run: RunData, focus: Focus | null, now: Now): string | null {
+  // An accepted run (L12) reads as its override, at whatever step the review stopped.
+  const accepted = acceptedOf(run.detail)
+  if (accepted) return boundedRedacted(`integrated (operator override) ${accepted.candidate.slice(0, 7)}: ${accepted.reason}`.replace(/\s+/g, ' ').trim(), HEADLINE_LIMIT)
   const controllerRow = now.reasonSource === 0 ? (now.reason ?? []).filter(part => typeof part === 'string').join('').trim() : ''
   // The review sidecar's rows never speak for the run (docs/PRD_REVIEW_SIDECAR.md 4.8), nor the report-only attack pass's
   // (docs/PRD_ATTACK_PASS.md 4.6): a run reads the same without them.

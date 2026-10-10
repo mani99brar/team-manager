@@ -1,9 +1,9 @@
-import type { Now } from '../../contracts/projects/triage.ts'
+import { acceptedOf, type Now } from '../../contracts/projects/triage.ts'
 import type { RunDetail } from './api.ts'
 import { LiveStatus } from './LiveStatus.tsx'
 import { RichText } from './NowBanner.tsx'
 import { AppLink, StatusBadge } from './panels.tsx'
-import { RUN_STATUS_SHORT } from './status.ts'
+import { OVERRIDE_SHORT, RUN_STATUS_SHORT } from './status.ts'
 import { withoutGlyph } from './steps.ts'
 import { TimeZoneToggle } from './TimeZoneToggle.tsx'
 import type { ResourceMeta } from './useResource.ts'
@@ -21,11 +21,12 @@ export function RunBar({ detail, now, clock, runHref, freshness, onNavigate }: {
   onNavigate: (pathname: string) => void
 }) {
   const { summary } = detail
+  const accepted = acceptedOf(detail) !== null
   return (
     <section className="run-summary run-bar" aria-labelledby="run-summary-title">
       <h2 id="run-summary-title" className="run-bar-title"><AppLink href={runHref} onNavigate={onNavigate}>{summary.run_id}</AppLink></h2>
       <p className="run-status-line run-bar-status" data-testid="run-status">
-        <StatusBadge status={summary.status} /> <span className="run-status-meaning" data-testid="run-status-meaning">{RUN_STATUS_SHORT[summary.status]}</span>
+        <StatusBadge status={summary.status} accepted={accepted} /> <span className="run-status-meaning" data-testid="run-status-meaning">{accepted ? OVERRIDE_SHORT : RUN_STATUS_SHORT[summary.status]}</span>
         {now && (
           <span className="run-bar-now">
             <span aria-hidden="true"> · </span>

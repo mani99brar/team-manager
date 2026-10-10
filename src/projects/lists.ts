@@ -11,7 +11,7 @@ import {
   controllerNotRunning, deriveNow, type ControllerReading, type ControllerState, type Now, type Situation,
 } from '../../contracts/projects/triage.ts'
 import type { RunActivity, RunDetail, RunSummary } from './api.ts'
-import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
+import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, OVERRIDE_LABEL, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
 import { formatSpan, type Zone } from './time.ts'
 import { statusTone, type Tone } from './tone.ts'
 
@@ -27,7 +27,9 @@ const FINISHED: readonly RunStatus[] = ['succeeded', 'failed', 'cancelled']
 export const WAITING_KINDS = ['question', 'pane', 'approval'] as const
 export type WaitingKind = (typeof WAITING_KINDS)[number]
 
-export const isFinished = (status: RunStatus) => FINISHED.includes(status)
+/** Whether a run no longer moves. A run with the operator override (L12) is finished before its status is read. */
+export const isFinished = (run: RunStatus | Pick<RunSummary, 'status' | 'accepted'>): boolean =>
+  typeof run === 'string' ? FINISHED.includes(run) : Boolean(run.accepted) || FINISHED.includes(run.status)
 const ms = (iso: string) => Date.parse(iso)
 
 // ---- The workflow title rule (4.1, reordered in decisions.md) -------------------------------------------------------
@@ -52,9 +54,9 @@ export const latestFeature = (runs: readonly RunSummary[]) => latestRun(runs)?.a
 // ---- Runs home sections (4.1) -----------------------------------------------------------------------------------------
 
 /** The kind a run waits on the operator for, from the served activity only; null without activity. */
-export function waitingKind(run: Pick<RunSummary, 'status' | 'activity'>): WaitingKind | null {
+export function waitingKind(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>): WaitingKind | null {
   const kind = run.activity?.attention?.kind
-  if (!kind || isFinished(run.status)) return null
+  if (!kind || isFinished(run)) return null
   return (WAITING_KINDS as readonly string[]).includes(kind) ? kind as WaitingKind : null
 }
 
@@ -86,7 +88,7 @@ export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], 
   const recent: T[] = []
   const todayKey = dayKey(now, zone)
   for (const row of rows) {
-    const finished = isFinished(row.run.status)
+    const finished = isFinished(row.run)
     const moved = finished ? endedAt(row.run) : movedAt(row.run)
     if (waitingKind(row.run) !== null) needsYou.push(row)
     else if (dayKey(moved, zone) === todayKey && ms(moved) <= now + 60_000) today.push(row)
@@ -95,7 +97,7 @@ export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], 
     else running.push(row)
   }
   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
-  const moved = (row: T) => ms(isFinished(row.run.status) ? endedAt(row.run) : movedAt(row.run))
+  const moved = (row: T) => ms(isFinished(row.run) ? endedAt(row.run) : movedAt(row.run))
   needsYou.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
   today.sort((a, b) => Number(b.run.status === 'running') - Number(a.run.status === 'running') || moved(b) - moved(a) || a.run.run_id.localeCompare(b.run.run_id))
   running.sort((a, b) => ms(movedAt(b.run)) - ms(movedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
@@ -157,7 +159,9 @@ function who(nodeId: string | null): string {
  * message (the served headline, which starts with the focus label). Without activity it is only the status; the row then
  * shows when the run was updated and nothing else.
  */
-export function rowSummary(run: Pick<RunSummary, 'status' | 'activity'>, labels: ReadonlyMap<string, string> = new Map()): string {
+export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>, labels: ReadonlyMap<string, string> = new Map()): string {
+  // The override (L12) reads as its own outcome, never as the succeeded status it is served under.
+  if (run.accepted) return `${OVERRIDE_LABEL} ${run.accepted.candidate.slice(0, 7)}: ${run.accepted.reason}`
   const status = STATUS_LABEL[run.status]
   const activity = run.activity
   if (!activity) return status
@@ -180,11 +184,11 @@ export type RowTime =
   | { kind: 'live'; started: string; last: string | null; ms: number }
   | { kind: 'updated'; at: string }
 
-export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity'>, now: number): RowTime {
+export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity' | 'accepted'>, now: number): RowTime {
   const activity = run.activity
   if (!activity) return { kind: 'updated', at: run.updated_at }
   if (activity.finished_at !== null) return { kind: 'finished', at: activity.finished_at, ms: Math.max(0, ms(activity.finished_at) - ms(run.created_at)) }
-  if (isFinished(run.status)) return { kind: 'updated', at: run.updated_at }
+  if (isFinished(run)) return { kind: 'updated', at: run.updated_at }
   return { kind: 'live', started: run.created_at, last: activity.last_activity_at, ms: Math.max(0, now - ms(run.created_at)) }
 }
 
@@ -196,10 +200,10 @@ export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated
  * A finished run has no such line.
  */
 export function cardElapsed(
-  run: Pick<RunSummary, 'status' | 'created_at'> & { activity?: { attention: { since: string | null } | null } | null },
+  run: Pick<RunSummary, 'status' | 'created_at' | 'accepted'> & { activity?: { attention: { since: string | null } | null } | null },
   now: number,
 ): { elapsed: string; since: string | null; started: string | null } | null {
-  if (isFinished(run.status)) return null
+  if (isFinished(run)) return null
   const span = formatSpan(Math.max(0, now - ms(run.created_at)))
   if (run.status === 'running') return { elapsed: `running for ${span}`, since: null, started: run.created_at }
   return { elapsed: `${STATUS_LABEL[run.status].toLowerCase()} · started ${span} ago`, since: run.activity?.attention?.since ?? null, started: null }
@@ -254,7 +258,7 @@ const BEFORE_INTERRUPTED: readonly Situation[] = ['question', 'pane_attention', 
 export function servedDisagreement(now: Now, served: ServedRun): 'question-answered' | 'question-asked' | 'controller-stopped' | null {
   const { activity } = served
   const status = served.detail.summary.status
-  if (activity && !isFinished(status)) {
+  if (activity && !isFinished(served.detail.summary)) {
     const asked = activity.waiting_questions > 0 && activity.attention?.kind === 'question'
     if (now.situation === 'question' && !asked) return 'question-answered'
     const lane = activity.attention?.node_id ? who(activity.attention.node_id) : null
@@ -323,7 +327,8 @@ export function dayLabel(key: string, now: number, zone: Zone): string {
 
 /** Recent's filters: Failed and Succeeded by status, Today by the day the run ended in the reader's zone. */
 export function filterRecent<T extends { run: RunSummary }>(rows: readonly T[], filter: RecentFilter, now: number, zone: Zone): T[] {
-  if (filter === 'failed') return rows.filter(row => row.run.status === 'failed')
+  // The override (L12) is not a failure; under Succeeded it appears only with its own marker (the row's chip), never as a reviewed success.
+  if (filter === 'failed') return rows.filter(row => !row.run.accepted && row.run.status === 'failed')
   if (filter === 'succeeded') return rows.filter(row => row.run.status === 'succeeded')
   if (filter === 'today') {
     const today = dayKey(now, zone)
@@ -408,16 +413,18 @@ export function railEntries<P extends { project_id: string }>(projects: readonly
  * run failed, else its most pressing live run's own tone (awaiting approval, running, paused), succeeded when its latest
  * finished run did, else idle.
  */
-export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at'>[]): Tone {
+export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'>[]): Tone {
   if (runs.some(run => waitingKind(run) !== null)) return 'warn'
-  const latest = runs.filter(run => isFinished(run.status)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at'> | null>(
+  const latest = runs.filter(run => isFinished(run)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'> | null>(
     (last, run) => (last === null || ms(endedAt(run)) > ms(endedAt(last)) ? run : last), null)
   if (latest?.status === 'failed') return 'fail'
   // A live run in its own tone (statusTone): awaiting approval is warn, running is run, paused is pause, never "Running".
-  const live = runs.filter(run => !isFinished(run.status)).map(run => statusTone(run.status))
+  const live = runs.filter(run => !isFinished(run)).map(run => statusTone(run.status))
   const order: readonly Tone[] = ['warn', 'run', 'pause']
   const liveTone = order.find(tone => live.includes(tone))
   if (liveTone) return liveTone
+  // The override (L12) sits where ok does: after the live tones.
+  if (latest?.accepted) return 'override'
   if (latest?.status === 'succeeded') return 'ok'
   return 'idle'
 }

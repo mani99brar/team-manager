@@ -1,3 +1,4 @@
+import { acceptedFindingsText } from '../../contracts/projects/triage.ts'
 import type { RunSummary } from './api.ts'
 import { rowSummary, rowTime, waitingKind } from './lists.ts'
 import { AppLink, StatusBadge } from './panels.tsx'
@@ -37,13 +38,13 @@ export function RunRow({ run, href, labels, context = [], lanes = [], trailing =
   const names = context.filter((name): name is string => Boolean(name))
   const summary = rowSummary(run, labels)
   return (
-    <li className="run-row-item" data-tone={stateTone({ status: run.status, attention: kind })}>
-      <AppLink href={href} onNavigate={onNavigate} className="run-row" data-run-id={run.run_id} data-status={run.status} data-attention={kind ?? undefined}>
+    <li className="run-row-item" data-tone={stateTone({ status: run.status, attention: kind, accepted: run.accepted })}>
+      <AppLink href={href} onNavigate={onNavigate} className="run-row" data-run-id={run.run_id} data-status={run.status} data-outcome={run.accepted ? 'override' : undefined} data-attention={kind ?? undefined}>
         <span className="run-row-head">
-          <span className="run-row-glyph" aria-hidden="true">{kind === null ? STATUS_GLYPH[run.status] : '?'}</span>
+          <span className="run-row-glyph" aria-hidden="true">{kind !== null ? '?' : run.accepted ? '◆' : STATUS_GLYPH[run.status]}</span>
           <span className="run-row-id">{run.run_id}</span>
           {names.length > 0 && <span className="run-row-context">{names.join(' · ')}</span>}
-          <StatusBadge status={run.status} explain />
+          <StatusBadge status={run.status} accepted={Boolean(run.accepted)} explain />
           {lanes.length > 0 && (
             <span className="run-row-lanes">
               <span className="visually-hidden">Lanes: </span>
@@ -59,6 +60,7 @@ export function RunRow({ run, href, labels, context = [], lanes = [], trailing =
         <span className="run-row-detail">
           {kind !== null && <span className="visually-hidden">Waiting on you: </span>}
           <span className="run-row-summary" title={summary}>{summary}</span>
+          {run.accepted && <span className="run-row-accepted" data-testid="row-accepted">accepted by {run.accepted.by} · {acceptedFindingsText(run.accepted)}</span>}
           {since && <span className="run-row-since"> · since <Time iso={since} /></span>}
           {trailing && <span className={`run-row-paused-since${trailing.tone === 'pause' ? ' tone-pause-text' : ''}`}> · {trailing.text}</span>}
         </span>

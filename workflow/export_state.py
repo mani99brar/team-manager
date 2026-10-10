@@ -83,6 +83,13 @@ without rounds), `delta_from` and `delta_diff` (an artifact reference to `review
 (plan.nodes.<lane>.roles, null before lane pins) and `skills` (plan.nodes.<lane>.skills, [] without). The graph
 definition is NOT changed: the server projects one `repair-<n>` node per session repair from `fix_loop`. A run without
 those records exports its 1.9.0 content plus the version and the new keys.
+
+Version 1.12.0 (additive, docs/PRD_ACCEPT_OVERRIDE.md; decisions.md [L1], [L8], [L15]) records an operator
+override: the top-level `accepted` section is `<run>/accepted.json` verbatim (contracts/workflow/accepted.schema.json),
+and `null` for a run without one (every run that was not accepted). The record is validated against its schema at export
+time; an accepted.json that does not validate fails the export, naming the file (design note 7), so a corrupt override
+never hides the run from the viewer silently. The graph definition, the costs section and every other section are 1.11.0
+unchanged, so an older run exports byte-for-byte as under 1.11.0 apart from the version and the null section.
 """
 from __future__ import annotations
 
@@ -94,6 +101,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from .accept import export_section as accepted_section
 from .costs import costs_section
 from .guardrails import HOLD, MAX_QUESTIONS, decisions_text, has_challenge
 from .attack import export_section as attack_section, has_attack
@@ -102,7 +110,7 @@ from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.11.0"
+EXPORT_VERSION = "1.12.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -632,6 +640,7 @@ def export_state(runtime, state) -> dict:
              "sidecar": sidecar_section(runtime.directory, runtime.plan),
              "attack": attack_section(runtime.directory, runtime.plan),
              "panels": panel_section(runtime.directory, runtime.plan),
+             "accepted": accepted_section(runtime.directory),
              "costs": costs_section(runtime.directory, runtime.plan),
              "fix_loop": fix_loop_section(runtime.directory, runtime.plan)}
     if previous and {key: item for key, item in previous.items() if key != "updated_at"} == value:

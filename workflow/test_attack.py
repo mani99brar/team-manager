@@ -869,6 +869,16 @@ class PassLocks(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Another controller owns this run"):
                 attack.pass_main([str(self.dir), "--by", "operator"])
 
+    def test_refused_on_an_accepted_run_and_nothing_written(self):
+        # An operator override closes the run to mutating commands ([L6], design note 2): attack-pass refuses before the
+        # locks, before any child runs, and writes no attack.json.
+        save_json(self.dir / "accepted.json", {"version": "1.0.0", "candidate": "c" * 40, "reason": "merged by hand"})
+        with mock.patch.object(attack, "run_child") as ran:
+            with self.assertRaisesRegex(SystemExit, "accepted by the operator"):
+                attack.pass_main([str(self.dir), "--by", "operator"])
+        ran.assert_not_called()
+        self.assertFalse(attack.record_path(self.dir).exists())
+
     def test_a_supervisor_is_refused_during_a_pass_without_blocking(self):
         # While pass_main holds both locks (it runs run_child in the foreground), a supervisor starting then is refused the
         # supervisor lock, non-blocking, so the run is not blocked. Patch run_child to stand in for the pass's body.

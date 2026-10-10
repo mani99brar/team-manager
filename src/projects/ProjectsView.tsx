@@ -14,10 +14,10 @@ import { projectPathname, projectsPathname, runPathname, workflowPathname, type 
 import { RunRow } from './RunRow.tsx'
 import { ProjectRunGroups, RunsHome } from './RunsHome.tsx'
 import { RunView } from './RunView.tsx'
-import { shortRevision, STATUS_LABEL } from './status.ts'
+import { OVERRIDE_LABEL, shortRevision, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
-import { statusTone, toneClass } from './tone.ts'
+import { stateTone, toneClass } from './tone.ts'
 import { Chip, Section } from './ui/index.tsx'
 import { TimeReferenceContext, useNow } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
@@ -126,7 +126,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // with no review result, or a pending/failed fetch yields none, and the header falls back to the definition's review steps.
   const latestReviewedId = useMemo(() => {
     let best: RunSummary | null = null
-    for (const run of runs) if (isFinished(run.status) && (best === null || Date.parse(endedAt(run)) > Date.parse(endedAt(best)))) best = run
+    for (const run of runs) if (isFinished(run) && (best === null || Date.parse(endedAt(run)) > Date.parse(endedAt(best)))) best = run
     return best?.run_id ?? null
   }, [runs])
   const loadReviewers = useCallback(async (signal: AbortSignal): Promise<string[]> => {
@@ -296,9 +296,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 {runs.map(run => (
                   <li key={run.run_id}>
                     <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate}
-                      className={`ui-chip plain ${toneClass(statusTone(run.status))} run-history-chip`} title={`${run.run_id} · ${STATUS_LABEL[run.status]}`}
-                      aria-label={`Run ${run.run_id}, ${STATUS_LABEL[run.status]}`}>
-                      {STATUS_GLYPH[run.status]}
+                      className={`ui-chip plain ${toneClass(stateTone({ status: run.status, accepted: run.accepted }))} run-history-chip`} title={`${run.run_id} · ${run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]}`}
+                      aria-label={`Run ${run.run_id}, ${run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]}`}>
+                      {run.accepted ? '◆' : STATUS_GLYPH[run.status]}
                     </AppLink>
                   </li>
                 ))}
