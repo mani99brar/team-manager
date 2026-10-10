@@ -36,6 +36,6 @@
     ],
     "timeout_minutes": 45
   },
-  "critical": false,
-  "tryout": false
+  "critical": true,
+  "tryout": true
 }
