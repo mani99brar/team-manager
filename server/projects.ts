@@ -89,7 +89,7 @@ export const DEFAULT_RUN_LIMIT = 50
 export const MAX_RUN_LIMIT = 100
 
 const FILE_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0'] as const
+const EXPORT_VERSIONS = ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0', '1.6.0', '1.7.0', '1.8.0', '1.9.0', '1.10.0', '1.11.0'] as const
 /** Exports without an `inputs` section predate configured lanes and always had exactly these two. */
 const LEGACY_LANES = ['ui', 'adapter'] as const
 /**
@@ -150,6 +150,12 @@ const attribution = z.string().regex(LANE_ID_PATTERN)
 /** A reviewer ID as the plan pins it (`review` for the default reviewer); the same shape as a lane ID. */
 const reviewerKey = z.string().regex(LANE_ID_PATTERN)
 
+/** Export 1.11.0 (docs/PRD_USER_CRITIQUE.md Appendix A): a critique finding's steps to reproduce and screenshot artifact links. */
+const critiqueEvidenceSectionSchema = z.strictObject({
+  steps: z.array(z.string().max(300)).max(20),
+  screenshots: z.array(z.strictObject({ artifact_id: z.string().min(1), caption: z.string().max(200) })).max(6),
+})
+
 const reviewFindingSectionSchema = z.strictObject({
   severity: z.enum(['P0', 'P1', 'P2']),
   message: z.string().min(1),
@@ -158,6 +164,17 @@ const reviewFindingSectionSchema = z.strictObject({
   requirement: z.string().min(1).nullable(),
   /** Present from export 1.4.0; earlier exports have the single reviewer `review`. */
   reviewer: reviewerKey.nullable().optional(),
+  /** Export 1.11.0: present only on a critique finding (docs/PRD_USER_CRITIQUE.md Appendix A); other reviewers carry none. */
+  evidence: critiqueEvidenceSectionSchema.optional(),
+})
+
+/** Export 1.11.0: the critique screenshot artifact list of the review section, served by the artifact route (PRD 4.5). */
+const critiqueArtifactSchema = z.strictObject({
+  id: z.string().min(1),
+  kind: z.literal('screenshot'),
+  path: relativePath,
+  sha256: hex64,
+  bytes: z.number().int().nonnegative(),
 })
 
 /** One reviewer of the review node as export 1.4.0 records it. */
@@ -190,6 +207,8 @@ const reviewSectionSchema = z.strictObject({
   round: z.number().int().positive().optional(),
   delta_from: commit.nullable().optional(),
   delta_diff: z.strictObject({ path: z.literal(DELTA_DIFF_FILE), sha256: hex64, bytes: z.number().int().nonnegative() }).nullable().optional(),
+  /** Export 1.11.0: the critique screenshot artifact list (feature.json 2.9.0); absent for a run without a critique reviewer. */
+  critique_artifacts: z.array(critiqueArtifactSchema).optional(),
 })
 
 const workerInputSchema = z.strictObject({
@@ -421,6 +440,8 @@ export type LoadedRun = {
   reviewDiff: ReviewDiffRegistration | null
   /** `review.delta.diff` as the export registered it (export 1.10.0); null without the file or before it. */
   deltaDiff: ReviewDiffRegistration | null
+  /** The critique screenshot artifacts the export registered (export 1.11.0); [] without a critique reviewer or before it. */
+  critiqueArtifacts: { id: string; path: string; sha256: string; bytes: number }[]
   /** The fix loop this run's repair nodes and review attempt were projected from (null for a run without session repairs). */
   fixLoop: FixLoop | null
   /** The export's `sidecar` section as written (export 1.6.0), unvalidated; null or undefined when absent. */
@@ -751,6 +772,11 @@ function projectFinding(finding: FindingSection, inputs: InputsSection | null): 
     requirement: finding.requirement === null ? null : redactPaths(finding.requirement),
     requirement_found_in: lanesQuoting(finding.requirement, inputs),
     reviewer: finding.reviewer ?? DEFAULT_REVIEWER_ID,
+    // Export 1.11.0: a critique finding's evidence (PRD_USER_CRITIQUE Appendix A); absent for every other reviewer's.
+    ...(finding.evidence !== undefined ? { evidence: {
+      steps: finding.evidence.steps.map(step => redactPaths(step)),
+      screenshots: finding.evidence.screenshots.map(shot => ({ artifact_id: shot.artifact_id, caption: redactPaths(shot.caption) })),
+    } } : {}),
   }
 }
 
@@ -1301,6 +1327,12 @@ export class RunStore {
     if (run.deltaDiff && run.deltaDiff.artifact_id === artifactId) {
       registered.push({ components: [DELTA_DIFF_FILE], kind: 'patch', sha256: run.deltaDiff.sha256, bytes: run.deltaDiff.bytes })
     }
+    // Export 1.11.0: one critique screenshot of a live or an archived round, registered at the run root under critique/<round>/ (PRD 4.5).
+    for (const shot of run.critiqueArtifacts) {
+      if (shot.id === artifactId) {
+        registered.push({ components: shot.path.split('/'), kind: 'screenshot', sha256: shot.sha256, bytes: shot.bytes })
+      }
+    }
     let untrusted = false
     for (const packet of run.packets) {
       if (!packet.ok) { untrusted = true; continue }
@@ -1406,6 +1438,7 @@ export class RunStore {
     }
     const reviewDiff = state.review?.diff ? { artifact_id: reviewArtifactId(state.review.diff.sha256), sha256: state.review.diff.sha256, bytes: state.review.diff.bytes } : null
     const deltaDiff = state.review?.delta_diff ? { artifact_id: reviewArtifactId(state.review.delta_diff.sha256), sha256: state.review.delta_diff.sha256, bytes: state.review.delta_diff.bytes } : null
+    const critiqueArtifacts = (state.review?.critique_artifacts ?? []).map(a => ({ id: a.id, path: a.path, sha256: a.sha256, bytes: a.bytes }))
     const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
     const run_dir = await this.runDirectory(scope, directory)
     try {
@@ -1415,7 +1448,7 @@ export class RunStore {
     }
     const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
     const controller = logged ? { pid: Number(PID_ROW.exec(logged.message)![1]), at: logged.time } : null
-    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller }
+    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, critiqueArtifacts, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller }
   }
 
 
@@ -1478,7 +1511,18 @@ export class RunStore {
           if (rawRounds === undefined) throw new FixLoopError(`${REVIEW_ROUNDS_FILE} is not readable`)
           rounds = mapReviewRounds(rawRounds, repairs, round => archives.get(round)).map(round => {
             const kept = exportedRounds.find(other => other.round === round.round)
-            return round.archived && round.reviewers.length === 0 && kept ? { ...round, reviewers: kept.reviewers } : round
+            if (!round.archived || !kept) return round
+            // The live read copies review-rounds.json's findings verbatim, and those carry no `evidence` (a critique
+            // finding's steps and screenshots live in critique/<round>/evidence.json, which only the Python export
+            // reads). Carry the exported round's reviewers and its critique findings' evidence onto the live findings,
+            // matched by index — both lists derive from the same raw `entry.findings`, in the same order (PRD 4.5,
+            // Acceptance 5, review finding 5). Only the critique findings carry `evidence`; others are left untouched.
+            const findings = round.findings.map((finding, index) => {
+              const evidence = kept.findings[index]?.evidence
+              return evidence !== undefined ? { ...finding, evidence } : finding
+            }) as typeof round.findings
+            const reviewers = round.reviewers.length === 0 ? kept.reviewers : round.reviewers
+            return { ...round, findings, reviewers }
           })
         } catch (error) {
           // Unreadable or invalid: the export's rounds (an absent file simply means no round was archived).

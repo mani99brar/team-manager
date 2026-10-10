@@ -138,6 +138,17 @@ export const REVIEW_TRANSPORTS = ['native', 'print', 'manual'] as const
  */
 export const REVIEWER_STATUSES = ['accepted', 'blocked', 'superseded', 'pending'] as const
 
+/**
+ * 1.11.0: a critique finding's evidence (docs/PRD_USER_CRITIQUE.md Appendix A): 1 to 20 numbered steps (each at most 300
+ * characters) and 0 to 6 screenshots, each an artifact id (`critique-<round>-<sha12>`) that resolves through the run's
+ * artifact route and a caption. Present only on a `critique` finding; other reviewers' findings and exports before 1.11.0
+ * carry none, which the viewer treats as no evidence.
+ */
+export const critiqueEvidenceSchema = z.strictObject({
+  steps: z.array(z.string().max(300)).min(1).max(20),
+  screenshots: z.array(z.strictObject({ artifact_id: z.string().min(1), caption: z.string().max(200) })).max(6),
+})
+
 /** One reviewer finding. `worker`/`requirement` are null for reviews recorded before the reviewer prompt asked for them. */
 export const reviewFindingSchema = z.strictObject({
   severity: z.enum(['P0', 'P1', 'P2']),
@@ -151,6 +162,8 @@ export const reviewFindingSchema = z.strictObject({
   requirement_found_in: z.array(laneId),
   /** The reviewer that reported it: one of `reviewers[].reviewer_id` (`review` for a single-reviewer run). Duplicates across reviewers are kept, never merged. */
   reviewer: reviewerId,
+  /** 1.11.0: a critique finding's steps and screenshots; absent for every other reviewer's finding and for exports before 1.11.0. */
+  evidence: critiqueEvidenceSchema.optional(),
 })
 
 /** One reviewer of the review node (1.4.0). Findings are unioned in the combined list; this entry repeats the reviewer's own. */
@@ -787,6 +800,8 @@ export const fixLoopFindingSchema = z.strictObject({
   worker: laneId.nullable(),
   requirement: z.string().min(1).nullable(),
   reviewer: reviewerId,
+  /** 1.11.0: an archived round's critique finding carries its evidence (docs/PRD_USER_CRITIQUE.md Appendix A); other findings carry none. */
+  evidence: critiqueEvidenceSchema.optional(),
 })
 
 /** One session repair; every field is present in every status, the ones not written yet are null or empty. */

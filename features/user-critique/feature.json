@@ -1,0 +1,29 @@
+{
+  "version": "2.8.0",
+  "name": "User critique (PRD_USER_CRITIQUE): a 2.9.0 feature may declare `critique`; its review step adds the critique reviewer, a Claude session that uses the frozen candidate's running app as a user and runs the Impeccable critique; its open P1s feed the fix loop (attack runs included) and the run page shows each finding's steps and screenshots",
+  "branch_prefix": "feature/user-critique",
+  "prd": "docs/PRD_USER_CRITIQUE.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critical": false,
+  "tryout": false
+}

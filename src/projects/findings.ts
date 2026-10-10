@@ -29,6 +29,13 @@ export function workerWording(worker: string): string {
   return worker
 }
 
+/** Where a finding's worker points, said on a blocking card and an archived round's finding: the lane, several lanes, none, or not recorded. */
+export function laneWording(worker: ReviewFinding['worker']): string {
+  if (worker === null) return 'worker not recorded'
+  const words = workerWording(worker)
+  return words === worker ? `lane ${worker}` : words === 'none' ? 'no worker' : words
+}
+
 /**
  * The run's lanes in policy order: from the recorded inputs when loaded, else from the pinned graph's `launch_<id>`
  * nodes (the naming the exporter guarantees), so findings group by lane even for a run whose inputs are not recorded.

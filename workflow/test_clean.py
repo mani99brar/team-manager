@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from . import clean
-from .sessions import git, run_lock, save_json
+from .sessions import git, read_json, run_lock, save_json
 from .worktrees import git_worktree
 
 
@@ -369,6 +369,20 @@ class CleanTests(unittest.TestCase):
         code, out, err = self.clean("--by", "operator")
         self.assertEqual(code, 0, err)
         self.assertIn("Nothing to remove", out)
+
+    def test_the_critique_worktree_is_listed_and_removed(self):
+        # PRD_USER_CRITIQUE 4.3: the critique reviewer's worktree lives at <runs root>/<run>.critique/worktree and is
+        # removed by clean (followup P2 #54). Pin it in the plan as prepare does.
+        critique_worktree = self.root / "runs" / "feature-001.critique" / "worktree"
+        self.add(critique_worktree)
+        plan = read_json(self.run / "plan.json")
+        plan["critique"] = {"lanes": ["ui"], "worktree": str(critique_worktree)}
+        save_json(self.run / "plan.json", plan)
+        code, out, err = self.clean("--by", "operator")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"  critique worktree {critique_worktree}", out)
+        self.assertFalse(critique_worktree.exists())
+        self.assertNotIn(str(critique_worktree), self.listed())
 
     def test_the_source_checkout_goes_only_with_a_finished_run(self):
         self.finish()

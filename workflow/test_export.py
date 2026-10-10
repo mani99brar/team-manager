@@ -294,7 +294,7 @@ class ReviewerExportTests(unittest.TestCase):
         self.assertEqual([(entry["reviewer_id"], entry["verdict"], entry["status"], entry["accepted_at"], len(entry["findings"])) for entry in section["reviewers"]],
                          [("general", "approved", "accepted", "2026-09-21T15:40:00.000000Z", 1), ("coverage", None, "superseded", None, 0)])
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.10.0")
+        self.assertEqual(exported["version"], "1.11.0")
         self.assertEqual([entry["reviewer_id"] for entry in exported["review"]["reviewers"]], ["general", "coverage"])
         self.assertEqual(exported["inputs"]["automatic"]["reviewer_transport"], "native")  # A per-reviewer receipt records the native transport.
         # The controller's own validation refuses a record whose reviewers are not the plan's, or whose findings name a stranger.
@@ -323,7 +323,7 @@ class ExportRunTests(unittest.TestCase):
         before = read_json(directory / "run-state.json")
         exported = export_run(runtime)
         self.assertEqual(exported["version"], EXPORT_VERSION)
-        self.assertEqual(exported["version"], "1.10.0")
+        self.assertEqual(exported["version"], "1.11.0")
         self.assertIsNone(exported["panels"])  # 1.9.0: null for a run without plan.panels.
         self.assertNotEqual(exported["updated_at"], before["updated_at"])
         self.assertEqual(exported["created_at"], before["created_at"])
@@ -345,7 +345,7 @@ class ExportRunTests(unittest.TestCase):
         from .test_sidecar import appendix_b
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual((exported["version"], exported["sidecar"]), ("1.10.0", None))
+        self.assertEqual((exported["version"], exported["sidecar"]), ("1.11.0", None))
         self.assertNotIn("sidecar", [node["node_id"] for node in exported["definition"]["nodes"]])
         plan = read_json(directory / "plan.json")
         plan["sidecar"] = {"prompt": "Brief", "cadence_seconds": 900, "pass_timeout_seconds": 600, "max_passes": 16, "max_messages_per_lane": 6}
@@ -369,7 +369,7 @@ class ExportRunTests(unittest.TestCase):
         """Export 1.7.0 (C52), additive: inputs.roles, inputs.controller and inputs.automatic.profile as prepare pinned them."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.10.0")
+        self.assertEqual(exported["version"], "1.11.0")
         self.assertFalse({"roles", "controller"} & set(exported["inputs"]))
         self.assertNotIn("profile", exported["inputs"]["automatic"])
         plan = read_json(directory / "plan.json")
@@ -388,7 +388,7 @@ class ExportRunTests(unittest.TestCase):
         """Within 1.7.0 (C7, C29): inputs.tryout {required, verdicts, allow_untried} from plan.tryout and tryout.json."""
         directory = legacy_run(self.root)
         exported = export_run(ExportRuntime(directory))
-        self.assertEqual(exported["version"], "1.10.0")
+        self.assertEqual(exported["version"], "1.11.0")
         self.assertNotIn("tryout", exported["inputs"])  # A plan from before C7.
         plan = read_json(directory / "plan.json")
         save_json(directory / "plan.json", {**plan, "tryout": False})
@@ -482,10 +482,10 @@ class ExportRunTests(unittest.TestCase):
         directory = legacy_run(self.root)
         result = subprocess.run([sys.executable, "-m", "workflow", "export", str(directory)], cwd=REPO, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("version 1.10.0", result.stdout)
+        self.assertIn("version 1.11.0", result.stdout)
         self.assertIn("No agents launched", result.stdout)
         exported = read_json(directory / "run-state.json")
-        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.10.0", REVIEWER))
+        self.assertEqual((exported["version"], exported["review"]["reviewer_session_id"]), ("1.11.0", REVIEWER))
         self.assertTrue((directory / "controller.lock").exists())
         self.assertFalse((directory / "review.interactive.json").exists())
         review = read_json(directory / "review.json")
@@ -689,7 +689,7 @@ class FixLoopExportTests(unittest.TestCase):
     def test_a_run_without_the_records_exports_its_1_9_0_content_plus_the_new_keys(self):
         directory = legacy_run(self.root)
         exported = export_of(directory)
-        self.assertEqual(exported["version"], "1.10.0")
+        self.assertEqual(exported["version"], "1.11.0")
         self.assertIsNone(exported["fix_loop"])
         review = exported["review"]
         self.assertEqual((review["round"], review["delta_from"], review["delta_diff"]), (1, None, None))

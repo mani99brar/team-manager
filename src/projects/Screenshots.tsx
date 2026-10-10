@@ -1,7 +1,12 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { paths, type RunScope, type WorkerResult } from './api.ts'
 
-type Artifact = WorkerResult['artifacts'][number]
+/**
+ * A screenshot the grid shows: a check capture (a full `WorkerResult` artifact, with its `sha256`) or a critique finding's
+ * screenshot (export 1.11.0), which carries only an `artifact_id` and a `caption` — no `sha256` is served for it (PRD
+ * 4.5, design challenge note 4). The shape is widened so the one grid and the one dialog render both, never a second dialog.
+ */
+type Artifact = Pick<WorkerResult['artifacts'][number], 'artifact_id'> & { sha256?: string; caption?: string }
 
 /**
  * One screenshot at full size in a native modal dialog (docs/PRD_VIEWER_UX.md 7, 10): rendered only while open, so mounting
@@ -34,7 +39,8 @@ function ScreenshotDialog({ scope, artifact, onClose }: { scope: RunScope; artif
       onClick={event => { if (event.target === event.currentTarget) onClose() }}
     >
       <div className="screenshot-dialog-head">
-        <code title={`sha256 ${artifact.sha256}`}>{artifact.artifact_id}</code>
+        <code title={artifact.sha256 !== undefined ? `sha256 ${artifact.sha256}` : undefined}>{artifact.artifact_id}</code>
+        {artifact.caption !== undefined && <span className="screenshot-dialog-caption">{artifact.caption}</span>}
         <button type="button" className="button button-small" onClick={onClose}>Close</button>
       </div>
       <img src={paths.artifact(scope, artifact.artifact_id)} alt={`Screenshot artifact ${artifact.artifact_id}, full size`} />
@@ -45,8 +51,9 @@ function ScreenshotDialog({ scope, artifact, onClose }: { scope: RunScope; artif
 function Thumbnail({ scope, artifact, onOpen }: { scope: RunScope; artifact: Artifact; onOpen: () => void }) {
   const [failed, setFailed] = useState(false)
   if (failed) return <p className="projects-error-inline" role="alert">Screenshot {artifact.artifact_id} could not be loaded from the artifact route.</p>
+  const title = artifact.sha256 !== undefined ? `${artifact.artifact_id}\nsha256 ${artifact.sha256}` : artifact.caption ?? artifact.artifact_id
   return (
-    <button type="button" className="screenshot-thumb" title={`${artifact.artifact_id}\nsha256 ${artifact.sha256}`} onClick={onOpen}>
+    <button type="button" className="screenshot-thumb" title={title} onClick={onOpen}>
       <img
         className="artifact-screenshot"
         src={paths.artifact(scope, artifact.artifact_id)}
@@ -71,7 +78,7 @@ export function Screenshots({ scope, screenshots }: { scope: RunScope; screensho
           <li key={artifact.artifact_id}>
             <figure>
               <Thumbnail scope={scope} artifact={artifact} onOpen={() => setShown(artifact)} />
-              <figcaption><code>{artifact.artifact_id}</code></figcaption>
+              <figcaption>{artifact.caption !== undefined ? <span className="screenshot-caption">{artifact.caption}</span> : <code>{artifact.artifact_id}</code>}</figcaption>
             </figure>
           </li>
         ))}

@@ -379,7 +379,7 @@ test('[scenario:ready] shows the worker change', async ({{page}}, testInfo) => {
             self.assertEqual(code, 0, (self.directory / "report-browser.log").read_text())
             self.assertEqual(sorted(self.sessions.starts), ["adapter", "ui"])  # Manual review: no reviewer session.
             exported = read_json(self.directory / "run-state.json")
-            self.assertEqual(exported["version"], "1.10.0")
+            self.assertEqual(exported["version"], "1.11.0")
             self.assertEqual((exported["review"]["transport"], exported["review"]["reviewer_session_id"]), ("manual", "synthetic-test-reviewer"))
             # A manual review of the single default reviewer exports one reviewer named `review`.
             self.assertEqual([(entry["reviewer_id"], entry["transport"], entry["session_id"], entry["verdict"], entry["status"], entry["launched_at"]) for entry in exported["review"]["reviewers"]],
@@ -2533,3 +2533,90 @@ class PanelLaunchGuards(unittest.TestCase):
                                     "--panel-settings", json.dumps(settings))
         self.assertNotEqual(code, 0)
         self.assertIn("--panel-settings applies to prepare --guardrails", err)
+
+
+class CritiquePrepareTests(unittest.TestCase):
+    """prepare --guardrails --critique-settings (feature.json 2.9.0): plan.critique is pinned last (followup P2 #44), the
+    print transport and a native reviewer named `critique` are refused only when critique is declared (design-challenge
+    note 1), and a reviewer named `critique` prepares when critique is NOT declared."""
+
+    TASK = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.repo = self.tmp / "target"
+        shutil.copytree(Path(__file__).resolve().parent / "testdata" / "project-workflows", self.repo / "features/project-workflows")
+        self.folder = self.repo / "features/project-workflows"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (self.folder / name).write_text(self.TASK)
+        (self.folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        (self.repo / "docs").mkdir(parents=True, exist_ok=True)
+        (self.repo / "docs" / "PRD.md").write_text("# PRD\n")
+        (self.folder / "brief-critique.md").write_text("A reviewer brief for the id critique.\n")
+        manifest = read_json(self.folder / "feature.json")
+        manifest.update(version="2.9.0", critique={"lanes": ["ui"]})
+        save_json(self.folder / "feature.json", manifest)
+        policy = read_json(self.folder / "policy.json")
+        policy["version"] = "1.4.0"
+        policy["critique_app"] = {"argv": ["npm", "run", "dev"], "ready_path": "/", "timeout_seconds": 120}
+        save_json(self.folder / "policy.json", policy)
+        home = self.tmp / "home"
+        skill = home / ".claude" / "skills" / "impeccable"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: impeccable\n---\nThe design critique method.\n")
+        self.home = home
+        for args in (["init", "-q"], ["config", "user.name", "Test"], ["config", "user.email", "test@example.invalid"],
+                     ["add", "."], ["commit", "-qm", "Feature"], ["switch", "-q", "-c", "feature/project-workflows/pw-001"]):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
+
+    def prepare(self, name, *flags, declare_critique=True):
+        run = self.tmp / "runs" / name
+        base = ["prepare", str(run), "--repo", str(self.repo), "--policy", str(self.folder / "policy.json"),
+                "--task", f"ui={self.folder / 'ui-task.md'}", "--task", f"adapter={self.folder / 'adapter-task.md'}",
+                "--guardrails", "--decisions", str(self.folder / "decisions.md"), "--prd", str(self.repo / "docs" / "PRD.md"), "--automatic"]
+        if declare_critique:
+            # launch fills the defaults (critique.declared) before passing the settings to prepare.
+            base += ["--critique-settings", json.dumps({"lanes": ["ui"], "skills": ["impeccable"], "max_budget_usd": 15, "timeout_minutes": 45})]
+        environ = {k: v for k, v in os.environ.items() if k != "WORKFLOW_WORKER_EFFORT"}
+        environ.update(HOME=str(self.home), MD_MANAGER_PROJECTS_CONFIG=str(self.tmp / "projects.json"))
+        with patch.dict(os.environ, environ, clear=True), patch("workflow.sessions.claude_version", return_value="2.1.288 (Claude Code)"):
+            code, out, err = pipeline_cli(*base, *flags)
+        return run, code, out, err
+
+    def test_prepare_pins_plan_critique_last_with_skills_digest_settings_and_worktree(self):
+        from . import critique
+        from .skills import skill_digest, skills_root, resolve_skill
+        run, code, out, err = self.prepare("pw-001")
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        item = plan["critique"]
+        self.assertEqual(item["lanes"], ["ui"])
+        folder = resolve_skill("critique", "impeccable", skills_root(self.home))
+        self.assertEqual(item["skills"], [{"name": "impeccable", "sha256": skill_digest("critique", "impeccable", folder)}])
+        self.assertRegex(item["settings_sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(item["worktree"].endswith("pw-001.critique/worktree"))
+        self.assertEqual(item["critique_app"]["ready_path"], "/")
+        self.assertEqual(plan["feature_version"], "2.9.0")  # pinned last among the feature pins
+        critique.validate_plan(plan)
+        # The skills were copied into the run's pinned plugin tree.
+        self.assertTrue((run / "skills" / "critique" / "skills" / "impeccable" / "SKILL.md").is_file())
+        self.assertTrue((run / "skills" / "critique" / ".claude-plugin" / "plugin.json").is_file())
+
+    def test_prepare_refuses_a_native_reviewer_named_critique_when_critique_is_declared(self):
+        run, code, out, err = self.prepare("pw-002", "--reviewer", f"critique={self.folder / 'brief-critique.md'}")
+        self.assertNotEqual(code, 0)
+        self.assertIn("may not have a native reviewer named `critique`", err)
+
+    def test_prepare_refuses_the_print_transport_for_a_critique_run(self):
+        run, code, out, err = self.prepare("pw-003", "--reviewer-transport", "print")
+        self.assertNotEqual(code, 0)
+        self.assertIn("print", err)
+
+    def test_a_reviewer_named_critique_prepares_when_critique_is_not_declared(self):
+        # design-challenge note 1: the id `critique` is free in a run that does not declare the critique reviewer.
+        run, code, out, err = self.prepare("pw-004", "--reviewer", f"critique={self.folder / 'brief-critique.md'}", declare_critique=False)
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        self.assertNotIn("critique", plan)  # no critique reviewer was pinned
+        self.assertIn("critique", [r["reviewer_id"] for r in plan["reviewers"]])  # the native reviewer keeps the id

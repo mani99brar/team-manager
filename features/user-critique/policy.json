@@ -1,0 +1,158 @@
+{
+  "version": "1.2.0",
+  "feature": "User critique: a reviewer that uses the frozen candidate's running app as a user and runs the Impeccable critique; its P0/P1 findings feed the fix loop",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "contracts/projects",
+        "server",
+        "docs/handoff/user-critique-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/findings.ts",
+        "src/projects/Screenshots.tsx",
+        "src/projects/NodeDetail.tsx",
+        "src/projects/node/ReviewSections.tsx",
+        "src/projects/critique.ts",
+        "src/projects/critique.css",
+        "tests/project-workflows/critique.spec.ts",
+        "tests/project-workflows/fixtures/ux-critique.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/unit/critique.test.ts",
+        "docs/handoff/user-critique-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "critique-evidence",
+              "description": "On a run-detail fixture built from the contract example with a critique reviewer (Appendix A of docs/PRD_USER_CRITIQUE.md): the review section lists the critique as a reviewer; its P1 finding shows its lane, its numbered steps to reproduce and its screenshot thumbnails with captions; activating a thumbnail opens the full-size screenshot dialog (Escape closes it and focus returns); a P1 finding with no screenshot says 'no screenshot'; findings of other reviewers show no evidence block; an 'Earlier rounds' list in the review section shows each archived round's findings and an archived critique finding shows its own evidence (not another finding's); the critique reviewer entry reads as a headless critique job with its launch time and status, never 'native session'; the viewer stays read-only; at 390 px nothing scrolls the page sideways"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

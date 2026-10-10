@@ -96,11 +96,15 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   // The policy schema uses conditional rules zod cannot import, so its structure is checked directly; the Python
   // controller validates every committed policy against it (workflow/test_verification.py, workflow/test_lanes.py).
   const schema = readJson('./verification.schema.json')
-  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0'])
-  // 1.3.0 adds the optional attack_check (docs/PRD_ATTACK_PASS.md section 3), refused before 1.3.0 by a rule the legacy finder skips.
+  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'])
+  // 1.3.0 adds the optional attack_check (docs/PRD_ATTACK_PASS.md section 3), refused before 1.3.0 by a rule the legacy finder skips; 1.4.0 keeps it.
   assert.deepEqual(Object.keys(schema.properties.attack_check.properties).sort(), ['argv', 'timeout_seconds'])
   const attackRule = schema.allOf.find((rule: { if: { not?: unknown }; then: { not?: { required?: string[] } } }) => rule.if.not && rule.then.not?.required?.includes('attack_check'))
-  assert.deepEqual(attackRule.if.not, { properties: { version: { const: '1.3.0' } } })
+  assert.deepEqual(attackRule.if.not, { properties: { version: { enum: ['1.3.0', '1.4.0'] } } })
+  // 1.4.0 adds the optional critique_app (docs/PRD_USER_CRITIQUE.md section 4.2), refused before 1.4.0.
+  assert.deepEqual(Object.keys(schema.properties.critique_app.properties).sort(), ['argv', 'ready_path', 'timeout_seconds'])
+  const critiqueRule = schema.allOf.find((rule: { if: { not?: unknown }; then: { not?: { required?: string[] } } }) => rule.if.not && rule.then.not?.required?.includes('critique_app'))
+  assert.deepEqual(critiqueRule.if.not, { properties: { version: { const: '1.4.0' } } })
   assert.equal(schema.properties.workers.minItems, 1)
   assert.equal('maxItems' in schema.properties.workers, false)
   const worker = schema.properties.workers.items.properties
@@ -116,10 +120,15 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   // The lane id pattern is shared by the policy, the feature file and the completion file's attribution (minus multiple/none).
   const lane = new RegExp(schema.$defs.nodeId.pattern)
   assert.equal(readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern, schema.$defs.nodeId.pattern)
-  for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'challenger', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
+  // The lane id `critique` and the prefix `critique-` are NOT reserved in the pattern: a feature before 2.9.0 (and a
+  // 2.9.0 one without `critique`) keeps a lane named `critique` and launches byte for byte. The lane id `critique` is
+  // refused only IN a feature that declares `critique`, at launch and prepare (workflow/launch.py, workflow/critique.py,
+  // PRD 4.2/4.7), not here (docs/PRD_USER_CRITIQUE.md).
+  for (const ok of ['ui', 'adapter', 'docs', 'contracts-lane', 'challenger', 'critique', 'critique-1', 'a', 'a'.repeat(32)]) assert.ok(lane.test(ok), ok)
   for (const bad of ['review', 'candidate', 'handoff', 'approval', 'integrate', 'multiple', 'none', 'both', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'attack', 'attack-1', 'review-x', 'launch_x', 'Docs', '1docs', 'a'.repeat(33), '']) assert.equal(lane.test(bad), false, bad)
   assert.ok(lane.test('sidecars'))
   assert.ok(lane.test('attacks'))
+  assert.ok(lane.test('critiques'))
   const attribution = new RegExp(readJson('./reviewCompletion.schema.json').properties.findings.items.properties.worker.pattern)
   for (const ok of ['ui', 'docs', 'multiple', 'none']) assert.ok(attribution.test(ok), ok)
   for (const bad of ['both', 'review', 'review-x', 'challenge', 'challenge-1', 'sidecar', 'sidecar-1', 'attack', 'attack-1', 'Docs', '']) assert.equal(attribution.test(bad), false, bad)
@@ -165,7 +174,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
@@ -209,6 +218,28 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   assert.equal(skillsExample.version, '2.8.0')
   feature.parse(skillsExample)
   assert.deepEqual(skillsExample.workers[0].skills, ['impeccable'])
+  // 2.9.0 adds the optional critique reviewer: false, or an object with 1+ lanes and optional skills/budget/timeout (workflow/critique.py refuses it on an earlier version).
+  feature.parse({ ...structuredClone(reviewed), version: '2.9.0', critique: { lanes: ['ui'] } })
+  feature.parse({ ...structuredClone(reviewed), version: '2.9.0', critique: { lanes: ['ui', 'adapter'], skills: ['impeccable'], max_budget_usd: 20, timeout_minutes: 60 } })
+  feature.parse({ ...structuredClone(reviewed), version: '2.9.0', critique: false })
+  feature.parse({ ...structuredClone(reviewed), version: '2.9.0' })  // a 2.9.0 feature with no critique still validates
+  feature.parse({ ...structuredClone(skilled), version: '2.9.0', attack: { angles: ['auth-funds'] }, critique: { lanes: ['ui'] } })  // attack and critique together
+  for (const bad of [{}, { lanes: [] }, { lanes: ['UI'] }, { lanes: ['ui', 'ui'] }, { lanes: ['ui'], skills: [] }, { lanes: ['ui'], max_budget_usd: 0 }, { lanes: ['ui'], max_budget_usd: 101 }, { lanes: ['ui'], timeout_minutes: 9 }, { lanes: ['ui'], timeout_minutes: 121 }, { lanes: ['ui'], extra: true }]) {
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.9.0', critique: bad }).success, false, JSON.stringify(bad))
+  }
+  // The schema does NOT reserve the lane/reviewer id `critique` or the prefix `critique-`: a feature before 2.9.0 (and a
+  // 2.9.0 one without `critique`) with such a name still validates and launches byte for byte (review finding 12, the
+  // Stop line "adding 2.9.0 would change the launch of any existing feature"). The reservation is conditional, enforced
+  // at launch and prepare only when the feature declares `critique` (workflow/launch.py, workflow/critique.py, PRD 4.7).
+  for (const ok of ['critique', 'critique-1']) {
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), reviewers: [{ reviewer_id: ok, prompt: 'builtin:general' }] }).success, true, ok)
+    assert.equal(feature.safeParse({ ...structuredClone(reviewed), workers: [{ node_id: ok, task: 'ui-task.md' }] }).success, true, ok)
+  }
+  // The committed 2.9.0 example (docs/PRD_USER_CRITIQUE.md section 4.2): critique naming its lanes.
+  const critiqueExample = readJson('./examples/feature.2.9.0.json')
+  assert.equal(critiqueExample.version, '2.9.0')
+  feature.parse(critiqueExample)
+  assert.deepEqual(critiqueExample.critique.lanes, ['pages', 'shell'])
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)

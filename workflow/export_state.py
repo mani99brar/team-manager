@@ -102,7 +102,7 @@ from .sidecar import has_sidecar, initial_ledger, ledger_path
 from .sessions import DEFAULT_REVIEWER, plan_excluded, plan_workers, read_json, review_node, save_json
 from .verification import required_kinds
 
-EXPORT_VERSION = "1.10.0"
+EXPORT_VERSION = "1.11.0"
 # The controller's per-reviewer status words, as the viewer contract spells them; anything else is still pending.
 REVIEWER_STATUS = {"succeeded": "accepted", "accepted": "accepted", "blocked": "blocked", "superseded": "superseded"}
 
@@ -198,6 +198,7 @@ def recorded_transport(directory: Path) -> str | None:
 
 def reviewer_entries(directory: Path, review: dict, findings: list, transport: str, reviewed_at: str) -> list[dict]:
     """One entry per reviewer of the combined record; a record without `reviewers` is the single default reviewer."""
+    from .critique import CRITIQUE as CRITIQUE_ID
     recorded = review.get("reviewers")
     entries = recorded if recorded is not None else [{"reviewer_id": DEFAULT_REVIEWER, "session_id": review["reviewer"], "verdict": review["verdict"], "accepted_at": None}]
     result = []
@@ -205,11 +206,19 @@ def reviewer_entries(directory: Path, review: dict, findings: list, transport: s
         node = review_node(entry["reviewer_id"])
         status_file = load_optional(directory / f"automatic-{node}.json") or {}
         receipt = load_optional(directory / f"{node}.interactive.json") or {}
-        launched = receipt.get("launch_requested_at")
+        is_critique = entry["reviewer_id"] == CRITIQUE_ID
+        # The headless critique job writes no native receipt (PRD 4.5): its launch time and status come from its RECORD,
+        # `automatic-review-critique.json`. Its RECORD status is `accepted` whenever it produced a decision (even a
+        # blocking one) and `failed` on a failure, so the exported status follows its VERDICT — a blocking or a failed
+        # critique reads `blocked`, so the viewer names it among the blockers (review findings 4 and 8).
+        launched = status_file.get("launched_at") if is_critique else receipt.get("launch_requested_at")
         accepted = entry.get("accepted_at")
         if not isinstance(accepted, str) and entry["verdict"] is not None:
             accepted = reviewed_at  # A record before per-reviewer acceptance times: the review's own time.
-        status = REVIEWER_STATUS.get(status_file.get("status")) or {"approved": "accepted", "blocked": "blocked"}.get(entry["verdict"]) or "pending"
+        if is_critique:
+            status = "accepted" if entry["verdict"] == "approved" else "blocked"
+        else:
+            status = REVIEWER_STATUS.get(status_file.get("status")) or {"approved": "accepted", "blocked": "blocked"}.get(entry["verdict"]) or "pending"
         result.append({"reviewer_id": entry["reviewer_id"], "transport": transport, "session_id": entry["session_id"], "verdict": entry["verdict"],
                        "findings": [finding for finding in findings if finding["reviewer"] == entry["reviewer_id"]],
                        "launched_at": zulu(launched) if isinstance(launched, str) else None,
@@ -261,12 +270,26 @@ def review_section(directory: Path, plan: dict | None = None) -> dict | None:
     findings = [{"severity": finding["severity"], "message": finding["message"], "disposition": finding["disposition"],
                  "worker": finding.get("worker"), "requirement": finding.get("requirement"),
                  "reviewer": finding.get("reviewer", DEFAULT_REVIEWER)} for finding in review["findings"]]
-    return {"attempt": 1, "transport": transport, "reviewer_session_id": review["reviewer"], "independent": review["independent"],
-            "bundle_sha256": review["bundle_sha256"], "candidate_commit": review["candidate_commit"], "verdict": review["verdict"],
-            "findings": findings, "reviewers": reviewer_entries(directory, review, findings, transport, reviewed_at),
-            "reviewed_at": reviewed_at, "diff": diff,
-            "round": 1 + sum(1 for entry in raw_review_rounds(directory) if entry.get("archived") is True),
-            "delta_from": delta_from(receipt, plan, delta_diff), "delta_diff": delta_diff}
+    round_number = 1 + sum(1 for entry in raw_review_rounds(directory) if entry.get("archived") is True)
+    attach_critique_evidence(directory, round_number, review["findings"], findings)  # 1.11.0: `evidence` on each critique finding (PRD Appendix A).
+    section = {"attempt": 1, "transport": transport, "reviewer_session_id": review["reviewer"], "independent": review["independent"],
+               "bundle_sha256": review["bundle_sha256"], "candidate_commit": review["candidate_commit"], "verdict": review["verdict"],
+               "findings": findings, "reviewers": reviewer_entries(directory, review, findings, transport, reviewed_at),
+               "reviewed_at": reviewed_at, "diff": diff, "round": round_number,
+               "delta_from": delta_from(receipt, plan, delta_diff), "delta_diff": delta_diff}
+    from .critique import has_critique, artifacts as critique_artifacts
+    if plan is not None and has_critique(plan):  # 1.11.0: the critique screenshot artifact list the server's artifact() serves (PRD 4.5).
+        section["critique_artifacts"] = critique_artifacts(directory)
+    return section
+
+
+def attach_critique_evidence(directory: Path, round_number: int, raw_findings: list, projected: list) -> None:
+    """Attach `evidence` to each critique finding of a round's projected findings, keyed by the digest of
+    `(severity, worker, message)` plus the occurrence index (PRD 4.5); other reviewers' findings carry no `evidence`."""
+    from .critique import finding_evidence
+    for index, item in finding_evidence(directory, round_number, raw_findings).items():
+        if 0 <= index < len(projected):
+            projected[index]["evidence"] = item
 
 
 FIX_LOOP_VERSION = "1.0.0"
@@ -349,7 +372,9 @@ def review_round_entry(directory: Path, entry: dict, repairs: list[dict]) -> dic
     for key, kind in (("round", int), ("verdict", str), ("candidate", str), ("lane", str), ("findings", list), ("reviewer_sessions", list), ("started_at", str), ("archived", bool)):
         if type(entry.get(key)) is not kind:
             raise ValueError(f"a review round has no {key}" if key not in entry else f"a review round has a malformed {key}")
-    return {"round": entry["round"], "verdict": entry["verdict"], "candidate": entry["candidate"], "lane": entry["lane"], "findings": list(entry["findings"]),
+    round_findings = [dict(finding) if isinstance(finding, dict) else finding for finding in entry["findings"]]
+    attach_critique_evidence(directory, entry["round"], entry["findings"], round_findings)  # 1.11.0: archived-round critique evidence (PRD 4.5).
+    return {"round": entry["round"], "verdict": entry["verdict"], "candidate": entry["candidate"], "lane": entry["lane"], "findings": round_findings,
             "reviewer_sessions": list(entry["reviewer_sessions"]), "started_at": entry["started_at"], "archived": entry["archived"],
             "restored_at": string_or_none(entry.get("restored_at")),
             "repair_n": next((repair["n"] for repair in repairs if repair["review_round"] == entry["round"]), None),

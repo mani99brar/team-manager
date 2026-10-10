@@ -1477,6 +1477,56 @@ class TwoReviewerCompletionTests(ReviewCompletionTests):
     """The same acceptance rules with two declared reviewers, each bound to its own node, token and files."""
     reviewers = ["general", "coverage"]
 
+    def test_the_native_reviewers_launch_before_the_critique_child_starts(self):
+        # PRD 4.4 Timing (round-1 review finding): the controller launches the native reviewers FIRST, then starts the
+        # critique child (setup/slot/app/job), so setup does not compete with the reviewers' launches. _review_native must
+        # call critique.ensure_started only after its launch loop.
+        from .automatic import _review_native
+        self.runtime.plan["critique"] = {"lanes": ["ui"]}
+        patch_file = self.root / "review.diff"
+        patch_file.write_text("")
+        order = []
+
+        def fake_launch(reviewer_id, prompt, token, commit):
+            order.append(f"launch {reviewer_id}")
+            return {"session_id": self.uuid(reviewer_id), "background_id": f"bg-{reviewer_id}"}
+
+        self.runtime.launch_reviewer = fake_launch
+        with patch("workflow.critique.ensure_started", side_effect=lambda runtime: order.append("critique started")), \
+             patch("workflow.automatic._accept_native", side_effect=lambda *a, **k: order.append("accept") or {}):
+            _review_native(self.runtime, self.bundle, self.digest, patch_file)
+        self.assertEqual(order, [f"launch {self.ids[0]}", f"launch {self.ids[1]}", "critique started", "accept"])
+
+    def test_a_late_critique_approval_stands_while_the_native_sessions_stay_listed(self):
+        # design-challenge note 2: _accept_native waits for the critique after the natives settle, THEN runs
+        # check_listed_identity on the approval. With a 45-minute critique the listing check can come ~50 minutes after the
+        # natives were accepted; as long as the (idle) native sessions are still listed, the approval stands and review.json
+        # is written approved. The native sessions MUST stay listed while the critique runs (recorded in the handoff).
+        from . import critique
+        from .automatic import ReviewStatus, check_listed_identity, combined_review, wait_reviews
+        self.runtime.plan["critique"] = {"lanes": ["ui"], "timeout_minutes": 45,
+                                         "critique_app": {"argv": ["x"], "ready_path": "/", "timeout_seconds": 10}}
+        save_json(self.root / "policy.json", {"version": "1.4.0", "setup": []})
+        for reviewer_id in self.ids:
+            self.write(reviewer_id)  # both natives approve at t0
+        # A critique that already settled (approved) for round 1: its decision and status record are persisted.
+        (self.root / "critique" / "1").mkdir(parents=True)
+        save_json(self.root / "critique" / "1" / "status.json", {"reviewer_id": "critique", "round": 1, "session_id": "crit-sess",
+                  "launched_at": "2026-01-01T10:00:00Z", "accepted_decision": {"verdict": "approved", "findings": []}})
+        save_json(self.root / critique.RECORD, {"reviewer_id": "critique", "status": "accepted", "reason": None,
+                  "session_id": "crit-sess", "round": 1, "launched_at": "2026-01-01T10:00:00Z", "finished_at": "2026-01-01T10:50:00Z"})
+        # The approval branch of _accept_native: the natives settle, THEN the controller waits for the critique (which here
+        # settled ~50 minutes after the natives were accepted), THEN runs check_listed_identity. With the idle native
+        # sessions still listed, the listing check accepts and the combined review is approved with the critique appended.
+        state = ReviewStatus.load(self.runtime)
+        decisions = wait_reviews(self.runtime, state, clock=lambda: 100.0, sleep=lambda _s: self.fail("natives already settled"))
+        critique.wait_for_critique(self.runtime)  # returns at once: the critique already settled for this round
+        review = combined_review(self.runtime, self.bundle, self.digest, state, decisions)
+        self.assertEqual(review["verdict"], "approved")
+        self.assertEqual([e["reviewer_id"] for e in review["reviewers"]], [*self.ids, "critique"])
+        self.assertTrue(all(e["verdict"] == "approved" for e in review["reviewers"]))
+        check_listed_identity(self.runtime, state)  # the native sessions are still listed (self.rows): no exception, the approval stands
+
     def test_a_block_accepted_before_a_restart_keeps_every_verdict_accepted_with_it(self):
         # coverage (declared second) approves first; general (declared first) then blocks, and the wait returns both. After
         # a restart the pre-pass restores both before the block decides, as the controller that never stopped had them.

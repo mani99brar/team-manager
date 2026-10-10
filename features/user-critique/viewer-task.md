@@ -1,0 +1,39 @@
+# Viewer worker: critique evidence on the run page (PRD_USER_CRITIQUE)
+
+## Goal
+
+This lane runs alone after the `engine` lane's run is integrated (PRD 4.8): the export 1.11.0, the contract and its critique examples are already in your base. On the run page, each finding of the critique reviewer shows its proof: its lane, its numbered steps to reproduce and its screenshots (thumbnails with captions that open the full-size dialog), in the current review and in one "Earlier rounds" list in the review section that shows each archived round's findings (all reviewers') with the critique's evidence. The critique's reviewer entry is worded as a headless critique job (its launch time and status), never "native session". A P1 critique finding without a screenshot says "no screenshot"; other reviewers' findings look exactly as today. `docs/PRD_USER_CRITIQUE.md` section 4.5 and Appendix A are the specification; `features/user-critique/decisions.md` records the operator's decisions.
+
+## Context
+
+- **Run 005 follows user-critique-004** (decisions.md [L6]): your lane starts from `a913218` (`--restore-from`), 004's viewer work at the moment it asked about `frontend-build`; its handoff is `docs/handoff/user-critique-viewer.md`. The base now has the fixed local types in `server/projects.test.ts`, so `frontend-build` should pass: rerun every check of this lane, fix anything that fails, and complete with every completion field.
+- **Run 004 follows user-critique-003** (decisions.md [L5]): the engine is in your base at d7c4aa4. Read `docs/handoff/user-critique-engine.md` first for the exact export fields (`evidence` on critique findings, the critique artifact list and its ids) and the contract examples it added under `contracts/projects/`. Archived rounds (`fix_loop.review_rounds[].findings`) hold only the open P0/P1 findings of each round, so the "Earlier rounds" list shows those (critique P1s with their evidence); a critique P2 of an archived round is not in the export and is out of scope.
+- The data: the export 1.11.0 adds `evidence: {steps, screenshots: [{artifact_id, caption}]}` to critique findings (PRD Appendix A). The `engine` lane owns `contracts/projects` and adds a critique finding with evidence to the contract examples (`contracts/projects/examples.ts`); build your fixtures from those examples (they are in your base). `ReviewFinding` comes from `contracts/projects/v1.ts` through `src/projects/api.ts`; a finding without `evidence` (older exports, other reviewers) has none.
+- The screens: `src/projects/ReviewDetail.tsx` and `src/projects/findings.ts` render findings; the live review reaches them through `src/projects/NodeDetail.tsx` and `src/projects/node/ReviewSections.tsx`, and the archived rounds are in the run detail's `fix_loop.review_rounds[].findings`; `src/projects/Screenshots.tsx` has the thumbnail and the native-dialog viewer the check rows use, and the artifact URL helper in `paths` (`src/projects/api.ts`). Reuse them; do not add a second dialog.
+- The look: Calm tokens in `src/projects/theme.css` and the existing findings styles; `PRODUCT.md` and `DESIGN.md` at the repository root. Read-only viewer: nothing here acts on a run.
+
+## Constraints
+
+- Owned paths only (policy.json `viewer`). Do not edit `src/projects/api.ts`, `contracts/projects`, `server` or `workflow` (the `engine` lane's); a type or route you need that is missing is a `question` completion.
+- No new dependency.
+
+## Acceptance
+
+- The `critique-evidence` browser scenario passes through `check-report`, with its screenshot.
+- Unit tests in `tests/unit/critique.test.ts` cover the evidence model: steps order, screenshots mapped to artifact URLs, a P1 with no screenshot, a finding without `evidence`, an archived round's finding.
+- `frontend-build`, `frontend-lint`, `shared-contract` and `frontend-unit` pass; `docs/handoff/user-critique-viewer.md` says what changed and every open P2.
+
+Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; run browser specs only through check-report on this lane's own specs.
+
+Browser checks: each scenario id appears in exactly one test title as `[scenario:<id>]`, and that test, when it passes, attaches exactly one image/png named `screenshot:<id>` (other attachments are fine). The verifier refuses anything else. Before completing, run the spec files you changed with a JSON report:
+
+```bash
+WORKFLOW_VERIFICATION_PHASE=<worker|candidate> PLAYWRIGHT_JSON_OUTPUT_FILE=<tmp>/report.json \
+  npx --no-install playwright test --config=tests/project-workflows/playwright.config.ts --reporter=json tests/project-workflows/critique.spec.ts
+```
+
+Then check the report with the verifier's own rules: run the exact `check-report` command the controller appends to this task when it pins it.
+
+## Stop
+
+Stop and report `blocked` or `question` when the evidence cannot be shown without editing a file another lane owns, or when the contract examples' shape differs from PRD Appendix A. Do not redesign the review section beyond the evidence block and the one "Earlier rounds" list.

@@ -368,6 +368,8 @@ class Pipeline:
             raise ValueError("Pinned policy changed")
         from .sidecar import validate_plan
         validate_plan(self.plan)
+        from .critique import validate_plan as validate_critique_plan
+        validate_critique_plan(self.plan)
         self.workers, self.excluded = lanes_of(self.plan, self.policy)
         self.sessions = sessions or InteractiveSessions(self.directory, timeout=45)
         self._events_lock = threading.Lock()
@@ -798,9 +800,12 @@ class Pipeline:
         return bundle, digest_file(path)
 
     def validate_review(self, review: dict, require_approved: bool = True) -> None:
-        """The combined record must name exactly this run's declared reviewers; approval needs every one of them."""
+        """The combined record must name exactly this run's declared reviewers (plus `critique` when the plan pins the
+        critique reviewer, feature.json 2.9.0); approval needs every one of them."""
+        from .critique import has_critique, CRITIQUE
         bundle, digest = self.validate_bundle()
-        check_review(review, bundle, digest, require_approved=require_approved, reviewers=reviewer_ids(self.plan))
+        declared = reviewer_ids(self.plan) + ([CRITIQUE] if has_critique(self.plan) else [])
+        check_review(review, bundle, digest, require_approved=require_approved, reviewers=declared)
 
     def integrate(self, approved: str) -> str:
         self.check_shared_git("integrate")
@@ -1413,7 +1418,9 @@ def main():
     parser.add_argument("--panel-settings", help="prepare --guardrails: the multi-provider panels (feature.json 2.6.0 panels) as JSON "
                                                  "{panels: [...], pi_bin}; prepare pins plan.panels last, with each brief's text and sha256 and the "
                                                  "requirement-document copies")
-    parser.add_argument("--panels", help="preflight: the transports the feature's panels declare (comma-separated claude,pi); preflight "
+    parser.add_argument("--critique-settings", help="prepare --guardrails: the critique reviewer (feature.json 2.9.0 critique) as JSON "
+                        "(lanes, skills, max_budget_usd, timeout_minutes); prepare pins plan.critique and refuses the print transport")
+    parser.add_argument("--panels", help="preflight: the transports the feature's panels declare (comma-separated claude,pi); preflight"
                                          "proves them again (claude --max-budget-usd, pi --version)")
     parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
                                                                    "(pinned as plan.restore_from; the challenge reads a read-only copy)")
@@ -1582,12 +1589,36 @@ def main():
                     brief = Path(item["prompt"])
                     if not brief.is_file() or not brief.read_text().strip():
                         raise ValueError(f"Panel brief for {item['id']} is missing or empty: {brief}")
+            critique_settings = None
+            if args.critique_settings is not None:
+                from . import critique
+                if not args.guardrails:
+                    parser.error("--critique-settings applies to prepare --guardrails (feature.json 2.9.0) only")
+                try:
+                    critique_settings = json.loads(args.critique_settings)
+                except ValueError as error:
+                    raise ValueError(f"--critique-settings is not JSON: {error}") from None
+                if not isinstance(critique_settings, dict):
+                    raise ValueError("--critique-settings must be a JSON object")
+                critique.lanes_of(critique_settings, "--critique-settings ")
+                critique.settings(critique_settings, "--critique-settings ")
+                if "critique_app" not in policy:
+                    raise ValueError("feature.json declares critique but its policy has no critique_app (policy 1.4.0)")
+                critique.validate_critique_app(policy["critique_app"])
+                # One integration path: a critique joins review.json after the native reviewers, not as a print job (PRD 4.4).
+                critique.refuse_print_transport(args.reviewer_transport)
             tasks = {}
             for worker in policy["workers"]:
                 node = worker["node_id"]
                 if node in selected:
                     tasks[node] = pinned_task(task_files[node].read_text(), worker)
             reviewers = parse_reviewer_files(args.reviewer, declared)
+            if critique_settings is not None and any(r["reviewer_id"] == "critique" for r in reviewers):
+                # A native reviewer named `critique` would own automatic-review-critique.json, the critique reviewer's own
+                # status file, and collide with its review.json entry. Refused at prepare only when the plan pins the
+                # critique reviewer (launch refuses it too, load_feature); a feature without `critique` keeps the id
+                # (design-challenge note 1, followup P2 #29). The lane id `critique` is refused by critique.pin.
+                raise ValueError("A critique run may not have a native reviewer named `critique` (the critique reviewer owns that id); rename the reviewer or drop --critique-settings")
             # C52: the roles' models and efforts, refused before anything is written; WORKFLOW_WORKER_EFFORT is read here, once.
             roles = pin_roles(args.worker_model, args.worker_effort, args.judge_model, args.judge_effort)
             # feature.json 2.7.0: every selected lane's effective worker pin, its own field else the run-wide one, refused here too.
@@ -1682,6 +1713,25 @@ def main():
                 except ValueError:
                     prd_label = args.prd.name if args.prd else None
                 panel.pin(plan, panel_settings["panels"], briefs, reqs, panel_settings.get("pi_bin"), prd_label)
+            if critique_settings is not None:
+                # Pinned LAST among the feature pins, so plan.feature_version reads 2.9.0 (PRD_USER_CRITIQUE Appendix A). The
+                # critique's skills are copied into <run>/skills/critique and pinned by digest as a lane's; the job's --settings
+                # digest (critique.critique_settings) is pinned so the same settings is launched every round (design note 1).
+                from . import critique
+                import hashlib as _hashlib
+                critique_plugin = skills_mod.plugin_dir(directory, critique.CRITIQUE)
+                (critique_plugin / ".claude-plugin").mkdir(parents=True)
+                save_json(critique_plugin / ".claude-plugin" / "plugin.json", skills_mod.plugin_json(critique.CRITIQUE, directory.name))
+                critique_skills = []
+                for name in critique_settings["skills"]:
+                    folder = skills_mod.check_skill(critique.CRITIQUE, name, skills_mod.skills_root())
+                    skills_mod.copy_skill(critique.CRITIQUE, name, folder, critique_plugin / "skills" / name)
+                    critique_skills.append({"name": name, "sha256": skills_mod.skill_digest(critique.CRITIQUE, name, folder)})
+                critique_advisor = skills_mod.advisor_model()
+                settings_sha = _hashlib.sha256(critique.critique_settings(directory, critique_advisor)[1].encode()).hexdigest()
+                worktree = directory.parent / f"{directory.name}.critique" / "worktree"
+                critique.pin(plan, {**critique_settings, "lanes": critique.lanes_of(critique_settings)}, selected,
+                             critique_skills, settings_sha, critique_advisor, policy["critique_app"], str(worktree))
             if restore:
                 pin_restore(plan, directory, policy, restore)
             if args.automatic:

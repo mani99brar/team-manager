@@ -199,6 +199,12 @@ def run_worktrees(directory: Path, plan: dict) -> tuple[list[tuple[str, Path]], 
             path = Path(attack[key]) if isinstance(attack.get(key), str) else None
             if path is not None and path.exists():
                 remove.append((label, path))
+    # The critique reviewer's worktree lives outside the run directory too, at <runs root>/<run id>.critique/ (PRD_USER_CRITIQUE 4.3).
+    critique = plan.get("critique") if isinstance(plan.get("critique"), dict) else None
+    if critique and isinstance(critique.get("worktree"), str):
+        path = Path(critique["worktree"])
+        if path.exists():
+            remove.append(("critique worktree", path))
     kept += [f"{path}: a repair workspace, which may hold an uncommitted fix" for path in sorted(directory.glob("repair-workspace-*")) if path.is_dir()]
     source = source_checkout(directory)  # launch's own checkout of the run (C56); older runs have none.
     if source.exists():

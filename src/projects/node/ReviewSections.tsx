@@ -1,11 +1,15 @@
+import type { FixLoop } from '../../../contracts/projects/v1.ts'
 import type { ReviewResult, RunDetail, RunInputs, RunScope } from '../api.ts'
-import { runLanes } from '../findings.ts'
-import { BlockingFindings, ReviewPanel } from '../ReviewDetail.tsx'
+import { archivedRounds } from '../critique.ts'
+import { laneWording, runLanes } from '../findings.ts'
+import { BlockingFindings, CritiqueEvidence, ReviewPanel } from '../ReviewDetail.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
-import { Figures } from '../ui/index.tsx'
+import { Figures, SeverityChip } from '../ui/index.tsx'
+import { severityClass, severityTone } from '../tone.ts'
 import type { Resource } from '../useResource.ts'
 import { blockingFindings, reviewFigures } from './panels.ts'
 import './review.css'
+import '../critique.css'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
@@ -36,11 +40,57 @@ function ReviewFigures({ review, lanes }: { review: ReviewResult; lanes: string[
 }
 
 /**
+ * The "Earlier rounds" list (docs/PRD_USER_CRITIQUE.md 4.5, decisions.md [L2]): one entry per archived review round, each with
+ * its findings (every reviewer's — archived rounds carry the open P0/P1 blockers), and a critique finding keeps its own steps
+ * and screenshots. These cards are not `finding` rows (their own test ids), so the live findings count is untouched (design
+ * challenge note 6). A run with no archived round renders nothing.
+ */
+function EarlierRounds({ scope, loop }: { scope: RunScope; loop: FixLoop | null }) {
+  const rounds = archivedRounds(loop)
+  if (rounds.length === 0) return null
+  return (
+    <NodeSection sectionKey="earlier-rounds" title="Earlier rounds" testId="earlier-rounds">
+      <p className="projects-muted">Each archived review round's findings (every reviewer's); a critique finding keeps its own steps to reproduce and screenshots.</p>
+      <ol className="earlier-rounds-list">
+        {rounds.map(round => (
+          <li key={round.round} className="earlier-round" data-testid="earlier-round" data-round={round.round}>
+            <h5 className="earlier-round-head">Round {round.round} · {round.verdict} · lane {round.lane}</h5>
+            {round.findings.length === 0 ? (
+              <p className="projects-muted" data-testid="earlier-round-empty">This round archived no blocking finding.</p>
+            ) : (
+              <ul className="earlier-round-findings">
+                {round.findings.map((finding, index) => (
+                  <li
+                    key={index}
+                    className={`earlier-finding ui-card ${severityClass(severityTone(finding.severity))}`}
+                    data-testid="earlier-finding"
+                    data-severity={finding.severity}
+                    data-reviewer={finding.reviewer}
+                    data-worker={finding.worker ?? 'unrecorded'}
+                  >
+                    <p className="earlier-finding-head">
+                      <SeverityChip severity={finding.severity} className="finding-severity" /> · {finding.disposition} · {finding.reviewer} · {laneWording(finding.worker)}
+                    </p>
+                    <p className="earlier-finding-message">{finding.message}</p>
+                    <CritiqueEvidence scope={scope} finding={finding} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ol>
+    </NodeSection>
+  )
+}
+
+/**
  * The independent review's sections (docs/PRD_VIEWER_UX.md 4.7, docs/PRD_VIEWER_REVAMP.md 5.4): four figures, then what blocks
  * integration, one card per unresolved P0 or P1 before the findings, then the recorded verdict, the findings as cards with
- * their filter row and the reviewer cards. The node page holds the review; these sections only render it.
+ * their filter row and the reviewer cards, then the "Earlier rounds" list of archived rounds (PRD_USER_CRITIQUE 4.5). The
+ * node page holds the review and the fix loop; these sections only render them.
  */
-export function ReviewSections({ scope, review, onRetryReview, unscopedUri, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: {
+export function ReviewSections({ scope, review, onRetryReview, unscopedUri, definitionNodes, snapshotNodes, inputs, fixLoop, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: {
   scope: RunScope
   review: Resource<ReviewResult>
   onRetryReview: () => void
@@ -48,6 +98,7 @@ export function ReviewSections({ scope, review, onRetryReview, unscopedUri, defi
   definitionNodes: DefinitionNode[]
   snapshotNodes: SnapshotNode[]
   inputs: Resource<RunInputs | null>
+  fixLoop: FixLoop | null
   refreshToken: number
   onNavigate: (pathname: string) => void
   onOpenRequirement: (nodeId: string, quote: string) => void
@@ -77,6 +128,7 @@ export function ReviewSections({ scope, review, onRetryReview, unscopedUri, defi
           onOpenFile={onOpenFile}
         />
       </NodeSection>
+      <EarlierRounds scope={scope} loop={fixLoop} />
     </>
   )
 }

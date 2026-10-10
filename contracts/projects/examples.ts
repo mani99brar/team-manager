@@ -100,6 +100,70 @@ export const reviewResult: ReviewResult = {
   diff: { artifact_id: 'patch-review-2bb474561d3e', kind: 'patch', uri: '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts/patch-review-2bb474561d3e', sha256: 'd'.repeat(64) },
 }
 
+/**
+ * The critique reviewer (feature.json 2.9.0, docs/PRD_USER_CRITIQUE.md): one more reviewer, `critique`, whose P1 finding
+ * carries `evidence` (numbered steps and a screenshot whose `artifact_id` is `critique-<round>-<sha12>`). Its open P1 blocks
+ * the review and feeds the fix loop; the viewer builds its fixtures from this example. A second critique finding with the
+ * same digest keeps its own evidence (a different screenshot). Other reviewers' findings carry no `evidence`.
+ */
+const CRITIQUE_FINDINGS: ReviewFinding[] = [
+  {
+    severity: 'P1', message: 'Run a review: the "Run" button on the first row spins forever and never shows the verdict.\nSteps: 1. Open /projects/alpha. 2. Click "Run" on the first row. 3. Wait 30s.', disposition: 'open',
+    worker: 'pages', requirement: null, requirement_found_in: [], reviewer: 'critique',
+    evidence: {
+      steps: ['Open /projects/alpha', "Click 'Run' on the first row", 'Wait 30s: the spinner never ends'],
+      screenshots: [{ artifact_id: 'critique-1-0a1b2c3d4e5f', caption: 'After clicking Run: spinner never ends' }],
+    },
+  },
+  {
+    severity: 'P2', message: 'The findings table crowds the severity and disposition badges on a 390 px screen.', disposition: 'open',
+    worker: 'shell', requirement: null, requirement_found_in: [], reviewer: 'critique',
+    evidence: {
+      steps: ['Open /projects/alpha at 390 px', 'Read the findings table header'],
+      screenshots: [{ artifact_id: 'critique-1-1b2c3d4e5f60', caption: 'Badges crowd at 390 px' }],
+    },
+  },
+  // A genuine duplicate pair: two findings with the SAME (severity, worker, message) digest, so the viewer gets the
+  // digest-plus-occurrence case the keying exists for. Each keeps its own evidence (a different screenshot/steps).
+  {
+    severity: 'P2', message: 'An empty state shows no guidance on a lane with no findings yet.', disposition: 'open',
+    worker: 'pages', requirement: null, requirement_found_in: [], reviewer: 'critique',
+    evidence: {
+      steps: ['Open /projects/alpha', 'Select a lane with no findings'],
+      screenshots: [{ artifact_id: 'critique-1-2c3d4e5f6071', caption: 'Empty lane: no guidance (first occurrence)' }],
+    },
+  },
+  {
+    severity: 'P2', message: 'An empty state shows no guidance on a lane with no findings yet.', disposition: 'open',
+    worker: 'pages', requirement: null, requirement_found_in: [], reviewer: 'critique',
+    evidence: {
+      steps: ['Open /projects/beta', 'Select a second lane with no findings'],
+      screenshots: [{ artifact_id: 'critique-1-3d4e5f607182', caption: 'Empty lane: no guidance (second occurrence)' }],
+    },
+  },
+]
+
+/** A recorded review whose reviewers include the critique reviewer, which blocked on an open P1 (the fix loop repairs `pages`). */
+export const critiqueReviewResult: ReviewResult = {
+  contract_version: '1.4.0', run_id: 'run-001', node_id: 'review', attempt: 1,
+  reviewer: { session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01, 9d4e5f60-1b2c-4d3e-8f09-aabbccddeeff', transport: 'native', independent: true },
+  bundle_sha256: 'b'.repeat(64), candidate_commit: 'c'.repeat(40),
+  verdict: 'blocked',
+  findings: [...GENERAL_FINDINGS, ...CRITIQUE_FINDINGS],
+  reviewers: [
+    {
+      reviewer_id: 'general', transport: 'native', session_id: '3f0c2a44-9f5b-4d0e-8c0a-5a6b7c8d9e01', verdict: 'approved', findings: GENERAL_FINDINGS,
+      launched_at: '2026-01-01T12:10:00Z', accepted_at: '2026-01-01T12:28:00Z', status: 'accepted',
+    },
+    {
+      reviewer_id: 'critique', transport: 'native', session_id: '9d4e5f60-1b2c-4d3e-8f09-aabbccddeeff', verdict: 'blocked', findings: CRITIQUE_FINDINGS,
+      launched_at: '2026-01-01T12:10:10Z', accepted_at: '2026-01-01T12:40:00Z', status: 'blocked',
+    },
+  ],
+  reviewed_at: '2026-01-01T12:40:00Z', round: 1, delta_from: null, delta_diff: null,
+  diff: { artifact_id: 'patch-review-2bb474561d3e', kind: 'patch', uri: '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts/patch-review-2bb474561d3e', sha256: 'd'.repeat(64) },
+}
+
 const ARTIFACTS = '/api/projects/md-manager/workflows/feature-implementation/runs/run-001/artifacts'
 
 /**
@@ -506,6 +570,33 @@ export const fixLoopRecord: FixLoopRecord = {
   ]
 }
 export const fixLoop: FixLoop = { ...fixLoopHeader, ...fixLoopRecord }
+
+/**
+ * A fix loop whose round 1 blocked on a critique P1: the archived round's critique finding carries its own `evidence`
+ * (steps and a `critique-1-<sha12>` screenshot), resolved by the digest of (severity, worker, message) plus the occurrence
+ * index — never by position in the round's filtered list. The viewer's "Earlier rounds" list builds its fixtures from this.
+ */
+export const critiqueFixLoop: FixLoop = {
+  ...fixLoopHeader,
+  ...fixLoopRecord,
+  review_rounds: [
+    {
+      ...fixLoopRecord.review_rounds[0],
+      lane: 'pages',
+      findings: [
+        {
+          severity: 'P1',
+          message: 'Run a review: the "Run" button on the first row spins forever and never shows the verdict.',
+          disposition: 'open', worker: 'pages', requirement: null, reviewer: 'critique',
+          evidence: {
+            steps: ['Open /projects/alpha', "Click 'Run' on the first row", 'Wait 30s: the spinner never ends'],
+            screenshots: [{ artifact_id: 'critique-1-0a1b2c3d4e5f', caption: 'After clicking Run: spinner never ends' }],
+          },
+        },
+      ],
+    },
+  ],
+}
 /** The same run mid-round at 09:40:12, as the live read serves it: repair 2 `launched`, the session not bound yet. */
 export const launchedRepair: RepairEntry = {
   "n": 2,

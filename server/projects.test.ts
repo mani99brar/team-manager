@@ -205,7 +205,8 @@ const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Sh
 const ADAPTER_TASK = '# Adapter worker\n\nServe the review route from the export section.\n\nApproved ownership and checks:\n{"node_id": "adapter", "owned_paths": ["server"]}'
 const TEXT_LIMIT = 65536
 
-type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null; reviewer?: string | null }
+type Finding = { severity: 'P0' | 'P1' | 'P2'; message: string; disposition: 'open' | 'resolved' | 'accepted'; worker: string | null; requirement: string | null; reviewer?: string | null
+  evidence?: { steps: string[]; screenshots: { artifact_id: string; caption?: string }[] } }
 type ReviewerSection = {
   reviewer_id: string; transport: 'native' | 'print' | 'manual'; session_id: string | null; verdict: 'approved' | 'blocked' | null; findings: Finding[]
   launched_at: string | null; accepted_at: string | null; status: 'accepted' | 'blocked' | 'superseded' | 'pending'
@@ -213,6 +214,7 @@ type ReviewerSection = {
 type ReviewSection = {
   attempt: number; transport: 'native' | 'print' | 'manual'; reviewer_session_id: string; independent: true; bundle_sha256: string; candidate_commit: string
   verdict: 'approved' | 'blocked'; findings: Finding[]; reviewers?: ReviewerSection[]; reviewed_at: string; diff: { path: string; sha256: string; bytes: number } | null
+  critique_artifacts?: { id: string; kind: 'screenshot'; path: string; sha256: string; bytes: number }[]
 }
 type WorkerInput = {
   role: string; required_check_kinds?: string[]; task: string; prompt: string | null; owned_paths: string[]
@@ -554,6 +556,52 @@ test('an empty project, an empty workflow and a missing scope are distinguishabl
     // Registered but unusable storage is a 503, never an empty success.
     assertError(await get(app, url('alpha', 'absent')), 503, 'RUNS_ROOT_UNAVAILABLE')
   }, [{ id: 'alpha', name: 'Alpha', workflows: [{ id: 'main' }, { id: 'absent', runsRoot: '/nonexistent/md-manager-projects-test/runs' }] }, { id: 'bare', name: 'Bare project', workflows: [] }])
+})
+
+test('critique reviewer 1.11.0: the artifact route serves a live and an archived round screenshot; a wrong hash or unknown id is refused', async () => {
+  const live = Buffer.concat([PNG, Buffer.from(' live-round-1')])
+  const archived = Buffer.concat([PNG, Buffer.from(' archived-round-2')])
+  const liveId = `critique-1-${sha256(live).slice(0, 12)}`
+  const archivedId = `critique-2-${sha256(archived).slice(0, 12)}`
+  await harness(async ({ app, runsRoot, root }) => {
+    const rootDir = runsRoot('alpha', 'main')
+    const review = reviewSection({
+      verdict: 'blocked',
+      findings: [{ severity: 'P1', message: 'The Run button spins forever.', disposition: 'open', worker: 'ui', requirement: null, reviewer: 'critique',
+        evidence: { steps: ['Open /projects/alpha', 'Click Run'], screenshots: [{ artifact_id: liveId, caption: 'spinner never ends' }] } }],
+      reviewers: [{ reviewer_id: 'critique', transport: 'native', session_id: '9d4e5f60-1b2c-4d3e-8f09-aabbccddeeff', verdict: 'blocked',
+        findings: [{ severity: 'P1', message: 'The Run button spins forever.', disposition: 'open', worker: 'ui', requirement: null, reviewer: 'critique',
+          evidence: { steps: ['Open /projects/alpha', 'Click Run'], screenshots: [{ artifact_id: liveId, caption: 'spinner never ends' }] } }],
+        launched_at: T2, accepted_at: T2, status: 'blocked' }],
+      critique_artifacts: [
+        { id: liveId, kind: 'screenshot', path: 'critique/1/after-run.png', sha256: sha256(live), bytes: live.length },
+        { id: archivedId, kind: 'screenshot', path: 'critique/2/after-run.png', sha256: sha256(archived), bytes: archived.length },
+      ],
+    } as Partial<ReviewSection>)
+    await writeRun(rootDir, { runId: 'crit', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['approval'], events: launchEvents,
+      version: '1.11.0', review, inputs: inputsSection(), diffFile: DIFF })
+    for (const [round, bytes] of [['1', live], ['2', archived]] as const) {
+      await mkdir(join(rootDir, 'crit', 'critique', round), { recursive: true })
+      await writeFile(join(rootDir, 'crit', 'critique', round, 'after-run.png'), bytes)
+    }
+    // The live round's screenshot and the archived round's screenshot both serve as PNGs through the run's artifact route.
+    for (const [id, bytes] of [[liveId, live], [archivedId, archived]] as const) {
+      const shot = await app.inject({ method: 'GET', url: url('alpha', 'main', 'crit', `/artifacts/${id}`) })
+      assert.equal(shot.statusCode, 200, shot.body)
+      assert.equal(shot.headers['content-type'], 'image/png')
+      assert.ok(shot.rawPayload.equals(bytes))
+    }
+    // The review result carries the critique finding's evidence with the screenshot artifact id; no absolute path leaks.
+    const detail = await get(app, url('alpha', 'main', 'crit', '/reviews/1'))
+    assert.equal(detail.status, 200, detail.body)
+    const finding = detail.json().findings.find((f: { reviewer: string }) => f.reviewer === 'critique')
+    assert.equal(finding.evidence.screenshots[0].artifact_id, liveId)
+    assert.ok(!detail.body.includes(root))
+    // An id not registered for this run is a 404, and a corrupted file no longer hashes as registered.
+    assertError(await get(app, url('alpha', 'main', 'crit', '/artifacts/critique-9-000000000000')), 404, 'ARTIFACT_NOT_FOUND', root)
+    await writeFile(join(rootDir, 'crit', 'critique', '1', 'after-run.png'), Buffer.concat([live, Buffer.from('tamper')]))
+    assertError(await get(app, url('alpha', 'main', 'crit', `/artifacts/${liveId}`)), 500, 'ARTIFACT_HASH_MISMATCH', root)
+  })
 })
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1531,7 +1579,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.11.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.12.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -3339,6 +3387,32 @@ test('[fix loop] the real run directory of worker-skills-001 (an export 1.9.0 wi
     const artifact = await get(app, review.delta_diff!.uri)
     assert.equal(artifact.status, 200)
     assert.equal(artifact.body, delta)
+  })
+})
+
+test("[fix loop] an archived round's critique finding carries its evidence from the export (the live read of review-rounds.json has none)", async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const critiqueFinding = { severity: 'P1' as const, message: 'The Run button spins forever.', disposition: 'open' as const, worker: 'ui', requirement: null, reviewer: 'critique' }
+    const evidence = { steps: ['Open the alpha project page', 'Click Run on the first row'], screenshots: [{ artifact_id: 'critique-1-0a1b2c3d4e5f', caption: 'spinner never ends' }] }
+    // Live records: review-rounds.json carries the finding with NO evidence (a critique finding's evidence lives only in
+    // critique/<round>/evidence.json, which the server never reads). review.round-1.json gives the archived reviewers.
+    const files = {
+      'repairs.json': journal(journalEntry(1, { status: 'applied', applied_at: '2026-03-01T10:30:00.000000Z', session: { node: 'repair-1', launch_token: 't', session_id: 'abc-session' } })),
+      'review-rounds.json': roundsFile(reviewRound(1, { findings: [critiqueFinding] })),
+      'review.round-1.json': json({ run_id: FIX_RUN, bundle_sha256: 'b'.repeat(64), candidate_commit: OUTPUT, reviewer: 's', independent: true, verdict: 'blocked',
+        reviewers: [{ reviewer_id: 'critique', session_id: '9d4e5f60-1b2c-4d3e-8f09-aabbccddeeff', verdict: 'blocked' }], findings: [critiqueFinding] }),
+    }
+    // The Python export (state.fix_loop) carries the same round with the critique finding's evidence attached by digest.
+    const exportedLoop = { version: '1.0.0', rounds: 2, repairs: [],
+      review_rounds: [{ round: 1, verdict: 'blocked', candidate: OUTPUT, lane: 'ui', reviewer_sessions: ['s-1'], started_at: '2026-03-01T10:11:00.000000Z',
+        archived: true, restored_at: null, repair_n: null, reviewers: [], findings: [{ ...critiqueFinding, evidence }] }] }
+    await writeRun(root, fixRun({ files, fixLoop: exportedLoop, review: null, inputs: null as never, events: [], values: { run_id: FIX_RUN }, next: [], packets: [] }))
+    const loop = (await detailOf(app)).fixLoop!
+    assert.equal(loop.source, 'live')  // served from the live journals, not the export
+    const round = 'review_rounds' in loop ? loop.review_rounds.find(entry => entry.round === 1)! : null
+    const finding = round!.findings.find(item => item.reviewer === 'critique')!
+    assert.deepEqual(finding.evidence, evidence)  // carried from the export onto the live finding (PRD 4.5, review finding 5)
   })
 })
 
