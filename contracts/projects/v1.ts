@@ -14,7 +14,7 @@ const version = z.literal('1.0.0')
  * (docs/PRD_VIEWER_REFINE.md Appendix A): the run detail's optional `fixLoop` (its own `contract_version: "1.10.0"`; the
  * summary's version stays 1.0.0 | 1.5.0), the review result's `round`, `delta_from` and `delta_diff`, the run inputs'
  * `automatic.fix_rounds` and each worker's `roles` and `skills`. Every key added at 1.10.0 is `.nullable().optional()` inside
- * its strict object, so values built before it validate unchanged; the server always sends them.
+ * its strict object, so values built before it validate unchanged; the server always sends them. Export 1.12.0 adds the run summary and detail's `accepted` (the operator override).
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -82,6 +82,51 @@ export const runActivitySchema = z.strictObject({
  */
 export const RUN_DIR_PATTERN = /^~(?!.*\/\.\.?(?:\/|$))\/[A-Za-z0-9._@+/-]+$/
 
+// ---- The operator override (viewer-owned; decisions.md L8, L12) -----------------------------------------------------
+
+/** What `accept` recorded about the review: `recorded` when the run had a review record, `none` when it had not. */
+export const ACCEPTED_REVIEWS = ['recorded', 'none'] as const
+const acceptedFindingSchema = z.strictObject({
+  severity: z.enum(['P0', 'P1', 'P2']),
+  reviewer: z.string(),
+  title: z.string(),
+  /** The lane the finding concerns, null when the review named none. */
+  lane: z.string().nullable(),
+})
+
+/**
+ * The export's top-level `accepted` as `accepted.json` is written (decisions.md L8): exactly this key set, `via` optional.
+ * `open_findings` are the blocking findings (P0/P1 not resolved) plus the P2s still open when the operator accepted.
+ * `accepted_at` is a UTC ISO date-time.
+ */
+export const acceptedRecordSchema = z.strictObject({
+  version: z.literal('1.0.0'),
+  run_id: z.string(),
+  candidate: commit,
+  reason: z.string(),
+  by: z.string(),
+  via: z.string().optional(),
+  accepted_at: timestamp,
+  on_main: z.boolean(),
+  review: z.enum(ACCEPTED_REVIEWS),
+  open_findings: z.array(acceptedFindingSchema),
+})
+
+/**
+ * What the viewer serves of an accepted run (L12): the run's snapshot status is `succeeded` and this field says the operator
+ * merged its candidate by hand. `abandoned` is the run's abandon row when it was abandoned first (history), else null.
+ */
+export const acceptedSchema = z.strictObject({
+  candidate: commit,
+  reason: z.string(),
+  by: z.string(),
+  accepted_at: timestamp,
+  on_main: z.boolean(),
+  review: z.enum(ACCEPTED_REVIEWS),
+  open_findings: z.array(acceptedFindingSchema),
+  abandoned: z.string().nullable(),
+})
+
 export const runSummarySchema = z.strictObject({
   /** 1.5.0 carries `activity`; 1.0.0 (a server before it, and the viewer's worker-phase mocks) does not. */
   contract_version: z.enum(['1.0.0', '1.5.0']),
@@ -92,7 +137,10 @@ export const runSummarySchema = z.strictObject({
   created_at: timestamp,
   updated_at: timestamp,
   activity: runActivitySchema.optional(),
+  /** Export 1.12.0: set when the operator accepted the run's candidate by hand (status is then `succeeded`); absent otherwise. */
+  accepted: acceptedSchema.nullable().optional(),
 }).superRefine((summary, context) => {
+  if (summary.accepted && summary.status !== 'succeeded') context.addIssue({ code: 'custom', message: 'An accepted run is succeeded', path: ['accepted'] })
   const issue = (message: string) => context.addIssue({ code: 'custom', message, path: ['activity'] })
   const { activity } = summary
   if ((summary.contract_version === '1.5.0') !== (activity !== undefined)) issue('A summary carries activity exactly when it is 1.5.0')
@@ -110,6 +158,8 @@ export const runDetailSchema = z.strictObject({
   run_dir: z.string().regex(RUN_DIR_PATTERN).nullable().optional(),
   /** 1.10.0: the in-run fix loop the repair nodes of `definition` and `snapshot` are projected from; null without one. */
   fixLoop: z.lazy(() => fixLoopSchema).nullable().optional(),
+  /** Export 1.12.0: the operator override, the same value as `summary.accepted`; absent otherwise. */
+  accepted: acceptedSchema.nullable().optional(),
 })
 
 // ---- Review results (1.1.0, finding links 1.2.0, lanes from configuration 1.3.0, parallel reviewers 1.4.0) ----
@@ -900,6 +950,7 @@ export const schemas = {
 export type Project = z.infer<typeof projectSchema>
 export type WorkflowDefinition = z.infer<typeof definitionSchema>
 export type RunSummary = z.infer<typeof runSummarySchema>
+export type RunAccepted = z.infer<typeof acceptedSchema>
 export type RunActivity = z.infer<typeof runActivitySchema>
 export type RunDetail = z.infer<typeof runDetailSchema>
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>
@@ -968,6 +1019,7 @@ export function validateRunDetail(input: unknown): RunDetail {
       throw new Error('Snapshot graph differs from pinned definition')
   }
   if ((detail.summary.contract_version === '1.5.0') !== (detail.run_dir !== undefined)) throw new Error('A run detail carries run_dir exactly when its summary is 1.5.0')
+  if (JSON.stringify(detail.accepted ?? null) !== JSON.stringify(detail.summary.accepted ?? null)) throw new Error('Summary and detail disagree about the operator override')
   const activity = detail.summary.activity
   if (activity) {
     const focus = activity.focus

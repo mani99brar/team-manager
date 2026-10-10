@@ -26,6 +26,7 @@
 .rail-dot.tone-warn { background: var(--warn); }
 .rail-dot.tone-fail { background: var(--fail); }
 .rail-dot.tone-pause { background: var(--pause); }
+.rail-dot.tone-override { background: var(--override); }
 .rail-group > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 10px; cursor: pointer; font-weight: 600; border-radius: var(--radius); }
 .rail-group > summary:hover { background: var(--surface-2); }
 .rail-group > .rail-list { padding-left: 10px; border-left: 2px solid var(--border); margin-left: 12px; }
@@ -94,6 +95,7 @@
 .run-row-item[data-tone="warn"] > .run-row { border-left-color: var(--warn); }
 .run-row-item[data-tone="fail"] > .run-row { border-left-color: var(--fail); }
 .run-row-item[data-tone="pause"] > .run-row { border-left-color: var(--pause); }
+.run-row-item[data-tone="override"] > .run-row { border-left-color: var(--override); }
 .run-row:hover { background: var(--surface-2); }
 .run-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .run-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
@@ -106,6 +108,7 @@
 .run-row-detail { grid-column: 1 / -1; display: flex; min-width: 0; color: var(--muted); font-size: 0.9rem; padding-left: calc(1.1em + 8px); white-space: nowrap; }
 .run-row-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .run-row-since { flex: none; white-space: pre; }
+.run-row-accepted { flex: none; white-space: pre; margin-left: 0.5em; }
 .run-row[data-status="failed"] .run-row-glyph { color: var(--fail); }
 .run-row[data-status="succeeded"] .run-row-glyph { color: var(--ok); }
 /* The lanes a Running or Paused row launches, as plain chips; no per-lane state is claimed. */
@@ -124,6 +127,7 @@
 .projects-shell .status-badge.status-running { background: var(--run-soft); color: var(--run); }
 .projects-shell .status-badge.status-awaiting_approval { background: var(--warn-soft); color: var(--warn); }
 .projects-shell .status-badge.status-paused { background: var(--pause-soft); color: var(--pause); }
+.projects-shell .status-badge.status-override { background: var(--override-soft); color: var(--override); }
 .projects-shell .status-badge.status-succeeded { background: var(--ok-soft); color: var(--ok); }
 .projects-shell .status-badge.status-failed { background: var(--fail-soft); color: var(--fail); }
 
@@ -172,6 +176,6 @@
   .run-row { grid-template-columns: minmax(0, 1fr); }
   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
   .run-row-detail { display: block; white-space: normal; }
-  .run-row-summary, .run-row-since, .run-row-paused-since { white-space: normal; }
+  .run-row-summary, .run-row-since, .run-row-paused-since, .run-row-accepted { white-space: normal; }
   .home-search { max-width: none; }
 }

@@ -25,6 +25,7 @@ import {
   type Project,
   type ReviewFinding,
   type ReviewResult,
+  type RunAccepted,
   type RunActivity,
   type RunDetail,
   type RunInputs,
@@ -38,7 +39,7 @@ import {
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 
-export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunAccepted, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
 export { isBlockingFinding }
 
 /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */

@@ -5,7 +5,7 @@
  */
 import type { RunDetail, RunSummary } from '../../contracts/projects/v1.ts'
 
-export type Tone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'idle'
+export type Tone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'override' | 'idle'
 export type Severity = 'P0' | 'P1' | 'P2'
 export type SeverityTone = 'p0' | 'p1' | 'p2'
 
@@ -50,7 +50,11 @@ export function severityTone(severity: string): SeverityTone {
  * The one tone for an element that may carry a status and an attention: attention wins, because a running run
  * that waits on the operator is shown as "needs you" everywhere.
  */
-export function stateTone(input: { status?: string | null; attention?: string | null }): Tone {
+export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: undefined }): Exclude<Tone, 'override'>
+export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: unknown }): Tone
+export function stateTone(input: { status?: string | null; attention?: string | null; accepted?: unknown }): Tone {
+  // The operator override (L12) is its own tone, whatever status it is served under; it waits on nobody.
+  if (input.accepted) return 'override'
   if (input.attention) return attentionTone(input.attention)
   if (input.status) return statusTone(input.status)
   return 'idle'
@@ -69,6 +73,7 @@ export const TONE_LABEL: Record<Tone, string> = {
   warn: 'Needs you',
   fail: 'Failed',
   pause: 'Paused',
+  override: 'Integrated (operator override)',
   idle: 'Idle',
 }
 

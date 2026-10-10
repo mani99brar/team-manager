@@ -11,6 +11,11 @@ export { ATTACK_NODE_ID, SIDECAR_NODE_ID }
 export type RunStatus = RunDetail['summary']['status']
 export type NodeKind = RunDetail['definition']['nodes'][number]['kind']
 
+/** The outcome of a run the operator accepted by hand (L12): served as `succeeded`, but never worded or styled as a reviewed integration. */
+export const OVERRIDE_LABEL = 'integrated (operator override)'
+export const OVERRIDE_TITLE = 'Integrated by the operator (override): the operator merged this run\'s candidate by hand, over its review. Not a reviewed integration.'
+export const OVERRIDE_SHORT = 'merged by the operator, not a reviewed integration'
+
 export const STATUS_LABEL: Record<RunStatus, string> = {
   pending: 'Pending',
   running: 'Running',

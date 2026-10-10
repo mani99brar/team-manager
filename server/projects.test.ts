@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
+import { acceptedRecordSchema, schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
 import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
@@ -112,6 +112,8 @@ type RunSpec = {
   panels?: unknown
   /** Content written to the live `<run>/panel.json`. */
   livePanel?: string
+  /** Export 1.12.0: the `accepted` record as persisted (undefined leaves the key out; null is an explicit null). */
+  accepted?: unknown
   /** Export 1.10.0: the `fix_loop` section as persisted (undefined leaves the key out; null is an explicit null). */
   fixLoop?: unknown
   /** Further files of the run directory (the fix loop's live records), by name. */
@@ -191,6 +193,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     ...(spec.attack !== undefined ? { attack: spec.attack } : {}),
     ...(spec.panels !== undefined ? { panels: spec.panels } : {}),
     ...(spec.fixLoop !== undefined ? { fix_loop: spec.fixLoop } : {}),
+    ...(spec.accepted !== undefined ? { accepted: spec.accepted } : {}),
   }
   await writeFile(join(dir, 'run-state.json'), spec.stateText ?? json(state))
   return dir
@@ -1579,7 +1582,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
     return { ...base, runId, review: reviewSection(), inputs: section }
   }
   const cases: RunSpec[] = [
-    { ...base, runId: 'unknown-version', version: '1.12.0', review: reviewSection(), inputs: inputsSection() },
+    { ...base, runId: 'unknown-version', version: '1.13.0', review: reviewSection(), inputs: inputsSection() },
     { ...base, runId: 'review-string', review: 'approved' },
     { ...base, runId: 'inputs-array', inputs: [] },
     withReview(section => { (section as Record<string, unknown>).summary = 'extra' }, 'review-extra-key'),
@@ -3607,4 +3610,101 @@ test('[fix loop] review rounds: the live review-rounds.json, the archived review
     // A journal and a rounds file that disagree with the export: the live files win.
     assert.equal((await detailOf(app, 'restored')).fixLoop?.source, 'live')
   })
+})
+
+// ---- The operator override (decisions.md L1, L8, L12, L13): export 1.12.0 `accepted` --------------------------------------
+
+/** accepted.json exactly as the engine writes it (L8): the full key set, `via` optional. */
+const acceptedRecord = (spec: Record<string, unknown> = {}) => ({
+  version: '1.0.0', run_id: 'accepted-run', candidate: OUTPUT, reason: 'merged by hand over a fail-safe P1', by: 'operator', via: 'claude-code',
+  accepted_at: '2026-10-08T09:30:00Z', on_main: true, review: 'recorded',
+  open_findings: [
+    { severity: 'P1', reviewer: 'coverage', title: 'The fail-safe path is not covered', lane: 'adapter' },
+    { severity: 'P2', reviewer: 'general', title: 'A comment is stale', lane: null }],
+  ...spec,
+})
+const blockedEvents: RawEvent[] = [...reviewingEvents, { sequence: 11, time: T2, node: 'review', status: 'blocked', message: 'coverage blocked the candidate' }]
+const abandonRow: RawEvent = { sequence: 12, time: T2, node: 'controller', status: 'cancelled', message: 'Abandoned by the operator: usage limit' }
+const acceptRow = (sequence: number): RawEvent => ({ sequence, time: T2, node: 'controller', status: 'succeeded', message: 'Accepted by the operator: merged by hand over a fail-safe P1' })
+const acceptedRun = (spec: Partial<RunSpec> = {}): RunSpec => ({
+  runId: 'accepted-run', version: '1.12.0', values: reviewedValues(), next: ['review'], packets: reviewedPackets, events: blockedEvents, review: null, inputs: inputsSection(),
+  accepted: acceptedRecord(), ...spec,
+})
+
+test('[accepted] a 1.12.0 export with accepted is served succeeded with the override; null and absent read as before (L1, L12)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, acceptedRun({ events: [...blockedEvents, acceptRow(12)] }))
+    await writeRun(root, acceptedRun({ runId: 'accepted-after-abandon', events: [...blockedEvents, abandonRow, acceptRow(13)] }))
+    await writeRun(root, acceptedRun({ runId: 'accepted-null', accepted: null, events: [...blockedEvents, abandonRow] }))
+    await writeRun(root, acceptedRun({ runId: 'accepted-absent', accepted: undefined, events: blockedEvents }))
+    const list = projectSchemas.runList.parse((await get(app, url('alpha', 'main'))).json())
+    const byId = new Map(list.runs.map(run => [run.run_id, run]))
+    assert.equal(byId.size, 4)
+    const plain = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-run'))).json())
+    assert.deepEqual([plain.summary.status, plain.snapshot.status], ['succeeded', 'succeeded'])
+    assert.deepEqual(plain.summary.accepted, {
+      candidate: OUTPUT, reason: 'merged by hand over a fail-safe P1', by: 'operator', accepted_at: '2026-10-08T09:30:00Z', on_main: true, review: 'recorded',
+      open_findings: acceptedRecord().open_findings, abandoned: null,
+    })
+    assert.deepEqual(plain.accepted, plain.summary.accepted)
+    assert.deepEqual(byId.get('accepted-run')!.accepted, plain.summary.accepted)
+    // Finished: a finish time, no attention, no controller reading.
+    assert.equal(plain.summary.activity?.attention, null)
+    assert.equal(plain.summary.activity?.controller, null)
+    assert.ok(plain.summary.activity?.headline?.includes('operator override'), plain.summary.activity?.headline ?? '')
+    const abandoned = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-after-abandon'))).json())
+    assert.equal(abandoned.summary.status, 'succeeded')
+    assert.equal(abandoned.summary.accepted?.abandoned, 'Abandoned by the operator: usage limit')
+    const nulled = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-null'))).json())
+    assert.deepEqual([nulled.summary.status, nulled.summary.accepted, nulled.accepted], ['cancelled', undefined, undefined])
+    const absent = validateRunDetail((await get(app, url('alpha', 'main', 'accepted-absent'))).json())
+    assert.deepEqual([absent.summary.status, 'accepted' in absent.summary], ['failed', false])
+    // No review recorded travels as such.
+    await writeRun(root, acceptedRun({ runId: 'accepted-no-review', accepted: acceptedRecord({ review: 'none', open_findings: [] }) }))
+    assert.equal(validateRunDetail((await get(app, url('alpha', 'main', 'accepted-no-review'))).json()).summary.accepted?.review, 'none')
+  })
+})
+
+test('[accepted] the accept row on a lane named controller belongs to the run, not the lane (L13 d)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const inputs = inputsSection({ policy_version: '1.2.0', selected_workers: ['controller', 'ui'], excluded_workers: [] })
+    inputs.workers = { controller: laneInput('controller', 'backend', ['unit'], workerInput('adapter').checks, '# Controller worker\n\nHarden the controller.'), ui: workerInput('ui') }
+    const events: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'controller', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      acceptRow(3),
+    ]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'lane-accept', version: '1.12.0', definition: { name: 'Feature implementation', nodes: graphNodes(['controller', 'ui']) },
+      next: ['launch_controller', 'launch_ui'], events, inputs, accepted: acceptedRecord({ run_id: 'lane-accept' }) })
+    const served = ((await get(app, url('alpha', 'main', 'lane-accept', '/events'))).json() as { events: WorkflowEvent[] }).events
+    assert.deepEqual([served[2].node_id, served[2].status], [null, 'succeeded'])
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'lane-accept'))).json())
+    assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'launch_controller')!.status, 'running', 'the accept row never settles the lane')
+  })
+})
+
+test('[accepted] a record outside the L8 key set, or a 1.11.0 export, is refused as an invalid run', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const withoutVia = Object.fromEntries(Object.entries(acceptedRecord()).filter(([key]) => key !== 'via'))
+    await writeRun(root, acceptedRun({ runId: 'no-via', accepted: withoutVia }))
+    assert.equal((await get(app, url('alpha', 'main', 'no-via'))).status, 200)
+    for (const [runId, record] of [['extra-key', acceptedRecord({ extra: 1 })], ['short-sha', acceptedRecord({ candidate: OUTPUT.slice(0, 7) })],
+      ['bad-severity', acceptedRecord({ open_findings: [{ severity: 'P3', reviewer: 'x', title: 'y', lane: null }] })],
+      ['no-lane-key', acceptedRecord({ open_findings: [{ severity: 'P1', reviewer: 'x', title: 'y' }] })], ['bad-review', acceptedRecord({ review: 'maybe' })],
+      ['non-iso-time', acceptedRecord({ accepted_at: 'yesterday at noon' })], ['offset-time', acceptedRecord({ accepted_at: '2026-10-08T09:30:00+02:00' })],
+      ['string', 'accepted']] as const) {
+      await writeRun(root, acceptedRun({ runId, accepted: record }))
+      assertError(await get(app, url('alpha', 'main', runId)), 500, 'RUN_STORAGE_INVALID', root)
+    }
+  })
+})
+
+test('[accepted] the engine\'s accepted*.json examples parse with the viewer\'s record schema (L13 a)', () => {
+  const directory = new URL('../contracts/workflow/examples/', import.meta.url)
+  const files = readdirSync(directory).filter(name => /^accepted.*\.json$/.test(name))
+  // The candidate phase has the engine's example; an earlier phase may not have it yet.
+  if (process.env.WORKFLOW_VERIFICATION_PHASE === 'candidate') assert.ok(files.length > 0, 'no contracts/workflow/examples/accepted*.json example exists')
+  for (const name of files) acceptedRecordSchema.parse(JSON.parse(readFileSync(new URL(name, directory), 'utf8')))
 })
