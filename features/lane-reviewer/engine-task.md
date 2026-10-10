@@ -2,7 +2,7 @@
 
 ## Goal
 
-A feature.json 2.9.0 lane may declare `reviewer: {transport, model, rounds, timeout_minutes}`. After that lane passes its own verification and before the candidate is built, the controller has that one provider review the lane's diff only; a P0 or P1 starts one fix round of that lane through the existing repair loop, and the lane is verified again. A provider failure is recorded and never blocks the run. A lane without `reviewer`, and every feature before 2.9.0, runs byte for byte as today. `docs/PRD_LANE_REVIEWER.md` sections 3, 4 and 7 are the specification; `features/lane-reviewer/decisions.md` records the operator's decisions and wins over this task where they differ.
+A feature.json 2.9.0 lane may declare `lane_review: {reviewers: [1 to 4 {transport, model, effort?}], rounds?, timeout_minutes?, budget_usd?}` (PRD section 3). After that lane passes its own verification and before the candidate is built, the controller has those reviewers review the lane's diff only, in parallel; a P0 or P1 from any of them starts one fix round of that lane through the existing repair loop, and the lane is verified again. A provider failure is recorded and never blocks the run. A lane without `lane_review`, and every feature before 2.9.0, runs byte for byte as today. `docs/PRD_LANE_REVIEWER.md` sections 3, 4 and 7 are the specification; `features/lane-reviewer/decisions.md` records the operator's decisions and wins over this task where they differ.
 
 ## Context
 
@@ -16,10 +16,10 @@ A feature.json 2.9.0 lane may declare `reviewer: {transport, model, rounds, time
 
 ## Design (default; decisions.md wins)
 
-- Placement: after `verify_<lane>` passes for a lane with a reviewer whose rounds are not used up for this snapshot, before `candidate`. One review per verified snapshot of the lane; a resume reuses a terminal record instead of rerunning it.
+- Placement: after `verify_<lane>` passes for a lane with `lane_review` whose rounds are not used up for this snapshot, before `candidate`. One review per verified snapshot of the lane; a resume reuses a terminal record instead of rerunning it.
 - Brief: a bundled lane brief (for example `workflow/prompts/lane-review.md`; the panel's briefs live in `workflow/prompts/panels/`): review this lane's diff against its task, `decisions.md` and the PRD; report only defects, as the panel's output schema.
-- Fix round: any P0/P1 starts a repair of the lane (trigger `lane-review`, counted against the lane's reviewer `rounds`, not against `--fix-rounds`); P2s never do. Used-up rounds with P0/P1 open: the lane goes on, and its open findings are added to the run reviewers' prompt.
-- Failure: start failure, timeout, unparseable reply → record `failed` with the error, lane goes on. Never raise into the graph except a KeyboardInterrupt.
+- Fix round: any P0/P1 starts a repair of the lane (trigger `lane-review`, counted against the lane's `lane_review.rounds`, not against `--fix-rounds`); P2s never do. Used-up rounds with P0/P1 open: the lane goes on, and its open findings are added to the run reviewers' prompt.
+- Failure: a reviewer's start failure, timeout or unparseable reply → record `failed` with the error; the others still count; all failed → lane goes on unreviewed. Never raise into the graph except a KeyboardInterrupt.
 - Records: `<run>/lane-review/<lane>/<n>.json` (schema `contracts/workflow/lane-review.schema.json`), event `lane_review` on the lane, a `status` line per lane. No export or viewer change.
 - Docs: RUNBOOK section "Lane reviewer (feature.json 2.9.0)", the README feature.json table, `docs/handoff/lane-reviewer.md` (what changed, how to turn it on, every open P2).
 
@@ -35,4 +35,4 @@ PRD_LANE_REVIEWER section 7, each item with a test the verifier runs through `wo
 
 ## Stop
 
-Stop and report `blocked` when a lane-review finding cannot reach a repair session without changing the review or repair record schemas incompatibly, when re-verifying one lane after its repair would need the other lanes re-frozen in a way the fix loop does not already do, or when adding 2.9.0 would change the launch or flow of any existing feature. Do not widen scope to the viewer, the export, a second reviewer per lane or a worker spawning agents.
+Stop and report `blocked` when a lane-review finding cannot reach a repair session without changing the review or repair record schemas incompatibly, when re-verifying one lane after its repair would need the other lanes re-frozen in a way the fix loop does not already do, or when adding 2.9.0 would change the launch or flow of any existing feature. Do not widen scope to the viewer, the export, more than four reviewers per lane or a worker spawning agents.
