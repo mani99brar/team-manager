@@ -7,6 +7,7 @@ import { controlRoutes } from './controls.ts'
 import { CONTROLS_PREFIX, type ControlsSetup } from './controlsGuard.ts'
 import type { RunnerOptions } from './controlsRunner.ts'
 import { PROJECTS_PREFIX, projectRoutes } from './projectRoutes.ts'
+import { DISPATCH_PREFIX, buildDispatch, dispatchRoutes, type DispatchAppOptions } from './dispatch.ts'
 import { RunStore, type RunStoreOptions } from './projects.ts'
 import { EMPTY_PROJECTS, assertProjectsConfig, type ProjectsConfig } from './projectsConfig.ts'
 
@@ -31,6 +32,11 @@ export type AppOptions = {
    * `enabled: false` and every other control route is a 404 `CONTROLS_DISABLED`. `runner` and `now` are injected by tests.
    */
   controls?: { setup: ControlsSetup; runner?: RunnerOptions; now?: () => Date }
+  /**
+   * The dispatch API (server/dispatch.ts) dependencies: the git runner, clock, HOME for labels and the GitHub reader.
+   * Omitted means real git with GitHub off — no timer, no cache, no gh runner — so every existing server test stays quiet (note 7).
+   */
+  dispatch?: DispatchAppOptions
 }
 
 function singleString(value: unknown): string | null {
@@ -79,6 +85,9 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
       if (request.url.startsWith(`${PROJECTS_PREFIX}/`) && status >= 400 && status < 500) {
         return reply.code(400).send({ error: { code: 'INVALID_ID', message: 'A path segment is not a valid ID.' } })
       }
+      if (request.url.startsWith(`${DISPATCH_PREFIX}/`) && status >= 400 && status < 500) {
+        return reply.code(400).send({ error: { code: 'INVALID_ID', message: 'A path segment is not a valid ID.' } })
+      }
       return reply.code(status).send({ error: status >= 500 ? 'Internal Server Error' : 'Bad Request', code: error.code, message: error.message, statusCode: status })
     },
   })
@@ -107,6 +116,13 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
     warn: (message, details) => app.log.warn(details, message),
   })
   app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })
+  // The read-only dispatch API: the Projects overview (git and GitHub) and per-project step digests.
+  const dispatch = buildDispatch(store, options.dispatch ?? {}, (message, details) => app.log.warn(details, message))
+  app.register(dispatchRoutes, { prefix: DISPATCH_PREFIX, ...dispatch, now: options.dispatch?.now })
+  // Warm the step digests and start GitHub's timer-driven reads after boot; stop the timer on close so the loop never lingers.
+  app.addHook('onReady', async () => { void dispatch.steps.warm(store.config.projects) })
+  app.addHook('onReady', async () => { dispatch.github.start() })
+  app.addHook('onClose', async () => { dispatch.github.stop() })
   // Run controls live outside the read-only Projects API; with controls off the scope answers 404 CONTROLS_DISABLED and nothing else changes.
   app.register(controlRoutes, { prefix: CONTROLS_PREFIX, store, setup: options.controls?.setup ?? { enabled: false, warnings: [] }, runner: options.controls?.runner, now: options.controls?.now })
   // The first Runs home visit finds every workflow's summaries cached: projected once in the background after boot.
