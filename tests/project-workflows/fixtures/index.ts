@@ -16,7 +16,7 @@ import {
   artifactFiles, attackResults, panelResults, projectList, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
-import { DISPATCH_PROJECTS, DISPATCH_RUN_LISTS, DISPATCH_WORKFLOW_LISTS } from './dispatch.ts'
+import { DISPATCH_PROJECTS, DISPATCH_RUN_DETAILS, DISPATCH_RUN_LISTS, DISPATCH_WORKFLOW_LISTS } from './dispatch.ts'
 import type { SeedContext } from '../seed.ts'
 import { uxAccepted } from './ux-accepted.ts'
 import { uxAttack } from './ux-attack.ts'
@@ -109,6 +109,9 @@ mergePayloads(UX_FIXTURE_MODULES)
 projectList.projects.push(...DISPATCH_PROJECTS)
 Object.assign(workflowLists, DISPATCH_WORKFLOW_LISTS)
 Object.assign(runLists, DISPATCH_RUN_LISTS)
+// The reading pane reads these with `fetchRunDetail`; index them per run so the events/results/artifacts routes answer empty.
+Object.assign(runDetails, DISPATCH_RUN_DETAILS)
+for (const runId of Object.keys(DISPATCH_RUN_DETAILS)) { runEvents[runId] ??= []; workerResults[runId] ??= {}; artifactFiles[runId] ??= [] }
 
 /** Seeds every module's runs for the candidate phase; returns what to add to the registry, in module order. */
 export function seedUxFixtures(context: SeedContext): Required<UxSeed> {

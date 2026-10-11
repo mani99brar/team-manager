@@ -34,7 +34,10 @@ export type ProjectRunInfo = {
   /** The newest run's last activity in epoch ms, 0 without runs. */
   lastActivity: number
   tone: Tone
+  /** Every workflow the project has, readable or not (the "N features" line and the rail sub-line). */
   features: number
+  /** Only the workflows whose runs could be read, for the state word "N of M features <result> last" ([L8]). */
+  readableFeatures: number
   counts: { succeeded: number; failed: number; cancelled: number }
   runCount: number
   latestRun: RunSummary | null
@@ -43,7 +46,7 @@ export type ProjectRunInfo = {
 }
 
 const EMPTY: ProjectRunInfo = {
-  waits: 0, paused: 0, running: 0, allBad: true, badFeatures: 0, lastActivity: 0, tone: 'idle', features: 0,
+  waits: 0, paused: 0, running: 0, allBad: true, badFeatures: 0, lastActivity: 0, tone: 'idle', features: 0, readableFeatures: 0,
   counts: { succeeded: 0, failed: 0, cancelled: 0 }, runCount: 0, latestRun: null, worstLatestCount: 0,
 }
 
@@ -72,5 +75,5 @@ export function projectRunInfo(entry: ProjectRuns | null): ProjectRunInfo {
   const tone: Tone = waits > 0 ? 'warn' : running > 0 ? 'run' : order.find(candidate => featureTones.includes(candidate)) ?? 'idle'
   const latestRun = latestRunOf(runs)
   const worstLatestCount = featureTones.filter(candidate => candidate === tone).length
-  return { waits, paused, running, allBad, badFeatures, lastActivity, tone, features: workflows.length, counts, runCount: runs.length, latestRun, worstLatestCount }
+  return { waits, paused, running, allBad, badFeatures, lastActivity, tone, features: workflows.length, readableFeatures: readable.length, counts, runCount: runs.length, latestRun, worstLatestCount }
 }

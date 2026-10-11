@@ -11,7 +11,7 @@ import { artifactFiles, attackResults, panelResults, projectList, reviewResults,
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
 import { CONTROLS_TOKEN, controlsFor } from './fixtures/controls.ts'
-import { dispatchOverview, dispatchSteps } from './fixtures/dispatch.ts'
+import { dispatchOverview, dispatchSteps, DISPATCH_UNLISTABLE_WORKFLOWS } from './fixtures/dispatch.ts'
 import type { ControlId, ControlRecord } from '../../src/projects/controls/types.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -52,6 +52,10 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (!workflows.workflows.some(workflow => workflow.workflow_id === workflowId)) return notFound(`Workflow "${workflowId}" does not belong to project "${projectId}".`)
   if (runsLiteral !== 'runs') return notFound('Unknown resource.')
   if (runId === undefined) {
+    // A workflow whose runs cannot be listed answers with a storage error, mirroring the candidate's unlistable `runs_root`
+    // ([P34]): `fetchWorkflowRuns` records it as that workflow's error, so the project reads "N cannot be read" and the step
+    // chart shows the workflow-level error row with the literal `<run-id>` placeholder (V18).
+    if (DISPATCH_UNLISTABLE_WORKFLOWS.has(workflowId)) return json({ error: { code: 'RUNS_UNREADABLE', message: 'The runs directory of this workflow could not be listed.' } }, 500)
     // Runs are listed per workflow (empty-flow and any other registered workflow without runs answer an empty page). A workflow
     // from any registered project is served, so the dispatch fixtures' extra projects list their runs too ([P16]).
     return json(runLists[workflowId] ?? { runs: [], next_cursor: null })

@@ -297,7 +297,12 @@ test(`Runs home with nothing waiting: "Needs you · 0" with the empty state in t
       await (Array.isArray(body.runs) ? route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) }) : route.fulfill({ response }))
       return
     }
-    await route.fulfill({ json: filterWaiting(await original(route) as { runs: RunSummary[]; next_cursor: string | null }) })
+    // A run list that could not be read carries no `runs` array (an unlistable workflow answers with an error): pass its
+    // response through untouched, status and all, so Runs home reads it under Attention exactly as it would without this override.
+    const resp = mockResponse(new URL(route.request().url()))
+    const body = JSON.parse(String(resp.body)) as { runs?: RunSummary[]; next_cursor: string | null }
+    if (!Array.isArray(body.runs)) { await route.fulfill({ status: resp.status, contentType: resp.contentType, body: resp.body }); return }
+    await route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) })
   })
   await page.clock.setFixedTime(REVAMP_NOW)
   await page.goto(triageUrl)

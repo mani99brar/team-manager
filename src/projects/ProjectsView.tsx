@@ -287,7 +287,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else content = <ProjectsPage cards={cards} overview={overviewData} repositoryCount={repositoryCount} now={listClock} onNavigate={onNavigate} />
+    } else content = <ProjectsPage cards={cards} overview={overviewData} repositoryCount={repositoryCount}
+      runsReadAt={homeMeta.settledAt} runsError={homeRuns.status === 'error' ? describeApiError(homeRuns.error) : null} onNavigate={onNavigate} />
   } else if (route.level === 'triage') {
     if (projects.status === 'loading' || projects.status === 'idle') content = <LoadingPanel>Loading registered projects…</LoadingPanel>
     else if (projects.status === 'error') content = <ErrorPanel error={projects.error} what="The project list" onRetry={reloadProjects} />
@@ -457,7 +458,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
 
   return (
     <>
-      <div className="navigation">
+      <div className={`navigation${route?.level === 'projects' || route?.level === 'triage' || route?.level === 'project' ? ' navigation-dispatch' : ''}`}>
         <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
         {/* Runs home says it at the rail's foot (docs/PRD_VIEWER_REVAMP.md 3); a Projects root without the rail says it here. */}
         {info !== null && !homeShown && <p className="folder-info" data-testid="projects-info">{info}</p>}

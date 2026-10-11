@@ -71,6 +71,21 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 `recent-runs`, `run-list` (feature page), `projects-info` (the read-only note, now at the foot of the Triage content),
 `lists-errors`. `data-workflow-id` and `a.lists-group-head` are reused on the step chart ([L1]).
 
+## Run 002 additions (V1–V22)
+
+New test ids and structure the run 002 scenarios read:
+
+- **Projects page:** `span[data-testid="dispatch-runs-read"]` holds "runs read <time>" (the read time, not a ticking clock) or "runs not read: <reason>" (V15).
+- **Project page header:** `span[data-testid="dispatch-same-repo"]` carries "same repo as …" (V10). The four jump buttons move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, each of which has `tabindex="-1"` (V4). A git-unavailable project's header says "git not read", never "checkout detached".
+- **Needs you and running** (`section[data-testid="dispatch-needs"]`, before the chart): links to the waiting and running runs, or `p[data-testid="dispatch-needs-none"]` "Nothing waits on you; nothing running" (V5).
+- **Step chart:** the axis (`[data-testid="dispatch-axis"]`), every `.dispatch-track` and the `.dispatch-ends-track` share one grid template (`CHART_COLUMNS` from `phases.ts`, set inline); each `.dispatch-ax[data-phase]` holds `.dispatch-ax-full` and `.dispatch-ax-short` (the short form shows under a container width of 640px via the `dispatch-chart` container query — never an ellipsis, V3). Each feature group has `details[data-testid="dispatch-def"]` ("Steps of this definition", `.dispatch-def-list li[data-node-id]`, V7). A workflow-level `error` still shows one `.dispatch-badrow` with the literal `<run-id>` placeholder.
+- **Reading pane (run):** `section[data-testid="dispatch-pane-nextstep"]` holds `p[data-testid="dispatch-pane-next-lead"]` and the run page's `CommandBlock` (`[data-testid="now-next"]`), fed by the run's `NextStep` read with `fetchRunDetail` + `deriveNow` (V2); loading/failure say so (`dispatch-pane-next-loading`/`-error`). Close and Escape return focus to the row. On a phone, `dispatch-pane-queue` returns to the list.
+- **Reading pane (ahead):** `aside[data-testid="dispatch-pane"][data-pane="ahead"]`, opened by `button[data-testid="dispatch-ahead-button"]` in the Local and GitHub card: `ul[data-testid="dispatch-ahead-commits"]` (short sha, subject, a run link), `p[data-testid="dispatch-ahead-more"]` ("and N more"), and `ul[data-testid="dispatch-ahead-landings"]` (each landing's local/origin state) (V6).
+- **GitHub cards:** PR/issue groups longer than five show `button[data-testid="dispatch-show-more"]` ("Show N more", V8); the merged group's `.dispatch-gh-note` says "among the 20 shown" (V9); the Local and GitHub card shows `p[data-testid="dispatch-gh-local-notread"]` when GitHub was not read but keeps its local counts (V11); a "Possibly related" row's `.dispatch-gh-why` names the match ("head is <b>"/"base is <b>", V14).
+- **Docked layout:** `.dispatch-project.has-pane` is a two-column grid; the header spans full width and the pane docks beside the body; the GitHub column stacks under the chart unless the viewport has room for three columns (V1, [P26]).
+- **Rail:** `a.dispatch-rail-home` (flex, with `.dispatch-rail-home-l` and `.dispatch-rail-home-n`) and `a.dispatch-rail-row` (grid) keep their layout — the base `.dispatch-rail a` rule no longer forces `display:block` (V13).
+- **Scenarios:** `dispatch-dock`, `dispatch-axis`, `dispatch-sections`, `dispatch-ahead`, `dispatch-folds` join the nine run-001 scenarios; all 14 pass in both phases.
+
 ## Data
 
 The pages read the existing registry API (`fetchProjects`, `fetchRegistryRuns`, `fetchWorkflowRuns`) for run state and the new

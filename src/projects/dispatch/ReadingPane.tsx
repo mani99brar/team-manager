@@ -1,15 +1,17 @@
 /**
  * The reading pane (docs/PRD_PROJECTS_DISPATCH.md 4.3): it docks only while a run is selected. It shows the run's facts, its
- * steps with attempts, the lead sentence (where it stopped, or that it integrated), a command to copy, and "Open run page" —
- * the primary action, where the run controls live ([D7]). Esc or Close undocks it (handled by the page) and returns focus to
- * the row. On a phone it fills the screen with "Queue" and "Next" ([P..], the phone scenario).
+ * steps with attempts, the lead sentence (where it stopped, or that it integrated), today's `CommandBlock` fed by the run's
+ * `NextStep`, and "Open run page" — the primary action, where the run controls live ([D7]). Esc or Close undocks it (handled
+ * by the page) and returns focus to the row. On a phone it fills the screen with "Queue" (back to the list) and "Next".
  *
- * The pane reads the run summary and the dispatch steps the page already holds; it does not fetch the run detail. Its copy
- * block is a lightweight `$`-command rather than the run page's full `CommandBlock`, whose `NextStep`/served-run/controls
- * contexts belong to the run page: the primary action sends the operator there. (Reading of [D7] recorded in the handoff.)
+ * The NextStep is the same one the run page shows: the pane reads the run detail with the existing `fetchRunDetail` and runs
+ * `deriveNow` over it (events empty, as `servedNow` does), so the operator copies the real next-step commands, not a fixed
+ * status line (V2, [P31]). While the detail loads, or when it fails, the pane says so and still offers "Open run page".
  */
-import { useEffect, useRef } from 'react'
-import type { RunSummary } from '../api.ts'
+import { useEffect, useRef, useState } from 'react'
+import { deriveNow, type Now } from '../../../contracts/projects/triage.ts'
+import { fetchRunDetail, type RunDetail, type RunSummary } from '../api.ts'
+import { CommandBlock } from '../CommandBlock.tsx'
 import { runPathname } from '../routes.ts'
 import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass } from '../tone.ts'
@@ -19,16 +21,6 @@ import { StateGlyph } from './common.tsx'
 import { PHASES, phaseOf } from './phases.ts'
 import type { ProjectStepsRun } from './types.ts'
 
-function CopyCommand({ text }: { text: string }) {
-  const copy = () => { void navigator.clipboard?.writeText(text).catch(() => undefined) }
-  return (
-    <div className="dispatch-cmd">
-      <span className="command-line"><span className="command-prompt" aria-hidden="true">$ </span><code data-testid="dispatch-pane-command">{text}</code></span>
-      <button type="button" className="button button-small" data-testid="dispatch-pane-copy" aria-label="Copy command" onClick={copy}>Copy</button>
-    </div>
-  )
-}
-
 type Props = {
   run: RunSummary
   steps: ProjectStepsRun
@@ -37,11 +29,12 @@ type Props = {
   onClose: () => void
   onNavigate: (pathname: string) => void
   phone: boolean
-  onPrev?: () => void
   onNext?: () => void
 }
 
-export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavigate, phone, onPrev, onNext }: Props) {
+type DetailState = { status: 'loading' } | { status: 'ready'; now: Now } | { status: 'error' }
+
+export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavigate, phone, onNext }: Props) {
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => { closeRef.current?.focus() }, [run.run_id])
   const tone = stateTone({ status: run.status, attention: run.activity?.attention?.kind ?? null, accepted: run.accepted })
@@ -49,6 +42,24 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
   const activity = run.activity
   const finished = activity?.finished_at ?? null
   const wall = finished ? formatSpan(Date.parse(finished) - Date.parse(run.created_at)) : null
+
+  // The run's NextStep, the same one the run page shows for it: read the run detail and derive it with events empty, exactly
+  // as `servedNow` does for the live chip ([P31]). A failed or still-loading read keeps "Open run page" available.
+  // The pane is keyed by run id in the page, so it mounts fresh per run and the initial 'loading' state needs no effect reset.
+  // A running or waiting run advances under the page's poll; `moved` (the run's last-activity time, which advances with it)
+  // is an effect dependency, so the pane re-reads the detail and shows the fresh NextStep, not an obsolete command (V2). The
+  // re-read keeps the current 'ready' commands on screen until the new ones arrive, so there is no flash back to "loading".
+  const moved = run.activity?.last_activity_at ?? run.updated_at
+  const [detail, setDetail] = useState<DetailState>({ status: 'loading' })
+  useEffect(() => {
+    let live = true
+    const controller = new AbortController()
+    fetchRunDetail({ projectId, workflowId, runId: run.run_id }, controller.signal)
+      .then((data: RunDetail) => { if (live) setDetail({ status: 'ready', now: deriveNow({ detail: data, events: [], activity: data.summary.activity ?? null }) }) })
+      .catch(() => { if (live) setDetail({ status: 'error' }) })
+    return () => { live = false; controller.abort() }
+  }, [projectId, workflowId, run.run_id, moved])
+
   const facts: [string, React.ReactNode][] = [
     ['Started', <Time key="s" iso={run.created_at} />],
     finished ? ['Finished', <Time key="f" iso={finished} />] : ['Last activity', <Time key="l" iso={activity?.last_activity_at ?? run.updated_at} />],
@@ -94,9 +105,16 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
             ))}
           </ul>
         </section>
-        <section className="dispatch-pane-sec">
-          <h3>Command</h3>
-          <CopyCommand text={`python -m workflow status ${run.run_id} --by operator`} />
+        <section className="dispatch-pane-sec" data-testid="dispatch-pane-nextstep">
+          <h3>Next step</h3>
+          {detail.status === 'loading' && <p className="dispatch-muted" data-testid="dispatch-pane-next-loading">Reading the run's commands…</p>}
+          {detail.status === 'error' && <p className="dispatch-muted" data-testid="dispatch-pane-next-error">The run's commands could not be read. Open the run page for the next step.</p>}
+          {detail.status === 'ready' && (
+            <>
+              <p className="dispatch-lead dispatch-next-lead" data-testid="dispatch-pane-next-lead">{detail.now.next.label}</p>
+              <CommandBlock next={detail.now.next} />
+            </>
+          )}
         </section>
         <section className="dispatch-pane-sec dispatch-pane-actions">
           <a className="button dispatch-pane-open" data-testid="dispatch-open-run" href={runPathname(projectId, workflowId, run.run_id)}
@@ -105,7 +123,7 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
           </a>
           {phone && (
             <div className="dispatch-pane-nav">
-              <button type="button" className="button button-small" data-testid="dispatch-pane-queue" onClick={onPrev} disabled={!onPrev}>Queue</button>
+              <button type="button" className="button button-small dispatch-pane-back" data-testid="dispatch-pane-queue" onClick={onClose}>Queue</button>
               <button type="button" className="button button-small" data-testid="dispatch-pane-next" onClick={onNext} disabled={!onNext}>Next</button>
             </div>
           )}

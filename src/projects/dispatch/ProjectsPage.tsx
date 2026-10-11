@@ -29,7 +29,7 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const read = github?.status === 'read'
-  const word = cardStateWord({ tone: info.tone, waits: info.waits, running: info.running, allBad: info.allBad, featureCount: info.features, worstLatestCount: info.worstLatestCount })
+  const word = cardStateWord({ tone: info.tone, waits: info.waits, running: info.running, allBad: info.allBad, featureCount: info.readableFeatures, worstLatestCount: info.worstLatestCount })
   const latest = info.latestRun
   const latestTone = latest ? stateTone({ status: latest.status, attention: latest.activity?.attention?.kind ?? null, accepted: latest.accepted }) : 'idle'
   const checkout = git?.checkout ?? null
@@ -78,11 +78,14 @@ type Props = {
   cards: readonly CardData[]
   overview: DispatchOverview | null
   repositoryCount: number
-  now: number
+  /** When the run lists were read (`homeMeta.settledAt`), not a ticking clock; null until they are read (V15). */
+  runsReadAt: number | null
+  /** The reason the run read failed, when it did; null otherwise (V15). */
+  runsError: string | null
   onNavigate: (pathname: string) => void
 }
 
-export function ProjectsPage({ cards, overview, repositoryCount, now, onNavigate }: Props) {
+export function ProjectsPage({ cards, overview, repositoryCount, runsReadAt, runsError, onNavigate }: Props) {
   const githubReads = (overview?.projects ?? []).map(p => p.github).filter(g => g.status === 'read' && g.read_at !== null)
   const oldestGithub = githubReads.length ? githubReads.reduce((oldest, g) => (Date.parse(g.read_at!) < Date.parse(oldest) ? g.read_at! : oldest), githubReads[0].read_at!) : null
   return (
@@ -91,7 +94,7 @@ export function ProjectsPage({ cards, overview, repositoryCount, now, onNavigate
         <h1 id="dispatch-projects-title">Projects</h1>
         <p className="dispatch-meta" data-testid="dispatch-projects-meta">
           {plural(cards.length, 'project')} in {plural(repositoryCount, 'repository').replace('repositorys', 'repositories')}
-          {' · '}runs read <Time iso={new Date(now).toISOString()} />
+          {' · '}<span data-testid="dispatch-runs-read">{runsReadAt !== null ? <>runs read <Time iso={new Date(runsReadAt).toISOString()} /></> : `runs not read${runsError ? `: ${runsError}` : ''}`}</span>
           {' · '}{oldestGithub ? <>GitHub read <Time iso={oldestGithub} /></> : 'GitHub not read'}
         </p>
         <p className="dispatch-muted">Each card opens the project's own page: runs by feature on the step chart, local against origin, pull requests and issues. Ordered as the rail is.</p>

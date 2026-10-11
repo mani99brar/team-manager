@@ -13,7 +13,7 @@ import { runPathname, workflowPathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass, type Tone } from '../tone.ts'
-import { PHASES, phaseOf } from './phases.ts'
+import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from './phases.ts'
 import { landingWording } from './derive.ts'
 import { StateGlyph } from './common.tsx'
 import type { Landing, ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
@@ -67,7 +67,7 @@ function Track({ entry }: { entry: ChartRun }) {
   const columns = phaseColumns(entry)
   const tone = runTone(entry.run)
   return (
-    <span className="dispatch-track" aria-hidden="true">
+    <span className="dispatch-track" aria-hidden="true" style={{ gridTemplateColumns: CHART_COLUMNS }}>
       {columns.map((lanes, phase) => {
         const cls = phase < stop.phase ? 'pass' : phase === stop.phase ? 'stop' : 'ahead'
         const multi = lanes.length > 1 ? ' multi' : ''
@@ -133,6 +133,27 @@ function ChartRow({ entry, landing, defaultBranch, selected, onSelect }: {
   )
 }
 
+/**
+ * The "Steps of this definition" fold (PRD 4.3, V7): the workflow's current definition steps (label and phase), read from
+ * the definition the chart already holds (`workflow.nodes`), so a feature with no runs, or one whose definition changed since
+ * its latest run, still shows the right steps; the run tracks keep their own recorded steps ([P30]).
+ */
+function DefinitionFold({ workflow }: { workflow: WorkflowDefinition }) {
+  return (
+    <details className="dispatch-def" data-testid="dispatch-def">
+      <summary>Steps of this definition <span className="dispatch-muted">{workflow.nodes.length} steps</span></summary>
+      <ol className="dispatch-def-list">
+        {workflow.nodes.map(node => (
+          <li key={node.node_id} data-node-id={node.node_id}>
+            <span className="dispatch-def-phase">{PHASES[phaseOf(node.node_id, node.kind)]}</span>
+            <span className="dispatch-def-label">{node.label}</span>
+          </li>
+        ))}
+      </ol>
+    </details>
+  )
+}
+
 function endedCounts(entries: readonly ChartRun[]): number[] {
   const counts = PHASES.map(() => 0)
   for (const entry of entries) {
@@ -164,9 +185,16 @@ type Props = {
 export function StepChart({ projectId, defaultBranch, groups, selectedRunId, onSelect, onNavigate }: Props) {
   return (
     <div className="dispatch-chart" data-testid="dispatch-chart">
-      <div className="dispatch-axis" aria-hidden="true" data-testid="dispatch-axis">
-        <span className="dispatch-axis-l">phase</span>
-        <span className="dispatch-axis-track">{PHASES.map(phase => <span key={phase} className="dispatch-ax">{phase}</span>)}</span>
+      <div className="dispatch-axis" data-testid="dispatch-axis">
+        <span className="dispatch-axis-l" aria-hidden="true">phase</span>
+        <span className="dispatch-axis-track" style={{ gridTemplateColumns: CHART_COLUMNS }}>
+          {PHASES.map((phase, i) => (
+            <span key={phase} className="dispatch-ax" data-phase={i} title={phase} aria-label={phase}>
+              <span className="dispatch-ax-full" aria-hidden="true">{phase}</span>
+              <span className="dispatch-ax-short" aria-hidden="true">{PHASE_SHORT[phase]}</span>
+            </span>
+          ))}
+        </span>
       </div>
       <ul className="lists-groups" data-testid="dispatch-features">
         {groups.map(group => {
@@ -223,13 +251,16 @@ export function StepChart({ projectId, defaultBranch, groups, selectedRunId, onS
                     {total > 0 && (
                       <div className="dispatch-ends" data-testid="dispatch-ends">
                         <span className="dispatch-ends-l">ended here</span>
-                        <span className="dispatch-ends-track">
+                        <span className="dispatch-ends-track" style={{ gridTemplateColumns: CHART_COLUMNS }}>
                           {counts.map((n, i) => <span key={i} className={`dispatch-en ${i === 7 ? 'land' : ''}`}>{n > 0 ? `${n}${i === 7 ? ' landed' : ''}` : ''}</span>)}
                         </span>
                       </div>
                     )}
                   </>
                 )}
+              {/* The "Steps of this definition" fold reads the current definition (`workflow.nodes`), which is held whether or
+                  not the runs could be listed, so every feature group exposes it — an unreadable workflow included (V7, [P30]). */}
+              <DefinitionFold workflow={group.workflow} />
               {/* keep the run links discoverable for keyboard and deep-linking without leaving the pane */}
               {group.runs.map(entry => (
                 <a key={`link-${entry.run.run_id}`} className="visually-hidden" href={runPathname(projectId, group.workflow.workflow_id, entry.run.run_id)}

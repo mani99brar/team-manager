@@ -11,6 +11,21 @@
 export const PHASES = ['Challenge', 'Launch', 'Freeze', 'Verify', 'Candidate', 'Review', 'Approval', 'Integrate'] as const
 export type Phase = (typeof PHASES)[number]
 
+/**
+ * The one grid-column template the axis, every run track and the "ended here" row share, so a stop glyph, its lane dots and
+ * the count under it sit inside the same column as the axis label (V3). The axis label is positioned by the same template,
+ * so column `i` of the axis spans column `i` of every track at every width.
+ */
+export const CHART_COLUMNS = 'repeat(8, minmax(0, 1fr))'
+
+/**
+ * A fixed short form per phase, used where a column is narrower than the full name so a label is never cut with an ellipsis
+ * ("Cha…"); the full name stays the accessible name and the `title` (V3).
+ */
+export const PHASE_SHORT: Record<Phase, string> = {
+  Challenge: 'Chal.', Launch: 'Lau.', Freeze: 'Frz.', Verify: 'Ver.', Candidate: 'Cand.', Review: 'Rev.', Approval: 'Appr.', Integrate: 'Integ.',
+}
+
 export const PHASE_CHALLENGE = 0
 export const PHASE_LAUNCH = 1
 export const PHASE_FREEZE = 2

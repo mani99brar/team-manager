@@ -40,6 +40,35 @@ export function syncAsOf(git: GitState): { ref: string; updatedAt: string | null
   return { ref: git.origin.ref, updatedAt: git.origin.updated_at }
 }
 
+/**
+ * The header's "same repo as …" addendum ([P28], V10): the other projects that share this clone's GitHub repository, named.
+ * On the primary it names the worktree project(s); on a worktree project it names the primary. Null when none.
+ */
+export function sameRepoText(otherNames: readonly string[]): string | null {
+  if (otherNames.length === 0) return null
+  if (otherNames.length === 1) return `same repo as ${otherNames[0]}`
+  const head = otherNames.slice(0, -1).join(', ')
+  return `same repo as ${head} and ${otherNames[otherNames.length - 1]}`
+}
+
+/** "update time not recorded" when a compared sync has no reflog time, else the "as of …" wording is used instead (V10). */
+export const UPDATE_TIME_NOT_RECORDED = 'update time not recorded'
+
+/**
+ * The "and N more" tail for the commits-ahead list (V6, [P33]): the server lists at most 50 of `ahead` commits, so when
+ * `ahead` exceeds the listed count the pane says how many are not listed; null when every ahead commit is listed.
+ */
+export function commitsAheadMore(ahead: number, listed: number): string | null {
+  const more = ahead - listed
+  return more > 0 ? `and ${more} more` : null
+}
+
+/** The "Show N more" label for a group folded to its first `shown` of `total` items (V8); null when nothing is hidden. */
+export function showMoreText(total: number, shown: number): string | null {
+  const more = total - shown
+  return more > 0 ? `Show ${more} more` : null
+}
+
 // ---- Landing wording ([L2], [P9]) ------------------------------------------------------------------------------------
 
 /**
@@ -122,12 +151,30 @@ export function cardStateWord(input: { tone: string; waits: number; running: num
 export type PrGroups = { related: Pr[]; mine: Pr[]; others: Pr[]; merged: Pr[] }
 
 /**
- * Groups the 20 most recently updated PRs ([P15]): "Possibly related" (head or base equals the checkout branch or a run's
- * source branch, an exact match only, [D5]); "Yours, open" (author equals `viewer_login`); "Others, open"; and "Merged in
- * the last 14 days" among the 20 shown. A PR counted as related is in no other group.
+ * Why a PR is "possibly related" ([L5], run 002, changing [D5]): its head branch equals the checkout branch or a run's
+ * `source_branch`, or its base branch does and that base is not the project's default branch (so a project checked out on
+ * its default branch does not match every PR by base). The match names itself: "head is <branch>" or "base is <branch>";
+ * null when it is not related.
  */
-export function prGroups(prs: readonly Pr[], options: { branches: ReadonlySet<string>; viewerLogin: string | null; readAt: number }): PrGroups {
-  const related = prs.filter(pr => options.branches.has(pr.head_ref) || options.branches.has(pr.base_ref))
+export function prRelation(pr: Pick<Pr, 'head_ref' | 'base_ref'>, branches: ReadonlySet<string>, defaultBranch: string | null): { kind: 'head' | 'base'; branch: string } | null {
+  if (branches.has(pr.head_ref)) return { kind: 'head', branch: pr.head_ref }
+  if (branches.has(pr.base_ref) && pr.base_ref !== defaultBranch) return { kind: 'base', branch: pr.base_ref }
+  return null
+}
+
+/** The wording that names a "possibly related" match: "head is <branch>" or "base is <branch>" ([L5]). */
+export function relatedWhy(relation: { kind: 'head' | 'base'; branch: string }): string {
+  return `${relation.kind} is ${relation.branch}`
+}
+
+/**
+ * Groups the 20 most recently updated PRs ([P15]): "Possibly related" ([L5]: head equals the checkout or a run's source
+ * branch, or base does when base is not the default branch); "Yours, open" (author equals `viewer_login`); "Others, open";
+ * and "Merged in the last 14 days" among the 20 shown. A PR counted as related is in no other group.
+ */
+export function prGroups(prs: readonly Pr[], options: { branches: ReadonlySet<string>; viewerLogin: string | null; readAt: number; defaultBranch?: string | null }): PrGroups {
+  const defaultBranch = options.defaultBranch ?? null
+  const related = prs.filter(pr => prRelation(pr, options.branches, defaultBranch) !== null)
   const isRelated = new Set(related)
   const open = prs.filter(pr => pr.state === 'OPEN' && !isRelated.has(pr))
   const mine = options.viewerLogin === null ? [] : open.filter(pr => pr.author === options.viewerLogin)

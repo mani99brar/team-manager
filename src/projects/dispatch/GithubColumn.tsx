@@ -1,14 +1,16 @@
 /**
  * The project page's GitHub column (docs/PRD_PROJECTS_DISPATCH.md 4.3, Appendix A): four cards — Local and GitHub, Pull
  * requests, Issues, and Also checked out as. Every claim names its source and time; nothing the data does not hold is shown.
- * When GitHub was not read each card says "GitHub not read: <reason>" and shows no counts; when it was read but the latest
- * refresh failed the data shows with a "latest refresh failed" line ([P12]).
+ * When GitHub was not read each card says "GitHub not read: <reason>" and shows no GitHub counts (the Local and GitHub card
+ * keeps its local sync, ahead and landing counts, which do not depend on GitHub, [P29]); when it was read but the latest
+ * refresh failed the data shows with a "latest refresh failed" line ([P12]). PR and issue groups longer than 5 fold ([V8]).
  */
+import { useState } from 'react'
 import type { Project } from '../api.ts'
 import { projectPathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { Time } from '../Time.tsx'
-import { issueGroups, prGroups, relTime, syncAsOf, syncPhrase } from './derive.ts'
+import { issueGroups, prGroups, prRelation, relatedWhy, relTime, showMoreText, syncAsOf, syncPhrase } from './derive.ts'
 import type { GitState, GithubState, Issue, Pr } from './types.ts'
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`
@@ -57,19 +59,24 @@ function IssueRow({ issue, readAt }: { issue: Issue; readAt: number }) {
   )
 }
 
-function Group({ title, items, render }: { title: string; items: readonly unknown[]; render: (item: never, i: number) => React.ReactNode }) {
+/** A GitHub group that shows its first five items and folds the rest behind "Show N more", which expands in place (V8). */
+function Group({ title, items, render, note }: { title: string; items: readonly unknown[]; render: (item: never, i: number) => React.ReactNode; note?: string }) {
+  const [expanded, setExpanded] = useState(false)
   if (items.length === 0) return null
+  const shown = expanded ? items : items.slice(0, 5)
+  const more = showMoreText(items.length, 5)
   return (
     <div className="dispatch-gh-group">
-      <h4>{title} <span>{items.length}</span></h4>
-      <ul className="dispatch-gh-list">{items.map((item, i) => render(item as never, i))}</ul>
+      <h4>{title} <span>{items.length}</span>{note && <span className="dispatch-gh-note">{note}</span>}</h4>
+      <ul className="dispatch-gh-list">{shown.map((item, i) => render(item as never, i))}</ul>
+      {more && !expanded && <button type="button" className="dispatch-show-more" data-testid="dispatch-show-more" onClick={() => setExpanded(true)}>{more}</button>}
     </div>
   )
 }
 
 function NotRead({ id, testId, title, reason }: { id: string; testId: string; title: string; reason: string }) {
   return (
-    <div className="dispatch-gcard" id={id} data-testid={testId}>
+    <div className="dispatch-gcard" id={id} data-testid={testId} tabIndex={-1}>
       <h3>{title}</h3>
       <p className="dispatch-muted">GitHub not read: {reason}</p>
     </div>
@@ -86,10 +93,14 @@ type Props = {
   primaryName: string | null
   viewerLogin: string | null
   readAt: number
+  /** Opens the commits-ahead and landings view in the reading pane (V6). */
+  onShowAhead: () => void
+  /** Whether the ahead view is the one currently docked, for the button's pressed state. */
+  aheadOpen: boolean
   onNavigate: (pathname: string) => void
 }
 
-export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onNavigate }: Props) {
+export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onShowAhead, aheadOpen, onNavigate }: Props) {
   const reason = github?.status === 'read' ? github.reason : github?.reason ?? 'not read yet'
   const notReadReason = github === null ? 'GitHub state not available' : reason ?? 'not read yet'
   const read = github?.status === 'read'
@@ -97,10 +108,11 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
   const branches = new Set<string>([...(git?.checkout ? [git.checkout] : []), ...runBranches])
   const asOf = git ? syncAsOf(git) : null
   const isShared = git !== null && git.clone_primary !== null && git.clone_primary !== project.project_id
+  const hasAheadOrLandings = git !== null && (git.ahead_commits.length > 0 || git.landings.length > 0 || (git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0))
 
   // Local and GitHub (always shown; it is the git card).
   const local = (
-    <div className="dispatch-gcard" id="g-local" data-testid="dispatch-gh-local">
+    <div className="dispatch-gcard" id="g-local" data-testid="dispatch-gh-local" tabIndex={-1}>
       <h3>Local and GitHub</h3>
       {git === null
         ? <p className="dispatch-muted">git state not available.</p>
@@ -116,13 +128,15 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
               </p>
             )}
             {git.origin === null && <p className="dispatch-gsub">not compared with origin.</p>}
-            {read && github.head && (
-              <p className="dispatch-gsub">
-                GitHub <code>{github.default_branch ?? defaultBranch}</code> is at{' '}
-                <a className="dispatch-ext" href={ghUrl(github.repo ?? '', 'commit', github.head.sha)} target="_blank" rel="noopener"><code>{github.head.sha.slice(0, 7)}</code></a>,
-                committed <Time iso={github.head.committed_at} />.
-              </p>
-            )}
+            {read && github.head
+              ? (
+                <p className="dispatch-gsub">
+                  GitHub <code>{github.default_branch ?? defaultBranch}</code> is at{' '}
+                  <a className="dispatch-ext" href={ghUrl(github.repo ?? '', 'commit', github.head.sha)} target="_blank" rel="noopener"><code>{github.head.sha.slice(0, 7)}</code></a>,
+                  committed <Time iso={github.head.committed_at} />.
+                </p>
+              )
+              : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</p>}
             {git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0 && (
               <p className="dispatch-gsub" data-testid="dispatch-ahead-naming">
                 Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. Runs never push.
@@ -135,6 +149,11 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
                 {' '}{git.landings.filter(l => l.on_default === null || l.on_origin === null).length} unknown.
               </p>
             )}
+            {hasAheadOrLandings && (
+              <button type="button" className="dispatch-gh-ahead-btn" data-testid="dispatch-ahead-button" aria-pressed={aheadOpen} onClick={onShowAhead}>
+                Commits ahead and landings
+              </button>
+            )}
           </>
         )}
     </div>
@@ -146,23 +165,23 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
     prs = <NotRead id="g-prs" testId="dispatch-gh-prs" title="Pull requests" reason={notReadReason} />
     issues = <NotRead id="g-iss" testId="dispatch-gh-issues" title="Issues" reason={notReadReason} />
   } else {
-    const groups = prGroups(github.prs, { branches, viewerLogin, readAt })
-    const relWhy = (pr: Pr) => `possibly related: branch matches ${branches.has(pr.head_ref) ? pr.head_ref : pr.base_ref}`
+    const groups = prGroups(github.prs, { branches, viewerLogin, readAt, defaultBranch })
+    const relWhy = (pr: Pr) => { const rel = prRelation(pr, branches, defaultBranch); return rel ? `possibly related: ${relatedWhy(rel)}` : '' }
     prs = (
-      <div className="dispatch-gcard" id="g-prs" data-testid="dispatch-gh-prs">
+      <div className="dispatch-gcard" id="g-prs" data-testid="dispatch-gh-prs" tabIndex={-1}>
         <h3>Pull requests <span className="dispatch-aside">{plural(github.open_prs ?? 0, 'open')} · showing the 20 most recently updated</span></h3>
         {github.status === 'read' && github.reason && <p className="dispatch-gsub dispatch-stale">Last read <Time iso={github.read_at ?? new Date(readAt).toISOString()} />; the latest refresh failed: {github.reason}</p>}
         <Group title="Possibly related" items={groups.related} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} why={relWhy(pr)} />} />
         <Group title="Yours, open" items={groups.mine} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
         <Group title="Others, open" items={groups.others} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
-        <Group title="Merged in the last 14 days" items={groups.merged} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
+        <Group title="Merged in the last 14 days" items={groups.merged} note="among the 20 shown" render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
         {github.prs.length === 0 && <p className="dispatch-muted">No pull requests.</p>}
         <p className="dispatch-note">Read <Time iso={github.read_at ?? new Date(readAt).toISOString()} />. Runs integrate locally and never open a pull request; related means a branch name matches.</p>
       </div>
     )
     const ig = issueGroups(github.issues, { viewerLogin })
     issues = (
-      <div className="dispatch-gcard" id="g-iss" data-testid="dispatch-gh-issues">
+      <div className="dispatch-gcard" id="g-iss" data-testid="dispatch-gh-issues" tabIndex={-1}>
         <h3>Issues <span className="dispatch-aside">{plural(github.open_issues ?? 0, 'open')}</span></h3>
         <Group title="Assigned to you" items={ig.assigned} render={(issue: Issue) => <IssueRow key={issue.number} issue={issue} readAt={readAt} />} />
         <Group title="Newest from people" items={ig.people} render={(issue: Issue) => <IssueRow key={issue.number} issue={issue} readAt={readAt} />} />

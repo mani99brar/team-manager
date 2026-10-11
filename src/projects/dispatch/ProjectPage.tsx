@@ -6,16 +6,23 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Project, RunSummary, WorkflowDefinition, WorkflowRuns } from '../api.ts'
+import { waitingKind } from '../lists.ts'
+import { runPathname } from '../routes.ts'
+import { AppLink } from '../panels.tsx'
 import { formatSpan } from '../time.ts'
 import type { Zone } from '../time.ts'
 import { Time } from '../Time.tsx'
 import { stateTone } from '../tone.ts'
-import { syncAsOf, syncPhrase } from './derive.ts'
+import { sameRepoText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
 import { GithubColumn } from './GithubColumn.tsx'
 import { ReadingPane } from './ReadingPane.tsx'
+import { AheadPane } from './AheadPane.tsx'
 import { StepChart, type ChartRun, type FeatureGroup } from './StepChart.tsx'
 import type { DispatchOverview, Landing, ProjectDispatch, ProjectSteps } from './types.ts'
+
+/** What the reading pane docks for: a selected run, or the commits-ahead and landings list from the Local and GitHub card. */
+type Selection = { kind: 'run'; runId: string } | { kind: 'ahead' } | null
 
 const ms = (iso: string) => Date.parse(iso)
 const movedOf = (entry: ChartRun) => ms(entry.run.activity?.last_activity_at ?? entry.run.updated_at)
@@ -43,10 +50,12 @@ type Props = {
 export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, overview, allProjects, now, onNavigate }: Props) {
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
-  const [selected, setSelected] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Selection>(null)
   const [query, setQuery] = useState('')
   const filterRef = useRef<HTMLInputElement>(null)
   const chartRef = useRef<HTMLDivElement>(null)
+  const selectedRunId = selected?.kind === 'run' ? selected.runId : null
+  const selectRun = useCallback((runId: string) => setSelected({ kind: 'run', runId }), [])
 
   const overviewMap = useMemo(() => new Map((overview?.projects ?? []).map(p => [p.project_id, p])), [overview])
   const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
@@ -85,23 +94,23 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
   }, [groups, query])
 
   const order = useMemo(() => filtered.flatMap(group => group.runs.map(entry => entry.run.run_id)), [filtered])
-  const selectedEntry = useMemo(() => filtered.flatMap(g => g.runs).find(e => e.run.run_id === selected) ?? null, [filtered, selected])
-  const selectedWorkflowId = useMemo(() => filtered.find(g => g.runs.some(e => e.run.run_id === selected))?.workflow.workflow_id ?? null, [filtered, selected])
+  const selectedEntry = useMemo(() => filtered.flatMap(g => g.runs).find(e => e.run.run_id === selectedRunId) ?? null, [filtered, selectedRunId])
+  const selectedWorkflowId = useMemo(() => filtered.find(g => g.runs.some(e => e.run.run_id === selectedRunId))?.workflow.workflow_id ?? null, [filtered, selectedRunId])
 
   const move = useCallback((delta: number) => {
     setSelected(current => {
       if (order.length === 0) return current
-      const index = current ? order.indexOf(current) : -1
+      const runId = current?.kind === 'run' ? current.runId : null
+      const index = runId ? order.indexOf(runId) : -1
       const next = index < 0 ? (delta > 0 ? 0 : order.length - 1) : Math.min(order.length - 1, Math.max(0, index + delta))
-      return order[next]
+      return { kind: 'run', runId: order[next] }
     })
   }, [order])
 
   const close = useCallback(() => {
     setSelected(null)
-    const row = chartRef.current?.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(selected ?? '')}"]`)
-    row?.focus()
-  }, [selected])
+    if (selectedRunId) chartRef.current?.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(selectedRunId)}"]`)?.focus()
+  }, [selectedRunId])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -133,11 +142,13 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
 
   const openPrs = github?.status === 'read' ? github.open_prs ?? 0 : null
   const openIssues = github?.status === 'read' ? github.open_issues ?? 0 : null
+  // Every jump button moves focus to its section, not only scrolls (V4): the four targets carry tabindex="-1" (set in the
+  // JSX), so focusing the section itself is reliable, where focusing a descendant heading was a no-op (a heading is not focusable).
   const jump = (id: string) => () => {
     const target = document.getElementById(id)
-    target?.scrollIntoView({ block: 'start' })
-    target?.querySelector<HTMLElement>('a, button, h3, input')?.focus({ preventScroll: true })
-    if (target && !target.querySelector('a, button, input')) { target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }) }
+    if (!target) return
+    target.scrollIntoView({ block: 'start' })
+    target.focus({ preventScroll: true })
   }
   const asOf = git ? syncAsOf(git) : null
   const runBranches = new Set<string>(projectRuns.flatMap(w => w.runs).map(run => (run as { source_branch?: string }).source_branch ?? '').filter(Boolean)
@@ -145,6 +156,30 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
   const others = allProjects
     .filter(p => p.project_id !== project.project_id && overviewMap.get(p.project_id)?.github.repo && github?.repo && overviewMap.get(p.project_id)!.github.repo === github.repo)
     .map(p => ({ project: p, cloneId: overviewMap.get(p.project_id)?.git.clone_id ?? null, checkout: overviewMap.get(p.project_id)?.git.checkout ?? null }))
+  // The header's "same repo as" names the other projects of this *clone* ([P28], V10), keyed on clone_id (a hash, [P8]), not
+  // the GitHub repo: a non-GitHub shared clone still has clone mates, and separate clones of one GitHub repo are not clone mates.
+  const cloneId = git?.clone_id ?? null
+  const cloneMates = cloneId === null ? [] : allProjects.filter(p => p.project_id !== project.project_id && overviewMap.get(p.project_id)?.git.clone_id === cloneId)
+  const sameRepo = sameRepoText(cloneMates.map(p => p.name))
+
+  // The run's workflow, so a landing or an ahead commit that names a run can link to its run page.
+  const workflowOfRun = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const w of projectRuns) for (const run of w.runs) map.set(run.run_id, w.workflow.workflow_id)
+    // The registry page is the newest 50 (DEFAULT_RUN_LIMIT); an ahead commit or landing can name an older run outside it. The
+    // dispatch steps carry every run directory the server read, so fall back to them so the link to that run's page survives (V6).
+    for (const w of steps?.workflows ?? []) for (const r of w.runs) if (!map.has(r.run_id)) map.set(r.run_id, w.workflow_id)
+    return map
+  }, [projectRuns, steps])
+  const runHref = useCallback((runId: string): string | null => {
+    const workflowId = workflowOfRun.get(runId)
+    return workflowId ? runPathname(project.project_id, workflowId, runId) : null
+  }, [workflowOfRun, project.project_id])
+
+  // "Needs you and running" (PRD 2, V5): this project's runs waiting on the operator and the running ones, before the chart.
+  const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
+  const waitingRuns = allRuns.filter(({ run }) => waitingKind(run) !== null)
+  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && waitingKind(run) === null)
 
   return (
     <div className={`dispatch-project ${selected ? 'has-pane' : ''}`} data-testid="dispatch-project">
@@ -156,8 +191,11 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
             : null}
         </div>
         <p className="dispatch-meta">
-          {git && <>checkout <code>{git.checkout ?? 'detached'}</code> in <code>{git.repository_label}</code> · </>}
-          {git && <span data-testid="dispatch-sync">{syncPhrase(git, project.project_id, primaryName)}{asOf && asOf.updatedAt && <> · as of <code>{asOf.ref}</code> updated here <Time iso={asOf.updatedAt} /></>}</span>}
+          {git && git.status !== 'unavailable' && <>checkout <code>{git.checkout ?? 'detached'}</code> in <code>{git.repository_label}</code> · </>}
+          {git && <span data-testid="dispatch-sync">{syncPhrase(git, project.project_id, primaryName)}{asOf && (asOf.updatedAt
+            ? <> · as of <code>{asOf.ref}</code> updated here <Time iso={asOf.updatedAt} /></>
+            : <> · {UPDATE_TIME_NOT_RECORDED}</>)}</span>}
+          {sameRepo && <span data-testid="dispatch-same-repo"> · {sameRepo}</span>}
         </p>
         {(finished.length > 0 || counts.waits > 0) && (
           <p className="dispatch-figs" data-testid="dispatch-figures">
@@ -183,17 +221,45 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
       </header>
       <div className="dispatch-project-body">
         <div className="dispatch-project-main">
-          <section id="dispatch-runs-section" aria-label="Runs by feature" ref={chartRef}>
-            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} selectedRunId={selected} onSelect={setSelected} onNavigate={onNavigate} />
+          <section className="dispatch-needs" aria-label="Needs you and running" data-testid="dispatch-needs">
+            <h2 className="dispatch-needs-h">Needs you and running</h2>
+            {waitingRuns.length === 0 && runningRuns.length === 0
+              ? <p className="dispatch-muted" data-testid="dispatch-needs-none">Nothing waits on you; nothing running.</p>
+              : (
+                <ul className="dispatch-needs-list">
+                  {waitingRuns.map(({ run, workflowId }) => (
+                    <li key={run.run_id} className="tone-warn">
+                      <StateGlyph tone="warn" />
+                      <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
+                      <span className="dispatch-muted">waits on you{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                    </li>
+                  ))}
+                  {runningRuns.map(({ run, workflowId }) => (
+                    <li key={run.run_id} className="tone-run">
+                      <StateGlyph tone="run" live />
+                      <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
+                      <span className="dispatch-muted">running{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </section>
+          <section id="dispatch-runs-section" aria-label="Runs by feature" tabIndex={-1} ref={chartRef}>
+            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
           </section>
         </div>
         <GithubColumn project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
-          viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now} onNavigate={onNavigate} />
+          viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now}
+          onShowAhead={() => setSelected({ kind: 'ahead' })} aheadOpen={selected?.kind === 'ahead'} onNavigate={onNavigate} />
       </div>
-      {selectedEntry && selectedWorkflowId && (
-        <ReadingPane run={selectedEntry.run} steps={selectedEntry.steps} projectId={project.project_id} workflowId={selectedWorkflowId}
+      {selected?.kind === 'run' && selectedEntry && selectedWorkflowId && (
+        <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} steps={selectedEntry.steps} projectId={project.project_id} workflowId={selectedWorkflowId}
           onClose={close} onNavigate={onNavigate} phone={typeof window !== 'undefined' && window.innerWidth <= 480}
-          onPrev={() => move(-1)} onNext={() => move(1)} />
+          onNext={() => move(1)} />
+      )}
+      {selected?.kind === 'ahead' && git && (
+        <AheadPane git={git} onClose={() => setSelected(null)} runHref={runHref} onNavigate={onNavigate}
+          phone={typeof window !== 'undefined' && window.innerWidth <= 480} />
       )}
     </div>
   )

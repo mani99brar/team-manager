@@ -6,11 +6,14 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
+import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
-  cardStateWord, issueGroups, landingWording, prGroups, railBadge, railOrder, relTime, syncAsOf, syncPhrase,
+  cardStateWord, commitsAheadMore, issueGroups, landingWording, prGroups, prRelation, railBadge, railOrder, relatedWhy,
+  relTime, sameRepoText, showMoreText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED,
   type RailInfo,
 } from '../../src/projects/dispatch/derive.ts'
+import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
+import type { ProjectRuns, RunSummary, WorkflowDefinition, Project } from '../../src/projects/api.ts'
 import type { GitState, Issue, Pr } from '../../src/projects/dispatch/types.ts'
 
 const phaseName = (nodeId: string, kind: string) => PHASES[phaseOf(nodeId, kind)]
@@ -106,6 +109,77 @@ describe('the card state word', () => {
 const pr = (over: Partial<Pr>): Pr => ({
   number: 1, title: 't', url: 'u', state: 'OPEN', draft: false, author: 'someone', author_is_bot: false,
   head_ref: 'x', base_ref: 'main', updated_at: '2026-10-10T00:00:00Z', merged_at: null, review_decision: null, checks: null, labels: [], ...over,
+})
+
+describe('the axis column template and short labels (V3)', () => {
+  test('the axis and the tracks share one column template; every phase has an un-elided short form', () => {
+    assert.equal(CHART_COLUMNS, 'repeat(8, minmax(0, 1fr))')
+    assert.equal(PHASE_SHORT.Challenge, 'Chal.')
+    assert.equal(PHASE_SHORT.Candidate, 'Cand.')
+    assert.equal(PHASE_SHORT.Approval, 'Appr.')
+    assert.equal(PHASE_SHORT.Integrate, 'Integ.')
+    for (const phase of PHASES) { assert.ok(PHASE_SHORT[phase].length > 0); assert.doesNotMatch(PHASE_SHORT[phase], /…/) }
+  })
+})
+
+describe('the possibly-related rule ([L5], V14)', () => {
+  test('a head match, a base match only when the base is not the default branch, and the match wording', () => {
+    const branches = new Set(['feature/x', 'dev'])
+    assert.deepEqual(prRelation({ head_ref: 'feature/x', base_ref: 'main' }, branches, 'main'), { kind: 'head', branch: 'feature/x' })
+    assert.deepEqual(prRelation({ head_ref: 'z', base_ref: 'dev' }, branches, 'main'), { kind: 'base', branch: 'dev' })
+    // base equals the default branch: not related, even though the default is in the branch set.
+    assert.equal(prRelation({ head_ref: 'z', base_ref: 'main' }, new Set(['main']), 'main'), null)
+    assert.equal(prRelation({ head_ref: 'z', base_ref: 'w' }, branches, 'main'), null)
+    assert.equal(relatedWhy({ kind: 'head', branch: 'feature/x' }), 'head is feature/x')
+    assert.equal(relatedWhy({ kind: 'base', branch: 'dev' }), 'base is dev')
+  })
+
+  test('prGroups applies the rule: a PR whose only tie is the default branch as its base is not related', () => {
+    const base = pr({ number: 1, head_ref: 'h', base_ref: 'main' })
+    const groups = prGroups([base], { branches: new Set(['main']), viewerLogin: null, readAt: 0, defaultBranch: 'main' })
+    assert.deepEqual(groups.related.map(p => p.number), [])
+  })
+})
+
+describe('commits-ahead and fold wording (V6, V8)', () => {
+  test('"and N more" when the ahead count exceeds the listed commits', () => {
+    assert.equal(commitsAheadMore(52, 50), 'and 2 more')
+    assert.equal(commitsAheadMore(50, 50), null)
+    assert.equal(commitsAheadMore(3, 50), null)
+  })
+  test('"Show N more" when a group is longer than the shown five', () => {
+    assert.equal(showMoreText(8, 5), 'Show 3 more')
+    assert.equal(showMoreText(6, 5), 'Show 1 more')
+    assert.equal(showMoreText(5, 5), null)
+  })
+})
+
+describe('header wording (V10)', () => {
+  test('"same repo as …" names the other projects of the clone, and the no-reflog wording is fixed', () => {
+    assert.equal(sameRepoText(['Widgets']), 'same repo as Widgets')
+    assert.equal(sameRepoText(['Alpha', 'Beta']), 'same repo as Alpha and Beta')
+    assert.equal(sameRepoText(['Alpha', 'Beta', 'Gamma']), 'same repo as Alpha, Beta and Gamma')
+    assert.equal(sameRepoText([]), null)
+    assert.equal(UPDATE_TIME_NOT_RECORDED, 'update time not recorded')
+  })
+})
+
+describe('the card state word counts only readable features ([L8], V18)', () => {
+  const run = (status: string): RunSummary => ({
+    contract_version: '1.5.0', project_id: 't', workflow_id: 'w', definition_revision: 'r', run_id: `${status}-1`,
+    status, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T01:00:00Z',
+  } as unknown as RunSummary)
+  const wfr = (id: string, runs: RunSummary[], error: unknown = null) => ({ workflow: { workflow_id: id } as unknown as WorkflowDefinition, runs, more: false, error })
+  test('three readable workflows (one failed last) plus one error workflow reads "1 of 3 features failed last"', () => {
+    const entry: ProjectRuns = {
+      project: { project_id: 't', name: 'Trio' } as unknown as Project, error: null,
+      workflows: [wfr('a', [run('succeeded')]), wfr('b', [run('cancelled')]), wfr('c', [run('failed')]), wfr('d', [], new Error('unreadable'))],
+    }
+    const info = projectRunInfo(entry)
+    assert.equal(info.readableFeatures, 3)
+    assert.equal(info.badFeatures, 1)
+    assert.equal(cardStateWord({ tone: info.tone, waits: info.waits, running: info.running, allBad: info.allBad, featureCount: info.readableFeatures, worstLatestCount: info.worstLatestCount }), '1 of 3 features failed last')
+  })
 })
 
 describe('pull request grouping', () => {

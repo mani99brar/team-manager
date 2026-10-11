@@ -25,7 +25,8 @@
 
 /* rail */
 .projects-shell .dispatch-rail { background: var(--surface-2); border-right: 1px solid var(--border); border-radius: var(--radius); padding: 12px 10px 24px; min-width: 0; position: sticky; top: 0; }
-.projects-shell .dispatch-rail a { color: var(--fg); text-decoration: none; display: block; }
+/* No display here: the home links set `display: flex` and the rows `display: grid`, each more specific than this base rule. */
+.projects-shell .dispatch-rail a { color: var(--fg); text-decoration: none; }
 .projects-shell .dispatch-rail-home { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 10px; font-weight: 700; font-size: 15px; }
 .projects-shell .dispatch-rail-home:hover { background: var(--surface); }
 .projects-shell .dispatch-rail-home[aria-current="page"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -62,9 +63,18 @@
 .projects-shell .dispatch-card-foot { display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .projects-shell .dispatch-card-open { margin-left: auto; color: var(--accent); font-weight: 600; }
 
-/* project page layout */
+/* project page layout. With no run selected the body is main + a 380px GitHub column (PRD 4.3); it stacks below 980px. */
 .projects-shell .dispatch-project-body { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; margin-top: 12px; }
+/* Docked (a run selected): the header stays full width, the reading pane docks beside the body, and the GitHub column stacks
+   under the chart unless the viewport is wide enough for three columns without squeezing the chart under 480px ([P26], V1).
+   Break-even arithmetic at the three-column grid (minmax(0,1fr) 380px, 16px gap): main = viewport - 322 (app padding 32,
+   workspace border 2, rail 280, shell-main padding 8); the pane track reaches its 420px max plus a 16px gap, so the body
+   (col1) = main - 436; the body's chart = body - 380 - 16. chart >= 480 needs body >= 876, i.e. main >= 1312, i.e. viewport
+   >= 1634 (content). 1680px leaves margin for a classic scrollbar (~15px) so the chart never drops below 480px while docked. */
+.projects-shell .dispatch-project.has-pane { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 420px); column-gap: 16px; align-items: start; }
+.projects-shell .dispatch-project.has-pane > .dispatch-project-head { grid-column: 1 / -1; }
 .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 1680px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr) 380px; } }
 .projects-shell .dispatch-project-main { min-width: 0; }
 .projects-shell .dispatch-crumbs { font-size: 12.5px; color: var(--muted); }
 .projects-shell .dispatch-crumbs a { color: var(--muted); }
@@ -79,10 +89,26 @@
 
 /* step chart */
 .projects-shell .dispatch-chart { margin-top: 8px; }
-.projects-shell .dispatch-axis { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: center; position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 12px; border-bottom: 1px solid var(--border); }
-.projects-shell .dispatch-axis-l { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+/* The axis, the run tracks and the "ended here" row share one 8-column template (set inline from CHART_COLUMNS) and the same
+   12px side padding, so column i of the axis spans column i of every track at every width (V3). The "phase" and "ended here"
+   captions sit above/below the track as block labels, never as a grid column, so they do not shift the columns. */
+.projects-shell .dispatch-axis { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.projects-shell .dispatch-axis-l { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px; }
 .projects-shell .dispatch-axis-track, .projects-shell .dispatch-track, .projects-shell .dispatch-ends-track { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); align-items: center; }
-.projects-shell .dispatch-ax { font-size: 11px; color: var(--muted); text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projects-shell .dispatch-ax { font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; min-width: 0; padding: 0 2px; }
+.projects-shell .dispatch-ax-short { display: none; }
+/* Where a phase column is narrower than its full name, use the fixed short form so a label is never cut with an ellipsis. */
+@container dispatch-chart (max-width: 640px) {
+  .projects-shell .dispatch-ax-full { display: none; }
+  .projects-shell .dispatch-ax-short { display: inline; }
+}
+/* Steps of this definition fold (V7). */
+.projects-shell .dispatch-def { margin: 6px 12px 0; font-size: 12.5px; }
+.projects-shell .dispatch-def summary { cursor: pointer; color: var(--muted); display: flex; gap: 8px; align-items: baseline; min-height: 28px; }
+.projects-shell .dispatch-def-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
+.projects-shell .dispatch-def-list li { display: flex; gap: 10px; align-items: baseline; }
+.projects-shell .dispatch-def-phase { min-width: 72px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.projects-shell .dispatch-def-label { color: var(--fg); }
 .projects-shell .dispatch-feature { list-style: none; }
 .projects-shell .lists-group.dispatch-feature { margin-top: 14px; }
 .projects-shell .dispatch-feature-id { font-family: var(--font-mono); font-weight: 700; }
@@ -109,8 +135,8 @@
 .projects-shell .dispatch-dot.reached { background: var(--tone, var(--idle)); border-color: var(--tone, var(--idle)); }
 .projects-shell .dispatch-stop-glyph { background: var(--surface); box-shadow: 0 0 0 3px var(--surface); border-radius: 50%; }
 .projects-shell .dispatch-att { font-size: 10px; font-weight: 700; color: var(--muted); }
-.projects-shell .dispatch-ends { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: center; padding: 6px 12px; font-size: 11px; color: var(--muted); }
-.projects-shell .dispatch-ends-l { text-transform: uppercase; letter-spacing: .06em; }
+.projects-shell .dispatch-ends { padding: 2px 12px 6px; font-size: 11px; color: var(--muted); }
+.projects-shell .dispatch-ends-l { display: block; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
 .projects-shell .dispatch-en { text-align: center; }
 .projects-shell .dispatch-en.land { color: var(--ok); font-weight: 700; }
 .projects-shell .dispatch-badrow { padding: 10px 12px; font-size: 12.5px; color: var(--muted); }
@@ -118,6 +144,29 @@
 /* at a chart width of 440px or less, a multi-lane phase collapses to one mark */
 @container dispatch-chart (max-width: 440px) { .projects-shell .dispatch-cell.multi .dispatch-lane:not(:first-child) { display: none; } }
 .projects-shell #dispatch-runs-section { container-type: inline-size; container-name: dispatch-chart; }
+
+/* Needs you and running (V5) */
+.projects-shell .dispatch-needs { margin-bottom: 12px; }
+.projects-shell .dispatch-needs-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+.projects-shell .dispatch-needs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.projects-shell .dispatch-needs-list li { display: flex; align-items: baseline; gap: 8px; }
+.projects-shell .dispatch-needs-list a { color: var(--accent); text-decoration: none; }
+.projects-shell .dispatch-needs-list code { font-family: var(--font-mono); }
+
+/* commits-ahead button + the ahead pane (V6) */
+.projects-shell .dispatch-gh-ahead-btn { margin-top: 8px; font: inherit; font-size: 12.5px; font-weight: 600; min-height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); color: var(--fg); cursor: pointer; }
+.projects-shell .dispatch-gh-ahead-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.projects-shell .dispatch-ahead-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.projects-shell .dispatch-ahead-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12.5px; }
+.projects-shell .dispatch-ahead-subj { color: var(--fg); overflow-wrap: anywhere; }
+.projects-shell .dispatch-ahead-run { color: var(--accent); text-decoration: none; font-family: var(--font-mono); font-size: 12px; }
+
+/* "Show N more" fold (V8) and the merged-group scope note (V9) */
+.projects-shell .dispatch-show-more { font: inherit; font-size: 12px; font-weight: 600; min-height: 28px; padding: 2px 8px; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--accent); cursor: pointer; }
+.projects-shell .dispatch-gh-note { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: 11.5px; }
+
+/* the reading pane's next-step lead */
+.projects-shell .dispatch-next-lead { font-size: 13px; margin: 0 0 8px; }
 
 /* github column */
 .projects-shell .dispatch-gh { display: grid; gap: 12px; align-content: start; }
@@ -148,8 +197,6 @@
 
 /* reading pane */
 .projects-shell .dispatch-pane { position: sticky; top: 8px; align-self: start; width: 100%; max-width: 460px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-float); overflow: hidden; }
-.projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr); }
-.projects-shell .dispatch-project.has-pane { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 16px; align-items: start; }
 .projects-shell .dispatch-pane::before { content: ""; display: block; height: 5px; background: var(--tone, var(--border-strong)); }
 .projects-shell .dispatch-pane-head { padding: 14px 18px; border-bottom: 1px solid var(--border); }
 .projects-shell .dispatch-pane-top { display: flex; align-items: center; gap: 8px; }
@@ -183,11 +230,24 @@
   .projects-shell .dispatch-project-body, .projects-shell .dispatch-project.has-pane { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* phone */
+/* phone: every link, button and input inside the dispatch regions is at least 44px tall (V12). CommandBlock.tsx is not owned,
+   so its Copy/Run buttons and legend/all-steps disclosures are sized here, scoped to the pane. */
 @media (max-width: 480px) {
   .projects-shell .dispatch-cards { grid-template-columns: minmax(0, 1fr); }
-  .projects-shell .dispatch-jump button, .projects-shell .dispatch-pane-open, .projects-shell .dispatch-pane-close, .projects-shell .dispatch-pane-nav button { min-height: 44px; }
+  .projects-shell .dispatch-jump button,
+  .projects-shell .dispatch-pane-open, .projects-shell .dispatch-pane-close, .projects-shell .dispatch-pane-nav button,
+  .projects-shell .dispatch-filter input,
+  .projects-shell .dispatch-gh-ahead-btn, .projects-shell .dispatch-show-more,
+  .projects-shell .dispatch-pane .command-copy, .projects-shell .dispatch-pane .command-run-button, .projects-shell .dispatch-pane .command-step > summary,
+  .projects-shell .dispatch-pane .command-legend > summary, .projects-shell .dispatch-pane .command-all-steps > summary { min-height: 44px; }
+  .projects-shell .dispatch-pane .command-copy, .projects-shell .dispatch-pane .command-run-button { display: inline-flex; align-items: center; }
   .projects-shell .dispatch-pane.phone { position: fixed; inset: 0; max-width: none; z-index: 20; border-radius: 0; }
   .projects-shell .dispatch-pane.phone .dispatch-pane-body { max-height: none; height: calc(100vh - 60px); }
-  .projects-shell .dispatch-ext, .projects-shell .dispatch-gh-item a { display: inline-block; min-height: 44px; line-height: 44px; }
+  .projects-shell .dispatch-ext, .projects-shell .dispatch-gh-item a, .projects-shell .dispatch-co a,
+  .projects-shell .dispatch-needs-list a, .projects-shell .dispatch-ahead-run { display: inline-flex; align-items: center; min-height: 44px; }
+  /* the breadcrumbs of the dispatch pages only ([P27]: the scan covers the dispatch regions). The crumbs nav is the shared
+     app-shell element in `.navigation`, rendered for every Projects route; ProjectsView tags it `.navigation-dispatch` only on
+     the dispatch routes (projects list, triage, project page), so the run, node and assignment pages and the skills explorer
+     keep App.css's crumbs untouched. */
+  .navigation-dispatch .breadcrumbs a, .navigation-dispatch .breadcrumbs .breadcrumb-ellipsis { display: inline-flex; align-items: center; min-height: 44px; }
 }

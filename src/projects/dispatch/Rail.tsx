@@ -43,11 +43,11 @@ export function Rail({ rows, projectCount, triage, current, onNavigate }: Props)
   const needs = triage.waits + triage.paused
   const home = (
     <>
-      <AppLink href={projectsPathname()} onNavigate={onNavigate} className="rail-home" current={current.kind === 'projects'} data-testid="rail-all-projects">
-        <span>All projects</span><span className="rail-home-n">{projectCount}</span>
+      <AppLink href={projectsPathname()} onNavigate={onNavigate} className="dispatch-rail-home" current={current.kind === 'projects'} data-testid="rail-all-projects">
+        <span className="dispatch-rail-home-l">All projects</span><span className="dispatch-rail-home-n">{projectCount}</span>
       </AppLink>
-      <AppLink href={triagePathname()} onNavigate={onNavigate} className="rail-home" current={current.kind === 'triage'} data-testid="rail-triage">
-        <span>Triage</span><span className={`rail-home-n ${needs ? 'tone-warn' : ''}`}>{triageBadge(triage)}</span>
+      <AppLink href={triagePathname()} onNavigate={onNavigate} className="dispatch-rail-home" current={current.kind === 'triage'} data-testid="rail-triage">
+        <span className="dispatch-rail-home-l">Triage</span><span className={`dispatch-rail-home-n ${needs ? 'tone-warn' : ''}`}>{triageBadge(triage)}</span>
       </AppLink>
     </>
   )

@@ -11,9 +11,10 @@
  * `dispatch-noorigin` (no origin ref), and `dispatch-unreadable` (its run state cannot be read).
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Project, RunSummary, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import type { Project, RunDetail, RunSummary, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import { done, runDetail, type NodeState } from '../fixtures.ts'
 import type { DispatchOverview, GithubRepoRead, GithubState, ProjectDispatch, ProjectSteps, ProjectStepsRun } from '../../../src/projects/dispatch/types.ts'
 
 const REVISION = 'a'.repeat(64)
@@ -33,6 +34,15 @@ export const DISPATCH_WIDGETS_WT = 'dispatch-widgets-wt'
 export const DISPATCH_TRIO = 'dispatch-trio'
 export const DISPATCH_NOORIGIN = 'dispatch-noorigin'
 export const DISPATCH_UNREADABLE = 'dispatch-unreadable'
+/** A project of its own for the waiting and running runs, 52 commits ahead, so the Widgets primary keeps its "2 unpushed"
+ * badge and rail place ([P24]) and "and 2 more" has a seed ([P33]); its clone has no origin reflog, so its time is missing ([L9]). */
+export const DISPATCH_BUSY = 'dispatch-busy'
+/** The Trio workflow whose runs cannot be listed ([P34]): a workflow-level `error`, the literal `<run-id>` placeholder row (V18). */
+export const DISPATCH_TRIO_LOCKED = 'trio-locked'
+/** Workflows whose runs the worker-phase mock answers with a listing error, mirroring the candidate's unlistable `runs_root`. */
+/** The unreadable project's sole workflow, whose runs also cannot be listed ([L1]), so the project reads "cannot be read". */
+export const DISPATCH_UNREADABLE_WORKFLOW = 'x'
+export const DISPATCH_UNLISTABLE_WORKFLOWS = new Set<string>([DISPATCH_TRIO_LOCKED, DISPATCH_UNREADABLE_WORKFLOW])
 
 export const DISPATCH_PROJECTS: Project[] = [
   { project_id: DISPATCH_LOCAL, name: 'Local only' },
@@ -40,6 +50,7 @@ export const DISPATCH_PROJECTS: Project[] = [
   { project_id: DISPATCH_WIDGETS_WT, name: 'Widgets worktree' },
   { project_id: DISPATCH_TRIO, name: 'Trio' },
   { project_id: DISPATCH_NOORIGIN, name: 'No origin' },
+  { project_id: DISPATCH_BUSY, name: 'Busy' },
   { project_id: DISPATCH_UNREADABLE, name: 'Unreadable' },
 ]
 
@@ -109,14 +120,36 @@ function stepsRun(runId: string, stop: Stop, options: { integrated?: string | nu
   }
 }
 
+/**
+ * ui-polish-002 (failed at verification) with a second Launch lane, a parallel worker, so its Launch phase cell holds two
+ * lanes and carries `.multi` — the only multi-lane cell in these fixtures, for the 440px collapse check (PRD 4.3, "a
+ * multi-lane phase collapses to one mark"). Worker phase only: the candidate seed writes single-lane runs, so the scenario
+ * asserts the collapse in the worker phase, as [P35] gates the failed-refresh line. The stop stays verify_ui in the Verify
+ * phase, so the stop glyph and the axis-centre check are untouched.
+ */
+function uiPolish002WithParallelLaunch(): ProjectStepsRun {
+  const run = stepsRun('ui-polish-002', { node_id: 'verify_ui', attempt: 3, status: 'failed' })
+  const launchIdx = run.steps.findIndex(step => step.node_id === 'launch_ui')
+  run.steps.splice(launchIdx + 1, 0, { node_id: 'launch_api', label: 'Launch api worker', kind: 'worker', status: 'succeeded', attempt: 1 })
+  run.lanes = ['ui', 'api']
+  return run
+}
+
 // ---- The runs behind each project ------------------------------------------------------------------------------------
 
 const widgetsRuns = {
   'ui-polish-001': summary(DISPATCH_WIDGETS, 'ui-polish', 'ui-polish-001', { status: 'succeeded', stop: 'integrate', feature: 'UI polish' }),
   'ui-polish-002': summary(DISPATCH_WIDGETS, 'ui-polish', 'ui-polish-002', { status: 'failed', stop: 'verify_ui', feature: 'UI polish' }),
+  // A second integrated run, so Widgets has exactly two integrated runs: one that landed on local main and origin, one on
+  // local main only ([P25], V16). Its landing is seeded on_default true / on_origin false in the overview.
+  'ui-polish-003': summary(DISPATCH_WIDGETS, 'ui-polish', 'ui-polish-003', { status: 'succeeded', stop: 'integrate', feature: 'UI polish' }),
 }
 const localRuns = {
   'sync-001': summary(DISPATCH_LOCAL, 'sync', 'sync-001', { status: 'awaiting_approval', stop: 'approval', feature: 'Sync', attentionKind: 'approval', finished: false }),
+}
+const busyRuns = {
+  'ship-001': summary(DISPATCH_BUSY, 'ship', 'ship-001', { status: 'awaiting_approval', stop: 'approval', feature: 'Ship', attentionKind: 'approval', finished: false }),
+  'ship-002': summary(DISPATCH_BUSY, 'ship', 'ship-002', { status: 'running', stop: 'launch_ui', feature: 'Ship', finished: false }),
 }
 const wtRuns = {
   'experiment-001': summary(DISPATCH_WIDGETS_WT, 'experiment', 'experiment-001', { status: 'succeeded', stop: 'integrate', feature: 'Experiment' }),
@@ -132,13 +165,14 @@ const nooriginRuns = {
 
 /** Every new workflow's runs, keyed by workflow id, for the shared `runLists`. */
 export const DISPATCH_RUN_LISTS: Record<string, { runs: RunSummary[]; next_cursor: null }> = {
-  'ui-polish': { runs: [widgetsRuns['ui-polish-002'], widgetsRuns['ui-polish-001']], next_cursor: null },
+  'ui-polish': { runs: [widgetsRuns['ui-polish-003'], widgetsRuns['ui-polish-002'], widgetsRuns['ui-polish-001']], next_cursor: null },
   sync: { runs: [localRuns['sync-001']], next_cursor: null },
   experiment: { runs: [wtRuns['experiment-001']], next_cursor: null },
   'alpha-feature': { runs: [trioRuns['alpha-feature-001']], next_cursor: null },
   'beta-feature': { runs: [trioRuns['beta-feature-001']], next_cursor: null },
   'gamma-feature': { runs: [trioRuns['gamma-feature-001']], next_cursor: null },
   main: { runs: [nooriginRuns['main-001']], next_cursor: null },
+  ship: { runs: [busyRuns['ship-002'], busyRuns['ship-001']], next_cursor: null },
 }
 
 /** Each new project's workflow definitions, keyed by project id, for the shared `workflowLists`. `dispatch-unreadable` is
@@ -147,8 +181,29 @@ export const DISPATCH_WORKFLOW_LISTS: Record<string, { workflows: WorkflowDefini
   [DISPATCH_LOCAL]: { workflows: [def(DISPATCH_LOCAL, 'sync')] },
   [DISPATCH_WIDGETS]: { workflows: [def(DISPATCH_WIDGETS, 'ui-polish'), def(DISPATCH_WIDGETS, 'broken')] },
   [DISPATCH_WIDGETS_WT]: { workflows: [def(DISPATCH_WIDGETS_WT, 'experiment')] },
-  [DISPATCH_TRIO]: { workflows: [def(DISPATCH_TRIO, 'alpha-feature'), def(DISPATCH_TRIO, 'beta-feature'), def(DISPATCH_TRIO, 'gamma-feature')] },
+  // Trio lists its three readable workflows and the unlistable one ([P34]); the mock answers the latter's run list with an error.
+  [DISPATCH_TRIO]: { workflows: [def(DISPATCH_TRIO, 'alpha-feature'), def(DISPATCH_TRIO, 'beta-feature'), def(DISPATCH_TRIO, 'gamma-feature'), def(DISPATCH_TRIO, DISPATCH_TRIO_LOCKED)] },
   [DISPATCH_NOORIGIN]: { workflows: [def(DISPATCH_NOORIGIN, 'main')] },
+  [DISPATCH_BUSY]: { workflows: [def(DISPATCH_BUSY, 'ship')] },
+  // The unreadable project lists one workflow whose runs cannot be listed, so its run state reads "cannot be read" while its
+  // project page still renders (git unavailable → "git not read", V10). The candidate seeds the same workflow with an unreadable run.
+  [DISPATCH_UNREADABLE]: { workflows: [def(DISPATCH_UNREADABLE, DISPATCH_UNREADABLE_WORKFLOW)] },
+}
+
+// ---- Run details the reading pane reads for its NextStep ([P31], V2) -------------------------------------------------
+// The pane reads the run detail with `fetchRunDetail` and derives the run's NextStep with `deriveNow`; the worker-phase mock
+// must serve a detail for every dispatch run the specs dock. These three are the Widgets `ui-polish` runs the pane scenario
+// selects: a run that failed at verification (so `deriveNow` yields a retry command, not a fixed status line) and two integrated runs.
+const UI_POLISH_DEF = def(DISPATCH_WIDGETS, 'ui-polish')
+const C = '2025-01-01T08:00:00Z'
+const U = '2025-01-01T09:00:00Z'
+const allDone: Record<string, NodeState> = Object.fromEntries(PIPELINE.map(node => [node.node_id, done()]))
+export const DISPATCH_RUN_DETAILS: Record<string, RunDetail> = {
+  'ui-polish-001': runDetail('ui-polish-001', 'succeeded', UI_POLISH_DEF, C, U, allDone, 10),
+  'ui-polish-003': runDetail('ui-polish-003', 'succeeded', UI_POLISH_DEF, C, U, allDone, 10),
+  'ui-polish-002': runDetail('ui-polish-002', 'failed', UI_POLISH_DEF, C, U, {
+    challenge: done(), launch_ui: done('sess-ui', 'ui'), handoff: done(), verify_ui: { status: 'failed', attempt: 3, result: 'ui' },
+  }, 8),
 }
 
 // ---- The dispatch overview (git + GitHub per project) ----------------------------------------------------------------
@@ -166,6 +221,8 @@ const prList = (repo: string): GithubState['prs'] => [
 const issueList = (repo: string): GithubState['issues'] => [
   { number: 100, title: 'Header overflows on mobile', url: `https://github.com/${repo}/issues/100`, author: 'octocat', author_is_bot: false, labels: ['bug'], assignees: [VIEWER_LOGIN], created_at: '2026-10-08T10:00:00Z', updated_at: '2026-10-09T10:00:00Z' },
   { number: 99, title: 'Document the config', url: `https://github.com/${repo}/issues/99`, author: 'alice', author_is_bot: false, labels: ['docs'], assignees: [], created_at: '2025-11-01T10:00:00Z', updated_at: '2025-11-01T10:00:00Z' },
+  // Six "Newest from people" issues in all, so that group is longer than five and folds to "Show N more" (V8).
+  ...[98, 97, 96, 95, 94].map(number => ({ number, title: `Open question ${number}`, url: `https://github.com/${repo}/issues/${number}`, author: 'bob', author_is_bot: false, labels: [], assignees: [], created_at: '2026-10-06T10:00:00Z', updated_at: '2026-10-06T10:00:00Z' })),
   { number: 90, title: 'Dependency alert', url: `https://github.com/${repo}/issues/90`, author: 'dependabot[bot]', author_is_bot: true, labels: [], assignees: [], created_at: '2025-11-01T10:00:00Z', updated_at: '2025-11-01T10:00:00Z' },
 ]
 
@@ -188,11 +245,23 @@ const widgetsGit = (projectId: string, primary: string, checkout: string): Proje
     ? [{ sha: sha('c1'), subject: 'Workflow ui-polish-001: integrate', committed_at: '2026-10-10T08:00:00Z', run_id: 'ui-polish-001' }, { sha: sha('c2'), subject: 'Local tweak', committed_at: '2026-10-09T08:00:00Z', run_id: null }]
     : [],
   ahead_naming_run: primary === projectId ? 1 : 0,
+  // Exactly two integrated runs ([P25], V16): one on local main and origin, one on local main only. 2 on local, 1 on origin, 0 unknown.
   landings: primary === projectId
-    ? [{ workflow_id: 'ui-polish', run_id: 'ui-polish-001', sha: sha('c1'), on_default: true, on_origin: true }]
+    ? [
+      { workflow_id: 'ui-polish', run_id: 'ui-polish-001', sha: sha('c1'), on_default: true, on_origin: true },
+      { workflow_id: 'ui-polish', run_id: 'ui-polish-003', sha: sha('c3'), on_default: true, on_origin: false },
+    ]
     : [],
   read_at: READ_AT,
 })
+
+// Busy is 52 commits ahead; the server lists at most 50, so the pane shows 50 and "and 2 more" ([P33], V6). The first names a run.
+const busyAheadCommits: ProjectDispatch['git']['ahead_commits'] = Array.from({ length: 50 }, (_, i) => ({
+  sha: (i + 256).toString(16).padStart(40, '0'), // a distinct 40-hex sha per commit (no zero-padding collisions)
+  subject: i === 0 ? 'Workflow ship-001: integrate' : `Local change ${50 - i}`,
+  committed_at: '2026-10-10T08:00:00Z',
+  run_id: i === 0 ? 'ship-001' : null,
+}))
 
 function overviewFor(projectIds: readonly string[]): DispatchOverview {
   const known: Record<string, ProjectDispatch> = {
@@ -201,7 +270,21 @@ function overviewFor(projectIds: readonly string[]): DispatchOverview {
       git: { status: 'read', reason: null, repository_label: '~/dev/localonly', checkout: 'main', head: sha('loc'), default_branch: 'main', clone_id: 'loc000000000', clone_primary: DISPATCH_LOCAL, origin: { ref: 'origin/main', sha: sha('locorigin'), updated_at: '2026-10-08T10:00:00Z', compare: 'compared', ahead: 0, behind: 0 }, ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: READ_AT },
       github: ghNone('not_github', 'not a GitHub remote'),
     },
-    [DISPATCH_WIDGETS]: { project_id: DISPATCH_WIDGETS, git: widgetsGit(DISPATCH_WIDGETS, DISPATCH_WIDGETS, 'feature/ui-polish'), github: ghRead('acme/widgets', 'PUBLIC', 3, 3) },
+    // The worker-phase overview marks Widgets' GitHub read with a failed latest refresh ([P35], V20): status stays `read`, the
+    // data shows, and the viewer adds the "latest refresh failed" line. The candidate server cannot produce this, so the spec
+    // asserts the line in the worker phase only, and the GitHub fixture file (candidate) carries no `reason`.
+    [DISPATCH_WIDGETS]: { project_id: DISPATCH_WIDGETS, git: widgetsGit(DISPATCH_WIDGETS, DISPATCH_WIDGETS, 'feature/ui-polish'), github: { ...ghRead('acme/widgets', 'PUBLIC', 3, 3), reason: 'gh timed out after 20 s' } },
+    [DISPATCH_BUSY]: {
+      project_id: DISPATCH_BUSY,
+      git: {
+        status: 'read', reason: null, repository_label: '~/dev/busy', checkout: 'main', head: sha('busy'), default_branch: 'main',
+        clone_id: 'busy00000000', clone_primary: DISPATCH_BUSY,
+        // 52 ahead, 1 behind; the reflog time is missing ([L9]), so the sync says "update time not recorded".
+        origin: { ref: 'origin/main', sha: sha('busyorigin'), updated_at: null, compare: 'compared', ahead: 52, behind: 1 },
+        ahead_commits: busyAheadCommits, ahead_naming_run: 1, landings: [], read_at: READ_AT,
+      },
+      github: ghRead('acme/busy', 'PUBLIC', 0, 0),
+    },
     [DISPATCH_WIDGETS_WT]: { project_id: DISPATCH_WIDGETS_WT, git: widgetsGit(DISPATCH_WIDGETS_WT, DISPATCH_WIDGETS, 'experiment'), github: ghRead('acme/widgets', 'PUBLIC', 2, 3) },
     [DISPATCH_TRIO]: {
       project_id: DISPATCH_TRIO,
@@ -237,7 +320,8 @@ const DISPATCH_STEPS: Record<string, ProjectSteps> = {
     contract_version: '1.0.0', project_id: DISPATCH_WIDGETS,
     workflows: [
       { workflow_id: 'ui-polish', error: null, errors: [], runs: [
-        stepsRun('ui-polish-002', { node_id: 'verify_ui', attempt: 3, status: 'failed' }),
+        stepsRun('ui-polish-003', { node_id: 'integrate', status: 'succeeded' }, { integrated: sha('c3') }),
+        uiPolish002WithParallelLaunch(),
         stepsRun('ui-polish-001', { node_id: 'integrate', status: 'succeeded' }, { integrated: sha('c1') }),
       ] },
       // An unreadable run is a per-run entry in `errors` (contracts/projects/examples.ts, server-task.md item 76): the server loads
@@ -259,11 +343,20 @@ const DISPATCH_STEPS: Record<string, ProjectSteps> = {
       { workflow_id: 'alpha-feature', error: null, errors: [], runs: [stepsRun('alpha-feature-001', { node_id: 'integrate', status: 'succeeded' }, { integrated: sha('a1') })] },
       { workflow_id: 'beta-feature', error: null, errors: [], runs: [stepsRun('beta-feature-001', { node_id: 'review', status: 'cancelled' })] },
       { workflow_id: 'gamma-feature', error: null, errors: [], runs: [stepsRun('gamma-feature-001', { node_id: 'verify_ui', attempt: 2, status: 'failed' })] },
+      // The workflow whose runs could not be listed at all: a whole-workflow `error`, shown with the literal `<run-id>` placeholder ([P21], V18).
+      { workflow_id: DISPATCH_TRIO_LOCKED, error: { code: 'RUNS_UNREADABLE', message: 'The runs directory of this workflow could not be listed.' }, errors: [], runs: [] },
     ],
   },
   [DISPATCH_NOORIGIN]: {
     contract_version: '1.0.0', project_id: DISPATCH_NOORIGIN,
     workflows: [{ workflow_id: 'main', error: null, errors: [], runs: [stepsRun('main-001', { node_id: 'integrate', status: 'succeeded' }, { integrated: sha('m1') })] }],
+  },
+  [DISPATCH_BUSY]: {
+    contract_version: '1.0.0', project_id: DISPATCH_BUSY,
+    workflows: [{ workflow_id: 'ship', error: null, errors: [], runs: [
+      stepsRun('ship-002', { node_id: 'launch_ui', status: 'running' }),
+      stepsRun('ship-001', { node_id: 'approval', status: 'awaiting_approval' }),
+    ] }],
   },
 }
 
@@ -312,6 +405,7 @@ type RunShape =
   | { kind: 'integrated'; integratedSha: string }
   | { kind: 'failed'; attempt: number }
   | { kind: 'awaiting' }
+  | { kind: 'running' }
   | { kind: 'cancelled' }
   | { kind: 'unreadable' }
 
@@ -344,6 +438,11 @@ function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string,
     tasks = [{ node_id: 'review', error: null, interrupts: [{ kind: 'independent_review', message: 'Independent review required before integration' }], result: null }]
     next = ['review']
     events = [event(1, 'challenge', 'succeeded', 'Design challenge accepted')]
+  } else if (shape.kind === 'running') {
+    nodes = PIPELINE_NODES
+    values = { run_id: runId, ui: { session_id: 'sess-ui' } }
+    next = ['launch_ui']
+    events = [event(1, 'challenge', 'succeeded', 'Design challenge accepted'), event(2, 'launch_ui', 'running', 'UI worker launched')]
   } else if (shape.kind === 'cancelled') {
     events = [event(1, 'challenge', 'succeeded', 'Design challenge accepted'), event(2, 'controller', 'cancelled', 'Abandoned by the operator')]
   }
@@ -394,8 +493,10 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
   commit(widgets, 'Workflow ui-polish-001: integrate'); commit(widgets, 'Local tweak')
   git(widgets, ['remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git'])
   // Base B (two commits back from the new tip) is an ancestor of both the local main and origin/main; using it as the run's
-  // landed sha makes the landing read true on local main and true on origin.
+  // landed sha makes the landing read true on local main and true on origin. The first ahead commit (HEAD~1) is on local main
+  // only, so a second integrated run that landed there reads true on local, false on origin ([P25], V16).
   const landedSha = gitOut(widgets, ['rev-parse', 'HEAD~2'])
+  const localOnlySha = gitOut(widgets, ['rev-parse', 'HEAD~1'])
   // Check the primary clone out onto a feature branch (never the default branch, whose name every PR's base would match). It
   // matches PR #43's head, so that PR reads "possibly related"; ahead/behind stay measured on refs/heads/main.
   git(widgets, ['checkout', '-b', 'feature/ui-polish-002'])
@@ -410,9 +511,30 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
   const trio = join(base, 'trio'); initRepo(trio); commit(trio, 'trio'); git(trio, ['remote', 'add', 'origin', 'https://github.com/acme/trio.git'])
   const unreadable = join(base, 'unreadable'); mkdirSync(unreadable, { recursive: true }); writeFileSync(join(unreadable, 'README.md'), 'not a git repo\n')
 
+  // Busy: its own origin and clone, 52 ahead and 1 behind, with the origin remote-tracking reflog removed so its update time
+  // is not recorded ([L9], [P33]). One ahead commit names a run (`ship-001`).
+  const busyOrigin = join(base, 'busy-origin.git'); initRepo(busyOrigin, true)
+  const busySeed = join(base, 'busy-seed'); git(base, ['clone', busyOrigin, 'busy-seed'])
+  commit(busySeed, 'busy base'); git(busySeed, ['push', 'origin', 'main'])
+  const busy = join(base, 'busy'); git(base, ['clone', busyOrigin, 'busy'])
+  commit(busySeed, 'busy origin ahead'); git(busySeed, ['push', 'origin', 'main'])
+  git(busy, ['fetch', 'origin'])
+  for (let i = 0; i < 52; i++) commit(busy, i === 0 ? 'Workflow ship-001: integrate' : `Busy local change ${i}`)
+  git(busy, ['remote', 'set-url', 'origin', 'https://github.com/acme/busy.git'])
+  rmSync(join(busy, '.git', 'logs', 'refs', 'remotes', 'origin', 'main'), { force: true })
+
+  // Trio's unlistable workflow ([P34]): its `runs_root` is a regular file, so the server cannot list it and reports a
+  // workflow-level error (not a chmod 000 directory, which a root-run suite would read).
+  const trioLockedRuns = join(base, 'runs', DISPATCH_TRIO, DISPATCH_TRIO_LOCKED)
+  mkdirSync(join(base, 'runs', DISPATCH_TRIO), { recursive: true }); writeFileSync(trioLockedRuns, 'not a directory\n')
+
   // Seed each project's runs so the real server lists them with the states the worker-phase fixtures express.
   writeDispatchRun(runsRoot(DISPATCH_WIDGETS, 'ui-polish'), 'ui-polish-001', '2025-01-02T00:00:00Z', { kind: 'integrated', integratedSha: landedSha })
   writeDispatchRun(runsRoot(DISPATCH_WIDGETS, 'ui-polish'), 'ui-polish-002', '2025-01-01T00:00:00Z', { kind: 'failed', attempt: 3 })
+  // The second integrated run landed on local main only (its sha is ahead of origin): on_default true, on_origin false ([P25]).
+  writeDispatchRun(runsRoot(DISPATCH_WIDGETS, 'ui-polish'), 'ui-polish-003', '2025-01-03T00:00:00Z', { kind: 'integrated', integratedSha: localOnlySha })
+  writeDispatchRun(runsRoot(DISPATCH_BUSY, 'ship'), 'ship-001', '2025-01-01T09:00:00Z', { kind: 'awaiting' })
+  writeDispatchRun(runsRoot(DISPATCH_BUSY, 'ship'), 'ship-002', '2025-01-02T09:00:00Z', { kind: 'running' })
   // The widgets `broken` feature: one run whose plan.json is missing, so the server reports it as an unreadable run.
   writeDispatchRun(runsRoot(DISPATCH_WIDGETS, 'broken'), 'broken-001', '2025-01-01T00:00:00Z', { kind: 'unreadable' })
   writeDispatchRun(runsRoot(DISPATCH_LOCAL, 'sync'), 'sync-001', '2025-01-01T09:00:00Z', { kind: 'awaiting' })
@@ -428,14 +550,21 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
     'acme/widgets': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 3, open_issues: 3, prs: prList('acme/widgets'), issues: issueList('acme/widgets') },
     'acme/trio': { read_at: READ_AT, visibility: 'PRIVATE', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 2, open_issues: 3, prs: prList('acme/trio'), issues: issueList('acme/trio') },
     'acme/noorigin': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [] },
+    'acme/busy': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [] },
   }
+  // Trio lists its three readable workflows plus the unlistable one, whose `runs_root` is a regular file ([P34], V18).
+  const trioWorkflows = [
+    ...workflowsFor(DISPATCH_TRIO, ['alpha-feature', 'beta-feature', 'gamma-feature']),
+    { workflow_id: DISPATCH_TRIO_LOCKED, runs_root: trioLockedRuns, definition: { name: 'Feature implementation', nodes } },
+  ]
   return {
     projects: [
       { project_id: DISPATCH_LOCAL, name: 'Local only', repository: localonly, workflows: workflowsFor(DISPATCH_LOCAL, ['sync']) },
       { project_id: DISPATCH_WIDGETS, name: 'Widgets', repository: widgets, workflows: workflowsFor(DISPATCH_WIDGETS, ['ui-polish', 'broken']) },
       { project_id: DISPATCH_WIDGETS_WT, name: 'Widgets worktree', repository: worktree, workflows: workflowsFor(DISPATCH_WIDGETS_WT, ['experiment']) },
-      { project_id: DISPATCH_TRIO, name: 'Trio', repository: trio, workflows: workflowsFor(DISPATCH_TRIO, ['alpha-feature', 'beta-feature', 'gamma-feature']) },
+      { project_id: DISPATCH_TRIO, name: 'Trio', repository: trio, workflows: trioWorkflows },
       { project_id: DISPATCH_NOORIGIN, name: 'No origin', repository: noorigin, workflows: workflowsFor(DISPATCH_NOORIGIN, ['main']) },
+      { project_id: DISPATCH_BUSY, name: 'Busy', repository: busy, workflows: workflowsFor(DISPATCH_BUSY, ['ship']) },
       { project_id: DISPATCH_UNREADABLE, name: 'Unreadable', repository: unreadable, workflows: workflowsFor(DISPATCH_UNREADABLE, ['x']) },
     ],
     githubFixture: { viewer_login: VIEWER_LOGIN, repos },
