@@ -10,16 +10,25 @@ import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { projectPathname, projectsPathname, runPathname, workflowPathname, type ProjectsRoute } from './routes.ts'
+import { projectPathname, projectsPathname, runPathname, triagePathname, workflowPathname, type ProjectsRoute } from './routes.ts'
 import { RunRow } from './RunRow.tsx'
-import { ProjectRunGroups, RunsHome } from './RunsHome.tsx'
+import { RunsHome } from './RunsHome.tsx'
+import { fetchDispatchOverview } from './dispatch/client.ts'
+import { fetchProjectSteps } from './dispatch/client.ts'
+import { Rail, type RailRow } from './dispatch/Rail.tsx'
+import { ProjectsPage, type CardData } from './dispatch/ProjectsPage.tsx'
+import { ProjectPage } from './dispatch/ProjectPage.tsx'
+import { projectRunInfo } from './dispatch/projectModel.ts'
+import { railBadge, railOrder, type RailInfo } from './dispatch/derive.ts'
+import { dateOnly } from './dispatch/format.ts'
+import './dispatch/dispatch.css'
 import { RunView } from './RunView.tsx'
 import { OVERRIDE_LABEL, shortRevision, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
-import { stateTone, toneClass } from './tone.ts'
+import { stateTone, toneClass, TONE_LABEL } from './tone.ts'
 import { Chip, Section } from './ui/index.tsx'
-import { TimeReferenceContext, useNow } from './useNow.ts'
+import { TimeReferenceContext, useNow, useTimeZone } from './useNow.ts'
 import { usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
@@ -42,7 +51,7 @@ type Props = {
  * is ever substituted from fixtures.
  */
 export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
-  const projectId = route && route.level !== 'projects' ? route.projectId : null
+  const projectId = route && route.level !== 'projects' && route.level !== 'triage' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
   const nodeId = route && route.level === 'run' ? route.nodeId : null
@@ -74,20 +83,70 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // The lists (docs/PRD_VIEWER_UX.md 4.1) read run lists only, never a run detail, and re-read them every 15 s. Runs home
   // reads every project's workflows and each workflow's run pages back to the Recent cutoff; the project page reads the
   // first page of each of its workflows.
-  const listClock = useNow(route?.level === 'projects' || route?.level === 'project' || route?.level === 'workflow', LISTS_POLL_MS)
+  // The rail and the Projects cards show state for every project; it is loaded whenever the rail is shown (the Projects page,
+  // Triage, the project page and the workflow page), not only on the Projects root ([D6], [O2]).
+  const railLevel = route?.level === 'projects' || route?.level === 'triage' || route?.level === 'project' || route?.level === 'workflow'
+  const [zone] = useTimeZone()
+  const listClock = useNow(railLevel, LISTS_POLL_MS)
   const projectsData = projects.status === 'ready' ? projects.data : null
-  const homePoll = usePoll(route?.level === 'projects', LISTS_POLL_MS)
+  const homePoll = usePoll(railLevel, LISTS_POLL_MS)
   const loadHome = useCallback((signal: AbortSignal) => {
     const cutoff = Date.now() - RECENT_WINDOW_MS
     return fetchRegistryRuns(projectsData ?? [], (runs, cursor) => readsNextPage(runs, cursor, cutoff), signal)
   }, [projectsData])
-  const homeKey = route?.level === 'projects' && projectsData !== null ? `home:${projectsData.map(project => project.project_id).join('\u0000')}` : null
+  const homeKey = railLevel && projectsData !== null ? `home:${projectsData.map(project => project.project_id).join('\u0000')}` : null
   const { state: homeRuns, meta: homeMeta } = useResource(homeKey, loadHome, refreshToken, homePoll)
+  // The dispatch overview (git and GitHub per project) for the rail badges, the cards and the project page; polled at the list rate.
+  const overviewPoll = usePoll(railLevel, LISTS_POLL_MS)
+  const { state: overview, meta: overviewMeta } = useResource(railLevel ? 'dispatch-overview' : null, fetchDispatchOverview, refreshToken, overviewPoll)
+  const overviewData = overview.status === 'ready' ? overview.data : null
+  // The project page's step chart, one read per project.
+  const stepsPoll = usePoll(route?.level === 'project', LISTS_POLL_MS)
+  const loadSteps = useCallback((signal: AbortSignal) => fetchProjectSteps(projectId!, signal), [projectId])
+  const { state: projectSteps } = useResource(route?.level === 'project' && projectId !== null ? `steps:${projectId}` : null, loadSteps, refreshToken, stepsPoll)
+  const projectStepsData = projectSteps.status === 'ready' ? projectSteps.data : null
   const workflowsData = workflows.status === 'ready' ? workflows.data : null
   const projectRunsPoll = usePoll(route?.level === 'project', LISTS_POLL_MS)
   const loadProjectRuns = useCallback((signal: AbortSignal) => fetchWorkflowRuns(projectId!, workflowsData ?? [], () => false, signal), [projectId, workflowsData])
   const projectRunsKey = route?.level === 'project' && workflowsData !== null ? `project-runs:${projectId}:${workflowsData.map(workflow => workflow.workflow_id).join('\u0000')}` : null
   const { state: projectRuns, meta: projectRunsMeta } = useResource(projectRunsKey, loadProjectRuns, refreshToken, projectRunsPoll)
+
+  // The rail rows and the Projects cards: every project's run state (from the registry runs) joined with the dispatch
+  // overview's git and GitHub, ordered needs-you, running, readable, unreadable, then by last activity ([D6]).
+  const homeRunsData = homeRuns.status === 'ready' ? homeRuns.data : null
+  const overviewMap = useMemo(() => new Map((overviewData?.projects ?? []).map(entry => [entry.project_id, entry])), [overviewData])
+  const dispatchProjects = useMemo(() => {
+    if (projectsData === null) return []
+    const runsByProject = new Map((homeRunsData ?? []).map(entry => [entry.project.project_id, entry]))
+    return projectsData.map(project => {
+      const info = projectRunInfo(runsByProject.get(project.project_id) ?? null)
+      const dispatch = overviewMap.get(project.project_id) ?? null
+      const git = dispatch?.git ?? null
+      const isPrimary = git !== null && git.clone_primary === project.project_id
+      const unpushed = isPrimary && git?.origin?.compare === 'compared' ? git.origin.ahead : null
+      const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
+        ? projectsData.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
+      const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed }
+      return { project, dispatch, info, primaryName, railInfo, unpushed }
+    })
+  }, [projectsData, homeRunsData, overviewMap])
+  const orderedProjects = useMemo(() => {
+    const byId = new Map(dispatchProjects.map(entry => [entry.project.project_id, entry]))
+    return railOrder(dispatchProjects.map(entry => entry.railInfo)).map(railInfo => byId.get(railInfo.projectId)!).filter(Boolean)
+  }, [dispatchProjects])
+  const railRows: RailRow[] = useMemo(() => orderedProjects.map(entry => ({
+    projectId: entry.project.project_id, name: entry.project.name, tone: entry.info.tone,
+    badge: railBadge(entry.railInfo), repoShort: entry.dispatch?.github.repo ? entry.dispatch.github.repo.split('/')[1] : entry.dispatch?.git.repository_label ?? null,
+    features: entry.info.features, allBad: entry.info.allBad,
+    date: entry.info.lastActivity ? dateOnly(new Date(entry.info.lastActivity).toISOString(), zone) : null,
+    worst: TONE_LABEL[entry.info.tone],
+  })), [orderedProjects, zone])
+  const triageBadge = useMemo(() => ({
+    waits: dispatchProjects.reduce((sum, entry) => sum + entry.info.waits, 0),
+    paused: dispatchProjects.reduce((sum, entry) => sum + entry.info.paused, 0),
+  }), [dispatchProjects])
+  const cards: CardData[] = useMemo(() => orderedProjects.map(entry => ({ project: entry.project, dispatch: entry.dispatch, info: entry.info, primaryName: entry.primaryName })), [orderedProjects])
+  const repositoryCount = useMemo(() => new Set((overviewData?.projects ?? []).map(entry => entry.git.clone_id ?? entry.project_id)).size || projectsData?.length || 0, [overviewData, projectsData])
 
   // What the run page reads beyond its export (B2, B3): the served activity and run directory, and the controller reading of
   // every poll, so the live chip and the Now banner believe `not_running` only once it has held for 15 s (6.3).
@@ -106,7 +165,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   }), [detailData, controllerReadings])
 
   // A Refresh re-reads every shown level in the background; the header button stays busy until they have all settled.
-  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing || homeMeta.refreshing || projectRunsMeta.refreshing
+  const refreshing = projectsMeta.refreshing || workflowsMeta.refreshing || runsMeta.refreshing || detailMeta.refreshing || homeMeta.refreshing || projectRunsMeta.refreshing || overviewMeta.refreshing
   useEffect(() => { onRefreshingChange(refreshing) }, [refreshing, onRefreshingChange])
   useEffect(() => () => onRefreshingChange(false), [onRefreshingChange])
   // A failed Refresh keeps the page as it was, so it says so until a later load of that level succeeds.
@@ -172,6 +231,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     let message: string | null = null
     if (route === null) message = 'This Projects link is invalid.'
     else if (route.level === 'projects' && projects.status === 'ready') message = `Loaded ${projects.data.length} ${projects.data.length === 1 ? 'project' : 'projects'}.`
+    else if (route.level === 'triage' && homeRuns.status === 'ready') message = 'Loaded Triage.'
     else if (route.level === 'project' && workflows.status === 'ready') message = `Loaded ${workflows.data.length} ${workflows.data.length === 1 ? 'workflow' : 'workflows'} for ${projectName ?? route.projectId}.`
     else if (route.level === 'workflow' && firstPage.status === 'ready') message = `Loaded ${firstPage.data.runs.length} ${firstPage.data.runs.length === 1 ? 'run' : 'runs'} for ${workflowName ?? route.workflowId}.`
     else if (route.level === 'run' && detail.status === 'ready') message = `Loaded run ${route.runId}: ${detail.data.summary.status.replace('_', ' ')}.`
@@ -188,10 +248,11 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     if (message === announced.current) return
     announced.current = message
     onAnnounce(message)
-  }, [route, projects, workflows, firstPage, detail, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
+  }, [route, projects, workflows, firstPage, detail, homeRuns, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
 
   // The Projects trail starts at Projects (the roots strip leads Home) and ends at the node a node page shows.
   const crumbs: PathCrumb[] = [{ id: 'projects', label: 'Projects', pathname: projectsPathname() }]
+  if (route?.level === 'triage') crumbs.push({ id: 'triage', label: 'Triage', pathname: triagePathname() })
   if (projectId !== null) crumbs.push({ id: `project:${projectId}`, label: projectName ?? projectId, pathname: projectPathname(projectId) })
   if (projectId !== null && workflowId !== null) crumbs.push({ id: `workflow:${workflowId}`, label: workflowName ?? workflowId, pathname: workflowPathname(projectId, workflowId) })
   if (projectId !== null && workflowId !== null && runId !== null) crumbs.push({ id: `run:${runId}`, label: runId, pathname: runPathname(projectId, workflowId, runId) })
@@ -203,10 +264,10 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
 
   const notFound = (error: unknown) => error instanceof ProjectsApiError && error.notFound
 
-  // The read-only note is said once, on the Projects root (docs/PRD_VIEWER_UX.md 3.2); each command block repeats it in one line.
-  const info = route?.level === 'projects' ? 'Read-only: runs are started, answered and approved in the workflow CLI, never from this page.' : null
-
-  const homeShown = route?.level === 'projects' && projects.status === 'ready' && projects.data.length > 0
+  // The read-only note is said once, on Triage (the former Runs home, docs/PRD_VIEWER_UX.md 3.2); each command block repeats it in one line.
+  const info = route?.level === 'triage' ? 'Read-only: runs are started, answered and approved in the workflow CLI, never from this page.' : null
+  // The rail carries the read-only note at its foot on every rail page, so the standalone note is never shown alongside it.
+  const homeShown = railLevel
   const busy = projects.status === 'loading' || workflows.status === 'loading' || firstPage.status === 'loading' || detail.status === 'loading'
 
   let content: React.ReactNode
@@ -218,6 +279,16 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       </div>
     )
   } else if (route.level === 'projects') {
+    if (projects.status === 'loading' || projects.status === 'idle') content = <LoadingPanel>Loading registered projects…</LoadingPanel>
+    else if (projects.status === 'error') content = <ErrorPanel error={projects.error} what="The project list" onRetry={reloadProjects} />
+    else if (projects.data.length === 0) {
+      content = (
+        <EmptyPanel title="No projects are registered." testId="empty-projects">
+          <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
+        </EmptyPanel>
+      )
+    } else content = <ProjectsPage cards={cards} overview={overviewData} repositoryCount={repositoryCount} now={listClock} onNavigate={onNavigate} />
+  } else if (route.level === 'triage') {
     if (projects.status === 'loading' || projects.status === 'idle') content = <LoadingPanel>Loading registered projects…</LoadingPanel>
     else if (projects.status === 'error') content = <ErrorPanel error={projects.error} what="The project list" onRetry={reloadProjects} />
     else if (projects.data.length === 0) {
@@ -244,11 +315,12 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
         </EmptyPanel>
       )
     } else {
+      const projectEntry = projectsData?.find(p => p.project_id === route.projectId) ?? { project_id: route.projectId, name: projectName ?? route.projectId }
       content = (
-        <Section headingId="workflows-title" className="project-features" title={`${projectName}: features`}
-          sub={`${workflows.data.length} ${workflows.data.length === 1 ? 'feature' : 'features'}`}>
-          <ProjectRunGroups projectId={route.projectId} workflows={workflows.data} runs={projectRuns} now={listClock} onNavigate={onNavigate} />
-        </Section>
+        <ProjectPage project={projectEntry} workflows={workflows.data}
+          projectRuns={projectRuns.status === 'ready' ? projectRuns.data : []}
+          steps={projectStepsData} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
+          allProjects={projectsData ?? []} now={listClock} zone={zone} onNavigate={onNavigate} />
       )
     }
   } else if (route.level === 'workflow') {
@@ -399,7 +471,13 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             </p>
           </div>
         )}
-        {content}
+        {railLevel && route !== null ? (
+          <div className="dispatch-shell">
+            <Rail rows={railRows} projectCount={projectsData?.length ?? 0} triage={triageBadge}
+              current={{ kind: route.level as 'projects' | 'triage' | 'project' | 'workflow', projectId: projectId ?? undefined }} onNavigate={onNavigate} />
+            <div className="dispatch-shell-main">{content}</div>
+          </div>
+        ) : content}
       </main>
     </>
   )

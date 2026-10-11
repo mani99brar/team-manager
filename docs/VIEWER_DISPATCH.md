@@ -1,0 +1,80 @@
+# The Projects dispatch pages (projects-dispatch-001)
+
+The dispatch slice (docs/PRD_PROJECTS_DISPATCH.md, `features/projects-dispatch/decisions.md`): a Projects page of cards, a
+projects-only rail, Triage (the former Runs home), and a dedicated project page with a step chart, a GitHub column and a
+reading pane. The viewer code lives in `src/projects/dispatch/`; the look is the Signal Box world (`src/projects/theme.css`,
+`DESIGN.md`), styled by `src/projects/dispatch/dispatch.css`. This file is the DOM contract the specs read.
+
+## Routes (`src/projects/routes.ts`)
+
+- `/projects` — the Projects page (`ProjectsPage`), the landing page.
+- `/projects/-/triage` — Triage (`RunsHome`, the former Runs home). `-` can never be a project id (`PROJECT_ID_PATTERN`), so
+  the path never collides with a project ([D1]). `triagePathname()` builds it; `parseProjectsPathname` returns `{ level: 'triage' }`.
+- `/projects/<p>` — the project page (`ProjectPage`).
+- `/projects/<p>/workflows/<w>` — the feature (workflow) page, unchanged; it keeps `run-list`, `current-definition`, the
+  run-history strip, `feature-lanes`/`feature-reviews`/`feature-reviewers`.
+
+## The rail (`src/projects/dispatch/Rail.tsx`)
+
+Appears on `/projects`, Triage, the project page and the workflow page (`railLevel` in `ProjectsView`). Run pages have no rail.
+
+- `aside[data-testid="dispatch-rail"]` with `a[data-testid="rail-all-projects"]` and `a[data-testid="rail-triage"]` at the top,
+  then `ul[data-testid="dispatch-rail-list"]` of `a.dispatch-rail-row[data-project-id]` in rail order ([D6]: needs you, running,
+  readable, unreadable, then by last activity). Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
+  "N paused" / "N running" / "N unpushed" on the clone's primary only) and a sub-line (repository · "N features" or "cannot be
+  read" · date). The current page's row has `aria-current="page"`.
+- At 999px and below the rail is hidden and `nav[data-testid="dispatch-chips"]` (a `.dispatch-chip` row, `overflow-x: auto`)
+  shows instead, starting "All projects", "Triage · N".
+
+## The Projects page (`src/projects/dispatch/ProjectsPage.tsx`)
+
+- `section[data-testid="dispatch-projects"]`, heading `h1` "Projects", `p[data-testid="dispatch-projects-meta"]` ("N projects in
+  M repositories · runs read <time> · GitHub read <time>").
+- `ul[data-testid="dispatch-cards"]` of `a.dispatch-card[data-project-id]`, each one link to `/projects/<p>`: the state word
+  (`.dispatch-card-word`, e.g. "1 of 3 features failed last"), the repository and `.dispatch-vis` chip for a read GitHub
+  project, "on <checkout> · <sync>" (`.dispatch-card-line`), the non-zero run counts, the latest run, and the footer with open
+  PR/issue counts or "GitHub not read: <reason>".
+
+## The project page (`src/projects/dispatch/ProjectPage.tsx`)
+
+- `div[data-testid="dispatch-project"]` (adds `.has-pane` while a run is selected).
+- Header `header[data-testid="dispatch-project-header"]`: `h1` name, the `https://github.com/<owner>/<name>` link and `.dispatch-vis`
+  chip, `p.dispatch-meta` with `span[data-testid="dispatch-sync"]` (the sync phrase + "as of origin/<d> updated here <time>"),
+  `p[data-testid="dispatch-figures"]`, the jump buttons ("Runs by feature", "Local and GitHub", "Pull requests · N open", "Issues
+  · N open") that move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, and a filter box `input#dispatch-filter`
+  (`/` focuses it, Escape clears it).
+- **Step chart** (`src/projects/dispatch/StepChart.tsx`), `div[data-testid="dispatch-chart"]`:
+  - `div[data-testid="dispatch-axis"]` — the sticky axis of the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate,
+    Review, Approval, Integrate).
+  - `ul[data-testid="dispatch-features"]` of `li.dispatch-feature[data-workflow-id]`, each with `a.lists-group-head.ui-card.tone-<tone>`
+    (**[L1]: this hook keeps `accepted.spec.ts` passing — the header carries the feature's tone class, `tone-(override|fail|idle)`
+    and never `tone-ok` when the latest run was accepted**; the tone is the latest registry run's). The header lists landed shas
+    and a chain of run chips.
+  - Run rows: `button.dispatch-run[data-run-id]`, `aria-selected`; the stop glyph (`.dispatch-stop-glyph`) sits in the stop phase
+    cell (`.dispatch-cell`, one per phase), lane dots (`.dispatch-dot`), `×N` attempts (`.dispatch-att`). A multi-lane phase cell
+    carries `.multi` and collapses to one mark at a chart width of 440px or less (container query on `#dispatch-runs-section`).
+  - "ended here" counts: `div[data-testid="dispatch-ends"]`. A feature that cannot be read shows a `.dispatch-badrow` with the
+    recorded error and `python -m workflow status <run-id> --by operator` (the literal placeholder for a whole-workflow failure).
+- **GitHub column** (`src/projects/dispatch/GithubColumn.tsx`), `aside[data-testid="dispatch-github"]`: four cards —
+  `#g-local`/`[data-testid="dispatch-gh-local"]` (Local and GitHub, with `[data-testid="dispatch-ahead-naming"]` and
+  `[data-testid="dispatch-landings"]`), `#g-prs`/`[data-testid="dispatch-gh-prs"]`, `#g-iss`/`[data-testid="dispatch-gh-issues"]`,
+  and `[data-testid="dispatch-gh-others"]`. When GitHub was not read each card says "GitHub not read: <reason>".
+- **Reading pane** (`src/projects/dispatch/ReadingPane.tsx`), `aside[data-testid="dispatch-pane"][data-run-id]`, docks only while
+  a run is selected: the lead sentence (`[data-testid="dispatch-pane-lead"]`), facts, `[data-testid="dispatch-pane-steps"]`, a
+  copyable command (`[data-testid="dispatch-pane-command"]`/`dispatch-pane-copy`), and `a[data-testid="dispatch-open-run"]`.
+  `[data-testid="dispatch-pane-close"]` and Escape undock it; j/k move the selection. On a phone it fills the screen with
+  `[data-testid="dispatch-pane-queue"]`/`dispatch-pane-next`.
+
+## Shared ids kept
+
+`projects-workspace`, and on Triage the Runs-home ids are unchanged: `needs-you`, `running-runs`, `today-runs`, `paused-runs`,
+`recent-runs`, `run-list` (feature page), `projects-info` (the read-only note, now at the foot of the Triage content),
+`lists-errors`. `data-workflow-id` and `a.lists-group-head` are reused on the step chart ([L1]).
+
+## Data
+
+The pages read the existing registry API (`fetchProjects`, `fetchRegistryRuns`, `fetchWorkflowRuns`) for run state and the new
+dispatch routes (`src/projects/dispatch/client.ts`, types in `src/projects/dispatch/types.ts`, Appendix A) for git and GitHub
+and the step chart. The worker phase mocks `/api/dispatch/**` in `installProjectMocks` (`mock.ts`) from `fixtures/dispatch.ts`,
+so every spec gets them. The candidate phase runs against the real server (the `server` lane) with the seeded repositories and
+`MD_MANAGER_GITHUB_FIXTURE`.

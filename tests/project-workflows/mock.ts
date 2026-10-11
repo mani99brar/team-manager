@@ -7,10 +7,11 @@
  * none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, attackResults, panelResults, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
+import { artifactFiles, attackResults, panelResults, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
 import { CONTROLS_TOKEN, controlsFor } from './fixtures/controls.ts'
+import { dispatchOverview, dispatchSteps } from './fixtures/dispatch.ts'
 import type { ControlId, ControlRecord } from '../../src/projects/controls/types.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -18,6 +19,25 @@ const notFound = (message: string, code = 'not_found') => json({ error: { code, 
 
 export function isProjectsRequest(url: URL): boolean {
   return url.pathname === '/api/projects' || url.pathname.startsWith('/api/projects/')
+}
+
+export function isDispatchRequest(url: URL): boolean {
+  return url.pathname === '/api/dispatch/projects' || url.pathname.startsWith('/api/dispatch/projects/')
+}
+
+/**
+ * Resolves a mocked dispatch request (docs/PRD_PROJECTS_DISPATCH.md Appendix A) in the worker phase, from `fixtures/dispatch.ts`.
+ * The overview covers every registered project, in registry order; a project's steps are served per id. These live here (not in
+ * `dispatch.spec.ts`) so every spec gets them and no spec's project page answers 404 for `/api/dispatch/**` ([design challenge note 1]).
+ */
+export function mockDispatchResponse(url: URL): { status: number; contentType: string; body: string | Buffer } {
+  const segments = url.pathname.split('/').filter(Boolean).slice(2).map(decodeURIComponent) // after /api/dispatch
+  if (segments.length === 1 && segments[0] === 'projects') return json(dispatchOverview(projectList.projects.map(project => project.project_id)))
+  if (segments.length === 3 && segments[0] === 'projects' && segments[2] === 'steps') {
+    const steps = dispatchSteps(segments[1])
+    return steps ? json(steps) : notFound(`Project "${segments[1]}" is not registered.`, 'NOT_FOUND')
+  }
+  return notFound('Unknown resource.', 'NOT_FOUND')
 }
 
 /** Resolves one mocked projects API request; returns null for unknown paths under the prefix (404). */
@@ -32,11 +52,12 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (!workflows.workflows.some(workflow => workflow.workflow_id === workflowId)) return notFound(`Workflow "${workflowId}" does not belong to project "${projectId}".`)
   if (runsLiteral !== 'runs') return notFound('Unknown resource.')
   if (runId === undefined) {
-    // Runs are listed per workflow (empty-flow and any other registered workflow without runs answer an empty page).
-    return json(projectId === PROJECT.project_id ? runLists[workflowId] ?? { runs: [], next_cursor: null } : { runs: [], next_cursor: null })
+    // Runs are listed per workflow (empty-flow and any other registered workflow without runs answer an empty page). A workflow
+    // from any registered project is served, so the dispatch fixtures' extra projects list their runs too ([P16]).
+    return json(runLists[workflowId] ?? { runs: [], next_cursor: null })
   }
-  const candidate = projectId === PROJECT.project_id ? runDetails[runId] : undefined
-  const detail = candidate && candidate.summary.workflow_id === workflowId ? candidate : undefined
+  const candidate = runDetails[runId]
+  const detail = candidate && candidate.summary.workflow_id === workflowId && candidate.summary.project_id === projectId ? candidate : undefined
   if (!detail) return notFound(`Run "${runId}" was not found in workflow "${workflowId}".`)
   if (rest.length === 0) return json(detail)
   const [kind, ...tail] = rest
@@ -85,6 +106,14 @@ export async function installProjectMocks(page: Page): Promise<void> {
       return
     }
     await route.fulfill(mockResponse(new URL(request.url())))
+  })
+  await page.route(url => isDispatchRequest(url), async (route: Route) => {
+    const request = route.request()
+    if (request.method() !== 'GET') {
+      await route.fulfill(json({ error: { code: 'method_not_allowed', message: 'This surface is read-only.' } }, 405))
+      return
+    }
+    await route.fulfill(mockDispatchResponse(new URL(request.url())))
   })
 }
 

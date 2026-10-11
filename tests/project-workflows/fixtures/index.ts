@@ -13,9 +13,10 @@
 import type { AttackResult, PanelResults, ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
-  artifactFiles, attackResults, panelResults, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
+  artifactFiles, attackResults, panelResults, projectList, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
   type ArtifactFile, type DefinitionNode,
 } from '../fixtures.ts'
+import { DISPATCH_PROJECTS, DISPATCH_RUN_LISTS, DISPATCH_WORKFLOW_LISTS } from './dispatch.ts'
 import type { SeedContext } from '../seed.ts'
 import { uxAccepted } from './ux-accepted.ts'
 import { uxAttack } from './ux-attack.ts'
@@ -102,6 +103,12 @@ function mergePayloads(modules: readonly UxFixtureModule[]) {
 }
 
 mergePayloads(UX_FIXTURE_MODULES)
+
+// The dispatch feature adds its own registry projects (not just workflows of PROJECT), with their own repositories ([P16]).
+// The worker-phase mocks serve these and the dispatch overview/steps from them; `dispatch-unreadable` has no workflow list.
+projectList.projects.push(...DISPATCH_PROJECTS)
+Object.assign(workflowLists, DISPATCH_WORKFLOW_LISTS)
+Object.assign(runLists, DISPATCH_RUN_LISTS)
 
 /** Seeds every module's runs for the candidate phase; returns what to add to the registry, in module order. */
 export function seedUxFixtures(context: SeedContext): Required<UxSeed> {

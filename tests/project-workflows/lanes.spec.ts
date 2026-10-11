@@ -12,7 +12,6 @@ import {
   GRAPH_NODES,
   LANES_FEATURE_NAME,
   LANES_WORKFLOW_ID,
-  LANES_WORKFLOW_NAME,
   ONE_LANE_NODES,
   PINNED_LABEL,
   PROJECT,
@@ -23,7 +22,6 @@ import {
   THREE_LANES,
   THREE_LANE_NODES,
   WORKFLOW_ID,
-  WORKFLOW_NAME,
   reviewFindings,
 } from './fixtures.ts'
 import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, workflowUrl } from './support.ts'
@@ -188,7 +186,9 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   await expect(page.getByTestId('run-list').locator(`[data-run-id="${RUN_THREE_LANES}"]`)).toHaveCount(0)
   await expect(page.getByTestId('current-definition')).toContainText(`${GRAPH_NODES.length} nodes`)
   await page.goto(`/projects/${PROJECT.project_id}`)
-  await expect(page.getByTestId('workflows-list').getByRole('link')).toContainText([WORKFLOW_NAME, LANES_WORKFLOW_NAME])
+  // The step chart groups both features; each is an li[data-workflow-id] whose header links to the feature.
+  await expect(page.locator(`li[data-workflow-id="${WORKFLOW_ID}"] a.lists-group-head`)).toHaveCount(1)
+  await expect(page.locator(`li[data-workflow-id="${LANES_WORKFLOW_ID}"] a.lists-group-head`)).toHaveCount(1)
 
   // The pinned two-lane graph: the same nine nodes with their stored labels, no third lane anywhere.
   await page.goto(runUrl(RUN_SUCCEEDED))

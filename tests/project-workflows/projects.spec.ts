@@ -62,9 +62,9 @@ test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects op
   await expect(page).toHaveURL(/\/projects$/)
   await expect(currentCrumb(page)).toHaveText('Projects')
   await expect(rootsNav(page).getByRole('link', { name: 'Projects' })).toHaveAttribute('aria-current', 'page')
-  const list = page.getByTestId('projects-list')
-  await expect(list.getByRole('link')).toContainText([PROJECT.name, EMPTY_PROJECT.name])
-  await expect(page.getByTestId('projects-info')).toContainText('Read-only')
+  const list = page.getByTestId('dispatch-cards')
+  await expect(list).toContainText(PROJECT.name)
+  await expect(list).toContainText(EMPTY_PROJECT.name)
   await expect(page.getByRole('toolbar', { name: 'File operations' })).toHaveCount(0)
   await expect(page.locator('.graph-canvas')).toHaveCount(0)
   await expectNoExecutionControls(page)
@@ -84,7 +84,7 @@ test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects op
   await expect(currentCrumb(page)).toHaveText('Pi')
   await page.goBack()
   await expect(currentCrumb(page)).toHaveText('Projects')
-  await expect(list.getByRole('link')).toHaveCount(2)
+  await expect(list).toContainText(PROJECT.name)
   await page.goForward()
   await expect(currentCrumb(page)).toHaveText('Pi')
   await expect(node(page, 'Pi')).toBeVisible()
@@ -115,11 +115,12 @@ test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects op
 
 test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspect the pinned graph (${phase})`, async ({ page }, testInfo) => {
   await page.goto(projectsUrl)
-  await page.getByTestId('projects-list').getByRole('link', { name: PROJECT.name }).click()
+  await page.locator(`.dispatch-card[data-project-id="${PROJECT.project_id}"]`).click()
   await expect(currentCrumb(page)).toHaveText(PROJECT.name)
-  const workflows = page.getByTestId('workflows-list')
-  await expect(workflows.getByRole('link')).toContainText([WORKFLOW_NAME, EMPTY_WORKFLOW_NAME])
-  await workflows.getByRole('link', { name: new RegExp(`^${WORKFLOW_NAME}`) }).click()
+  // The step chart groups the project's features; each header links to the feature's runs.
+  await expect(page.locator(`li[data-workflow-id="${WORKFLOW_ID}"]`)).toHaveCount(1)
+  await expect(page.locator(`li[data-workflow-id="${EMPTY_WORKFLOW_ID}"]`)).toHaveCount(1)
+  await page.locator(`li[data-workflow-id="${WORKFLOW_ID}"] a.lists-group-head`).click()
   await expect(page).toHaveURL(new RegExp(`${workflowUrl(PROJECT.project_id, WORKFLOW_ID)}$`))
   await expect(currentCrumb(page)).toHaveText(WORKFLOW_NAME)
 
@@ -264,7 +265,7 @@ test(`[scenario:empty-states] Distinguish no workflows from no runs (${phase})`,
   await expect(currentCrumb(page)).toHaveText(EMPTY_PROJECT.name)
   const emptyWorkflows = page.getByTestId('empty-workflows')
   await expect(emptyWorkflows).toContainText(`${EMPTY_PROJECT.name} has no workflow definitions`)
-  await expect(page.getByTestId('workflows-list')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-chart')).toHaveCount(0)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
   const noWorkflowsText = await emptyWorkflows.innerText()
 
@@ -279,9 +280,9 @@ test(`[scenario:empty-states] Distinguish no workflows from no runs (${phase})`,
   expect(await emptyRuns.innerText()).not.toEqual(noWorkflowsText)
   await attach(page, testInfo, 'empty-states')
 
-  // The populated project and workflow show lists, never an empty state.
+  // The populated project shows the step chart, never an empty state.
   await page.goto(projectUrl(PROJECT.project_id))
-  await expect(page.getByTestId('workflows-list')).toBeVisible()
+  await expect(page.getByTestId('dispatch-chart')).toBeVisible()
   await expect(page.getByTestId('empty-workflows')).toHaveCount(0)
 })
 
@@ -345,12 +346,12 @@ test(`[scenario:request-errors] Show an actionable API error rather than silentl
   await expect(error).toContainText('registry_unavailable')
   await expect(error).toContainText('HTTP 503')
   await expect(error).toHaveAttribute('data-error-kind', 'http')
-  await expect(page.getByTestId('projects-list')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-cards')).toHaveCount(0)
   await expect(page.getByText(PROJECT.name)).toHaveCount(0)
   await attach(page, testInfo, 'request-errors')
   failProjects = false
   await error.getByRole('button', { name: 'Retry' }).click()
-  await expect(page.getByTestId('projects-list').getByRole('link')).toContainText([PROJECT.name])
+  await expect(page.getByTestId('dispatch-cards')).toContainText(PROJECT.name)
 
   // An unreachable API for the workflows of a project.
   let dropWorkflows = true
@@ -361,10 +362,10 @@ test(`[scenario:request-errors] Show an actionable API error rather than silentl
   await page.goto(projectUrl(PROJECT.project_id))
   await expect(page.getByTestId('projects-error')).toContainText('could not be reached')
   await expect(page.getByTestId('projects-error')).toHaveAttribute('data-error-kind', 'network')
-  await expect(page.getByTestId('workflows-list')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-chart')).toHaveCount(0)
   dropWorkflows = false
   await page.getByTestId('projects-error').getByRole('button', { name: 'Retry' }).click()
-  await expect(page.getByTestId('workflows-list')).toBeVisible()
+  await expect(page.getByTestId('dispatch-chart')).toBeVisible()
 
   // A payload that violates the contract is rejected, not rendered.
   let corruptRuns = true
@@ -501,9 +502,8 @@ test(`[scenario:registry-refresh] A workflow registered while the project page i
     await route.fulfill({ json: body })
   })
   await page.goto(projectUrl(PROJECT.project_id))
-  const list = page.getByTestId('workflows-list')
-  await expect(list).toBeVisible()
-  const fixes = list.locator('.projects-card-title', { hasText: 'Fixes' })
+  await expect(page.getByTestId('dispatch-chart')).toBeVisible()
+  const fixes = page.locator('li[data-workflow-id="fixes"]')
   await expect(fixes).toHaveCount(0)
   registered = true
   await expect(fixes).toBeVisible({ timeout: 15_000 })

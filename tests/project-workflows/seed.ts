@@ -109,6 +109,7 @@ import {
   type RawReviewSection,
 } from './fixtures.ts'
 import { seedUxFixtures } from './fixtures/index.ts'
+import { seedDispatchCandidate } from './fixtures/dispatch.ts'
 import type { WorkerResult } from '../../contracts/workflow/v1.ts'
 
 export type InternalEvent = { sequence: number; time: string; node: string; status: string; message: string }
@@ -285,8 +286,13 @@ export type SeedContext = {
   leakFor: typeof leakFor
 }
 
-/** Seeds registry + runs under `root`; returns the registry path for MD_MANAGER_PROJECTS_CONFIG. */
-export function seedCandidate(root: string): string {
+/**
+ * Seeds registry + runs under `root`; returns the registry path for MD_MANAGER_PROJECTS_CONFIG.
+ * With `options.dispatch`, also creates the dispatch feature's git repositories and appends their projects, and writes the
+ * GitHub fixture to `<root>/github-fixture.json` ([P16], [L2]); `controls-app.ts` calls it without the option, so it seeds no
+ * git repository and never reaches real `gh`.
+ */
+export function seedCandidate(root: string, options: { dispatch?: boolean } = {}): string {
   const repository = join(root, 'repository')
   const runsRoot = join(root, 'runs', WORKFLOW_ID)
   const emptyRunsRoot = join(root, 'runs', EMPTY_WORKFLOW_ID)
@@ -660,6 +666,12 @@ export function seedCandidate(root: string): string {
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },
     ],
+  }
+  // The dispatch feature's own registry projects with their own git repositories, opt-in so controls-app.ts never creates them.
+  if (options.dispatch) {
+    const seed = seedDispatchCandidate(root)
+    registry.projects.push(...(seed.projects as unknown as typeof registry.projects))
+    writeJson(join(root, 'github-fixture.json'), seed.githubFixture)
   }
   const configPath = join(root, 'projects.json')
   writeJson(configPath, registry)
