@@ -6,22 +6,8 @@
   "policy": "policy.json",
   "workers": [
     {
-      "node_id": "server",
-      "task": "server-task.md",
-      "lane_review": {
-        "reviewers": [
-          {
-            "transport": "pi",
-            "model": "openai-codex/gpt-6.1-sol"
-          }
-        ],
-        "rounds": 1,
-        "timeout_minutes": 15
-      }
-    },
-    {
-      "node_id": "viewer",
-      "task": "viewer-task.md",
+      "node_id": "sessions",
+      "task": "sessions-task.md",
       "skills": [
         "impeccable"
       ],
@@ -49,7 +35,7 @@
   ],
   "critique": {
     "lanes": [
-      "viewer"
+      "sessions"
     ],
     "skills": [
       "impeccable"

@@ -18,10 +18,31 @@ From the grill session of 2026-10-11 with the operator.
 - [G3] Projected node ids: `reviewer-<id>` (including `reviewer-critique`), `panel`, `lane-review-<lane>-<n>`. Reviewer and panel nodes depend on what `review` depends on and `review` also depends on them; lane review nodes depend on `verify_<lane>` and nothing depends on them; all are advisory in triage.
 - [G4] The night-shift folder is `MD_MANAGER_NIGHT_SHIFT_DIR` (default `~/.local/state/md-manager-workflows/night-shift`); a record matches a run by `run_id` and by its texts naming this run's directory or none.
 - [G5] The resume command is `cd <dir> && claude --resume <id>` with a `~`-relative working directory, or `claude --resume <id>` with "run it in the session's worktree" when the directory is not under HOME or not recorded.
-- [G6] The viewer lane owns `tests/project-workflows` and `tests/unit` as directories, because the new reviewer nodes change cards that many existing specs count; it may update them only to the new count and cards, never weaker ([O3]).
-- [G7] The viewer mirrors Appendix A in `src/projects/sessions/types.ts` instead of importing the server lane's contract file, so the lanes stay parallel.
+- [G6] The lane owns `tests/project-workflows` and `tests/unit` as directories, because the new reviewer nodes change cards that many existing specs count; it may update them only to the new count and cards, never weaker ([O3]).
+- [G7] Superseded by [P14]: with one lane the pages import `contracts/projects/sessions.ts` directly.
 - [G8] The critique app is `tests/project-workflows/sessions-app.ts`, ready at `/api/projects`.
 - [G9] Herdr pane links and transcripts are out of scope (`terminals.json` goes stale across review rounds) [added, not asked].
+
+## Panel review of the slice (2026-10-11, before launch; decided under [O6])
+
+`/multi-review` of bf4634a..0a47134 (the PRD and the first feature files, with `server/projects.ts`, `server/projectRoutes.ts`, `src/projects/signal/model.ts` and `layout.ts`, `workflow/lane_review.py`, the harness's `mock.ts` and `fixtures/index.ts`, and a shapes-only sample of the real run and night-shift files) by Claude (Fable), GPT (gpt-6-astra) and DeepSeek (v4-pro): 26 findings (16, 9, 1). The P1s were checked against the code and the files on disk; the settlements below are in the PRD and the task.
+
+- [P1] (x2, P1, confirmed) Night-shift records hold `confidence` as a word ("high", "medium", null), have no `decided_at` field, and hold `jev` as `{}`, `false`, `null`, an error object or nothing. Settled: `confidence: string | null`; `decided_at` from the record's `key`, else null; `jev` null for the empty forms, `{error}`, or the pick from `jev.json` (`pick`, `confidence`, `pass_floor`).
+- [P2] (x1, P1, confirmed) Deriving reviewer nodes from per-session files would make the mocked and the real server disagree on the existing fixtures, which write exports without receipt files. Settled: which nodes exist comes from export-visible facts (the export's `review.reviewers` of the latest round, the panels route, the lane-review records); files only add facts.
+- [P3] (x1, P2, confirmed) A `panel.json` beside a pre-1.9.0 export answers `PANELS_NOT_FOUND` (`panel-old` fixture). Settled: the `panel` node exists exactly when the panels route answers.
+- [P4] (x1, P1, confirmed) The resume command's `~`-relative worktree reveals the run directory that `run_dir` hides unless the project is under `viewer.expose_run_dir`. Settled: the `cd ~/…` form only for exposed projects; otherwise `claude --resume <id>` with "run it in the session's worktree".
+- [P5] (x1, P1) An unquoted directory in a copyable shell command. Settled: single-quoted after `~/`; a directory with a quote or control character falls back to the bare form.
+- [P6] (x2, P1, confirmed) `redactPaths` turns `~/…` into `<path>` (`server/projects.ts:131`), so redacting every string destroys the resume command, and it does not catch credentials. Settled: the command is composed after redaction and exempt; every other text also passes a credential filter; errors are their first line, at most 200 characters.
+- [P7] (x1, P2, confirmed) "late" lives in `automatic-review-<id>.json`. Settled: a reviewer source.
+- [P8] (x2, P1, confirmed) Lane-review rounds and repair rounds differ; the record already holds its `repair` number (`lane-review/server/1.json` `repair: 1`). Settled: `fix_round` uses it.
+- [P9] (x1, P1) A lane reviewer's `model` may be null in the record. Settled: nullable in Appendix A.
+- [P10] (x2, P1) The engine records one combined no-fix reason ("rounds used up, fix loop off or repair cap"), and none for a clean or failed round. Settled: the page shows the recorded words, "no P0/P1", or "the review failed: <first line>"; the scenario asserts the combined words.
+- [P11] (x1, P2) Summing subscription-covered pi estimates with metered Claude dollars gives a figure nobody pays. Settled: `totals.metered_usd` and `totals.covered_usd` apart, with `cost_kind` per row.
+- [P12] (x1, P2) Sidecar passes and attack angles are sessions too (`workflow/costs.py` `ROLES`). Settled: roles `sidecar` and `attack`.
+- [P13] (x2, P1) A night-shift record without a directory could be shown on another project's run with the same id. Settled: a named run directory must resolve (realpath) to this run's; with no directory named, only when the run id is unique in the registry; else omitted.
+- [P14] (x2, P1, confirmed; changes [O2]'s "two lanes" and [O5]'s "one-line registrations only") A viewer lane in parallel with the server lane cannot run the candidate phase of its specs (its worktree has no sessions route and no projected nodes), so it would first meet the real server at the candidate gate, which is how projects-dispatch-001 spent all three repairs; and the harness needs a sessions hook in `mock.ts`, not one line. Settled under [O6]: one full-stack lane `sessions` (`sessions-task.md`) that builds the server first and runs both phases itself; small, explicit edits to `mock.ts`, `seed.ts`, `fixtures/index.ts` and `playwright.config.ts` are allowed, kept small for the hand merge with projects-dispatch. The engine stays unchanged, as [O2] chose.
+- Questions put to the panel: Q1 (lanes) was answered by Claude only, "keep two lanes", before [P14]'s evidence; [P14] overrides it. Q2 one node per lane-review round and Q3 `review` depends on the reviewer nodes: Claude agreed with both, the others did not answer; kept.
+- Also settled: the lane reviewer's Claude session id comes from the reviewer entry or the `.pid` `marker` (x1, DeepSeek).
 
 ## Changes after launch
 

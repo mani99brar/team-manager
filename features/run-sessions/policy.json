@@ -15,12 +15,13 @@
   ],
   "workers": [
     {
-      "node_id": "server",
-      "role": "backend",
+      "node_id": "sessions",
+      "role": "frontend",
       "required_check_kinds": [
         "build",
         "unit",
-        "contract"
+        "contract",
+        "browser"
       ],
       "owned_paths": [
         "server/projects.ts",
@@ -37,65 +38,7 @@
         "contracts/projects/examples",
         "contracts/projects/README.md",
         "contracts/projects/triage.ts",
-        "docs/handoff/run-sessions-server.md"
-      ],
-      "checks": [
-        {
-          "id": "frontend-build",
-          "kind": "build",
-          "argv": [
-            "npm",
-            "run",
-            "build"
-          ],
-          "timeout_seconds": 300,
-          "scenarios": []
-        },
-        {
-          "id": "frontend-lint",
-          "kind": "build",
-          "argv": [
-            "npm",
-            "run",
-            "lint"
-          ],
-          "timeout_seconds": 180,
-          "scenarios": []
-        },
-        {
-          "id": "shared-contract",
-          "kind": "contract",
-          "argv": [
-            "npm",
-            "run",
-            "test:contracts"
-          ],
-          "timeout_seconds": 180,
-          "scenarios": []
-        },
-        {
-          "id": "frontend-unit",
-          "kind": "unit",
-          "argv": [
-            "npm",
-            "run",
-            "test:unit"
-          ],
-          "timeout_seconds": 300,
-          "scenarios": []
-        }
-      ]
-    },
-    {
-      "node_id": "viewer",
-      "role": "frontend",
-      "required_check_kinds": [
-        "build",
-        "unit",
-        "contract",
-        "browser"
-      ],
-      "owned_paths": [
+        "contracts/projects/v1.ts",
         "src/projects/signal",
         "src/projects/sessions",
         "src/projects/node",
@@ -107,7 +50,7 @@
         "tests/unit",
         "tests/project-workflows",
         "docs/VIEWER_SIGNAL_BOX.md",
-        "docs/handoff/run-sessions-viewer.md"
+        "docs/handoff/run-sessions.md"
       ],
       "checks": [
         {
@@ -168,23 +111,23 @@
           "scenarios": [
             {
               "id": "sessions-stage",
-              "description": "On the seeded sessions run, the stage shows 'Reviewer · general', 'Reviewer · coverage', 'Reviewer · critique' and 'Panel' as separate cards in the column before the review gate, each with its state word (general blocked, coverage late blocked, critique approved), its open P0/P1 count and its cost; a 'Lane review · server · round 1' card follows verify_server and a 'Lane review · viewer · round 1' card follows verify_viewer; the review gate, repairs and approval keep their places; the Now banner and the focus never land on a reviewer, panel or lane review node; a seeded older run with no lane-review records and one reviewer shows only its reviewer node added"
+              "description": "On the seeded sessions run, the stage shows 'Reviewer · general', 'Reviewer · coverage', 'Reviewer · critique' and 'Panel' as separate cards in the column before the review gate, each with its state word (general blocked, coverage late blocked, critique approved), its open P0/P1 count and its cost; a 'Lane review · server · round 1' card follows verify_server and a 'Lane review · viewer · round 1' card follows verify_viewer; the review gate, repairs and approval keep their places; the Now banner and the focus never land on a reviewer, panel or lane review node; a seeded older run with no lane-review records and one reviewer shows only its reviewer node added, and the panel-old run has no Panel node"
             },
             {
               "id": "sessions-lane-review",
-              "description": "The 'Lane review · server · round 1' node page lists its reviewer (transport pi, model openai-codex/gpt-6.1-sol, status, duration, cost), every finding with severity, file:line, title and detail, the reviewed snapshot's short sha, and 'Fix round started: repair 1' linking to the repair-1 node; the viewer lane's round says 'Recorded; no fix round: rounds used up'; the stage card of each says the same in short form"
+              "description": "The 'Lane review · server · round 1' node page lists its reviewer (transport pi, model openai-codex/gpt-6.1-sol, status, duration, cost), every finding with severity, file:line, title and detail, the reviewed snapshot's short sha, and 'Fix round started: repair 1' linking to the repair-1 node (from the record's own repair number); the viewer lane's round says 'Recorded; no fix round: rounds used up, fix loop off or repair cap' (the engine's own words); the stage card of each says the same in short form"
             },
             {
               "id": "sessions-reviewer",
-              "description": "The 'Reviewer · general' node page shows its session block (model, transport claude, status, started, duration, cost, session id) with the copyable resume command 'cd ~/<worktree> && claude --resume <id>', its verdict and only its own findings for the latest round, and its earlier round's verdict; the critique node page shows the critique session and its findings; no absolute path is rendered (renderedText)"
+              "description": "The 'Reviewer · general' node page shows its session block (model, transport, status, started, duration, cost, session id) with the copyable resume command \"cd ~/'<worktree>' && claude --resume <id>\" on the seeded project that exposes its run directory, and 'claude --resume <id>' with 'run it in the session's worktree' on the seeded project that does not; its verdict and only its own findings for the latest round, and its earlier round's verdict; the coverage node says 'late blocked'; the critique node page shows the critique session and its findings; no absolute path is rendered (renderedText)"
             },
             {
               "id": "sessions-list",
-              "description": "The run page's Sessions section lists every seeded session in start order grouped by role (design challenge attempts, workers, repairs, lane reviewers, reviewers, critique, panel providers, night-shift providers), each row with label, linked node, model, status, started, duration, cost and session id, and a total line with the sum of known costs and how many costs are not recorded; Claude rows offer the resume command and pi rows do not; no absolute path is rendered"
+              "description": "The run page's Sessions section lists every seeded session in start order grouped by role (design challenge attempts, workers, repairs, lane reviewers, reviewers, critique, panel providers, night-shift providers), each row with label, linked node, model, status, started, duration, cost and session id, and a totals line with the metered cost, the subscription-covered estimates and how many costs are not recorded, by value; Claude rows offer the resume command and pi rows do not; no absolute path is rendered"
             },
             {
               "id": "sessions-panel",
-              "description": "The 'Panel' node page shows the multi-provider panel's providers with model, status, cost and findings; the approval node page shows the seeded night-shift decision: kind awaiting_approval, each provider's option, text, confidence and needs-the-operator, the agreement, Jev's pick with confidence and reason, and 'Held: <reason>' (or 'Executed' with the redacted command for the executed one on the challenge node); the run page shows '2 panel decisions: 1 executed, 1 held' linking to them"
+              "description": "The 'Panel' node page shows the multi-provider panel's providers with model, status, cost and findings; the approval node page shows the seeded held night-shift decision: kind awaiting_approval, each provider's option, text, confidence word and needs-the-operator, the agreement, Jev's pick with confidence and pass-floor (or 'Jev not called'), and 'Held: <reason>'; the challenge node page shows the executed one with its redacted command; the night-shift record of another run with the same id is not shown; the run page shows '2 panel decisions: 1 executed, 1 held' linking to them"
             },
             {
               "id": "sessions-phone",
