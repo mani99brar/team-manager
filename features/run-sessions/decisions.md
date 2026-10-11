@@ -46,7 +46,7 @@ From the grill session of 2026-10-11 with the operator.
 
 ## Changes after launch
 
-None yet.
+- [L1] (run-sessions-001, design challenge attempt 1, two P1s marked "Operator decides" and four P2s; adopted by the operator's session under [O6], each the challenge's recommended option) (1) The candidate test root is under the system temp directory, outside the real HOME, so the server serves no `~/` directory there (`run_dir` is null there too; `ux-lists` already branches on it). Settled: the candidate phase of `sessions-reviewer` asserts the bare `claude --resume <id>` form with "run it in the session's worktree" on the exposed project; the `~/` form is proven in the worker phase and in `server/sessions.test.ts` with a temporary `home` option. The policy's scenario text is unchanged (resume does not re-pin it); this reading governs. (2) Reviewer nodes from `review.reviewers` alone would vanish exactly while reviewers work (the review section is null in round 1 and while round k > 1 runs). Settled: while the review section is null and `review` is not pending, one reviewer node per `plan.json` `reviewers` entry, status from `automatic-review-<id>.json`, no earlier round's verdict. Also settled: one pure projection function for the server and the worker-phase mock, keyed on the raw export list (no node for the adapter's synthetic `review` reviewer); the projected ids special-cased wherever kind `review` is matched, a blocked reviewer not drawn as a failed step; word-anchored credential patterns with a minimum tail; the Claude total labelled "reported by Claude".
 
 ## Deferred
 
