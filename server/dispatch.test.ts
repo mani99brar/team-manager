@@ -263,7 +263,7 @@ const GRAPHQL = JSON.stringify({
       openPRs: { totalCount: 2 }, openIssues: { totalCount: 5 },
       pullRequests: { nodes: [
         {
-          number: 42, title: 'Human PR', url: 'u', state: 'OPEN', isDraft: false,
+          number: 42, title: 'Human PR', url: 'u', state: 'OPEN', isDraft: true,
           author: { login: 'mani99brar', __typename: 'User' }, headRefName: 'f', baseRefName: 'main',
           updatedAt: '2026-10-11T02:00:00Z', mergedAt: null, reviewDecision: 'REVIEW_REQUIRED',
           labels: { nodes: [{ name: 'feature' }] },
@@ -281,7 +281,7 @@ const GRAPHQL = JSON.stringify({
         },
       ] },
       issues: { nodes: [
-        { number: 101, title: 'Issue', url: 'u', author: null, labels: { nodes: [] }, assignees: { nodes: [{ login: 'mani99brar' }] }, createdAt: '2026-10-08T09:00:00Z', updatedAt: '2026-10-10T12:00:00Z' },
+        { number: 101, title: 'Issue', url: 'u', author: null, labels: { nodes: [{ name: 'triage' }, { name: 'bug' }] }, assignees: { nodes: [{ login: 'mani99brar' }] }, createdAt: '2026-10-08T09:00:00Z', updatedAt: '2026-10-10T12:00:00Z' },
       ] },
     },
   },
@@ -464,11 +464,15 @@ test('buildDigest: lanes exclude fix-loop repair nodes while steps include them 
 // ---- The routes --------------------------------------------------------------------------------
 
 const BASE = 'a'.repeat(40)
-const MIN_NODES = [
-  { node_id: 'launch_a', label: 'Lane A', kind: 'worker' as const, depends_on: [] as string[] },
-  { node_id: 'integrate', label: 'Integrate', kind: 'integration' as const, depends_on: ['launch_a'] },
+// A recorded definition node: the kind is the `contracts/projects/v1.ts` enum, so a test can record a kind that
+// differs from the registry's (S8) and the `tsc -b` build still type-checks (design-challenge note 2).
+type DefNodeKind = 'prepare' | 'worker' | 'verification' | 'review' | 'integration'
+type DefNode = { node_id: string; label: string; kind: DefNodeKind; depends_on: string[] }
+const MIN_NODES: readonly DefNode[] = [
+  { node_id: 'launch_a', label: 'Lane A', kind: 'worker', depends_on: [] },
+  { node_id: 'integrate', label: 'Integrate', kind: 'integration', depends_on: ['launch_a'] },
 ]
-function writeRunDir(runsRoot: string, runId: string, opts: { events?: Record<string, unknown>[]; updated?: string; skipPlan?: boolean; badState?: boolean; planOnly?: boolean; empty?: boolean; nodes?: typeof MIN_NODES } = {}): void {
+function writeRunDir(runsRoot: string, runId: string, opts: { events?: Record<string, unknown>[]; updated?: string; skipPlan?: boolean; badState?: boolean; planOnly?: boolean; empty?: boolean; nodes?: readonly DefNode[] } = {}): void {
   const dir = join(runsRoot, runId)
   mkdirSync(dir, { recursive: true })
   if (opts.empty) return
@@ -704,7 +708,7 @@ test('S3: the tick discovers the current registry; a repository missing from a d
   assert.equal(deps.github.state('o/b', false).status, 'read', 'its last read still answers read ([P12])')
 })
 
-test('S4: an unreadable run is cached by fingerprint; the loader runs once across warm and two requests', async t => {
+test('S9: an unreadable run is cached by fingerprint and warn-logged once across warm and two overview requests', async t => {
   const runsRoot = join(fresh('runs-s4'), 'w')
   mkdirSync(runsRoot, { recursive: true })
   writeRunDir(runsRoot, 'corrupt-001', {})
@@ -713,19 +717,26 @@ test('S4: an unreadable run is cached by fingerprint; the loader runs once acros
   t.mock.method(RunStore.prototype, 'loadRun', async () => { loads += 1; throw new ProjectApiError(500, 'RUN_STORAGE_INVALID', 'corrupt run') })
   const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
   after(() => app.close())
+  // The corrupt run is first loaded when digests are warmed at onReady, and buildDispatch passes app.log.warn as the
+  // digest warner (server/app.ts), so the warning fires during app.ready(). Mock warn before ready and count only the
+  // 'Run digest could not be read' message, so an unrelated boot warning does not inflate the count (design note 6).
+  let warnCount = 0
+  t.mock.method(app.log, 'warn', (_details: unknown, message?: string) => { if (message === 'Run digest could not be read') warnCount += 1 })
   await app.ready()
   const first = await app.inject({ method: 'GET', url: '/api/dispatch/projects' })
   const second = await app.inject({ method: 'GET', url: '/api/dispatch/projects' })
   assert.equal(first.statusCode, 200)
   assert.equal(second.statusCode, 200)
   assert.equal(loads, 1, 'the corrupt run is loaded once, then served from the fingerprint cache')
+  assert.equal(warnCount, 1, 'the unreadable run is warn-logged once per fingerprint, not on every request')
   // It still surfaces as an error on the steps route, from the cache.
   const steps = await app.inject({ method: 'GET', url: '/api/dispatch/projects/proj/steps' })
   assert.equal(steps.json().workflows[0].errors[0].run_id, 'corrupt-001')
   assert.equal(loads, 1)
+  assert.equal(warnCount, 1)
 })
 
-test('S5: every git argv the reader issues is read-only (an allowlist of exact shapes)', async () => {
+test('S9: every git argv the reader issues is read-only (an allowlist of exact shapes, abbreviations rejected)', async () => {
   const { clone, seed, origin } = originAndClone()
   commit(clone, 'Workflow run-ro: ahead')
   const landed = git(clone, 'rev-parse', 'HEAD').trim()
@@ -747,22 +758,31 @@ test('S5: every git argv the reader issues is read-only (an allowlist of exact s
   assert.equal(isReadOnlyGit(['symbolic-ref', '-d', 'refs/remotes/origin/HEAD']), false, 'symbolic-ref -d writes')
   assert.equal(isReadOnlyGit(['log', '--output=/tmp/x', 'HEAD']), false, 'log --output writes a file')
   assert.equal(isReadOnlyGit(['rev-list', '--output=/tmp/x', 'HEAD']), false, 'rev-list --output writes a file')
+  // Git accepts unambiguous abbreviations, so a writing option's prefix must be rejected too, not only its exact name
+  // (S9, run-002 review P2 / lane-review-1): `--dele` abbreviates `--delete` and `--outp=` abbreviates `--output`.
+  assert.equal(isReadOnlyGit(['symbolic-ref', '--dele', 'HEAD']), false, 'symbolic-ref --dele abbreviates --delete')
+  assert.equal(isReadOnlyGit(['log', '--outp=/x', 'HEAD']), false, 'log --outp= abbreviates --output')
   void seed; void origin
 })
 
 /**
  * The exact read-only git shapes the reader uses (design-challenge note 6); anything else is a write and fails the
  * proof. A writing option (`--output`, `--delete`, `--force`, …, or their short forms) is rejected whatever the verb,
- * so a read-looking verb cannot smuggle a write to disk or a ref mutation (lane-review-1).
+ * so a read-looking verb cannot smuggle a write to disk or a ref mutation (lane-review-1). Git's parse-options accepts
+ * any unambiguous prefix, so a long option is writing when its name is a prefix of a writing option (`--dele` of
+ * `--delete`, `--outp` of `--output`), not only the exact name (S9).
  */
+const WRITING_OPTIONS = ['output', 'delete', 'force', 'write', 'update', 'set', 'edit', 'expire', 'prune', 'unset', 'add', 'rename', 'remove', 'move']
 function isReadOnlyGit(args: readonly string[]): boolean {
   const verb = args[0]
   const rest = args.slice(1)
   const options = rest.filter(a => a.startsWith('-'))
   const positionals = rest.filter(a => !a.startsWith('-'))
-  const writingOption = (opt: string): boolean =>
-    /^--(output|delete|force|write|update|set|edit|expire|prune|unset|add|rename|remove|move)(=|$)/.test(opt) ||
-    ['-d', '-o', '-f', '-w'].includes(opt)
+  const writingOption = (opt: string): boolean => {
+    if (['-d', '-o', '-f', '-w'].includes(opt)) return true
+    const long = /^--([^=]+)(?:=|$)/.exec(opt)
+    return long !== null && WRITING_OPTIONS.some(name => name.startsWith(long[1]))
+  }
   if (options.some(writingOption)) return false
   switch (verb) {
     case 'rev-parse':
@@ -782,17 +802,19 @@ function isReadOnlyGit(args: readonly string[]): boolean {
   }
 }
 
-test('S5: realGitRunner and realGhRunner spawn execFile with an argv array, no shell, the timeouts and the env', async () => {
+test('S7: realGitRunner and realGhRunner spawn execFile the way production does — default timeouts 5000/20000, no shell, the env', async () => {
   type Call = { file: string; args: readonly string[]; options: { timeout: number; env?: NodeJS.ProcessEnv; shell?: boolean } }
   const gitCalls: Call[] = []
   const fakeGit: ExecFileLike = (file, args, options, cb) => { gitCalls.push({ file, args, options }); cb(null, '', ''); return undefined }
-  await realGitRunner(5000, fakeGit)('/some/repo', ['rev-parse', 'HEAD'])
+  // Production calls realGitRunner() with no timeout (server/index.ts, server/dispatch.ts), so the test must too: the
+  // 5000 ms it asserts is the default, and changing or removing that default now fails the test ([P37], S7 lane-review P1).
+  await realGitRunner(undefined, fakeGit)('/some/repo', ['rev-parse', 'HEAD'])
   const g = gitCalls[0]
   assert.equal(g.file, 'git')
   assert.ok(Array.isArray(g.args))
   assert.deepEqual(g.args.slice(0, 3), ['--no-optional-locks', '-C', '/some/repo'])
   assert.equal(g.options.shell, undefined, 'never a shell')
-  assert.equal(g.options.timeout, 5000)
+  assert.equal(g.options.timeout, 5000, 'the production default git timeout is 5 s')
   assert.equal(g.options.env!.GIT_TERMINAL_PROMPT, '0')
   assert.equal(g.options.env!.GIT_NO_LAZY_FETCH, '1')
   assert.equal(g.options.env!.GIT_OPTIONAL_LOCKS, '0')
@@ -804,13 +826,15 @@ test('S5: realGitRunner and realGhRunner spawn execFile with an argv array, no s
   try {
     const ghCalls: Call[] = []
     const fakeGh: ExecFileLike = (file, args, options, cb) => { ghCalls.push({ file, args, options }); cb(null, '{}', ''); return undefined }
-    await realGhRunner('gh', 20_000, fakeGh)(['api', 'graphql'])
+    // Production calls realGhRunner(env.MD_MANAGER_GH || 'gh') with no timeout (server/dispatchGithub.ts), relying on
+    // the 20_000 ms default; the test calls it the same way and asserts 20000, so changing that default fails here.
+    await realGhRunner('gh', undefined, fakeGh)(['api', 'graphql'])
     const h = ghCalls[0]
     assert.equal(h.file, 'gh')
     assert.ok(Array.isArray(h.args))
     assert.deepEqual(h.args, ['api', 'graphql'])
     assert.equal(h.options.shell, undefined, 'never a shell')
-    assert.equal(h.options.timeout, 20_000)
+    assert.equal(h.options.timeout, 20_000, 'the production default gh timeout is 20 s')
     assert.equal(h.options.env!.GH_TOKEN, 'ghp_fromProcessEnv', 'gh keeps its credentials from process.env')
     assert.ok('HOME' in h.options.env!, 'HOME reaches gh')
     assert.ok('PATH' in h.options.env!, 'PATH reaches gh')
@@ -842,13 +866,50 @@ test('S5: both routes answer GET and HEAD; every other method is 405 with an All
   }
 })
 
-test('S5: runner mode writes only the GitHub cache file', async () => {
-  const cacheDir = fresh('cache-only')
-  const cachePath = join(cacheDir, 'github.json')
-  const reader = new GithubReader({ mode: 'runner', now, refreshMinutes: 15, cachePath, runner: async () => ghOk() })
+/** Every file (not directory) under `root`, recursively, as absolute paths, sorted. */
+function listFilesRecursive(root: string): string[] {
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        if (entry.isDirectory()) walk(p)
+        else out.push(p)
+      }
+    } catch { /* an unreadable directory contributes no files */ }
+  }
+  walk(root)
+  return out.sort()
+}
+
+test('S9: runner mode writes only the GitHub cache file — nothing else under HOME or the working directory', async () => {
+  // Build the reader the way index.ts does — from githubReaderOptions with an isolated HOME and an explicit cache path
+  // under it — but inject the runner so no real `gh` is spawned (design-challenge note 4, [L12]). Set process.env.HOME
+  // to the temporary HOME (os.homedir() reads it on POSIX) and chdir into a fresh working directory for this test only,
+  // restoring both after, since the worktree is shared with parallel test processes. Then every file under HOME and the
+  // working directory, recursively before and after, must differ only by the cache file.
+  const tmpHome = fresh('home')
+  const workdir = fresh('workdir')
+  const cachePath = join(tmpHome, 'c', 'github.json')
+  const options = { ...githubReaderOptions({ HOME: tmpHome, MD_MANAGER_GITHUB_CACHE: cachePath } as NodeJS.ProcessEnv, now), runner: async () => ghOk() }
+  assert.equal(options.mode, 'runner')
+  const reader = new GithubReader(options)
   reader.register(['o/n'])
-  await reader.refreshDue()
-  assert.deepEqual(readdirSync(cacheDir), ['github.json'], 'only the cache file is written')
+  const prevHome = process.env.HOME
+  const prevCwd = process.cwd()
+  process.env.HOME = tmpHome
+  process.chdir(workdir)
+  try {
+    const before = [...listFilesRecursive(tmpHome), ...listFilesRecursive(workdir)]
+    await reader.refreshDue()
+    const after = [...listFilesRecursive(tmpHome), ...listFilesRecursive(workdir)]
+    const added = after.filter(p => !before.includes(p))
+    assert.deepEqual(added, [cachePath], 'the only new file anywhere under HOME or the working directory is the cache file')
+  } finally {
+    process.chdir(prevCwd)
+    if (prevHome === undefined) delete process.env.HOME
+    else process.env.HOME = prevHome
+  }
   assert.equal(reader.state('o/n', false).status, 'read')
 })
 
@@ -886,13 +947,17 @@ test('S5: origin/HEAD naming dev outranks a local main', async () => {
   void origin
 })
 
-test('S5: landings are null (never false) with a missing origin ref and with no local default branch', async () => {
-  // A clone without a local default branch: both refs unknown for a sha it does not have.
+test('S9: landings are null (never false) with a missing origin ref and with no local default branch', async () => {
+  // A clone without a local default branch, asked about a commit it DOES have (a real object, not a made-up sha):
+  // on_default must be null because the branch is missing, not because the object is. A merge-base against a missing
+  // object would also be non-zero, so a real sha proves the null comes from the absent branch ([L11], S9).
   const { clone } = originAndClone()
   git(clone, 'checkout', '--detach', 'HEAD')
+  const existing = git(clone, 'rev-parse', 'HEAD').trim()
   git(clone, 'branch', '-D', 'main')
-  const noLocal = await stateOf(clone, { landings: [{ workflow_id: 'w', run_id: 'r', sha: 'deadbeef' }] })
-  assert.equal(noLocal.state.landings[0].on_default, null, 'no local default branch is null, not false')
+  const noLocal = await stateOf(clone, { landings: [{ workflow_id: 'w', run_id: 'r', sha: existing }] })
+  assert.equal(noLocal.state.origin!.compare, 'no_local_branch', 'the local default branch is gone')
+  assert.equal(noLocal.state.landings[0].on_default, null, 'no local default branch is null, not false, even for an object the clone has')
 
   // A local-only repository: origin is unknown (null), never false, for any sha.
   const repo = fresh('solo-land')
@@ -904,7 +969,7 @@ test('S5: landings are null (never false) with a missing origin ref and with no 
   assert.equal(solo.state.landings[0].on_default, true)
 })
 
-test('S5: the GraphQL query orders PRs and issues, and state() maps every Appendix A field and parses with the contract', async () => {
+test('S9: the GraphQL query orders PRs and issues, and state() maps every Appendix A field (draft and labels by value) and parses with the contract', async () => {
   assert.match(GITHUB_QUERY, /pullRequests\(first: 20, orderBy: \{field: UPDATED_AT, direction: DESC\}\)/)
   assert.match(GITHUB_QUERY, /issues\(first: 20, states: OPEN, orderBy: \{field: CREATED_AT, direction: DESC\}\)/)
   const reader = new GithubReader({ mode: 'runner', now, runner: async () => ghOk() })
@@ -920,7 +985,8 @@ test('S5: the GraphQL query orders PRs and issues, and state() maps every Append
   assert.equal(pr.title, 'Human PR')
   assert.equal(pr.url, 'u')
   assert.equal(pr.state, 'OPEN')
-  assert.equal(pr.draft, false)
+  assert.equal(pr.draft, true, 'a draft PR maps draft:true (guards the isDraft mapping)')
+  assert.equal(s.prs[1].draft, false, 'a non-draft PR maps draft:false')
   assert.equal(pr.head_ref, 'f')
   assert.equal(pr.base_ref, 'main')
   assert.equal(pr.updated_at, '2026-10-11T02:00:00.000Z')
@@ -929,7 +995,7 @@ test('S5: the GraphQL query orders PRs and issues, and state() maps every Append
   assert.deepEqual(pr.labels, ['feature'])
   assert.equal(s.prs[1].merged_at, '2026-10-09T10:05:00.000Z')
   const issue = s.issues[0]
-  assert.deepEqual(issue.labels, [])
+  assert.deepEqual(issue.labels, ['triage', 'bug'], 'issue labels map by value, in order (guards the issue-label mapping)')
   assert.deepEqual(issue.assignees, ['mani99brar'])
   assert.equal(issue.created_at, '2026-10-08T09:00:00.000Z')
   assert.equal(issue.updated_at, '2026-10-10T12:00:00.000Z')
@@ -987,15 +1053,18 @@ test('S5: the steps route returns the newest 50 runs, newest first', async () =>
   assert.deepEqual(runIds, expected, 'the newest 50 runs, newest first')
 })
 
-test('S5: a run carries the label and kind of its own recorded definition ([P22])', async () => {
-  const recorded = [
-    { node_id: 'launch_a', label: 'Recorded Lane A', kind: 'worker' as const, depends_on: [] as string[] },
-    { node_id: 'integrate', label: 'Recorded Integrate', kind: 'integration' as const, depends_on: ['launch_a'] },
+test('S8: a run carries the label and kind of its own recorded definition, not the registry\'s ([P22], [L2])', async () => {
+  // launch_a's recorded kind is 'review' (a valid v1.ts kind, [L12]), differing from the registry's 'worker' for the
+  // same node id. So an implementation that takes the label from the run but the kind from the registry's MIN_NODES
+  // would still read step.kind 'worker' and fail this test, which is what [P37] requires.
+  const recorded: readonly DefNode[] = [
+    { node_id: 'launch_a', label: 'Recorded Lane A', kind: 'review', depends_on: [] },
+    { node_id: 'integrate', label: 'Recorded Integrate', kind: 'integration', depends_on: ['launch_a'] },
   ]
   const runsRoot = join(fresh('runs-def'), 'w')
   mkdirSync(runsRoot, { recursive: true })
   writeRunDir(runsRoot, 'run-001', { nodes: recorded })
-  // The registry definition uses the different MIN_NODES labels ('Lane A', 'Integrate').
+  // The registry definition uses the different MIN_NODES labels ('Lane A', 'Integrate') and kind 'worker' for launch_a.
   const config = registry([{ project_id: 'proj', name: 'Proj', repository: fresh('repo-def'), workflows: [{ workflow_id: 'w', runs_root: runsRoot, definition: { name: 'W', nodes: MIN_NODES } }] }])
   const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
   after(() => app.close())
@@ -1003,23 +1072,41 @@ test('S5: a run carries the label and kind of its own recorded definition ([P22]
   const body = (await app.inject({ method: 'GET', url: '/api/dispatch/projects/proj/steps' })).json()
   const step = body.workflows[0].runs[0].steps.find((s: { node_id: string }) => s.node_id === 'launch_a')
   assert.equal(step.label, 'Recorded Lane A', 'the step label comes from the run\'s recorded definition, not the registry')
-  assert.equal(step.kind, 'worker')
+  assert.equal(step.kind, 'review', 'the step kind comes from the run\'s recorded definition, not the registry\'s worker')
 })
 
-test('S5: no absolute path appears in a route response; a loader error path is redacted ([L8], [P8])', async t => {
+test('S9: no absolute path appears in either route\'s whole JSON; per-run and workflow-level error paths are redacted ([L8], [P8])', async t => {
   const runsRoot = join(fresh('runs-path'), 'w')
   mkdirSync(runsRoot, { recursive: true })
   writeRunDir(runsRoot, 'broken-001', {})
-  const config = registry([{ project_id: 'proj', name: 'Proj', repository: fresh('repo-path'), workflows: [{ workflow_id: 'w', runs_root: runsRoot, definition: { name: 'W', nodes: MIN_NODES } }] }])
+  // A second workflow whose runs_root is a regular file, as Trio's is ([P34]): `fs.readdir` fails with an ENOTDIR
+  // error whose message carries the absolute path. Today's code swallows that and returns a fixed text, so the scan
+  // passes; a regression that forwarded the caught error's message (dispatchSteps.ts:143) would leak the path and
+  // fail the scan (design-challenge note 3).
+  const fileRoot = join(fresh('runs-path-file'), 'w-file')
+  writeFileSync(fileRoot, 'this is a file, not a runs directory')
+  const config = registry([{
+    project_id: 'proj', name: 'Proj', repository: fresh('repo-path'),
+    workflows: [
+      { workflow_id: 'w', runs_root: runsRoot, definition: { name: 'W', nodes: MIN_NODES } },
+      { workflow_id: 'wfile', runs_root: fileRoot, definition: { name: 'W', nodes: MIN_NODES } },
+    ],
+  }])
   // The loader throws a message holding an absolute path, as the real `invalidRun` would before its own redaction.
   t.mock.method(RunStore.prototype, 'loadRun', async () => { throw new ProjectApiError(500, 'RUN_STORAGE_INVALID', 'plan.json is missing at /tmp/x/run/plan.json') })
   const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
   after(() => app.close())
   await app.ready()
-  const res = await app.inject({ method: 'GET', url: '/api/dispatch/projects/proj/steps' })
-  const text = JSON.stringify(res.json())
-  assert.ok(!/(?:^|[^\w])\/(?:tmp|home|Users|var|private)\//.test(text), `an absolute path reached the response: ${text}`)
-  const message = res.json().workflows[0].errors[0].message as string
-  assert.ok(message.includes('<path>'), 'the path is redacted')
+  const overview = (await app.inject({ method: 'GET', url: '/api/dispatch/projects' })).json()
+  const steps = (await app.inject({ method: 'GET', url: '/api/dispatch/projects/proj/steps' })).json()
+  const ABSOLUTE = /(?:^|[^\w])\/(?:tmp|home|Users|var|private)\//
+  for (const [name, body] of [['overview', overview], ['steps', steps]] as const) {
+    assert.ok(!ABSOLUTE.test(JSON.stringify(body)), `an absolute path reached the ${name} response`)
+  }
+  const wf = steps.workflows.find((w: { workflow_id: string }) => w.workflow_id === 'w')
+  const message = wf.errors[0].message as string
+  assert.ok(message.includes('<path>'), 'the per-run path is redacted')
   assert.ok(message.includes('plan.json is missing'), 'the rest of the message survives verbatim')
+  const wfFile = steps.workflows.find((w: { workflow_id: string }) => w.workflow_id === 'wfile')
+  assert.ok(wfFile.error, 'the workflow whose runs_root is a file carries a workflow-level error (scanned for a path too)')
 })

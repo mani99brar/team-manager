@@ -1,4 +1,4 @@
-# Handoff: the dispatch API (lane `server`, runs projects-dispatch-001 and -002)
+# Handoff: the dispatch API (lane `server`, runs projects-dispatch-001, -002 and -003)
 
 Spec: [PRD_PROJECTS_DISPATCH.md](../PRD_PROJECTS_DISPATCH.md) sections 2, 5, 7 and Appendix A; decisions
 `features/projects-dispatch/decisions.md` ([P1]–[P37], [L1]–[L9], and the design-challenge notes bind; where they
@@ -49,6 +49,30 @@ Strengthened so each now fails on the regression it names (each break reverted a
   flipping `compareRuns`' sign / taking the oldest 50 → the `deepEqual` fails.
 
 No production code changed in this repair; the three edits are test-only.
+
+## What run 003 changed (S7–S10)
+
+Run 003 fixes `review-002.md`'s server findings: two lane-review P1s where an S5 test could not fail on its
+regression (S7, S8) and the S5/S4 test-strength P2s (S9). All edits are in `server/dispatch.test.ts` only; **no
+production code changed** (the read-only abbreviation guard lives in the test file's own `isReadOnlyGit` helper). Each
+superseded S5/S4 test was renamed to its S7/S8/S9 item. The GraphQL fixture now has a draft PR (#42 `isDraft: true`)
+and an issue with labels (`triage`, `bug`), and `writeRunDir`'s `nodes` type was widened to the `contracts/projects/v1.ts`
+kind enum so S8's recorded `kind: 'review'` type-checks under `tsc -b` (design-challenge note 2).
+
+### How each S7–S9 test was seen to fail (P37)
+
+Each break was made by hand, the one test run, and reverted (all four lane checks pass on the unbroken tree):
+
+| Test (in `server/dispatch.test.ts`) | Hand-break that makes it fail |
+|---|---|
+| `S7: realGitRunner and realGhRunner spawn execFile the way production does …` | Change a default timeout: `realGitRunner(timeoutMs = 5000 → 6000)` (`dispatchGit.ts:53`) or `GH_TIMEOUT_MS = 20_000 → 30_000` (`dispatchGithub.ts:33`). The test now calls the runners the way production does (`realGitRunner(undefined, …)`, `realGhRunner('gh', undefined, …)`) and asserts 5000/20000, so either default change fails it. Confirmed: AssertionError "the production default git timeout is 5 s". |
+| `S8: a run carries the label and kind of its own recorded definition …` | In `buildDigest` take the kind from a constant instead of the run (`kind: node.kind → kind: 'worker'`, `dispatchSteps.ts:60`). The recorded `launch_a` is `kind: 'review'` while the registry's `MIN_NODES` says `worker`, so an implementation that reads the registry's kind fails. Confirmed: fail 1. |
+| `S9: every git argv the reader issues is read-only (… abbreviations rejected)` | Revert the test's `isReadOnlyGit` writing-option check from the prefix rule (`WRITING_OPTIONS.some(name => name.startsWith(long[1]))`) to exact-name matching (`.includes(long[1])`). The new assertions `['symbolic-ref','--dele','HEAD']` and `['log','--outp=/x']` then pass the read-only proof and the test fails. Confirmed: fail 1. |
+| `S9: no absolute path appears in either route's whole JSON …` | Forward the swallowed `readdir` error at `dispatchSteps.ts:143` (`message: redactPaths('…') → message: (error as Error).message`). A second workflow whose `runs_root` is a regular file ([P34]) makes `readdir` throw ENOTDIR with an absolute path; the scan of both routes' whole JSON then catches it. Confirmed: fail 1. (Today's code returns a fixed text, so the scan passes.) |
+| `S9: an unreadable run is cached by fingerprint and warn-logged once …` | Cache digests only, not errors (`dispatchSteps.ts:128`, `resolved.type !== 'skip' → resolved.type === 'digest'`). The corrupt run then reloads and warn-logs on every request, so the warn count (mocked on `app.log.warn` before `app.ready()`, counting only `'Run digest could not be read'`, design-challenge note 6) exceeds 1. Confirmed: fail 1. |
+| `S9: the GraphQL query orders PRs and issues, … (draft and labels by value) …` | Drop the draft mapping (`draft: Boolean(node.isDraft) → draft: false`, `dispatchGithub.ts:149`) or the issue-label mapping (`labels: (…).map(…) → labels: []`). The fixture's draft PR and labelled issue then mismatch the by-value assertions. Confirmed: fail 1 for each. |
+| `S9: runner mode writes only the GitHub cache file — nothing else under HOME or the working directory` | Add a stray write to `join(homedir(), '.cache', …)` in `writeCache` (`dispatchGithub.ts`). The test builds the reader from `githubReaderOptions` with an isolated HOME (set on `process.env.HOME`, which `os.homedir()` reads on POSIX) and an injected runner, `chdir`s into a fresh working directory, and lists every file recursively under both before/after; the stray write appears and the listing differs. Confirmed: fail 1, **and the real `~/.cache` was not touched** (design-challenge note 4). |
+| `S9: landings are null (never false) with a missing origin ref and with no local default branch` | Strengthened to ask about a **real object** in the clone (the detached-HEAD commit) rather than a made-up sha, so the `on_default: null` is attributable to the missing local default branch, not a missing object ([L11]). Its falsifying guard is the S1 `localDefaultExists` logic (`dispatchGit.ts:167, 216`): returning `false` instead of `null` when the local default is absent fails the assertion. |
 
 ## What changed
 
