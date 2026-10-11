@@ -36,7 +36,7 @@ A feature's lane may declare `lane_review` with 1 to 4 reviewers. After that lan
 - Refused on a version before 2.9.0, naming `workers[<lane>].lane_review`: 2.9.0 joins every exact-match version set that lists 2.8.0 (shared learning `version-gates-are-sets-add-a-keeps-everything-test.md`).
 - `prepare` pins it into `plan.nodes[<lane>].lane_review` with the `pi` bin it proved, like the panel's `pi_bin`; `launch --dry-run` prints it per lane; DeepSeek models stay behind `panel.deepseek_guard`.
 
-## 4. Design (default; the grill decides the open points)
+## 4. Design (decisions.md [L1] changes 4.1 and 4.2: the review runs inside `verify_<lane>` and blocks its packet; the repair keeps trigger `verify` with `origin: "lane-review"`)
 
 ### 4.1 Where it runs
 

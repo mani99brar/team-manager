@@ -22,7 +22,12 @@ From the grill session of 2026-10-10 with the operator.
 
 ## Changes after launch
 
-None yet.
+- [L1] lane-reviewer-001, design challenge attempt 1 (3 P1s; the night-shift panel, Claude and GPT, agreed to hold for the operator). The operator approved the proposed fix on 2026-10-11. Operator: "go". It changes [G2] and settles the three P1s:
+  (a) Placement: the lane review runs inside the lane's own `verify_<lane>` step, after its policy checks pass (so lanes are reviewed in parallel, by the existing verify fan-out). No new graph node.
+  (b) Gate: while the lane's lane-review rounds are not used up, a P0/P1 from any lane reviewer makes that verify packet `blocked`, with one gate reason per finding, prefixed `lane-review:` and marked so that `check_retries` / `advance_failed_checks` never treat it as a flaky check to rerun; the fix loop then repairs it as any failed `verify_<lane>` (trigger `verify`). Once the rounds are used up, the packet passes and the open findings are recorded and passed to the run reviewers ([O4]).
+  (c) Export: no change ([O1] holds): the repair keeps trigger `verify`; its `repairs.json` entry gains `origin: "lane-review"` (a key the export ignores). An acceptance test exports a run with a lane-review repair and gets a fix-loop section without `error`.
+  (d) Budgets ([O5]): repairs with `origin: "lane-review"` count against `lane_review.rounds` and not against `--fix-rounds` (`fix_decision`'s per-lane count skips them); they do count against the run-wide `MAX_REPAIRS`, and lane-review repairs per run are capped at `MAX_REPAIRS - 1` so the fix loop always keeps one (past that the lane passes with its findings recorded). `launch_session`'s `round`/`rounds` for a lane-review repair come from `lane_review.rounds`.
+  (e) Challenge P2s, all taken: reviewer findings are untrusted data (each field capped in length, quoted as data in the repair brief and the run reviewers' prompt, the brief says they are claims to check against the code; adapter test with an oversized and an injected-instruction finding); provider process groups are killed in a `finally` (test with a fake provider that ignores SIGTERM); the handoff records the wall-time cost (one extra review after the last fix); the lane lands review-only (`rounds: 0`) with its tests first, then the repair route.
 
 ## Deferred
 

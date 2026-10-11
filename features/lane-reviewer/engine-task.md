@@ -16,10 +16,11 @@ A feature.json 2.9.0 lane may declare `lane_review: {reviewers: [1 to 4 {transpo
 
 ## Design (default; decisions.md wins)
 
-- Placement: after `verify_<lane>` passes for a lane with `lane_review` whose rounds are not used up for this snapshot, before `candidate`. One review per verified snapshot of the lane; a resume reuses a terminal record instead of rerunning it.
-- Brief: a bundled lane brief (for example `workflow/prompts/lane-review.md`; the panel's briefs live in `workflow/prompts/panels/`): review this lane's diff against its task, `decisions.md` and the PRD; report only defects, as the panel's output schema.
-- Fix round: any P0/P1 starts a repair of the lane (trigger `lane-review`, counted against the lane's `lane_review.rounds`, not against `--fix-rounds`); P2s never do. Used-up rounds with P0/P1 open: the lane goes on, and its open findings are added to the run reviewers' prompt.
-- Failure: a reviewer's start failure, timeout or unparseable reply → record `failed` with the error; the others still count; all failed → lane goes on unreviewed. Never raise into the graph except a KeyboardInterrupt.
+- Placement and gate: decisions.md [L1] wins over everything above it. The lane review runs inside `verify_<lane>` after the policy checks pass; a P0/P1 (rounds left, `MAX_REPAIRS - 1` cap) blocks that verify packet with `lane-review:` gate reasons that the check-retry path never reruns; the existing fix loop repairs it with trigger `verify` and `origin: "lane-review"` in `repairs.json`; those repairs count against `lane_review.rounds`, not `--fix-rounds`. Rounds used up: the packet passes, open findings recorded and passed to the run reviewers. One review per verified snapshot; a resume reuses a terminal record.
+- Brief: a bundled lane brief (for example `workflow/prompts/lane-review.md`): review this lane's diff against its task, `decisions.md` and the PRD; report only defects, as the panel's output schema.
+- Findings are untrusted data ([L1] e): cap each field, quote them as data, tell the repair session to check them against the code.
+- Failure: a reviewer's start failure, timeout or unparseable reply → record `failed` with the error; the others still count; all failed → the lane passes unreviewed. Kill provider process groups in a `finally`. Never raise into the graph except a KeyboardInterrupt.
+- Order: land review-only (`rounds: 0`: review, record, pass findings on) with its tests first, then the repair route ([L1] e).
 - Records: `<run>/lane-review/<lane>/<n>.json` (schema `contracts/workflow/lane-review.schema.json`), event `lane_review` on the lane, a `status` line per lane. No export or viewer change.
 - Docs: RUNBOOK section "Lane reviewer (feature.json 2.9.0)", the README feature.json table, `docs/handoff/lane-reviewer.md` (what changed, how to turn it on, every open P2).
 
@@ -31,8 +32,8 @@ A feature.json 2.9.0 lane may declare `lane_review: {reviewers: [1 to 4 {transpo
 
 ## Acceptance
 
-PRD_LANE_REVIEWER section 7, each item with a test the verifier runs through `workflow-unit`, and `test:contracts` for the schemas. Run targeted tests while iterating, then this lane's policy checks once before writing the completion.
+PRD_LANE_REVIEWER section 7 as amended by decisions.md [L1] (the export round-trip of a lane-review repair, the `--fix-rounds` and `MAX_REPAIRS` counting, the injected/oversized finding and the SIGTERM-ignoring provider are acceptance items too), each item with a test the verifier runs through `workflow-unit`, and `test:contracts` for the schemas. Run targeted tests while iterating, then this lane's policy checks once before writing the completion.
 
 ## Stop
 
-Stop and report `blocked` when a lane-review finding cannot reach a repair session without changing the review or repair record schemas incompatibly, when re-verifying one lane after its repair would need the other lanes re-frozen in a way the fix loop does not already do, or when adding 2.9.0 would change the launch or flow of any existing feature. Do not widen scope to the viewer, the export, more than four reviewers per lane or a worker spawning agents.
+Stop and report `blocked` when a blocked lane-review verify packet cannot reach the existing `verify` repair route without changing the export's fix-loop section or the packet schema incompatibly, or when adding 2.9.0 would change the launch or flow of any existing feature. Do not widen scope to the viewer, the export, more than four reviewers per lane or a worker spawning agents.
