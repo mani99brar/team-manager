@@ -1,0 +1,232 @@
+/**
+ * The run-controls UI's rules (docs/PRD_RUN_CONTROLS.md section 6; decisions [L2], [L3], [L4]): the dialog model (inputs per
+ * `ParamSpec`, Confirm only when valid, the typed run id), one `request_id` per dialog and none on the clean preview, the
+ * record's wording, the 409 handling, which dock step gets Run, and a list that shows what the server sent.
+ */
+import { spawnSync } from 'node:child_process'
+import { afterEach, describe, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { ControlError, controlPaths, postCleanPreview, postControl } from '../../src/projects/controls/client.ts'
+import {
+  buildParams, canOpen, controlRows, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, paramProblem, pinToken, reasonOf, recordLine, shownRecord, stepControl,
+} from '../../src/projects/controls/model.ts'
+import { waitingQuestions } from '../../src/projects/controls/questions.ts'
+import { CONTROL_ORDER, type Control, type ControlId, type ControlRecord, type RunControls } from '../../src/projects/controls/types.ts'
+import { controlsFor } from '../project-workflows/fixtures/controls.ts'
+
+const RUN = 'controls-stopped'
+const SCOPE = { projectId: 'alpha-project', workflowId: 'controls', runId: RUN }
+const HERDR_REASON = "Typing the answer needs the lane's Herdr pane; answer in your terminal"
+
+const control = (id: ControlId, patch: Partial<Control> = {}): Control => ({
+  id, label: id, available: true, reason: null, recommended: false, command: `$PY -m workflow ${id}`, runs: 'short', confirm: 'plain', params: [], effect: 'Does it.', not_effect: null, ...patch,
+})
+const record = (patch: Partial<ControlRecord> = {}): ControlRecord => ({
+  record_id: 'c-000000000001', request_id: 'r', control: 'restart', params: {}, command: '$PY', status: 'running', exit_code: null, started_at: '2026-03-02T09:00:00Z', ended_at: null, output_tail: [], ...patch,
+})
+const payload = (controls: Control[], records: ControlRecord[] = []): RunControls => ({ version: '1.0.0', run_state_token: 'rs-1', supervisor: 'not_running', supervisor_since: null, controls, records })
+
+describe('the dialog model', () => {
+  test('a text parameter needs its length, a typed one the run id, a choice a listed value', () => {
+    const abandon = controlsFor('controls-stopped', 'rs-1')!.controls.find(item => item.id === 'abandon')!
+    let values = initialValues(abandon)
+    assert.equal(dialogValid(abandon, values, RUN), false)
+    values = { ...values, reason: 'The design changed.' }
+    assert.equal(dialogValid(abandon, values, RUN), false, 'the run id is still missing')
+    assert.equal(paramProblem(abandon.params[1], { ...values, confirm_run_id: `${RUN}x` }, RUN), 'Type the run id exactly.')
+    values = { ...values, confirm_run_id: RUN }
+    assert.equal(dialogValid(abandon, values, RUN), true)
+    assert.deepEqual(buildParams(abandon, values), { reason: 'The design changed.', confirm_run_id: RUN })
+    // The reason's own bounds, and a NUL.
+    assert.notEqual(paramProblem(abandon.params[0], { ...values, reason: 'ab' }, RUN), null)
+    assert.notEqual(paramProblem(abandon.params[0], { ...values, reason: 'x'.repeat(501) }, RUN), null)
+    assert.notEqual(paramProblem(abandon.params[0], { ...values, reason: 'abc\0' }, RUN), null)
+  })
+
+  test('a single choice is preselected, the dock command presets its lane and phase, a lane not offered is not', () => {
+    const retry = controlsFor('controls-repair', 'rs-1')!.controls.find(item => item.id === 'retry')!
+    assert.deepEqual({ ...initialValues(retry), drop: [] }, { lane: 'ui', phase: '', drop: [], text: '', reason: '', confirm_run_id: '' })
+    assert.equal(initialValues(retry, { phase: 'candidate', lane: 'ghost' }).phase, 'candidate')
+    assert.equal(initialValues(retry, { lane: 'ghost' }).lane, 'ui')
+    assert.equal(dialogValid(retry, initialValues(retry), RUN), false, 'the phase is required')
+    assert.equal(dialogValid(retry, initialValues(retry, { phase: 'worker' }), RUN), true)
+  })
+
+  test('an answer needs text; the optional drop list is sent only when chosen', () => {
+    const answer = controlsFor('controls-question', 'rs-1')!.controls.find(item => item.id === 'answer')!
+    assert.equal(dialogValid(answer, initialValues(answer), RUN), false)
+    assert.equal(dialogValid(answer, { ...initialValues(answer), text: '   ' }, RUN), false, 'blank is empty')
+    assert.equal(dialogValid(answer, { ...initialValues(answer), text: 'Yes.' }, RUN), true)
+    const release = control('release_hold', { params: [{ name: 'drop', kind: 'multi', choices: [1, 2], required: false }] })
+    assert.equal(dialogValid(release, initialValues(release), RUN), true)
+    assert.deepEqual(buildParams(release, initialValues(release)), {})
+    assert.deepEqual(buildParams(release, { ...initialValues(release), drop: [2, 1] }), { drop: [1, 2] })
+  })
+
+  test('each dialog has its own request id', () => {
+    const ids = new Set(Array.from({ length: 50 }, () => newRequestId()))
+    assert.equal(ids.size, 50)
+    for (const id of ids) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  })
+})
+
+describe('the requests', () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => { globalThis.fetch = originalFetch })
+  const capture = () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    globalThis.fetch = (async (url: string, init: RequestInit) => { calls.push({ url, init }); return new Response(JSON.stringify({ exitCode: 0, output: '', record: record() }), { status: 200 }) }) as typeof fetch
+    return calls
+  }
+
+  test('the clean preview sends the run state token only, and the request id goes only on the clean POST ([L4])', async () => {
+    const calls = capture()
+    await postCleanPreview(SCOPE, 'secret-token', 'rs-1')
+    await postControl(SCOPE, 'secret-token', 'clean', { request_id: 'req-1', run_state_token: 'rs-1', params: { confirm_run_id: RUN } })
+    assert.equal(calls[0].url, `/api/run-controls/alpha-project/controls/${RUN}/clean-preview`)
+    assert.deepEqual(JSON.parse(calls[0].init.body as string), { run_state_token: 'rs-1' })
+    assert.equal(calls[1].url, `/api/run-controls/alpha-project/controls/${RUN}/clean`)
+    assert.deepEqual(JSON.parse(calls[1].init.body as string), { request_id: 'req-1', run_state_token: 'rs-1', params: { confirm_run_id: RUN } })
+  })
+
+  test('the token travels in its header, never in a URL', async () => {
+    const calls = capture()
+    await postControl(SCOPE, 'secret-token', 'restart', { request_id: 'req-1', run_state_token: 'rs-1', params: {} })
+    assert.equal((calls[0].init.headers as Record<string, string>)['X-MDM-Control-Token'], 'secret-token')
+    assert.equal((calls[0].init.headers as Record<string, string>)['Content-Type'], 'application/json')
+    assert.ok(!calls[0].url.includes('secret-token'))
+    assert.ok(!controlPaths.record(SCOPE, 'c-1').includes('secret'))
+  })
+
+  test('an error body becomes a ControlError with the server code', async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: { code: 'STATE_CHANGED', message: 'moved' } }), { status: 409 })) as typeof fetch
+    await assert.rejects(postControl(SCOPE, 't', 'restart', { request_id: 'r', run_state_token: 'x', params: {} }), (error: unknown) => error instanceof ControlError && error.code === 'STATE_CHANGED' && error.status === 409)
+  })
+})
+
+describe('the record and the refusals', () => {
+  const NOW = Date.parse('2026-03-02T09:02:00Z')
+  test('a record reads as its label, status and duration; a failure leads with the controller\'s Blocked line', () => {
+    assert.equal(recordLine(record(), 'Restart supervisor', NOW), 'Restart supervisor · running for 2 min')
+    assert.equal(recordLine(record({ status: 'succeeded', exit_code: 0, ended_at: '2026-03-02T09:00:03Z' }), 'Restart supervisor', NOW), 'Restart supervisor · succeeded in 3 s')
+    assert.equal(recordLine(record({ status: 'failed', exit_code: 1 }), 'Abandon', NOW), 'Abandon · failed (exit 1)')
+    assert.match(recordLine(record({ status: 'lost' }), 'Restart', NOW), /lost: the server restarted/)
+    assert.equal(headlineOf(record({ status: 'failed', output_tail: ['Starting', 'Blocked: another controller owns this run', 'Nothing changed'] })), 'Blocked: another controller owns this run')
+    assert.equal(headlineOf(record({ status: 'succeeded', output_tail: ['a', 'Automatic by the operator'] })), 'Automatic by the operator')
+    assert.equal(headlineOf(record({ output_tail: ['still going'] })), null, 'a running record has no result line yet')
+  })
+
+  test('the dock shows a running control, else this browser\'s last action', () => {
+    const running = record({ record_id: 'c-1' })
+    const mine = record({ record_id: 'c-2', status: 'succeeded' })
+    assert.equal(shownRecord([mine, running], null), running)
+    assert.equal(shownRecord([], mine), mine)
+    assert.equal(shownRecord([], null), null)
+  })
+
+  test('409 STATE_CHANGED and BUSY are said plainly, refresh the controls and allow a new confirm; a refused token unpairs', () => {
+    const changed = describeFailure(new ControlError(409, 'STATE_CHANGED', 'x'))
+    assert.match(changed.message, /The run changed since you looked/)
+    assert.deepEqual([changed.refresh, changed.retryable, changed.unpair], [true, true, false])
+    const busy = describeFailure(new ControlError(409, 'BUSY', 'x'))
+    assert.match(busy.message, /Another control of this run is running/)
+    assert.deepEqual([busy.refresh, busy.retryable], [true, true])
+    assert.equal(describeFailure(new ControlError(403, 'TOKEN_INVALID', 'x')).unpair, true)
+    const gone = describeFailure(new ControlError(422, 'NOT_AVAILABLE', 'A supervisor is running'))
+    assert.deepEqual([gone.message, gone.refresh, gone.retryable], ['A supervisor is running', true, false])
+  })
+})
+
+describe('which step gets Run', () => {
+  const step = (verb: string, ...rest: string[]) => ['"$PY" -m workflow', verb, '"$RUN"', ...rest, '--by operator'].join(' ')
+  const offered = ['restart', 'retry', 'answer', 'approve', 'repair_session', 'accept_challenge'].map(id => control(id as ControlId))
+
+  test('the first command\'s verb, and its flags where one verb serves two controls, name the control', () => {
+    assert.deepEqual(matchStep(step('automatic', '--live')), { id: 'restart' })
+    assert.equal(matchStep(step('automatic')), null, 'a bare automatic is not the supervisor restart')
+    assert.deepEqual(matchStep(step('retry', '--phase', 'candidate', '--node', 'ui')), { id: 'retry', lane: 'ui', phase: 'candidate' })
+    assert.deepEqual(matchStep(step('answer', 'ui', '"<your answer>"')), { id: 'answer', lane: 'ui' })
+    assert.deepEqual(matchStep(step('resume', '--accept-challenge', '"<reason>"')), { id: 'accept_challenge' })
+    assert.deepEqual(matchStep(step('resume', '--launch')), { id: 'release_hold' })
+    assert.deepEqual(matchStep(step('resume')), { id: 'resume' })
+    assert.deepEqual(matchStep(step('repair', 'ui', '--session', '--live')), { id: 'repair_session', lane: 'ui' })
+    assert.equal(matchStep(step('repair', 'ui', '--workspace')), null, 'a workspace repair is an edit that stays in the terminal')
+    assert.equal(matchStep(step('status')), null)
+    assert.equal(matchStep('echo hello'), null)
+  })
+
+  test('only an offered control gets Run, with the dock command\'s lane as the preset', () => {
+    assert.equal(stepControl(step('automatic', '--live'), offered)?.control.id, 'restart')
+    assert.deepEqual(stepControl(step('answer', 'ui', '"<your answer>"'), offered)?.preset, { lane: 'ui' })
+    assert.equal(stepControl(step('abandon', '--reason', '"x"'), offered), null, 'abandon is not offered here')
+    assert.equal(stepControl(step('automatic', '--live'), [control('restart', { available: false, reason: 'A supervisor is running' })]), null)
+  })
+})
+
+describe('the list shows what the server sent', () => {
+  test('an answer control sent unavailable with the Herdr-pane reason is greyed with that reason and opens nothing ([L2])', () => {
+    const answer = control('answer', { available: false, reason: HERDR_REASON })
+    assert.equal(canOpen(answer), false)
+    assert.equal(reasonOf(answer), HERDR_REASON)
+    const [row] = controlRows(payload([answer]))
+    assert.deepEqual([row.available, row.reason], [false, HERDR_REASON])
+  })
+
+  test('with a running restart record the list still shows Pause and Answer as the server sent them ([L3])', () => {
+    const data = payload([
+      control('restart', { available: false, reason: 'A supervisor is running (since 09:03 UTC)', runs: 'long' }),
+      control('pause', { runs: 'signal' }),
+      control('answer'),
+    ], [record({ status: 'running', control: 'restart' })])
+    const rows = controlRows(data)
+    assert.deepEqual(rows.map(row => [row.control.id, row.available]), [['restart', false], ['pause', true], ['answer', true]])
+    assert.ok(rows.filter(row => row.available).every(row => canOpen(row.control)))
+  })
+
+  test('the mocked payload lists all twelve controls in the PRD order', () => {
+    assert.deepEqual(controlsFor('controls-running', 'rs-1')!.controls.map(item => item.id), [...CONTROL_ORDER])
+  })
+})
+
+describe('the Answer dialog\'s question', () => {
+  test('the export\'s latest unanswered question per lane; the live Now wins for its lane', () => {
+    const inputs = { workers: [
+      { node_id: 'ui', questions: [{ n: 1, question: 'old', answer: 'a', asked_at: 'x', answered_at: 'y' }, { n: 2, question: 'Which one?', answer: null, asked_at: 'x', answered_at: null }] },
+      { node_id: 'adapter', questions: [{ n: 1, question: 'done', answer: 'a', asked_at: 'x', answered_at: 'y' }] },
+    ] }
+    assert.deepEqual(waitingQuestions(null, inputs as never), { ui: { n: 2, text: 'Which one?' } })
+    const now = { situation: 'question', lane: 'adapter', reason: ['“Fresh question?”', ' (from the event log; answered state not yet exported)'] }
+    assert.deepEqual(waitingQuestions(now as never, inputs as never), { ui: { n: 2, text: 'Which one?' }, adapter: { n: null, text: 'Fresh question?' } })
+  })
+})
+
+describe('decisions [L6]', () => {
+  test('a dialog keeps the run state token it was opened on when the polls bring a new one (6c)', () => {
+    let pinned = pinToken(null, 'rs-1')
+    assert.equal(pinned, 'rs-1')
+    pinned = pinToken(pinned, 'rs-2')
+    assert.equal(pinned, 'rs-1', 'the later poll is not the one posted')
+    assert.equal(pinToken(null, null), null)
+  })
+
+  test('the fake controller parses every argv form the server builds, and a bare leading-dash text fails as in the real controller (3)', () => {
+    const fake = new URL('../project-workflows/fake-controller.py', import.meta.url).pathname
+    const R = '/runs/run-1'
+    const forms: string[][] = [
+      ['automatic', R, '--live', '--by', 'operator'], ['retry', R, '--phase', 'worker', '--node', 'ui', '--by', 'operator'], ['reconcile', R, '--by', 'operator'],
+      ['resume', R, '--by', 'operator'], ['resume', R, '--accept-challenge=-x', '--by', 'operator'], ['resume', R, '--launch', '--drop', '1,2', '--by', 'operator'],
+      ['answer', R, 'ui', '--by', 'operator', '--', '-x'], ['answer', R, 'ui', '--by', 'operator', '--', '-h'], ['answer', R, 'ui', '--by', 'operator', '--', '--help'],
+      ['answer', R, 'ui', '--by', 'operator', '--', '--reason'], ['approve', R, '--bundle-sha256', 'a7a7a7a7a7a7', '--by', 'operator'],
+      ['repair', R, 'ui', '--session', '--live', '--by', 'operator'], ['abandon', R, '--reason=-x', '--by', 'operator'], ['abandon', R, '--reason=--reason', '--by', 'operator'],
+      ['clean', R, '--by', 'operator'], ['clean', R, '--by', 'operator', '--dry-run'],
+    ]
+    for (const form of forms) {
+      if (form[0] === 'automatic') continue // sleeps 3 s to show a running record; its parser is the same as the rest
+      const result = spawnSync('python3', [fake, '-m', 'workflow', ...form], { encoding: 'utf8' })
+      assert.equal(result.status, 0, `${form.join(' ')}: ${result.stderr}`)
+    }
+    for (const form of [['answer', R, 'ui', '--by', 'operator', '-x'], ['abandon', R, '--reason', '-x', '--by', 'operator']]) {
+      assert.equal(spawnSync('python3', [fake, '-m', 'workflow', ...form], { encoding: 'utf8' }).status, 2, form.join(' '))
+    }
+  })
+})

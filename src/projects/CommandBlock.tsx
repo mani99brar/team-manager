@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { COMMAND_CAPTION, COMMAND_LEGEND, type NextStep, type RunbookRef } from '../../contracts/projects/triage.ts'
+import { RUN_HERE_CAPTION, useStepControls } from './controls/context.ts'
 import { useServedRun } from './LiveStatus.tsx'
 
 /** How long "Copied" stays beside a Copy button. */
@@ -24,7 +25,7 @@ function select(element: HTMLElement) {
  * One copyable command (docs/PRD_VIEWER_UX.md 6.1): the command lives in a `<code>` outside any button, so the viewer offers
  * text to copy, never an action. Copy writes it to the clipboard, or selects it when the clipboard API is unavailable.
  */
-function CommandLine({ text, caption, codeTestId = 'now-command', copyTestId = 'copy-command' }: { text: string; caption?: string; codeTestId?: string; copyTestId?: string }) {
+function CommandLine({ text, caption, codeTestId = 'now-command', copyTestId = 'copy-command', run }: { text: string; caption?: string; codeTestId?: string; copyTestId?: string; run?: { label: string; onRun: () => void } }) {
   const code = useRef<HTMLElement>(null)
   const [outcome, setOutcome] = useState<'copied' | 'selected' | null>(null)
   useEffect(() => {
@@ -47,6 +48,7 @@ function CommandLine({ text, caption, codeTestId = 'now-command', copyTestId = '
       {caption && <span className="command-step-caption">{caption}</span>}
       <span className="command-line"><span className="command-prompt" aria-hidden="true">$ </span><code ref={code} data-testid={codeTestId}>{text}</code></span>
       <button type="button" className="button button-small command-copy" data-testid={copyTestId} aria-label="Copy command" onClick={() => void copy()}>Copy</button>
+      {run && <button type="button" className="button button-small command-run-button" data-testid="run-command" aria-label={`Run: ${run.label}`} onClick={run.onRun}>Run</button>}
       <span className="command-copied" role="status">{outcome === 'copied' ? 'Copied' : outcome === 'selected' ? 'Selected: copy it with Ctrl+C' : ''}</span>
     </div>
   )
@@ -63,6 +65,10 @@ export function CommandBlock({ next }: { next: NextStep }) {
   const runDir = useServedRun()?.runDir ?? null
   const setRun = runDir !== null && next.steps.some(step => step.kind === 'command' && step.text.includes('$RUN'))
   const lead = next.action === 'required' ? 'Likely next step' : null
+  // The live dock's controls (docs/PRD_RUN_CONTROLS.md section 6): the first command gets Run when this browser is paired and the server offers its control.
+  const controls = useStepControls()
+  const firstStep = next.steps[0]
+  const runnable = controls !== null && firstStep?.kind === 'command' ? controls.forStep(firstStep.text) : null
   return (
     <div className="command-block" data-testid="now-next" data-action={next.action}>
       <div className="command-label">
@@ -84,7 +90,7 @@ export function CommandBlock({ next }: { next: NextStep }) {
       {next.steps.length > 0 && (() => {
         const renderStep = (step: NextStep['steps'][number], index: number) => (
           <li key={index} className="command-step" data-testid="now-step" data-kind={step.kind}>
-            {step.kind === 'command' ? <CommandLine text={step.text} caption={step.caption} /> : <div className="command-step-body"><span className="command-prose">{step.text}</span></div>}
+            {step.kind === 'command' ? <CommandLine text={step.text} caption={step.caption} run={index === 0 && runnable !== null ? { label: runnable.control.label, onRun: () => controls!.run(runnable.control, runnable.preset) } : undefined} /> : <div className="command-step-body"><span className="command-prose">{step.text}</span></div>}
           </li>
         )
         const [first, ...rest] = next.steps
@@ -96,6 +102,7 @@ export function CommandBlock({ next }: { next: NextStep }) {
         return (
           <>
             <ol className="command-steps">{renderStep(first, 0)}</ol>
+            {commands && <p className="command-caption">{runnable !== null ? RUN_HERE_CAPTION : COMMAND_CAPTION}</p>}
             {next.caveat && <p className="command-caveat">{next.caveat}</p>}
             {rest.length > 0 && (
               <details className="command-all-steps" data-testid="now-all-steps">
@@ -107,7 +114,6 @@ export function CommandBlock({ next }: { next: NextStep }) {
         )
       })()}
       {next.steps.length === 0 && next.caveat && <p className="command-caveat">{next.caveat}</p>}
-      {commands && <p className="command-caption">{COMMAND_CAPTION}</p>}
     </div>
   )
 }
