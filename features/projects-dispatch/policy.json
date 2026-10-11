@@ -1,0 +1,235 @@
+{
+  "version": "1.4.0",
+  "feature": "Projects dispatch: a Projects page of project cards, a dedicated project page with the step chart, git sync and GitHub PRs and issues, a projects-only rail, Triage; read-only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "server",
+      "role": "backend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "server/dispatch.ts",
+        "server/dispatchGit.ts",
+        "server/dispatchGithub.ts",
+        "server/dispatchSteps.ts",
+        "server/dispatch.test.ts",
+        "server/app.ts",
+        "server/index.ts",
+        "server/projectsConfig.ts",
+        "contracts/projects/dispatch.ts",
+        "contracts/projects/contract.test.ts",
+        "contracts/projects/examples.ts",
+        "contracts/projects/export.ts",
+        "contracts/projects/dispatchOverview.schema.json",
+        "contracts/projects/projectSteps.schema.json",
+        "contracts/projects/README.md",
+        "docs/handoff/projects-dispatch-server.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/dispatch",
+        "src/projects/RunsHome.tsx",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/routes.ts",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/RunRow.tsx",
+        "src/App.tsx",
+        "tests/unit/dispatch.test.ts",
+        "tests/unit/lists.test.ts",
+        "tests/unit/routes.test.ts",
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/dispatch-app.ts",
+        "tests/project-workflows/fixtures/dispatch.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/mock.ts",
+        "tests/project-workflows/seed.ts",
+        "tests/project-workflows/support.ts",
+        "tests/project-workflows/playwright.config.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/lanes.spec.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "docs/VIEWER_DISPATCH.md",
+        "docs/handoff/projects-dispatch-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "dispatch-overview",
+              "description": "/projects shows the Projects page: the heading 'Projects', a line naming the project and repository counts and when runs and GitHub were read, and one card per registered project in rail order; each card shows the name, the state word ('1 of 3 features failed last' for a project with three features whose worst latest result is failed), the repository and a public or private chip, 'on <checkout>' with the sync ('2 ahead of origin/main as last fetched' for the seeded clone), the non-zero run counts, the latest run id with its state word, and open PR and issue counts; clicking a card opens /projects/<id>"
+            },
+            {
+              "id": "dispatch-rail",
+              "description": "On the Projects page, Triage, a project page and a workflow page the rail shows 'All projects', 'Triage', then one row per project and nothing else (no workflow rows, no repository headers); a project with a run waiting on the operator comes first with the badge '1 waits on you', an unreadable project comes last with 'cannot be read'; the clone's primary project shows 'N unpushed' and its worktree project does not; the current page's row has aria-current=page; clicking a row opens that project's page"
+            },
+            {
+              "id": "dispatch-triage",
+              "description": "/projects/-/triage shows the former Runs home content (needs-you, today-runs, running-runs, recent-runs sections and their cards) under the new rail, with 'Triage' marked current; the rail's 'Triage' entry and the g then h keys reach it, and g then p returns to the Projects page"
+            },
+            {
+              "id": "dispatch-project",
+              "description": "A project page's header shows the project name, a link to https://github.com/<owner>/<name>, the visibility chip, the checkout and the sync line ('2 ahead, 1 behind origin/main as last fetched'), the succeeded/failed/cancelled figures, and jump buttons 'Runs by feature', 'Local and GitHub', 'Pull requests \u00b7 N open', 'Issues \u00b7 N open'; activating 'Issues \u00b7 N open' moves focus to the Issues card; the filter box narrows the run rows and Escape clears it"
+            },
+            {
+              "id": "dispatch-chart",
+              "description": "The step chart shows the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate, Review, Approval, Integrate) once in a sticky axis; a run that failed at verification draws its stop glyph in the Verify column with '\u00d73' over it when the verify step was attempted three times, a solid track before it and a dotted track after; a run integrated shows its landed sha; the feature header lists its landed shas and a chain of run chips; a feature whose run state cannot be read shows one 'cannot be read' row with the recorded error and 'python -m workflow status <run-id> --by operator'"
+            },
+            {
+              "id": "dispatch-pane",
+              "description": "With no run selected the project page has no reading pane; clicking a run row docks the pane with the run id, its state, facts, the steps with attempts, the commands with Copy, and an 'Open run page' link to the run's URL; j and k move the selection; Escape (and the Close button) undocks the pane and returns focus to the row"
+            },
+            {
+              "id": "dispatch-github",
+              "description": "The Pull requests card groups PRs as 'Possibly related' (only the PR whose head or base branch equals the checkout branch or a run's source branch), 'Yours, open' (author equals viewer_login), 'Others, open' and 'Merged in the last 14 days', each row with its number, title linking to GitHub, review decision, checks counts and 'updated' time; the Issues card lists 'Assigned to you' first, then 'Newest from people', folds bot authors into 'N from bots', shows a year on an issue opened in an earlier year, and links 'All N on GitHub'; for the project whose remote is not GitHub every GitHub card says 'GitHub not read: not a GitHub remote' and shows no counts"
+            },
+            {
+              "id": "dispatch-git-truth",
+              "description": "The worktree project's header and card say 'shares its clone with <primary>' and show no unpushed count; the Local and GitHub card of the primary says the sync is counted against origin/<branch> as this clone last fetched it with the FETCH_HEAD time and that this page never fetches, says how many of the commits ahead name a run, and lists landings as on local main and on origin or not; a project whose repository has no origin ref says 'not compared with origin'"
+            },
+            {
+              "id": "dispatch-phone",
+              "description": "At 390 px wide the rail is a chip row starting 'All projects', 'Triage', the Projects page cards are one column, the project page stacks the GitHub column under the chart, tapping a run fills the screen with the reading pane and 'Queue' and 'Next' buttons, every link and button in the header and GitHub cards is at least 44 px tall, and nothing scrolls sideways"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/dispatch-app.ts"
+    ],
+    "ready_path": "/api/dispatch/projects",
+    "timeout_seconds": 180
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "version": "2.9.0",
+  "name": "Projects dispatch (PRD_PROJECTS_DISPATCH): the Projects tab opens on a card per project; each opens a dedicated project page with the step chart of every feature's runs, local main against origin as last fetched, landings, and GitHub pull requests and issues read through gh; a projects-only rail on every Projects page but the run page; the Runs home becomes Triage; read-only",
+  "branch_prefix": "feature/projects-dispatch",
+  "prd": "docs/PRD_PROJECTS_DISPATCH.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "server",
+      "task": "server-task.md"
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md",
+      "skills": [
+        "impeccable"
+      ]
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critique": {
+    "lanes": [
+      "viewer"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "timeout_minutes": 45
+  },
+  "critical": false,
+  "tryout": true
+}
