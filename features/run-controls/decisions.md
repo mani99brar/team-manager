@@ -35,6 +35,19 @@ From the grill session of 2026-10-10 with the operator.
   3. A server test with a `running` restart record accepts `pause` and `answer` and still refuses a second `restart` as `NOT_AVAILABLE` from the probe, and a test shows `BUSY` while a short control is in flight and while a long control's spawn has not returned.
   4. The viewer shows each control's `available` and `reason` as the server sent them and never disables a control itself because a record is `running`.
 
+- [L4] run-controls-002, design challenge attempt 1 (paused, 1 P1 marked `Acts: operator`): the challenge's recommendation is adopted as written; it binds both lanes and wins over the PRD and the task files, and it amends [L1] 3(a). Same provenance as [L2]: it is the challenge's own recommendation adopted by the operator's session under the operator's /goal and the widened night goals (the panel may decide P1 pauses of this run, the amendment text is never the panel's), and it is not an approval by the operator. The clean-preview wire contract:
+  1. `POST /api/run-controls/:project_id/:workflow_id/:run_id/clean-preview` (a static route registered beside the `:control_id` route, so it never matches it); the same three-segment form as every other route.
+  2. Body `{ run_state_token }` only, under a strict schema: no `request_id`, no `params`, nothing else. Guards 1 to 4 and 6 of PRD 5.2 apply and `clean` must be offered for the run; guard 5 (the repeated `request_id`) and guard 7 do not, and no record is written.
+  3. The response is `{ exitCode, output }` exactly as [L1] 3(a) writes it (these two keys stay camelCase).
+  4. Clean's dialog sends the preview first, then the `clean` POST; the dialog's single `request_id` goes only on the `clean` POST, so the real clean is never mistaken for a repeat of the preview.
+  5. A server test shows the preview route with a valid token runs `clean --dry-run`, writes no record and does not consume the dialog's `request_id`, and that a following `clean` POST with that `request_id` runs the real clean once; a body with an extra key is refused. A viewer unit test shows the dialog sends the `request_id` only on the clean POST.
+
+- [L5] run-controls-002, design challenge attempt 2 (paused, 1 P1 marked `Acts: operator`): the challenge's recommendation is adopted as written; it binds both lanes and wins over the PRD and the task files, and it pins PRD 5.1. Same provenance as [L4]: adopted by the operator's session under the operator's /goal and the widened night goals, not an approval by the operator. The startup environment that turns the controls on:
+  1. Server: the controls turn on only when the token file is a regular file with `(mode & 0o077) === 0` and at least 32 characters, and `MD_MANAGER_WORKFLOW_PYTHON` is an absolute path that passes an `X_OK` check; otherwise the controls stay off (every route but `status` is 404 `CONTROLS_DISABLED`) and the server logs a startup warning naming the failed condition.
+  2. Viewer: `playwright.config.ts` `prepare()` and `controls-app.ts` write the token file with mode `0o600` and `chmod` `fake-controller.py` to `0o755` (committed as 100755), whatever the umask.
+  3. `controls-app.ts` exits non-zero unless `/api/run-controls/status` returns `enabled: true`. The critique app's `ready_path` `/api/run-controls/status` therefore means ready only when the controls are on, not merely when the page answers (`status` answers 200 `{enabled:false}` when they are off, [L1] 3(b)).
+  4. A server test shows each failed condition (token mode 0644, token under 32 characters, a relative or non-executable `MD_MANAGER_WORKFLOW_PYTHON`) leaves the controls off with the warning; a viewer-side check shows the app helper refuses to start with controls off.
+
 ## Deferred
 
 - `freeze`, `note`, `tryout` and follow-up `launch` controls [G5].
