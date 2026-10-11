@@ -1,4 +1,4 @@
-"""Lane reviewer of feature.json 2.9.0 (PRD_LANE_REVIEWER section 7, items 1-19). Fake pi/claude providers over a toy
+"""Lane reviewer of feature.json 2.10.0 (PRD_LANE_REVIEWER section 7, items 1-19). Fake pi/claude providers over a toy
 repository and the offline automatic fixture; no real model call, no network, every path under a temporary HOME."""
 from __future__ import annotations
 
@@ -98,13 +98,14 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a lane_review setting"):
             lane_review.settings({**self.good(), "extra": 1}, "x ")
 
-    def test_declared_refuses_before_2_9_0_naming_the_lane(self):
-        manifest = {"version": "2.8.0", "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()}]}
-        with self.assertRaisesRegex(ValueError, r"workers\[engine\].lane_review needs version 2.9.0"):
-            lane_review.declared(manifest)
+    def test_declared_refuses_before_2_10_0_naming_the_lane(self):
+        for version in ("2.8.0", "2.9.0"):  # 2.9.0 is the critique version; lane_review starts at 2.10.0.
+            manifest = {"version": version, "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()}]}
+            with self.assertRaisesRegex(ValueError, r"workers\[engine\].lane_review needs version 2.10.0"):
+                lane_review.declared(manifest)
 
-    def test_declared_returns_settings_on_2_9_0(self):
-        manifest = {"version": "2.9.0", "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()},
+    def test_declared_returns_settings_on_2_10_0(self):
+        manifest = {"version": "2.10.0", "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()},
                                                     {"node_id": "viewer", "task": "v.md"}]}
         got = lane_review.declared(manifest)
         self.assertEqual(set(got), {"engine"})
@@ -459,8 +460,8 @@ class LaunchConfigTests(unittest.TestCase):
                                          prove=lambda panels: {"pi_bin": "/fake/pi-bin"})
         return commands
 
-    def test_2_9_0_lane_review_reaches_prepare_for_the_declaring_lane_only(self):  # Item 1.
-        self.set_feature("2.9.0", {"reviewers": [{"transport": "pi", "model": "openai-codex/gpt-6.1-sol"},
+    def test_2_10_0_lane_review_reaches_prepare_for_the_declaring_lane_only(self):  # Item 1.
+        self.set_feature("2.10.0", {"reviewers": [{"transport": "pi", "model": "openai-codex/gpt-6.1-sol"},
                                                  {"transport": "claude", "model": "claude-sonnet-5-5", "effort": "medium"}], "rounds": 1})
         prepare = self.commands()[2]
         settings = json.loads(prepare[prepare.index("--lane-review-settings") + 1])
@@ -470,13 +471,13 @@ class LaunchConfigTests(unittest.TestCase):
 
     def test_2_8_0_with_lane_review_is_refused_naming_the_lane(self):  # Item 6.
         self.set_feature("2.8.0", {"reviewers": [{"transport": "pi", "model": "openai-codex/gpt-6.1-sol"}]})
-        with self.assertRaisesRegex(ValueError, r"workers\[ui\].lane_review needs version 2.9.0"):
+        with self.assertRaisesRegex(ValueError, r"workers\[ui\].lane_review needs version 2.10.0"):
             self.commands()
 
     def test_2_8_0_without_lane_review_prepares_unchanged(self):  # Item 5 (the gate-set learning).
         self.set_feature("2.8.0")
         prepare = self.commands()[2]
-        self.assertNotIn("--lane-review-settings", prepare)  # No 2.9.0 plumbing touches a 2.8.0 feature.
+        self.assertNotIn("--lane-review-settings", prepare)  # No 2.10.0 plumbing touches a 2.8.0 feature.
         self.assertEqual(prepare[3], "prepare")
 
 

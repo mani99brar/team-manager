@@ -35,20 +35,20 @@ FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
 # 2.6.0 (the multi-provider panel), 2.7.0 (per-lane worker pins) and 2.8.0 (per-lane skills) keep both. The migration hint for
 # an earlier feature with a browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0"})
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0"})
 CRITICAL_VERSION = "2.4.0"
 # The feature versions whose `workers[]` may carry the lane's own worker `model` and `effort` (pinned per lane at prepare).
 # A set, not a range: the next bump must join it (shared learning version-gates-are-sets-add-a-keeps-everything-test).
 LANE_ROLE_VERSION = "2.7.0"
-LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0", "2.9.0"})
+LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0", "2.9.0", "2.10.0"})
 LANE_ROLE_FIELDS = ("model", "effort")
 # The feature versions whose `workers[]` may carry the lane's own `skills` (feature.json 2.8.0, PRD_WORKER_SKILLS section 3).
 # One more set the next bump must move.
 SKILLS_VERSION = "2.8.0"
-SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0"})
-# The feature versions whose `workers[]` may carry the lane's own `lane_review` (feature.json 2.9.0, PRD_LANE_REVIEWER section 3).
+SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0", "2.10.0"})
+# The feature versions whose `workers[]` may carry the lane's own `lane_review` (feature.json 2.10.0, PRD_LANE_REVIEWER section 3).
 # One more set the next bump must move.
-LANE_REVIEW_VERSION = "2.9.0"
+LANE_REVIEW_VERSION = "2.10.0"
 LANE_REVIEW_VERSIONS = frozenset({LANE_REVIEW_VERSION})
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
@@ -191,7 +191,7 @@ def load_feature(folder: Path) -> dict:
         lane_roles(manifest)  # Refuses a lane's `model`/`effort` on a version before 2.7.0, naming the lane and the key.
         lane_skills(manifest)  # Refuses a lane's `skills` on a version before 2.8.0, naming the lane and the key.
         from . import lane_review
-        lane_review.declared(manifest)  # Refuses a lane's `lane_review` on a version before 2.9.0, naming the lane and the key.
+        lane_review.declared(manifest)  # Refuses a lane's `lane_review` on a version before 2.10.0, naming the lane and the key.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -386,7 +386,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         from .skills import check_skill, skills_root
         for name in review_critique["skills"]:
             check_skill(critique.CRITIQUE, name, skills_root())
-    # 2.9.0: the lane reviewers (PRD_LANE_REVIEWER 4.1). The DeepSeek key guard and the transport probes are refused here,
+    # 2.10.0: the lane reviewers (PRD_LANE_REVIEWER 4.1). The DeepSeek key guard and the transport probes are refused here,
     # before any Git action (the dry run included); the proved pi bin is pinned at prepare into plan.nodes[<lane>].lane_review.
     from . import lane_review
     lane_reviews = lane_review.declared(manifest)
@@ -498,7 +498,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             check_skill(node, name, skills_root())
         if node in lane_skill_names:
             prepare.extend(["--lane-skills", f"{node}={','.join(lane_skill_names[node])}"])
-    # 2.9.0: each selected lane's reviewers, with the pi bin the probe resolved; prepare pins plan.nodes[<lane>].lane_review
+    # 2.10.0: each selected lane's reviewers, with the pi bin the probe resolved; prepare pins plan.nodes[<lane>].lane_review
     # with the bundled brief's text and sha256.
     selected_reviews = {node: lane_reviews[node] for node in selected if node in lane_reviews}
     if selected_reviews:
@@ -707,7 +707,7 @@ def main(argv=None):
             if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
                 printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
                                      "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
-            if "--lane-review-settings" in prepare:  # 2.9.0: what prepare pins as plan.nodes[<lane>].lane_review (per lane) and the proved pi bin.
+            if "--lane-review-settings" in prepare:  # 2.10.0: what prepare pins as plan.nodes[<lane>].lane_review (per lane) and the proved pi bin.
                 settings = json.loads(prepare[prepare.index("--lane-review-settings") + 1])
                 printed["lane_review"] = {**settings, "guard": "clear: transports proved (claude --max-budget-usd / pi --version)"}
             feature_skills = lane_skills(manifest)  # 2.8.0: each selected lane's skills and the plugin dir prepare would write.

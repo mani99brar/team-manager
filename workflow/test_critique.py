@@ -31,6 +31,7 @@ class Config(unittest.TestCase):
         self.assertIsNone(critique.declared({"version": "2.9.0", "critique": False}))
         value = critique.declared({"version": "2.9.0", "critique": {"lanes": ["pages"]}})
         self.assertEqual(value, {"lanes": ["pages"], "skills": ["impeccable"], "max_budget_usd": 15, "timeout_minutes": 45})
+        self.assertEqual(critique.declared({"version": "2.10.0", "critique": {"lanes": ["pages"]}}), value)  # 2.10.0 keeps critique
         with self.assertRaisesRegex(ValueError, "version 2.9.0"):
             critique.declared({"version": "2.8.0", "critique": {"lanes": ["pages"]}})
 

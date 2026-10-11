@@ -2427,12 +2427,13 @@ class PanelLaunchGuards(unittest.TestCase):
 
     def test_a_2_8_0_feature_keeps_every_gate_a_2_6_0_feature_has(self):
         # The version gates are sets, not ranges: a 2.4.0 bump once silently dropped every guardrail. A 2.7.0 feature (per-lane
-        # worker pins) and a 2.8.0 feature (per-lane skills) keep the guardrails, the sidecar, the attack pass, the panels and
-        # `critical` exactly as 2.6.0 does (PRD_WORKER_SKILLS acceptance 5: every 2.7.0 feature still launches unchanged).
+        # worker pins), a 2.8.0 feature (per-lane skills), a 2.9.0 feature (critique) and a 2.10.0 feature (per-lane reviewer)
+        # keep the guardrails, the sidecar, the attack pass, the panels and `critical` exactly as 2.6.0 does (PRD_WORKER_SKILLS
+        # acceptance 5: every 2.7.0 feature still launches unchanged).
         from . import attack, guardrails, panel, sidecar
         from .launch import load_feature
         flags = {}
-        for version in ("2.6.0", "2.7.0", "2.8.0"):
+        for version in ("2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0"):
             self.write_feature(version=version)
             manifest = load_feature(self.folder)
             self.assertTrue(guardrails.is_guarded(manifest), version)
@@ -2447,6 +2448,8 @@ class PanelLaunchGuards(unittest.TestCase):
                 self.assertIn(flag, prepare, version)
         self.assertEqual(flags["2.7.0"], flags["2.6.0"])
         self.assertEqual(flags["2.8.0"], flags["2.7.0"])  # a 2.8.0 feature without skills launches with the same flags
+        self.assertEqual(flags["2.9.0"], flags["2.8.0"])  # a 2.9.0 feature without critique launches with the same flags
+        self.assertEqual(flags["2.10.0"], flags["2.9.0"])  # a 2.10.0 feature without lane_review launches with the same flags
         self.write_feature(version="2.8.0", tryout=True)
         self.assertTrue(load_feature(self.folder)["tryout"])
 

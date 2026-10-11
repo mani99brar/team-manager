@@ -1,6 +1,6 @@
 {
   "version": "2.8.0",
-  "name": "Lane reviewer (PRD_LANE_REVIEWER): a lane may declare 1 to 4 reviewers (lane_review, feature.json 2.9.0); after the lane passes verification they review that lane's diff and a P0/P1 starts one fix round through the repair loop before the candidate; every other lane runs as today",
+  "name": "Lane reviewer (PRD_LANE_REVIEWER): a lane may declare 1 to 4 reviewers (lane_review, feature.json 2.10.0); after the lane passes verification they review that lane's diff and a P0/P1 starts one fix round through the repair loop before the candidate; every other lane runs as today",
   "branch_prefix": "feature/lane-reviewer-runs",
   "prd": "docs/PRD_LANE_REVIEWER.md",
   "policy": "policy.json",

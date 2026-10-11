@@ -672,10 +672,10 @@ class Pipeline:
                                        "injected_at": now(), "native_before": self.native_evidence()})
         packet["result"]["summary"] = snap["summary"]
         packet["result"]["open_assumptions"] = snap["open_assumptions"]
-        # feature.json 2.9.0: once the lane's own checks pass, its reviewers review its diff (PRD_LANE_REVIEWER 4.1). A P0/P1 blocks
+        # feature.json 2.10.0: once the lane's own checks pass, its reviewers review its diff (PRD_LANE_REVIEWER 4.1). A P0/P1 blocks
         # this packet with `lane-review:` reasons and a structured marker, re-derived from the (lane, snapshot) record on every entry
         # (never read back from the saved packet); otherwise the open findings are recorded and passed to the run reviewers. Never
-        # raises into the graph except a KeyboardInterrupt. A lane without lane_review, and every feature before 2.9.0, skip this.
+        # raises into the graph except a KeyboardInterrupt. A lane without lane_review, and every feature before 2.10.0, skip this.
         from . import lane_review
         if not drilled and packet["gate"]["status"] == "passed" and lane_review.lane_review_of(self.plan, node) is not None:
             reasons, marker = lane_review.review_and_gate(self, node, snap["commit"])
@@ -1341,7 +1341,7 @@ def run_status(directory: Path) -> tuple[dict, str]:
     lane_review_lines = {node: line for node in plan_workers(plan)
                          if lane_review.lane_review_of(plan, node) is not None
                          and (line := lane_review.status_line(SimpleNamespace(directory=directory, plan=plan), node)) is not None}
-    if lane_review_lines:  # feature.json 2.9.0: each lane's last lane review.
+    if lane_review_lines:  # feature.json 2.10.0: each lane's last lane review.
         status["lane_review"] = lane_review_lines
     if (directory / "challenge.json").exists():
         from .guardrails import is_held
@@ -1466,7 +1466,7 @@ def main():
                         "(lanes, skills, max_budget_usd, timeout_minutes); prepare pins plan.critique and refuses the print transport")
     parser.add_argument("--panels", help="preflight: the transports the feature's panels declare (comma-separated claude,pi); preflight"
                                          "proves them again (claude --max-budget-usd, pi --version)")
-    parser.add_argument("--lane-review-settings", help="prepare: the lanes' reviewers (feature.json 2.9.0 workers[].lane_review) as JSON "
+    parser.add_argument("--lane-review-settings", help="prepare: the lanes' reviewers (feature.json 2.10.0 workers[].lane_review) as JSON "
                                                        "{reviews: {lane: {...}}, pi_bin}; prepare pins each as plan.nodes[<lane>].lane_review with the "
                                                        "bundled brief's text and sha256 and the proved pi bin")
     parser.add_argument("--restore-from", metavar="COMMIT", help="prepare: a follow-up run restores the lanes' owned paths from this commit "
@@ -1685,7 +1685,7 @@ def main():
                     skills_mod.check_skill(node, name, skills_mod.skills_root())
                 lane_skill_names[node] = names
             advisor_model = skills_mod.advisor_model() if lane_skill_names else None
-            # feature.json 2.9.0: each selected lane's reviewers, validated before the run directory exists so a refusal leaves none.
+            # feature.json 2.10.0: each selected lane's reviewers, validated before the run directory exists so a refusal leaves none.
             lane_review_settings = None
             if args.lane_review_settings is not None:
                 from . import lane_review
@@ -1729,7 +1729,7 @@ def main():
                 plan["nodes"][node]["skills"] = pinned
                 plan["nodes"][node]["advisor_model"] = advisor_model  # string or null; the plan, not the file, is read at launch
                 skills_authority[node] = {"plugin_sha256": skills_mod.tree_digest(lane_plugin), "advisor_model": advisor_model}
-            # feature.json 2.9.0: each selected lane's reviewers pinned as plan.nodes[<lane>].lane_review, with the bundled brief's
+            # feature.json 2.10.0: each selected lane's reviewers pinned as plan.nodes[<lane>].lane_review, with the bundled brief's
             # text and sha256 and the proved pi bin (PRD_LANE_REVIEWER section 3, [L4](f)).
             if lane_review_settings is not None:
                 from . import lane_review

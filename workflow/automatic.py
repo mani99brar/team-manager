@@ -2188,7 +2188,7 @@ def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
     is archived only after the round's refusals passed (repair.session_refusals), and restored whenever no repair applies."""
     from . import lane_review
     from .repair import open_session, repair_session, session_refusals
-    # feature.json 2.9.0: a verify block the lane review wrote is repaired with origin "lane-review"; a refusal or a blocked
+    # feature.json 2.10.0: a verify block the lane review wrote is repaired with origin "lane-review"; a refusal or a blocked
     # session is a spent round (the packet then passes), never `exhausted` ([L4](b)). The origin is re-derived from the open
     # journal entry on a resume, else from the lane's current blocked packet's marker.
     origin, snapshot = None, None

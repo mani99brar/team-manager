@@ -174,7 +174,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0', '2.10.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
@@ -240,21 +240,22 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   assert.equal(critiqueExample.version, '2.9.0')
   feature.parse(critiqueExample)
   assert.deepEqual(critiqueExample.critique.lanes, ['pages', 'shell'])
-  // 2.9.0 adds a lane's own reviewers: 1 to 4 {transport, model?, effort?}, rounds 0..2, timeout 1..30, budget 0.5..20 (PRD_LANE_REVIEWER section 3).
-  const reviewed29 = structuredClone(reviewed)
-  Object.assign(reviewed29.workers[0], { lane_review: { reviewers: [{ transport: 'pi', model: 'openai-codex/gpt-6.1-sol' }], rounds: 1, timeout_minutes: 10, budget_usd: 3 } })
-  feature.parse({ ...reviewed29, version: '2.9.0' })
-  feature.parse({ ...structuredClone(reviewed), version: '2.9.0' })  // a 2.9.0 feature with no lane_review still validates
+  // 2.10.0 keeps every 2.9.0 rule and adds a lane's own reviewers: 1 to 4 {transport, model?, effort?}, rounds 0..2, timeout 1..30, budget 0.5..20 (PRD_LANE_REVIEWER section 3).
+  const reviewed210 = structuredClone(reviewed)
+  Object.assign(reviewed210.workers[0], { lane_review: { reviewers: [{ transport: 'pi', model: 'openai-codex/gpt-6.1-sol' }], rounds: 1, timeout_minutes: 10, budget_usd: 3 } })
+  feature.parse({ ...reviewed210, version: '2.10.0' })
+  feature.parse({ ...reviewed210, version: '2.10.0', critique: { lanes: ['ui'] } })  // lane_review and critique together
+  feature.parse({ ...structuredClone(reviewed), version: '2.10.0' })  // a 2.10.0 feature with no lane_review still validates
   for (const bad of [{ reviewers: [] }, { reviewers: [{ transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }] },
     { reviewers: [{ transport: 'codex' }] }, { reviewers: [{ transport: 'pi', model: 'x' }], rounds: 3 }, { reviewers: [{ transport: 'pi', model: 'x' }], timeout_minutes: 0 },
     { reviewers: [{ transport: 'pi', model: 'x' }], budget_usd: 0 }, { reviewers: [{ transport: 'pi', model: 'x' }], extra: true }, {}]) {
     const value = structuredClone(reviewed)
     Object.assign(value.workers[0], { lane_review: bad })
-    assert.equal(feature.safeParse({ ...value, version: '2.9.0' }).success, false, JSON.stringify(bad))
+    assert.equal(feature.safeParse({ ...value, version: '2.10.0' }).success, false, JSON.stringify(bad))
   }
-  // The committed 2.9.0 example (docs/PRD_LANE_REVIEWER.md section 3): one lane with lane_review, one without.
-  const laneReviewExample = readJson('./examples/feature.2.9.0.json')
-  assert.equal(laneReviewExample.version, '2.9.0')
+  // The committed 2.10.0 example (docs/PRD_LANE_REVIEWER.md section 3): one lane with lane_review, one without.
+  const laneReviewExample = readJson('./examples/feature.2.10.0.json')
+  assert.equal(laneReviewExample.version, '2.10.0')
   feature.parse(laneReviewExample)
   assert.ok(laneReviewExample.workers.some((w: { lane_review?: unknown }) => w.lane_review))
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
@@ -360,7 +361,7 @@ test('multi-provider panel record 1.0.0: both Appendix A records validate verbat
   assert.equal(schema.$defs.output.type, 'object')  // The claude provider's --json-schema needs an object root.
 })
 
-test('lane-review record 1.0.0 keeps the full panel-shaped finding per reviewer and closes every object (feature.json 2.9.0)', () => {
+test('lane-review record 1.0.0 keeps the full panel-shaped finding per reviewer and closes every object (feature.json 2.10.0)', () => {
   const laneReview = handWritten('lane-review')
   const finding = { severity: 'P1', file: 'workflow/x.py', line: 12, title: 'leak', detail: 'the key is logged', unanchored: false }
   const reviewer = { index: 1, transport: 'pi', model: 'openai-codex/gpt-6.1-sol', effort: null, status: 'ok', cost_usd: 0.4, context_bytes: 1200, duration_seconds: 21, cwd: '/tmp/lane-review-ab', findings: [finding], error: null }

@@ -1,0 +1,25 @@
+{
+  "version": "2.10.0",
+  "name": "Lane reviewer example",
+  "branch_prefix": "feature/lane-reviewer",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md",
+      "lane_review": {
+        "reviewers": [
+          {"transport": "pi", "model": "openai-codex/gpt-6.1-sol"},
+          {"transport": "claude", "model": "claude-sonnet-5-5", "effort": "medium"}
+        ],
+        "rounds": 1,
+        "timeout_minutes": 10,
+        "budget_usd": 3
+      }
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ]
+}
