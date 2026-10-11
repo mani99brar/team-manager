@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
+import {
+  CONTROL_IDS, RECORD_STATUSES, cleanPreviewRequestSchema, cleanPreviewResponseSchema, controlErrorSchema, controlRecordSchema, controlRequestSchema, controlsStatusSchema, runControlsSchema,
+} from './controls.js'
 import type { RunInputs } from './v1.js'
 import { validateWorkerResult } from '../workflow/v1.js'
 import {
@@ -862,4 +865,40 @@ test('run details with repair nodes: the DAG check passes, the key is optional a
   inputs.workers[0].skills = []
   validateRunInputs(inputs)
   assert.throws(() => validateRunInputs({ ...inputs, workers: [{ ...inputs.workers[0], skills: [{ name: 'x' }] }] }))
+})
+
+test('run controls (Appendix A): every example validates, one RunControls per offer state and one record per status', () => {
+  const states = Object.entries(examples.runControlsStates)
+  assert.deepEqual(states.map(([name]) => name), [
+    'stoppedAutomatic', 'runningSupervisor', 'failedVerify', 'needsReconciliation', 'challengePaused', 'challengeHeld', 'questionWithPane', 'questionWithoutPane',
+    'awaitingApproval', 'blockedAfterFreeze', 'abandoned', 'finished',
+  ])
+  for (const [name, controls] of states) {
+    runControlsSchema.parse(controls)
+    assert.deepEqual(controls.controls.map(control => control.id), [...CONTROL_IDS], name)
+    for (const control of controls.controls) assert.equal(control.available, control.reason === null, `${name}/${control.id}`)
+  }
+  assert.deepEqual(examples.controlRecords.map(record => controlRecordSchema.parse(record).status).sort(), [...RECORD_STATUSES].sort())
+  controlsStatusSchema.parse(examples.controlsStatus)
+  assert.equal(controlsStatusSchema.parse(examples.controlsStatusOff).enabled, false)
+  controlRequestSchema.parse(examples.controlRequest)
+  cleanPreviewRequestSchema.parse(examples.cleanPreviewRequest)
+  cleanPreviewResponseSchema.parse(examples.cleanPreviewResponse)
+  controlErrorSchema.parse({ error: { code: 'NOT_AVAILABLE', message: 'The run is not finished or abandoned' } })
+})
+
+test('run controls (Appendix A): the schemas refuse what the API never sends', () => {
+  const controls = structuredClone(examples.runControls)
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(1) }), 'twelve controls')
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls].reverse() }), 'in the order of PRD section 4')
+  const unavailable = structuredClone(controls)
+  unavailable.controls[1].reason = null
+  assert.throws(() => runControlsSchema.parse(unavailable), 'an unavailable control carries a reason')
+  assert.throws(() => runControlsSchema.parse({ ...controls, token: 'secret' }), 'no extra keys')
+  assert.throws(() => controlRecordSchema.parse({ ...examples.controlRecordRunning, record_id: 'c-123' }))
+  assert.throws(() => controlRecordSchema.parse({ ...examples.controlRecordRunning, params: { confirm_run_id: 'run' } }), 'the typed run id is never part of a record')
+  assert.throws(() => controlRecordSchema.parse({ ...examples.controlRecordRunning, output_tail: Array.from({ length: 41 }, () => 'x') }))
+  assert.throws(() => cleanPreviewRequestSchema.parse({ run_state_token: 't', request_id: examples.controlRequest.request_id }), 'the preview body is the token only ([L4])')
+  assert.throws(() => controlRequestSchema.parse({ ...examples.controlRequest, request_id: 'nope' }))
+  assert.throws(() => controlErrorSchema.parse({ error: { code: 'SOMETHING_ELSE', message: 'x' } }))
 })

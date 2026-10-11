@@ -1,0 +1,215 @@
+{
+  "version": "1.4.0",
+  "feature": "Run controls: the run page runs the controller's own recovery and decision commands as the operator, behind pairing, origin, host and stale-state guards, and shows their progress and result",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "server",
+      "role": "backend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "server/controls.ts",
+        "server/controlsGuard.ts",
+        "server/controlsRunner.ts",
+        "server/controls.test.ts",
+        "server/app.ts",
+        "server/index.ts",
+        "contracts/projects/controls.ts",
+        "contracts/projects/contract.test.ts",
+        "contracts/projects/examples.ts",
+        "workflow/RUNBOOK.md",
+        "workflow/README.md",
+        "docs/handoff/run-controls-server.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/controls",
+        "src/projects/signal/LiveDock.tsx",
+        "src/projects/signal/IdentityLine.tsx",
+        "src/projects/signal/signal.css",
+        "src/projects/CommandBlock.tsx",
+        "tests/unit/controls.test.ts",
+        "tests/project-workflows/controls.spec.ts",
+        "tests/project-workflows/fixtures/controls.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/controls-app.ts",
+        "tests/project-workflows/fake-controller.py",
+        "tests/project-workflows/playwright.config.ts",
+        "tests/project-workflows/mock.ts",
+        "docs/handoff/run-controls-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "controls-off",
+              "description": "With run controls off (the API started without MD_MANAGER_RUN_CONTROLS=on), a run page that waits on a stopped supervisor looks exactly as today: the dock's command block has Copy and no Run button, its caption still says the viewer never changes a run, there is no Controls button in the identity line, and no request goes to /api/run-controls/* other than the status probe"
+            },
+            {
+              "id": "controls-pair",
+              "description": "With controls on and no token in this browser, the identity line's Controls button opens a 'Pair this browser' panel with one token field and nothing else; a wrong token says it was refused and asks again; the right token closes the panel and the Controls list appears; after a reload the browser is still paired; the token is never shown again on the page"
+            },
+            {
+              "id": "controls-restart",
+              "description": "On an automatic run whose supervisor stopped (an interrupted event naming automatic --live), the dock's command block shows Run beside Copy on the restart command; Run opens a confirmation dialog with the label 'Restart supervisor', the exact redacted command, what it does and what it does not do; Confirm sends one POST (a second click while it is in flight sends nothing); the dock then shows a Controls row 'Restart supervisor' running with its log tail behind a disclosure, then succeeded; Escape closes the dialog without sending and focus returns to Run"
+            },
+            {
+              "id": "controls-unavailable",
+              "description": "On a run whose supervisor is running, the Controls list shows Pause supervisor available and Restart supervisor, Retry a check, Reconcile launches, Abandon and Clean greyed with the reason 'A supervisor is running' (with since time); Pause's confirmation says the workers keep running; on a finished run Clean is available and Restart is greyed with a reason"
+            },
+            {
+              "id": "controls-answer",
+              "description": "On a run where lane ui waits on question 2 and has a pane recorded in terminals.json, the Controls list and the dock offer Answer the question; its dialog shows the question text and a text field; Confirm stays disabled while the field is empty; an answer is sent once and the record shows succeeded with the controller's output line"
+            },
+            {
+              "id": "controls-typed-confirm",
+              "description": "Abandon the run asks for a reason and the run id typed: Confirm stays disabled until the typed id matches exactly; Approve and integrate, Repair a lane and Clean worktrees ask for the typed run id the same way; Clean first shows the dry-run output it will act on"
+            },
+            {
+              "id": "controls-refused",
+              "description": "A control the controller refuses (the fake controller prints 'Blocked: ...' and exits 1) shows the record as failed with the Blocked line first; a request answered 409 STATE_CHANGED says the run changed since you looked and refreshes the controls, without sending again; a 409 BUSY says another control of this run is running"
+            },
+            {
+              "id": "controls-phone",
+              "description": "At 390 px wide: the Controls list is a bottom sheet, every control's button and reason are readable without horizontal scroll, the confirmation dialog fits the screen with its command wrapped, and nothing on the run page scrolls sideways"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/controls-app.ts"
+    ],
+    "ready_path": "/api/run-controls/status",
+    "timeout_seconds": 180
+  }
+}

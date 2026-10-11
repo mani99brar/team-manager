@@ -1,4 +1,5 @@
 import type { WorkerResult } from '../workflow/v1.js'
+import type { Control, ControlId, ControlRecord, ControlRequest, ControlsStatus, ParamSpec, RunControls } from './controls.js'
 import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, ReviewFinding, RepairEntry, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
 
 /**
@@ -711,3 +712,158 @@ export const fixLoopRestoredRecord: FixLoopRecord = {
 export const fixLoopRestored: FixLoop = { ...fixLoopHeader, ...fixLoopRestoredRecord }
 /** A loop neither source could project: no repairs, no rounds, no repair nodes. */
 export const fixLoopError: FixLoop = { contract_version: '1.10.0', source: 'export', version: '1.0.0', error: 'repairs.json: repair 2 has a status the viewer does not know', rounds: null, repairs: [], review_rounds: [] }
+
+// ---- Run controls (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.0.0) -------------------------------------------------------
+
+const PANE_REASON = 'Typing the answer needs the lane\'s Herdr pane; answer in your terminal'
+
+type ControlBase = Omit<Control, 'available' | 'reason' | 'recommended' | 'params'>
+
+const controlBases: ControlBase[] = [
+  { id: 'restart', label: 'Restart supervisor', command: '$PY -m workflow automatic "$RUN" --live --by operator', runs: 'long', confirm: 'plain',
+    effect: 'Starts the automatic supervisor again from the run\'s checkpoint; it may start model sessions.', not_effect: 'It relaunches nothing the controller has a receipt for.' },
+  { id: 'pause', label: 'Pause supervisor (workers keep running)', command: 'SIGINT to the supervisor\'s process group', runs: 'signal', confirm: 'plain',
+    effect: 'Sends Ctrl-C (SIGINT) to the supervisor\'s process group, as in its terminal; the controller records the interruption and keeps the sessions.',
+    not_effect: 'It does not stop the workers or reviewers: their sessions keep running and a later restart waits for them again. To stop everything, abandon the run.' },
+  { id: 'retry', label: 'Retry a check', command: '$PY -m workflow retry "$RUN" --phase <phase> --node <lane> --by operator', runs: 'short', confirm: 'plain',
+    effect: 'Raises the attempt of a lane\'s failed or interrupted check and reruns it.', not_effect: 'On an automatic run it prints the restart command instead of continuing; restart the supervisor next.' },
+  { id: 'reconcile', label: 'Reconcile launches', command: '$PY -m workflow reconcile "$RUN" --by operator', runs: 'short', confirm: 'plain',
+    effect: 'Binds the sessions the launch receipts name; inspect the receipts and `claude agents --json` first (RUNBOOK, Ambiguous startup).', not_effect: 'It launches nothing new.' },
+  { id: 'resume', label: 'Rerun the design challenge', command: '$PY -m workflow resume "$RUN" --by operator', runs: 'long', confirm: 'plain',
+    effect: 'Reruns the design challenge for the run; it starts a model session.', not_effect: 'It does not edit the task or decisions files: edits stay in your terminal.' },
+  { id: 'accept_challenge', label: 'Accept the challenge', command: '$PY -m workflow resume "$RUN" --accept-challenge="<reason>" --by operator', runs: 'long', confirm: 'plain',
+    effect: 'Accepts the paused design challenge with your reason and launches the workers.', not_effect: 'It does not resolve the challenge\'s concerns; the reason is recorded.' },
+  { id: 'release_hold', label: 'Launch the workers', command: '$PY -m workflow resume "$RUN" --launch --by operator', runs: 'long', confirm: 'plain',
+    effect: 'Releases the held design challenge and launches the workers, leaving out the notes you drop.', not_effect: 'It does not change the challenge\'s record; dropped notes are only left out of the workers\' prompts.' },
+  { id: 'answer', label: 'Answer the question', command: '$PY -m workflow answer "$RUN" <lane> --by operator -- "<text>"', runs: 'short', confirm: 'plain',
+    effect: 'Records your answer to the lane\'s question and types it into the lane\'s Herdr pane.', not_effect: 'It does not restart the supervisor.' },
+  { id: 'approve', label: 'Approve and integrate', command: '$PY -m workflow approve "$RUN" --bundle-sha256 <digest> --by operator', runs: 'short', confirm: 'typed_run_id',
+    effect: 'Approves the reviewed bundle and integrates it into the source branch.', not_effect: 'It approves only the bundle shown by its first 12 characters; a different bundle is refused.' },
+  { id: 'repair_session', label: 'Repair a lane', command: '$PY -m workflow repair "$RUN" <lane> --session --live --by operator', runs: 'long', confirm: 'typed_run_id',
+    effect: 'Starts one model session that repairs the lane that blocked at a check after freeze, then applies its fix.', not_effect: 'It does not continue the run: restart the supervisor afterwards.' },
+  { id: 'abandon', label: 'Abandon the run', command: '$PY -m workflow abandon "$RUN" --reason="<reason>" --by operator', runs: 'short', confirm: 'typed_run_id',
+    effect: 'Stops every recorded session of the run and closes it for good.', not_effect: 'Worktrees and evidence stay until the run is cleaned.' },
+  { id: 'clean', label: 'Clean worktrees', command: '$PY -m workflow clean "$RUN" --by operator', runs: 'short', confirm: 'typed_run_id',
+    effect: 'Removes the run\'s worktrees (and its source checkout once finished); a dry run shows what first.', not_effect: 'Evidence, packets, logs and every run file stay.' },
+]
+
+const typedParam: ParamSpec = { name: 'confirm_run_id', kind: 'typed', required: true }
+const noParams: Record<ControlId, ParamSpec[]> = {
+  restart: [], pause: [], retry: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'phase', kind: 'choice', choices: [], required: true }], reconcile: [], resume: [],
+  accept_challenge: [{ name: 'reason', kind: 'text', min_length: 10, max_length: 500, required: true }], release_hold: [{ name: 'drop', kind: 'multi', choices: [], required: false }],
+  answer: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }],
+  approve: [typedParam], repair_session: [{ name: 'lane', kind: 'choice', choices: [], required: true }, typedParam],
+  abandon: [{ name: 'reason', kind: 'text', min_length: 1, max_length: 500, required: true }, typedParam], clean: [typedParam],
+}
+
+/** One RunControls: `offered` lists the available ids (with their parameter specs), `reasons` the reason of every other control. */
+function controlsExample(token: string, supervisor: RunControls['supervisor'], offered: Partial<Record<ControlId, ParamSpec[]>>, reasons: Partial<Record<ControlId, string>>, records: ControlRecord[] = [], commands: Partial<Record<ControlId, string>> = {}): RunControls {
+  return {
+    version: '1.0.0', run_state_token: token, supervisor, supervisor_since: supervisor === 'running' ? '2026-10-10T10:42:07Z' : null,
+    controls: controlBases.map(base => {
+      const id = base.id
+      const available = id in offered
+      return { ...base, command: commands[id] ?? base.command, available, reason: available ? null : reasons[id] ?? 'Not available', recommended: false, params: offered[id] ?? noParams[id] }
+    }),
+    records,
+  }
+}
+
+const choice = (name: 'lane', choices: string[]): ParamSpec => ({ name, kind: 'choice', choices, required: true })
+const phases = (choices: ('worker' | 'candidate')[]): ParamSpec => ({ name: 'phase', kind: 'choice', choices, required: true })
+const reasonSpec = (min: number): ParamSpec => ({ name: 'reason', kind: 'text', min_length: min, max_length: 500, required: true })
+const SUPERVISOR_RUNNING = 'A supervisor is running (since 10:42 UTC)'
+const NO_QUESTION = 'No lane has an unanswered question'
+const NOT_PAUSED = 'The design challenge is not paused, held or interrupted'
+
+export const controlsStatus: ControlsStatus = { version: '1.0.0', enabled: true, paired: true }
+export const controlsStatusOff: ControlsStatus = { version: '1.0.0', enabled: false, paired: false }
+
+export const controlRecordRunning: ControlRecord = {
+  record_id: 'c-0a1b2c3d4e5f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3301', control: 'restart', params: {}, command: '$PY -m workflow automatic "$RUN" --live --by operator',
+  status: 'running', exit_code: null, started_at: '2026-10-10T10:40:00Z', ended_at: null, output_tail: ['Automatic by the operator'],
+}
+export const controlRecordSucceeded: ControlRecord = {
+  ...controlRecordRunning, record_id: 'c-1a2b3c4d5e6f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3302', control: 'answer', params: { lane: 'ui', text: 'Use port 8080.' },
+  command: '$PY -m workflow answer "$RUN" ui --by operator -- "Use port 8080."', status: 'succeeded', exit_code: 0, ended_at: '2026-10-10T10:40:03Z', output_tail: ['Answer 1 recorded for ui by the operator'],
+}
+export const controlRecordFailed: ControlRecord = {
+  ...controlRecordRunning, record_id: 'c-2a3b4c5d6e7f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3303', status: 'failed', exit_code: 1, ended_at: '2026-10-10T10:40:02Z',
+  output_tail: ['Blocked: Another controller owns this run', 'Evidence retained at ~/runs/refuse-run.'],
+}
+export const controlRecordRefused: ControlRecord = {
+  ...controlRecordRunning, record_id: 'c-3a4b5c6d7e8f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3304', control: 'clean', params: {}, command: '$PY -m workflow clean "$RUN" --by operator',
+  status: 'refused', exit_code: null, ended_at: '2026-10-10T10:40:00Z', output_tail: ['The command could not be started.'],
+}
+export const controlRecordLost: ControlRecord = {
+  ...controlRecordRunning, record_id: 'c-4a5b6c7d8e9f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3305', status: 'lost', ended_at: '2026-10-10T11:00:00Z', output_tail: [],
+}
+export const controlRecords: ControlRecord[] = [controlRecordRunning, controlRecordSucceeded, controlRecordFailed, controlRecordRefused, controlRecordLost]
+
+/** One RunControls per state of the offer rules (PRD section 4; decisions.md [L2], [L3], [L6]). */
+export const runControlsStates: Record<string, RunControls> = {
+  stoppedAutomatic: controlsExample('rs-stopped', 'not_running', { restart: [], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
+    accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: NO_QUESTION,
+    approve: 'The run is not waiting for your approval', repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }),
+  runningSupervisor: controlsExample('rs-running', 'running', { pause: [] }, {
+    restart: SUPERVISOR_RUNNING, retry: SUPERVISOR_RUNNING, reconcile: SUPERVISOR_RUNNING, resume: SUPERVISOR_RUNNING, accept_challenge: SUPERVISOR_RUNNING,
+    release_hold: SUPERVISOR_RUNNING, answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: SUPERVISOR_RUNNING, abandon: SUPERVISOR_RUNNING, clean: SUPERVISOR_RUNNING,
+  }, [controlRecordRunning]),
+  failedVerify: controlsExample('rs-failed-verify', 'not_running', { restart: [], retry: [choice('lane', ['ui']), phases(['worker'])], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused',
+    release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }, [controlRecordFailed]),
+  needsReconciliation: controlsExample('rs-reconcile', 'not_running', { restart: [], reconcile: [], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused',
+    release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }),
+  challengePaused: controlsExample('rs-paused', 'not_running', { restart: [], resume: [], accept_challenge: [reasonSpec(10)], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', release_hold: 'The design challenge is not held',
+    answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }),
+  challengeHeld: controlsExample('rs-held', 'not_running', { restart: [], resume: [], release_hold: [{ name: 'drop', kind: 'multi', choices: [1, 2], required: false }], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', accept_challenge: 'The latest design challenge is not paused',
+    answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }),
+  questionWithPane: controlsExample('rs-question', 'not_running', {
+    restart: [], answer: [choice('lane', ['ui']), { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }], abandon: [reasonSpec(1), typedParam],
+  }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
+    accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', approve: 'The run is not waiting for your approval',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }, [controlRecordSucceeded]),
+  questionWithoutPane: controlsExample('rs-question-no-pane', 'not_running', { restart: [], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
+    accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: PANE_REASON, approve: 'The run is not waiting for your approval',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }),
+  awaitingApproval: controlsExample('rs-approval', 'not_running', { restart: [], approve: [typedParam], abandon: [reasonSpec(1), typedParam] }, {
+    pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
+    accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: NO_QUESTION,
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  }, [], { approve: '$PY -m workflow approve "$RUN" --bundle-sha256 cccccccccccc… --by operator' }),
+  blockedAfterFreeze: controlsExample('rs-frozen', 'not_running', {
+    restart: [], retry: [choice('lane', ['ui']), phases(['worker'])], repair_session: [choice('lane', ['ui']), typedParam], abandon: [reasonSpec(1), typedParam],
+  }, {
+    pause: 'No supervisor is running', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused',
+    release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval', clean: 'The run is not finished or abandoned',
+  }),
+  abandoned: controlsExample('rs-abandoned', 'not_running', { clean: [typedParam] }, {
+    restart: 'The run was abandoned', pause: 'No supervisor is running', retry: 'The run was abandoned', reconcile: 'The run was abandoned', resume: 'The run was abandoned',
+    accept_challenge: 'The run was abandoned', release_hold: 'The run was abandoned', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
+    repair_session: 'The run was abandoned', abandon: 'The run was abandoned',
+  }),
+  finished: controlsExample('rs-finished', 'not_running', { clean: [typedParam] }, {
+    restart: 'The run is finished', pause: 'No supervisor is running', retry: 'The run is finished', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
+    accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', abandon: 'The run is already integrated',
+  }),
+}
+export const runControls: RunControls = runControlsStates.stoppedAutomatic
+export const controlRequest: ControlRequest = { request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3306', run_state_token: 'rs-stopped', params: {} }
+export const cleanPreviewRequest = { run_state_token: 'rs-finished' }
+export const cleanPreviewResponse = { exitCode: 0, output: 'Would remove 2 worktrees\nWould keep evidence' }

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT_PREFIX, SKILL_LOCATIONS, verificationPhase } from './harness.ts'
+import { controlsEnvironment } from './fixtures/controls.ts'
 import { seedCandidate } from './seed.ts'
 
 /**
@@ -69,6 +70,11 @@ function prepare(): { root: string; apiPort: number; webPort: number; projectsCo
 const { root, apiPort, webPort, projectsConfig } = prepare()
 const baseURL = `http://127.0.0.1:${webPort}`
 
+// Candidate phase: the API starts with the run controls on (decisions [L5]) and the fake controller; the worker phase has no
+// controls backend, and controls.spec.ts mocks /api/run-controls/** there.
+const controlsEnv: Record<string, string> = phase === 'candidate' ? controlsEnvironment(root, join(root, 'projects')) : {}
+if (phase === 'candidate') process.env.MD_MANAGER_FAKE_CONTROLLER_LOG = controlsEnv.MD_MANAGER_FAKE_CONTROLLER_LOG
+
 const apiEnv: Record<string, string> = {
   MD_MANAGER_CONFIG: join(root, 'sources.json'),
   MD_MANAGER_FIXTURE_ROOT: '',
@@ -77,6 +83,20 @@ const apiEnv: Record<string, string> = {
   WORKFLOW_VERIFICATION_PHASE: phase,
   ...(projectsConfig ? { MD_MANAGER_PROJECTS_CONFIG: projectsConfig } : {}),
 }
+
+// Only controls.spec.ts sees the controls: every other spec reads pages without a Controls button (their allow-lists predate
+// it), so the candidate phase runs a second API and web server with the controls on for that one spec.
+function ports(): { apiPort: number; webPort: number } {
+  if (process.env.MD_MANAGER_CONTROLS_API_PORT) return { apiPort: Number(process.env.MD_MANAGER_CONTROLS_API_PORT), webPort: Number(process.env.MD_MANAGER_CONTROLS_WEB_PORT) }
+  const taken = new Set([apiPort, webPort])
+  const next = () => { let port = freePort(); while (taken.has(port)) port = freePort(); taken.add(port); return port }
+  const chosen = { apiPort: next(), webPort: next() }
+  process.env.MD_MANAGER_CONTROLS_API_PORT = String(chosen.apiPort)
+  process.env.MD_MANAGER_CONTROLS_WEB_PORT = String(chosen.webPort)
+  return chosen
+}
+const controlsPorts = phase === 'candidate' ? ports() : null
+const controlsURL = controlsPorts ? `http://127.0.0.1:${controlsPorts.webPort}` : baseURL
 
 export default defineConfig({
   testDir: '.',
@@ -94,6 +114,12 @@ export default defineConfig({
     timezoneId: 'UTC',
     locale: 'en-GB',
   },
+  projects: phase === 'candidate'
+    ? [
+      { name: 'pages', testIgnore: '**/controls.spec.ts' },
+      { name: 'controls', testMatch: '**/controls.spec.ts', use: { baseURL: controlsURL } },
+    ]
+    : [{ name: 'all' }],
   webServer: [
     {
       command: 'npm run start:api',
@@ -109,5 +135,21 @@ export default defineConfig({
       reuseExistingServer: false,
       timeout: 30_000,
     },
+    ...(controlsPorts ? [
+      {
+        command: 'npm run start:api',
+        url: `http://127.0.0.1:${controlsPorts.apiPort}/api/entries`,
+        env: { ...apiEnv, ...controlsEnv, MD_MANAGER_API_PORT: String(controlsPorts.apiPort), MD_MANAGER_WEB_PORT: String(controlsPorts.webPort) },
+        reuseExistingServer: false,
+        timeout: 30_000,
+      },
+      {
+        command: 'npm run dev:web',
+        url: controlsURL,
+        env: { MD_MANAGER_API_PORT: String(controlsPorts.apiPort), MD_MANAGER_WEB_PORT: String(controlsPorts.webPort) },
+        reuseExistingServer: false,
+        timeout: 30_000,
+      },
+    ] : []),
   ],
 })

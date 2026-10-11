@@ -3,6 +3,9 @@ import type { LocationConfig } from './config.ts'
 import { RequestError, readMarkdownFile, writeMarkdownFile, type ReadFile } from './files.ts'
 import { parseMutationBody, performMutation } from './mutations.ts'
 import { LocationRegistry } from './registry.ts'
+import { controlRoutes } from './controls.ts'
+import { CONTROLS_PREFIX, type ControlsSetup } from './controlsGuard.ts'
+import type { RunnerOptions } from './controlsRunner.ts'
 import { PROJECTS_PREFIX, projectRoutes } from './projectRoutes.ts'
 import { RunStore, type RunStoreOptions } from './projects.ts'
 import { EMPTY_PROJECTS, assertProjectsConfig, type ProjectsConfig } from './projectsConfig.ts'
@@ -23,6 +26,11 @@ export type AppOptions = {
   refreshProjects?: () => Promise<ProjectsConfig | null>
   /** Read limits for persisted run files; tests lower them to prove reads are bounded. */
   runStore?: Pick<RunStoreOptions, 'exportByteLimit' | 'packetByteLimit' | 'artifactByteLimit'>
+  /**
+   * The run controls (server/controls.ts), from `loadControlsConfig`. Omitted means off: `/api/run-controls/status` answers
+   * `enabled: false` and every other control route is a 404 `CONTROLS_DISABLED`. `runner` and `now` are injected by tests.
+   */
+  controls?: { setup: ControlsSetup; runner?: RunnerOptions; now?: () => Date }
 }
 
 function singleString(value: unknown): string | null {
@@ -65,6 +73,9 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
     frameworkErrors: (error, request, untyped) => {
       const reply = untyped as FastifyReply
       const status = typeof error.statusCode === 'number' ? error.statusCode : 500
+      if (request.url.startsWith(`${CONTROLS_PREFIX}/`) && status >= 400 && status < 500) {
+        return reply.code(400).header('Cache-Control', 'no-store').send({ error: { code: 'INVALID_ID', message: 'A path segment is not a valid ID.' } })
+      }
       if (request.url.startsWith(`${PROJECTS_PREFIX}/`) && status >= 400 && status < 500) {
         return reply.code(400).send({ error: { code: 'INVALID_ID', message: 'A path segment is not a valid ID.' } })
       }
@@ -96,6 +107,8 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
     warn: (message, details) => app.log.warn(details, message),
   })
   app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })
+  // Run controls live outside the read-only Projects API; with controls off the scope answers 404 CONTROLS_DISABLED and nothing else changes.
+  app.register(controlRoutes, { prefix: CONTROLS_PREFIX, store, setup: options.controls?.setup ?? { enabled: false, warnings: [] }, runner: options.controls?.runner, now: options.controls?.now })
   // The first Runs home visit finds every workflow's summaries cached: projected once in the background after boot.
   app.addHook('onReady', async () => { void store.warmSummaries() })
   app.get('/api/entries', async (_request, reply) => {

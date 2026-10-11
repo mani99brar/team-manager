@@ -1,3 +1,5 @@
+import { ControlsHistory } from '../controls/ControlsRow.tsx'
+import { ControlsMenu } from '../controls/ControlsMenu.tsx'
 import { acceptedFindingsText, acceptedOf, isUntried } from '../../../contracts/projects/triage.ts'
 import type { RunAccepted, RunDetail, RunInputs, WorkflowDefinition } from '../api.ts'
 import { INPUTS_NONE_SENTENCE } from '../Assignment.tsx'
@@ -68,6 +70,7 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
   const title = data?.feature ?? workflowTitle(definition)
   const definitionChanged = current !== null && current.definition_revision !== definition.definition_revision
   const accepted = acceptedOf(detail)
+  const scope = { projectId: summary.project_id, workflowId: summary.workflow_id, runId: summary.run_id }
   return (
     <header className={`sb-idline ${toneClass(tone)}`} data-testid="run-header" data-tone={tone} aria-labelledby="run-summary-title">
       <h2 id="run-summary-title" className="sb-runid">{summary.run_id}</h2>
@@ -89,6 +92,7 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
         <TimeZoneToggle />
       </div>
       <AppLink href={other.href} onNavigate={onNavigate} className="sb-other" data-testid={other.testId}>{other.label}</AppLink>
+      <ControlsMenu scope={scope} />
       {accepted && <AcceptedOutcome accepted={accepted} />}
       <details className="run-details sb-details" data-testid="run-details">
         <summary>Details</summary>
@@ -116,6 +120,7 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
             <div><dt>Created</dt><dd><Time iso={summary.created_at} anchor /></dd></div>
             <div><dt>Export updated</dt><dd><Time iso={summary.updated_at} /></dd></div>
           </dl>
+          <ControlsHistory scope={scope} />
         </div>
       </details>
     </header>

@@ -1,6 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { acceptedOf, type Now, type Timeline } from '../../../contracts/projects/triage.ts'
 import type { RunDetail, RunInputs } from '../api.ts'
+import { ControlDialogHost } from '../controls/ControlDialog.tsx'
+import { StepControlsContext, type StepControls } from '../controls/context.ts'
+import { ControlsRow } from '../controls/ControlsRow.tsx'
+import { stepControl } from '../controls/model.ts'
+import { waitingQuestions } from '../controls/questions.ts'
+import { openDialog, useRunControls } from '../controls/store.ts'
+import { servedNow } from '../lists.ts'
+import { useServedRun } from '../LiveStatus.tsx'
 import { NowBanner } from '../NowBanner.tsx'
 import { deadlinesLabel, OVERRIDE_LABEL } from '../status.ts'
 import { formatAgo, formatSpan, utcTitle } from '../time.ts'
@@ -54,6 +62,17 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
   const end = timeline?.runEnd ? Date.parse(timeline.runEnd.at) : null
   const ran = end === null ? (detail.summary.status === 'running' ? clock - start : null) : end - start
   const finished = accepted !== null || detail.summary.status === 'succeeded' || detail.summary.status === 'cancelled' || detail.summary.status === 'failed'
+  const { project_id: projectId, workflow_id: workflowId, run_id: runId } = detail.summary
+  const scope = useMemo(() => ({ projectId, workflowId, runId }), [projectId, workflowId, runId])
+  const controls = useRunControls(scope)
+  // Run buttons exist only for a paired browser whose server offers the control; otherwise the dock is today's.
+  const stepControls = useMemo<StepControls | null>(() => {
+    const offered = controls.mode === 'on' && controls.paired ? controls.data?.controls : undefined
+    return offered === undefined ? null : { forStep: text => stepControl(text, offered), run: (control, preset) => openDialog(scope, control.id, preset) }
+  }, [controls.mode, controls.paired, controls.data?.controls, scope])
+  // The live Now (a question asked since the export) names the lane and quotes the question the Answer dialog shows.
+  const served = useServedRun()
+  const questions = useMemo(() => waitingQuestions(now === null ? null : servedNow(now, served), inputs), [now, served, inputs])
   const toggle = () => {
     rememberDockOpen(!open)
     onOpenChange(!open)
@@ -77,8 +96,11 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
       </button>
       <div className="lv-body" id="sb-live-body" hidden={!open}>
         <div className="lv-sec lv-sec-now">
-          <NowBanner now={now} clock={clock} focusHref={now?.focus ? nodeHref(now.focus.node_id) : null} onNavigate={onNavigate} onOpenFocus={onGo} />
+          <StepControlsContext.Provider value={stepControls}>
+            <NowBanner now={now} clock={clock} focusHref={now?.focus ? nodeHref(now.focus.node_id) : null} onNavigate={onNavigate} onOpenFocus={onGo} />
+          </StepControlsContext.Provider>
         </div>
+        <ControlsRow scope={scope} clock={clock} />
         <div className="lv-sec">
           <p className="lv-h">Latest events</p>
           {latest.length === 0
@@ -118,6 +140,7 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
             : <>From the run's records as served, last written <Time iso={detail.summary.updated_at} />; the page re-reads them while the run can change.</>}
         </p>
       </div>
+      <ControlDialogHost scope={scope} questions={questions} />
     </section>
   )
 }
