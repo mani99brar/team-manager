@@ -2,7 +2,7 @@
 
 The Projects tab opens on a Projects page: one card per registered project. Each card opens a dedicated project page with:
 - the step chart of every feature's runs;
-- local default branch against origin "as last fetched";
+- local default branch against origin, as this clone has it;
 - landings;
 - pull requests and issues read through `gh`.
 

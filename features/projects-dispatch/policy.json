@@ -30,7 +30,6 @@
         "server/dispatch.test.ts",
         "server/app.ts",
         "server/index.ts",
-        "server/projectsConfig.ts",
         "contracts/projects/dispatch.ts",
         "contracts/projects/contract.test.ts",
         "contracts/projects/examples.ts",
@@ -183,19 +182,19 @@
           "scenarios": [
             {
               "id": "dispatch-overview",
-              "description": "/projects shows the Projects page: the heading 'Projects', a line naming the project and repository counts and when runs and GitHub were read, and one card per registered project in rail order; each card shows the name, the state word ('1 of 3 features failed last' for a project with three features whose worst latest result is failed), the repository and a public or private chip, 'on <checkout>' with the sync ('2 ahead of origin/main as last fetched' for the seeded clone), the non-zero run counts, the latest run id with its state word, and open PR and issue counts; clicking a card opens /projects/<id>"
+              "description": "/projects shows the Projects page: the heading 'Projects', a line naming the project and repository counts and when runs and GitHub were read, and one card per registered project in rail order; each card shows the name, the state word ('1 of 3 features failed last' for the seeded three-feature project whose worst latest result is failed), 'on <checkout>' with the sync ('2 ahead, 1 behind origin/main' for the seeded primary clone, the same wording as its header), the non-zero run counts and the latest run id with its state word; a GitHub project's card also shows 'acme/widgets'-style repository, a public or private chip and open PR and issue counts, while the non-GitHub project's card shows 'GitHub not read: not a GitHub remote' and no chip or counts; clicking a card opens /projects/<id>"
             },
             {
               "id": "dispatch-rail",
-              "description": "On the Projects page, Triage, a project page and a workflow page the rail shows 'All projects', 'Triage', then one row per project and nothing else (no workflow rows, no repository headers); a project with a run waiting on the operator comes first with the badge '1 waits on you', an unreadable project comes last with 'cannot be read'; the clone's primary project shows 'N unpushed' and its worktree project does not; the current page's row has aria-current=page; clicking a row opens that project's page"
+              "description": "On the Projects page, Triage, a project page and a workflow page the rail shows 'All projects', 'Triage', then one row per project and nothing else (no workflow rows, no repository headers); projects with runs waiting on the operator come first with an 'N waits on you' badge, the unreadable project comes last with 'cannot be read'; the seeded primary clone shows '2 unpushed' and its worktree project shows no unpushed badge; the current page's row has aria-current=page; clicking a row opens that project's page"
             },
             {
               "id": "dispatch-triage",
-              "description": "/projects/-/triage shows the former Runs home content (needs-you, today-runs, running-runs, recent-runs sections and their cards) under the new rail, with 'Triage' marked current; the rail's 'Triage' entry and the g then h keys reach it, and g then p returns to the Projects page"
+              "description": "/projects/-/triage shows the former Runs home content (needs-you, today-runs, running-runs, recent-runs sections and their cards) under the new rail, with 'Triage' marked current; the rail's 'Triage' entry reaches it from a project page and 'All projects' returns to the Projects page"
             },
             {
               "id": "dispatch-project",
-              "description": "A project page's header shows the project name, a link to https://github.com/<owner>/<name>, the visibility chip, the checkout and the sync line ('2 ahead, 1 behind origin/main as last fetched'), the succeeded/failed/cancelled figures, and jump buttons 'Runs by feature', 'Local and GitHub', 'Pull requests \u00b7 N open', 'Issues \u00b7 N open'; activating 'Issues \u00b7 N open' moves focus to the Issues card; the filter box narrows the run rows and Escape clears it"
+              "description": "The seeded primary clone's project page header shows the project name, a link to https://github.com/acme/widgets, the visibility chip, the checkout, a '~'-relative or basename repository label and no absolute path, the sync line '2 ahead, 1 behind origin/main' with 'as of origin/main updated here <time>', the succeeded/failed/cancelled figures, and jump buttons 'Runs by feature', 'Local and GitHub', 'Pull requests \u00b7 N open', 'Issues \u00b7 N open'; activating 'Issues \u00b7 N open' moves focus to the Issues card; the filter box narrows the run rows and Escape clears it"
             },
             {
               "id": "dispatch-chart",
@@ -207,11 +206,11 @@
             },
             {
               "id": "dispatch-github",
-              "description": "The Pull requests card groups PRs as 'Possibly related' (only the PR whose head or base branch equals the checkout branch or a run's source branch), 'Yours, open' (author equals viewer_login), 'Others, open' and 'Merged in the last 14 days', each row with its number, title linking to GitHub, review decision, checks counts and 'updated' time; the Issues card lists 'Assigned to you' first, then 'Newest from people', folds bot authors into 'N from bots', shows a year on an issue opened in an earlier year, and links 'All N on GitHub'; for the project whose remote is not GitHub every GitHub card says 'GitHub not read: not a GitHub remote' and shows no counts"
+              "description": "The Pull requests card says it shows the 20 most recently updated and groups PRs as 'Possibly related' (only the PR whose head or base branch equals the checkout branch or a run's source branch), 'Yours, open' (author equals viewer_login), 'Others, open' and 'Merged in the last 14 days', each row with its number, title linking to GitHub, review decision, checks counts and 'updated' time; the Issues card lists 'Assigned to you' first, then 'Newest from people', folds bot authors into 'N from bots among the newest 20', shows a year on an issue opened in an earlier year, and links 'All N on GitHub'; for the project whose remote is not GitHub every GitHub card says 'GitHub not read: not a GitHub remote' and shows no counts"
             },
             {
               "id": "dispatch-git-truth",
-              "description": "The worktree project's header and card say 'shares its clone with <primary>' and show no unpushed count; the Local and GitHub card of the primary says the sync is counted against origin/<branch> as this clone last fetched it with the FETCH_HEAD time and that this page never fetches, says how many of the commits ahead name a run, and lists landings as on local main and on origin or not; a project whose repository has no origin ref says 'not compared with origin'"
+              "description": "The worktree project's header and card say 'shares its clone with <primary>' and show no unpushed count; the primary's Local and GitHub card says the sync is counted against origin/main as this clone has it, with 'origin/main last updated here <time>' and that this page never fetches, says 'Of the 2 ahead, 1 name a run; 1 do not name a known run' (or the seeded counts), shows GitHub main's sha with its commit date, and lists the landings as on local main and on origin (one each, from the seed); the project with no origin ref says 'not compared with origin'; no rendered text on these pages contains /tmp/ or /home/"
             },
             {
               "id": "dispatch-phone",
