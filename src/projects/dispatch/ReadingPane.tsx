@@ -109,12 +109,9 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
           <h3>Next step</h3>
           {detail.status === 'loading' && <p className="dispatch-muted" data-testid="dispatch-pane-next-loading">Reading the run's commands…</p>}
           {detail.status === 'error' && <p className="dispatch-muted" data-testid="dispatch-pane-next-error">The run's commands could not be read. Open the run page for the next step.</p>}
-          {detail.status === 'ready' && (
-            <>
-              <p className="dispatch-lead dispatch-next-lead" data-testid="dispatch-pane-next-lead">{detail.now.next.label}</p>
-              <CommandBlock next={detail.now.next} />
-            </>
-          )}
+          {/* No separate lead line: today's CommandBlock already states the next step's label (as "Likely next step — …" or
+              the sentence itself), so a lead paragraph here would repeat it word for word (V27). */}
+          {detail.status === 'ready' && <CommandBlock next={detail.now.next} />}
         </section>
         <section className="dispatch-pane-sec dispatch-pane-actions">
           <a className="button dispatch-pane-open" data-testid="dispatch-open-run" href={runPathname(projectId, workflowId, run.run_id)}

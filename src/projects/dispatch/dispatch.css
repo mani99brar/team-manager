@@ -66,15 +66,17 @@
 /* project page layout. With no run selected the body is main + a 380px GitHub column (PRD 4.3); it stacks below 980px. */
 .projects-shell .dispatch-project-body { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; margin-top: 12px; }
 /* Docked (a run selected): the header stays full width, the reading pane docks beside the body, and the GitHub column stacks
-   under the chart unless the viewport is wide enough for three columns without squeezing the chart under 480px ([P26], V1).
-   Break-even arithmetic at the three-column grid (minmax(0,1fr) 380px, 16px gap): main = viewport - 322 (app padding 32,
-   workspace border 2, rail 280, shell-main padding 8); the pane track reaches its 420px max plus a 16px gap, so the body
-   (col1) = main - 436; the body's chart = body - 380 - 16. chart >= 480 needs body >= 876, i.e. main >= 1312, i.e. viewport
-   >= 1634 (content). 1680px leaves margin for a classic scrollbar (~15px) so the chart never drops below 480px while docked. */
+   under the chart unless the body itself is wide enough for three columns without squeezing the chart under 480px ([P26], V1,
+   V23). The column count is decided from the body's own width with a container query, not a viewport media query, so it is
+   right whatever the shell around it (the workspace border and padding the media-query arithmetic used to leave out). A
+   container query cannot style its own container, so `.dispatch-body-container` wraps the body and carries the container;
+   `.dispatch-project-body` (the grid it styles) is the child. 876px = a 480px chart + 16px gap + the 380px GitHub column. */
 .projects-shell .dispatch-project.has-pane { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 420px); column-gap: 16px; align-items: start; }
 .projects-shell .dispatch-project.has-pane > .dispatch-project-head { grid-column: 1 / -1; }
+.projects-shell .dispatch-body-container { min-width: 0; }
+.projects-shell .dispatch-project.has-pane .dispatch-body-container { container-type: inline-size; container-name: dispatch-body; }
 .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr); }
-@media (min-width: 1680px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr) 380px; } }
+@container dispatch-body (min-width: 876px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr) 380px; } }
 .projects-shell .dispatch-project-main { min-width: 0; }
 .projects-shell .dispatch-crumbs { font-size: 12.5px; color: var(--muted); }
 .projects-shell .dispatch-crumbs a { color: var(--muted); }
@@ -122,6 +124,8 @@
 .projects-shell .dispatch-run-id { font-family: var(--font-mono); font-weight: 700; }
 .projects-shell .dispatch-run-r { margin-left: auto; }
 .projects-shell .dispatch-res { display: inline-flex; align-items: center; gap: 6px; }
+/* A landed sha never breaks mid-sha, even in a squeezed run row at 1100px (V29). */
+.projects-shell .dispatch-res code, .projects-shell .dispatch-run-2 code { white-space: nowrap; }
 .projects-shell .dispatch-off { font-size: 11px; color: var(--warn); }
 .projects-shell .dispatch-run-2 { font-size: 12.5px; color: var(--muted); }
 .projects-shell .dispatch-run-2 b { color: var(--fg); }
@@ -165,13 +169,12 @@
 .projects-shell .dispatch-show-more { font: inherit; font-size: 12px; font-weight: 600; min-height: 28px; padding: 2px 8px; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--accent); cursor: pointer; }
 .projects-shell .dispatch-gh-note { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: 11.5px; }
 
-/* the reading pane's next-step lead */
-.projects-shell .dispatch-next-lead { font-size: 13px; margin: 0 0 8px; }
-
 /* github column */
 .projects-shell .dispatch-gh { display: grid; gap: 12px; align-content: start; }
 .projects-shell .dispatch-gcard { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); }
-.projects-shell .dispatch-gcard h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; align-items: baseline; gap: 8px; }
+.projects-shell .dispatch-gcard h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+/* The card title stays on one line; only the aside count wraps below it, so "PULL REQUESTS" never splits across two lines (V29). */
+.projects-shell .dispatch-gh-title { white-space: nowrap; }
 .projects-shell .dispatch-aside { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
 .projects-shell .dispatch-gline { font-weight: 600; margin: 0 0 6px; }
 .projects-shell .dispatch-gsub { font-size: 12.5px; color: var(--muted); margin: 4px 0; }

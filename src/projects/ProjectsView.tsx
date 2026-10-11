@@ -17,9 +17,9 @@ import { fetchDispatchOverview } from './dispatch/client.ts'
 import { fetchProjectSteps } from './dispatch/client.ts'
 import { Rail, type RailRow } from './dispatch/Rail.tsx'
 import { ProjectsPage, type CardData } from './dispatch/ProjectsPage.tsx'
-import { ProjectPage } from './dispatch/ProjectPage.tsx'
+import { ProjectPage, type RunsState } from './dispatch/ProjectPage.tsx'
 import { projectRunInfo } from './dispatch/projectModel.ts'
-import { railBadge, railOrder, type RailInfo } from './dispatch/derive.ts'
+import { everyRunListFailed, railBadge, railOrder, type RailInfo } from './dispatch/derive.ts'
 import { dateOnly } from './dispatch/format.ts'
 import './dispatch/dispatch.css'
 import { RunView } from './RunView.tsx'
@@ -110,6 +110,16 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const loadProjectRuns = useCallback((signal: AbortSignal) => fetchWorkflowRuns(projectId!, workflowsData ?? [], () => false, signal), [projectId, workflowsData])
   const projectRunsKey = route?.level === 'project' && workflowsData !== null ? `project-runs:${projectId}:${workflowsData.map(workflow => workflow.workflow_id).join('\u0000')}` : null
   const { state: projectRuns, meta: projectRunsMeta } = useResource(projectRunsKey, loadProjectRuns, refreshToken, projectRunsPoll)
+  // The run lists' state for the project page's "Needs you and running" section (V25, [L12]): loading while they load, failed
+  // when the request failed or every workflow's run list failed (so the all-clear is never claimed falsely), ready otherwise.
+  // `fetchWorkflowRuns` rejects only on abort and turns each workflow's failure into `{runs: [], error}`, so a wholly failed
+  // request reaches the page as "every workflow failed"; an empty workflow list is fully read, not failed (design note 5).
+  const projectRunsState: RunsState = useMemo(() => {
+    if (projectRuns.status === 'loading' || projectRuns.status === 'idle') return { kind: 'loading' }
+    if (projectRuns.status === 'error') return { kind: 'failed', reason: describeApiError(projectRuns.error) }
+    if (everyRunListFailed(projectRuns.data)) return { kind: 'failed', reason: describeApiError(projectRuns.data.find(workflow => workflow.error !== null)!.error) }
+    return { kind: 'ready' }
+  }, [projectRuns])
 
   // The rail rows and the Projects cards: every project's run state (from the registry runs) joined with the dispatch
   // overview's git and GitHub, ordered needs-you, running, readable, unreadable, then by last activity ([D6]).
@@ -320,6 +330,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       content = (
         <ProjectPage project={projectEntry} workflows={workflows.data}
           projectRuns={projectRuns.status === 'ready' ? projectRuns.data : []}
+          runsState={projectRunsState}
           steps={projectStepsData} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
           allProjects={projectsData ?? []} now={listClock} zone={zone} onNavigate={onNavigate} />
       )

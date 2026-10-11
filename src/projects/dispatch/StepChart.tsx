@@ -167,6 +167,8 @@ export type FeatureGroup = {
   workflow: WorkflowDefinition
   steps: ProjectStepsWorkflow | null
   runs: ChartRun[]
+  /** The feature's run count before any filter, so a filtered-to-empty group reads "0 of N runs match", not "0 runs" (V30). */
+  total: number
   /** The feature header's tone: the latest registry run's state tone, so it is correct even when the step data is absent ([L1]). */
   headTone: Tone
   /** The landings this project's git read reports, keyed by run id. */
@@ -177,12 +179,14 @@ type Props = {
   projectId: string
   defaultBranch: string | null
   groups: readonly FeatureGroup[]
+  /** Whether the project's run filter is active, so a group filtered to nothing says "0 of N runs match" (V30). */
+  filtering: boolean
   selectedRunId: string | null
   onSelect: (runId: string) => void
   onNavigate: (pathname: string) => void
 }
 
-export function StepChart({ projectId, defaultBranch, groups, selectedRunId, onSelect, onNavigate }: Props) {
+export function StepChart({ projectId, defaultBranch, groups, filtering, selectedRunId, onSelect, onNavigate }: Props) {
   return (
     <div className="dispatch-chart" data-testid="dispatch-chart">
       <div className="dispatch-axis" data-testid="dispatch-axis">
@@ -209,7 +213,11 @@ export function StepChart({ projectId, defaultBranch, groups, selectedRunId, onS
                 className={`projects-card lists-group-head ui-card ${toneClass(tone)}`}>
                 <span className="dispatch-feature-id">{group.workflow.workflow_id}</span>
                 <span className="dispatch-muted">
-                  {error ? 'cannot be read' : `${group.runs.length} ${group.runs.length === 1 ? 'run' : 'runs'}`}
+                  {error
+                    ? 'cannot be read'
+                    : filtering && group.runs.length === 0 && group.total > 0
+                      ? `0 of ${group.total} runs match`
+                      : `${group.runs.length} ${group.runs.length === 1 ? 'run' : 'runs'}`}
                   {landed.length > 0 && <> · landed {landed.map(sha => <code key={sha}>{sha.slice(0, 7)}</code>)}</>}
                   {!error && landed.length === 0 && group.runs.length > 0 && ' · nothing landed'}
                 </span>

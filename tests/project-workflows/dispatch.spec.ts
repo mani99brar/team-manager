@@ -7,6 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { attach, installHooks, phase, projectUrl, renderedText, workspace } from './support.ts'
+import { mockDispatchResponse } from './mock.ts'
 import {
   DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT,
 } from './fixtures/dispatch.ts'
@@ -200,6 +201,17 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
   // Every feature group exposes the "Steps of this definition" fold, the unreadable workflow included (V7, [P30]).
   await expect(locked.getByTestId('dispatch-def')).toHaveCount(1)
   await expect(locked.getByTestId('dispatch-def')).toContainText('Steps of this definition')
+  // A filter matching none of a feature's runs says "0 of N runs match" in its group header, not "0 runs" (V30).
+  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await page.locator('#dispatch-filter').fill('zzzznomatch')
+  await expect(page.locator('li[data-workflow-id="ui-polish"] a.lists-group-head')).toContainText('0 of 3 runs match')
+  await page.locator('#dispatch-filter').fill('')
+  // A landed sha in a run row sits on one line at 1100px (V29): its box is a single client rect, never a mid-sha break.
+  await page.setViewportSize({ width: 1100, height: 900 })
+  const landedSha = run(page, 'ui-polish-001').locator('.dispatch-res code').first()
+  await expect(landedSha).toBeVisible()
+  expect(await landedSha.evaluate(el => el.getClientRects().length), 'the landed sha sits on one line').toBe(1)
+  await page.setViewportSize({ width: 1280, height: 900 })
   await attach(page, testInfo, 'dispatch-chart')
 })
 
@@ -214,9 +226,11 @@ test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the le
   await expect(pane).toHaveAttribute('data-run-id', 'ui-polish-002')
   await expect(pane.getByTestId('dispatch-pane-lead')).toBeVisible()
   await expect(pane.getByTestId('dispatch-pane-steps')).toBeVisible()
-  // Today's CommandBlock, fed by the run's NextStep (not a fixed status line): its lead and the command block render.
-  await expect(pane.getByTestId('dispatch-pane-next-lead')).toBeVisible()
+  // Today's CommandBlock, fed by the run's NextStep (not a fixed status line): the command block renders.
   await expect(pane.getByTestId('now-next')).toBeVisible()
+  // The command text, captured by value, is compared with the run page's own rendering below (V2).
+  const paneCommand = (await pane.getByTestId('now-command').first().innerText()).trim()
+  expect(paneCommand.length, 'the failed run shows a next-step command').toBeGreaterThan(0)
   await expect(pane.getByTestId('dispatch-open-run')).toHaveAttribute('href', /ui-polish-002/)
   // k moves the selection up the list, j back down.
   await page.keyboard.press('k')
@@ -232,10 +246,35 @@ test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the le
   await page.keyboard.press('Escape')
   await expect(page.getByTestId('dispatch-pane')).toHaveCount(0)
   await expect(run(page, 'ui-polish-002')).toBeFocused()
+  // The next-step lead appears once (V27): the CommandBlock states the label; there is no separate duplicate lead paragraph.
+  // ui-polish-001 is integrated, so its label is a full sentence the block renders verbatim; it must appear exactly once.
+  await run(page, 'ui-polish-001').click()
+  const paneOne = page.getByTestId('dispatch-pane')
+  await expect(paneOne.getByTestId('now-next')).toBeVisible()
+  await expect(paneOne.getByTestId('dispatch-pane-next-lead')).toHaveCount(0)
+  const lead = (await paneOne.locator('[data-testid="now-next"] .command-label').innerText()).trim()
+  expect(lead.length, 'the CommandBlock states a lead label').toBeGreaterThan(0)
+  const paneText = await paneOne.innerText()
+  expect(paneText.split(lead).length - 1, 'the next-step lead is not duplicated').toBe(1)
+  // The CommandBlock's command equals the run's NextStep command, the one the run page shows for that run, by value (V2).
+  await page.goto(`${projectUrl(DISPATCH_WIDGETS)}/workflows/ui-polish/runs/ui-polish-002`)
+  const runPageCommand = (await page.getByTestId('now-command').first().innerText()).trim()
+  expect(runPageCommand).toBe(paneCommand)
+  await page.goto(projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-pane')
 })
 
-test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the match, fold long groups, say the merged scope, and a not-read project keeps local counts (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the match, fold long groups, say the merged scope, a head-null read is read, and a not-read project keeps local counts (${phase})`, async ({ page }, testInfo) => {
+  // In the worker phase only, serve Widgets' GitHub read with head null (an empty repository, Appendix A allows it): the card
+  // must say the default branch has no commits, not "GitHub not read", and keep its PR and issue counts ([P35], V26). The
+  // candidate server cannot produce this, as fixture mode never refreshes and the fixture file carries no head change.
+  if (phase === 'worker') {
+    await page.route(url => url.pathname === '/api/dispatch/projects', async route => {
+      const body = JSON.parse(mockDispatchResponse(new URL(route.request().url())).body as string)
+      for (const project of body.projects) if (project.project_id === DISPATCH_WIDGETS) project.github.head = null
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+    })
+  }
   await page.goto(projectUrl(DISPATCH_WIDGETS))
   const prs = page.getByTestId('dispatch-gh-prs')
   await expect(prs).toContainText('showing the 20 most recently updated')
@@ -264,6 +303,25 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
   await expect(issues.getByRole('link', { name: /All .* on GitHub/ })).toBeVisible()
   // In the worker phase only, a mocked repository read with a failed refresh shows the stale line ([P35], V20).
   if (phase === 'worker') await expect(prs).toContainText('the latest refresh failed')
+  // The count wording is "N open", never "N opens" (V29).
+  await expect(prs.locator('h3')).toContainText('3 open')
+  await expect(prs.locator('h3')).not.toContainText('opens')
+  await expect(page.getByTestId('dispatch-gh-issues').locator('h3')).toContainText('3 open')
+  // In the worker phase only, Widgets' read with head null says the default branch has no commits, not "GitHub not read",
+  // and keeps the read PR and issue counts (V26).
+  if (phase === 'worker') {
+    await expect(page.getByTestId('dispatch-gh-local-nohead')).toContainText("GitHub's main has no commits")
+    await expect(page.getByTestId('dispatch-gh-local')).not.toContainText('GitHub not read')
+    await expect(prs.locator('h3')).toContainText('3 open')
+  }
+  // The PULL REQUESTS heading sits on one line at 1100 and 1440 px: the title is a single client rect (V29).
+  for (const width of [1100, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    const title = page.getByTestId('dispatch-gh-prs').locator('.dispatch-gh-title')
+    await expect(title).toBeVisible()
+    expect(await title.evaluate(el => el.getClientRects().length), `the heading is one line at ${width}px`).toBe(1)
+  }
+  await page.setViewportSize({ width: 1280, height: 900 })
   // A not-read project: every GitHub card says so and shows no GitHub count, while the local sync and counts stay (V11).
   await page.goto(projectUrl(DISPATCH_LOCAL))
   await expect(page.getByTestId('dispatch-gh-prs')).toContainText('GitHub not read: not a GitHub remote')
@@ -317,12 +375,12 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
   await expect(pane).toHaveClass(/phone/)
   await expect(pane.getByTestId('dispatch-pane-queue')).toBeVisible()
   await expect(pane.getByTestId('dispatch-pane-next')).toBeVisible()
-  // "Queue" returns to the run list (never the previous run).
-  await pane.getByTestId('dispatch-pane-queue').click()
-  await expect(page.getByTestId('dispatch-pane')).toHaveCount(0)
-  // Measure the targets inside the dispatch regions (string-form evaluate, so the build's tsc need not type the DOM globals).
+  await expect(pane.getByTestId('now-command')).not.toHaveCount(0) // the pane shows the CommandBlock's Copy button to measure
+  // Measure the targets inside the dispatch regions, the open reading pane among them (Close, Open run page, Queue, Next and
+  // the CommandBlock's Copy/Run buttons), measured before "Queue" closes the pane (V12, V31). String-form evaluate so the
+  // build's tsc need not type the DOM globals.
   const short = await page.evaluate(`(() => {
-    const roots = ['[data-testid="dispatch-chips"]', '[data-testid="dispatch-project-header"]', '.breadcrumbs', '[data-testid="dispatch-github"]']
+    const roots = ['[data-testid="dispatch-chips"]', '[data-testid="dispatch-project-header"]', '.breadcrumbs', '[data-testid="dispatch-github"]', '[data-testid="dispatch-pane"]']
       .map(s => document.querySelector(s)).filter(Boolean)
     const bad = []
     for (const root of roots) for (const el of root.querySelectorAll('a, button, input')) {
@@ -332,10 +390,21 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
     return bad
   })()`) as string[]
   expect(short, `targets under 44px: ${short.join('; ')}`).toEqual([])
+  // "Queue" returns to the run list (never the previous run).
+  await pane.getByTestId('dispatch-pane-queue').click()
+  await expect(page.getByTestId('dispatch-pane')).toHaveCount(0)
   await attach(page, testInfo, 'dispatch-phone')
 })
 
-test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart without squeezing it or scrolling the page, at 1280, 1440 and 1920 px (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart without squeezing it or scrolling the page; the GitHub column count comes from the body's width (${phase})`, async ({ page }, testInfo) => {
+  // Where the GitHub column sits relative to the chart: beside it (its left edge is at or past the chart's right edge) or
+  // under it (the body stacked to one column). V23 decides the count from the body's own width (a container query), so the
+  // chart never drops under 480px while the column is beside it, whatever the shell's border and padding around the body.
+  const placement = async () => {
+    const chart = await box(page.getByTestId('dispatch-chart'))
+    const gh = await box(page.getByTestId('dispatch-github'))
+    return { chart, beside: gh.x >= chart.x + chart.width - 2 }
+  }
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 })
     await page.goto(projectUrl(DISPATCH_WIDGETS))
@@ -354,10 +423,25 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
     expect(chart.width).toBeGreaterThanOrEqual(480)
     // The boxes do not overlap: the pane is to the right of the chart.
     expect(pane.x).toBeGreaterThanOrEqual(chart.x + chart.width - 2)
+    // The GitHub column stacks under the chart at 1280/1440 and sits beside it at 1920 (the body width decides, V23).
+    const { beside } = await placement()
+    expect(beside, `GitHub column beside the chart at ${width}px`).toBe(width === 1920)
     // No horizontal page scroll and the window did not scroll away when the run was selected.
     const overflow = await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number
     expect(overflow).toBeLessThanOrEqual(0)
     expect(await page.evaluate('window.scrollY') as number).toBeLessThanOrEqual(2)
+  }
+  // Across the band around the old 1680px breakpoint: at each width either the GitHub column is under the chart, or (beside it)
+  // the chart keeps at least 480px. A viewport media query at 1680 would squeeze the chart under 480 just above it; the body
+  // container query does not, because it measures the body, not the viewport.
+  for (const width of [1600, 1680, 1720, 1760]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await page.evaluate('window.scrollTo(0, 0)')
+    await run(page, 'ui-polish-002').click()
+    await expect(page.getByTestId('dispatch-pane')).toBeVisible()
+    const { chart, beside } = await placement()
+    expect(!beside || chart.width >= 480, `at ${width}px: column under the chart or chart >= 480px`).toBe(true)
   }
   await attach(page, testInfo, 'dispatch-dock')
 })
@@ -392,6 +476,9 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
   await expect(needs.getByRole('link', { name: /ship-002/ })).toBeVisible()
   await expect(needs).toContainText('waits on you')
   await expect(needs).toContainText('running')
+  // Each Busy link's href is that run's page (V25).
+  await expect(needs.getByRole('link', { name: /ship-001/ })).toHaveAttribute('href', /\/workflows\/ship\/runs\/ship-001$/)
+  await expect(needs.getByRole('link', { name: /ship-002/ })).toHaveAttribute('href', /\/workflows\/ship\/runs\/ship-002$/)
   // The section sits before the step chart.
   const needsBox = await box(needs)
   const chartBox = await box(page.getByTestId('dispatch-chart'))
@@ -399,12 +486,46 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
   // A compared sync whose reflog time is missing says "update time not recorded" in the header and on the card ([L9], V10).
   await expect(page.getByTestId('dispatch-sync')).toContainText('update time not recorded')
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('update time not recorded')
-  // The Widgets primary has neither waiting nor running runs.
+  // The Widgets primary has neither waiting nor running runs. What its run lists return differs by phase: the worker mock
+  // lists its `broken` feature as an empty readable list, so the plain all-clear shows; the candidate server cannot read
+  // broken-001 (its plan.json is missing), so that feature's run list fails and the section is qualified — the clear phrase
+  // plus "1 feature cannot be read", never the plain all-clear (V25). Asserted per phase, not weakened to a shared substring.
   await page.goto(projectUrl(DISPATCH_WIDGETS))
-  await expect(page.getByTestId('dispatch-needs-none')).toContainText('Nothing waits on you; nothing running')
+  if (phase === 'worker') {
+    await expect(page.getByTestId('dispatch-needs-none')).toContainText('Nothing waits on you; nothing running')
+  } else {
+    await expect(page.getByTestId('dispatch-needs-clear')).toContainText('Nothing waits on you; nothing running')
+    await expect(page.getByTestId('dispatch-needs-unread')).toContainText('1 feature cannot be read')
+    await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
+  }
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets worktree')
   await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets')
+  // Trio's trio-locked workflow cannot be listed ([P34]): the section never shows the plain all-clear and says one feature
+  // cannot be read, rather than asserting nothing waits on the operator (V25).
+  await page.goto(projectUrl(DISPATCH_TRIO))
+  await expect(page.getByTestId('dispatch-needs')).toContainText('1 feature cannot be read')
+  await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
+  // In the worker phase only, the run-list state reaches the page as loading or fully failed (route interception, V25, [L12]).
+  if (phase === 'worker') {
+    // A held-open run-list request: the section reads "Reading runs…" while the lists load.
+    const widgetsRuns = (u: URL) => /\/projects\/dispatch-widgets\/workflows\/[^/]+\/runs$/.test(u.pathname)
+    await page.route(widgetsRuns, async route => {
+      await new Promise(resolve => setTimeout(resolve, 4000))
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [], next_cursor: null }) }).catch(() => undefined)
+    })
+    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await expect(page.getByTestId('dispatch-needs-loading')).toContainText('Reading runs')
+    await page.unroute(widgetsRuns)
+    // Failing every /runs request of one project: "Runs not read: <reason>" and no all-clear.
+    const nooriginRuns = (u: URL) => /\/projects\/dispatch-noorigin\/workflows\/[^/]+\/runs$/.test(u.pathname)
+    await page.route(nooriginRuns, async route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'RUNS_UNREADABLE', message: 'the runs could not be read' } }) }))
+    await page.goto(projectUrl(DISPATCH_NOORIGIN))
+    await expect(page.getByTestId('dispatch-needs-failed')).toContainText('Runs not read:')
+    await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
+    await page.unroute(nooriginRuns)
+  }
+  await page.goto(projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-sections')
 })
 
@@ -422,6 +543,15 @@ test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and t
   await expect(landings.locator('li')).toHaveCount(2)
   await expect(landings).toContainText('local main:')
   await expect(landings).toContainText('origin/main:')
+  // Escape and Close on the Local commits pane return focus to the "Commits ahead and landings" button (V28).
+  await page.keyboard.press('Escape')
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-ahead-button')).toBeFocused()
+  await page.getByTestId('dispatch-ahead-button').click()
+  await expect(pane).toBeVisible()
+  await pane.getByTestId('dispatch-pane-close').click()
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-ahead-button')).toBeFocused()
   // Busy is seeded 52 commits ahead: it lists 50 and shows "and 2 more".
   await page.goto(projectUrl(DISPATCH_BUSY))
   await page.getByTestId('dispatch-ahead-button').click()

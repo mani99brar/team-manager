@@ -7,7 +7,7 @@
 import { useEffect, useRef } from 'react'
 import { AppLink } from '../panels.tsx'
 import { Time } from '../Time.tsx'
-import { commitsAheadMore } from './derive.ts'
+import { commitsAheadMore, OLDER_THAN_LISTED } from './derive.ts'
 import type { GitState, Landing } from './types.ts'
 
 function landingState(landing: Pick<Landing, 'on_default' | 'on_origin'>, defaultBranch: string | null): string {
@@ -19,12 +19,15 @@ function landingState(landing: Pick<Landing, 'on_default' | 'on_origin'>, defaul
 type Props = {
   git: GitState
   onClose: () => void
+  /** The run page of a commit's run, or null when the page cannot resolve the run's workflow (an older run, V24). */
   runHref: (runId: string) => string | null
+  /** The run page of a landing, built from the landing's own `workflow_id`; a landing always links (V24). */
+  landingHref: (workflowId: string, runId: string) => string
   onNavigate: (pathname: string) => void
   phone: boolean
 }
 
-export function AheadPane({ git, onClose, runHref, onNavigate, phone }: Props) {
+export function AheadPane({ git, onClose, runHref, landingHref, onNavigate, phone }: Props) {
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => { closeRef.current?.focus() }, [])
   const defaultBranch = git.default_branch
@@ -61,7 +64,7 @@ export function AheadPane({ git, onClose, runHref, onNavigate, phone }: Props) {
                       <span className="dispatch-ahead-subj">{commit.subject}</span>
                       {commit.run_id && (href
                         ? <AppLink href={href} onNavigate={onNavigate} className="dispatch-ahead-run">{commit.run_id}</AppLink>
-                        : <span className="dispatch-muted">{commit.run_id}</span>)}
+                        : <span className="dispatch-muted">{commit.run_id} · {OLDER_THAN_LISTED}</span>)}
                       <span className="dispatch-muted"><Time iso={commit.committed_at} /></span>
                     </li>
                   )
@@ -79,9 +82,7 @@ export function AheadPane({ git, onClose, runHref, onNavigate, phone }: Props) {
                 {git.landings.map(landing => (
                   <li key={landing.run_id}>
                     <code className="dispatch-mono">{landing.sha.slice(0, 7)}</code>
-                    {runHref(landing.run_id)
-                      ? <AppLink href={runHref(landing.run_id)!} onNavigate={onNavigate} className="dispatch-ahead-run">{landing.run_id}</AppLink>
-                      : <span className="dispatch-mono">{landing.run_id}</span>}
+                    <AppLink href={landingHref(landing.workflow_id, landing.run_id)} onNavigate={onNavigate} className="dispatch-ahead-run">{landing.run_id}</AppLink>
                     <span className="dispatch-muted">{landingState(landing, defaultBranch)}</span>
                   </li>
                 ))}

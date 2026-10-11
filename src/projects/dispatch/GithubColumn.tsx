@@ -10,7 +10,7 @@ import type { Project } from '../api.ts'
 import { projectPathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { Time } from '../Time.tsx'
-import { issueGroups, prGroups, prRelation, relatedWhy, relTime, showMoreText, syncAsOf, syncPhrase } from './derive.ts'
+import { githubHeadState, githubNoHeadText, issueGroups, prGroups, prRelation, relatedWhy, relTime, showMoreText, syncAsOf, syncPhrase } from './derive.ts'
 import type { GitState, GithubState, Issue, Pr } from './types.ts'
 
 const plural = (n: number, word: string) => `${n} ${n === 1 ? word : `${word}s`}`
@@ -104,6 +104,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
   const reason = github?.status === 'read' ? github.reason : github?.reason ?? 'not read yet'
   const notReadReason = github === null ? 'GitHub state not available' : reason ?? 'not read yet'
   const read = github?.status === 'read'
+  const headState = githubHeadState(github)
   const defaultBranch = git?.default_branch ?? null
   const branches = new Set<string>([...(git?.checkout ? [git.checkout] : []), ...runBranches])
   const asOf = git ? syncAsOf(git) : null
@@ -128,7 +129,9 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
               </p>
             )}
             {git.origin === null && <p className="dispatch-gsub">not compared with origin.</p>}
-            {read && github.head
+            {/* A read with a head shows the head commit; a read with no head (an empty repository, `head: null`) says the
+                default branch has no commits, not "GitHub not read" (V26); a not-read project says "GitHub not read". */}
+            {headState === 'head' && github?.head
               ? (
                 <p className="dispatch-gsub">
                   GitHub <code>{github.default_branch ?? defaultBranch}</code> is at{' '}
@@ -136,7 +139,13 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
                   committed <Time iso={github.head.committed_at} />.
                 </p>
               )
-              : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</p>}
+              : headState === 'no-head'
+                ? (
+                  <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-nohead">
+                    {github?.default_branch ? <>GitHub's <code>{github.default_branch}</code> has no commits.</> : githubNoHeadText(null)}
+                  </p>
+                )
+                : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</p>}
             {git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0 && (
               <p className="dispatch-gsub" data-testid="dispatch-ahead-naming">
                 Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. Runs never push.
@@ -169,7 +178,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
     const relWhy = (pr: Pr) => { const rel = prRelation(pr, branches, defaultBranch); return rel ? `possibly related: ${relatedWhy(rel)}` : '' }
     prs = (
       <div className="dispatch-gcard" id="g-prs" data-testid="dispatch-gh-prs" tabIndex={-1}>
-        <h3>Pull requests <span className="dispatch-aside">{plural(github.open_prs ?? 0, 'open')} · showing the 20 most recently updated</span></h3>
+        <h3><span className="dispatch-gh-title">Pull requests</span> <span className="dispatch-aside">{github.open_prs ?? 0} open · showing the 20 most recently updated</span></h3>
         {github.status === 'read' && github.reason && <p className="dispatch-gsub dispatch-stale">Last read <Time iso={github.read_at ?? new Date(readAt).toISOString()} />; the latest refresh failed: {github.reason}</p>}
         <Group title="Possibly related" items={groups.related} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} why={relWhy(pr)} />} />
         <Group title="Yours, open" items={groups.mine} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
@@ -182,7 +191,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
     const ig = issueGroups(github.issues, { viewerLogin })
     issues = (
       <div className="dispatch-gcard" id="g-iss" data-testid="dispatch-gh-issues" tabIndex={-1}>
-        <h3>Issues <span className="dispatch-aside">{plural(github.open_issues ?? 0, 'open')}</span></h3>
+        <h3><span className="dispatch-gh-title">Issues</span> <span className="dispatch-aside">{github.open_issues ?? 0} open</span></h3>
         <Group title="Assigned to you" items={ig.assigned} render={(issue: Issue) => <IssueRow key={issue.number} issue={issue} readAt={readAt} />} />
         <Group title="Newest from people" items={ig.people} render={(issue: Issue) => <IssueRow key={issue.number} issue={issue} readAt={readAt} />} />
         {ig.botCount > 0 && <p className="dispatch-note">{ig.botCount} from bots among the newest 20 ({ig.botAuthors.join(', ')}).</p>}

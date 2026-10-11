@@ -7,7 +7,7 @@
  * Every function is pure and names its source: the viewer never claims a comparison the data does not hold. An unknown
  * landing is shown as unknown, never as false ([P9]); git that could not be read says so in words.
  */
-import type { GitState, Issue, Landing, Pr } from './types.ts'
+import type { GitState, GithubState, Issue, Landing, Pr } from './types.ts'
 
 // ---- Sync wording (section 5, "Sync wording") -------------------------------------------------------------------------
 
@@ -89,6 +89,51 @@ export function landingWording(landing: Pick<Landing, 'on_default' | 'on_origin'
   if (landing.on_default === false) where.unshift(`not on local ${d}`)
   if (landing.on_origin === false) where.push(`not on origin/${d}`)
   return where.join(', ') || 'unknown'
+}
+
+// ---- Run-to-workflow resolution for commit and landing links (V24, [L10]) --------------------------------------------
+
+/**
+ * The workflow a run belongs to, so a commit that names a run can link to its run page (V24). `known` maps the run ids the
+ * page actually holds (the registry run lists, then the dispatch steps) to their workflow. When the run is not in `known` and
+ * the project has exactly one workflow, that one workflow is the answer (`singleWorkflowId`); otherwise null, and the caller
+ * shows the run id as plain text with "older than the newest 50 runs", never a dead or guessed link ([L10]). A single-workflow
+ * fallback can mislink a clone mate's run of a shared clone — named as an open P2 in the handoff ([L12]).
+ */
+export function resolveRunWorkflow(runId: string, known: ReadonlyMap<string, string>, singleWorkflowId: string | null): string | null {
+  return known.get(runId) ?? singleWorkflowId
+}
+
+/** The literal text shown for a commit's run whose workflow the page cannot resolve: it is older than the listed runs (V24). */
+export const OLDER_THAN_LISTED = 'older than the newest 50 runs'
+
+/**
+ * Whether every workflow's run list failed, so the "Needs you and running" section says "Runs not read: <reason>" rather
+ * than an all-clear (V25). An empty workflow list is fully read, not failed (a project with no workflows gets the plain
+ * all-clear, not "Runs not read" with no reason to show, [L12] design note 5).
+ */
+export function everyRunListFailed(workflows: readonly { error: unknown }[]): boolean {
+  return workflows.length > 0 && workflows.every(workflow => workflow.error !== null)
+}
+
+// ---- GitHub head line (V26) ------------------------------------------------------------------------------------------
+
+/**
+ * Which line the Local and GitHub card shows for the GitHub default branch (V26). A read with a head shows the head commit;
+ * a read with no head (an empty repository, `head: null`, which Appendix A allows) says the default branch has no commits,
+ * not "GitHub not read"; a project that was not read says "GitHub not read: <reason>".
+ */
+export function githubHeadState(github: GithubState | null): 'head' | 'no-head' | 'not-read' {
+  if (github?.status === 'read') return github.head ? 'head' : 'no-head'
+  return 'not-read'
+}
+
+/**
+ * The no-head wording: "GitHub's <default branch> has no commits" when GitHub reports a default branch name, else "GitHub's
+ * default branch has no commits" (an empty repository has no `defaultBranchRef`). Never falls back to the local branch name ([L12]).
+ */
+export function githubNoHeadText(defaultBranch: string | null): string {
+  return defaultBranch ? `GitHub's ${defaultBranch} has no commits.` : "GitHub's default branch has no commits."
 }
 
 // ---- Rail order and badge words ([D6]) -------------------------------------------------------------------------------

@@ -86,6 +86,18 @@ New test ids and structure the run 002 scenarios read:
 - **Rail:** `a.dispatch-rail-home` (flex, with `.dispatch-rail-home-l` and `.dispatch-rail-home-n`) and `a.dispatch-rail-row` (grid) keep their layout — the base `.dispatch-rail a` rule no longer forces `display:block` (V13).
 - **Scenarios:** `dispatch-dock`, `dispatch-axis`, `dispatch-sections`, `dispatch-ahead`, `dispatch-folds` join the nine run-001 scenarios; all 14 pass in both phases.
 
+## Run 003 additions (V23–V32)
+
+Changes and new test ids the run 003 scenarios read:
+
+- **Needs you and running** (`section[data-testid="dispatch-needs"]`, V25): the section now follows the run lists' state. `p[data-testid="dispatch-needs-loading"]` "Reading runs…" while they load; `p[data-testid="dispatch-needs-failed"]` "Runs not read: <reason>" when the request failed or every workflow's run list failed; `p[data-testid="dispatch-needs-none"]` "Nothing waits on you; nothing running." only when every workflow was read and none waits or runs; when some but not all failed, `p[data-testid="dispatch-needs-clear"]` (the all-clear phrase, no period) or the run list, followed by `p[data-testid="dispatch-needs-unread"]` " · N feature(s) cannot be read". `ProjectPage` takes a `runsState` prop (`{kind:'loading'|'failed'|'ready'}`) from `ProjectsView`.
+- **Docked layout** (V23): `.dispatch-body-container` wraps `.dispatch-project-body` and, while `.dispatch-project.has-pane`, carries `container-type: inline-size; container-name: dispatch-body`. The chart/GitHub column count comes from the body's own width (`@container dispatch-body (min-width: 876px)`), not a viewport media query; the old `@media (min-width: 1680px)` rule is gone.
+- **GitHub head line** (`GithubColumn.tsx`, V26): a read with no head (`head: null`, an empty repository) shows `p[data-testid="dispatch-gh-local-nohead"]` "GitHub's <default branch> has no commits." (or "GitHub's default branch has no commits." when `github.default_branch` is null), never "GitHub not read". The PR/issue cards keep their counts. The card titles are `span.dispatch-gh-title` (nowrap) so "Pull requests" never wraps; the open count reads "N open", never "N opens" (V29).
+- **Commits-ahead pane** (`AheadPane.tsx`, V24): a commit whose run the page cannot resolve shows its run id with "older than the newest 50 runs" (`OLDER_THAN_LISTED`), never a dead link; a landing always links via its own `workflow_id` (`landingHref`). Run-to-workflow resolution is `resolveRunWorkflow` (run lists + steps, then a single-workflow project), unit-tested. Escape and Close return focus to `button[data-testid="dispatch-ahead-button"]` (V28).
+- **Reading pane** (`ReadingPane.tsx`, V27): the duplicate `dispatch-pane-next-lead` paragraph is removed; the CommandBlock (`[data-testid="now-next"]`, `now-command`) states the next step's label once.
+- **Step chart** (`StepChart.tsx`, V30): a filter matching none of a feature's runs shows "0 of N runs match" in the group header; `StepChart` takes a `filtering` prop and each `FeatureGroup` a `total`. A landed sha (`.dispatch-res code`) is `white-space: nowrap` (V29).
+- **Phone** (V31): the 44 px scan adds `[data-testid="dispatch-pane"]` as a root and runs while the pane is open, before "Queue" closes it.
+
 ## Data
 
 The pages read the existing registry API (`fetchProjects`, `fetchRegistryRuns`, `fetchWorkflowRuns`) for run state and the new

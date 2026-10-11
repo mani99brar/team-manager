@@ -13,7 +13,7 @@ import { formatSpan } from '../time.ts'
 import type { Zone } from '../time.ts'
 import { Time } from '../Time.tsx'
 import { stateTone } from '../tone.ts'
-import { sameRepoText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED } from './derive.ts'
+import { resolveRunWorkflow, sameRepoText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
 import { GithubColumn } from './GithubColumn.tsx'
 import { ReadingPane } from './ReadingPane.tsx'
@@ -23,6 +23,14 @@ import type { DispatchOverview, Landing, ProjectDispatch, ProjectSteps } from '.
 
 /** What the reading pane docks for: a selected run, or the commits-ahead and landings list from the Local and GitHub card. */
 type Selection = { kind: 'run'; runId: string } | { kind: 'ahead' } | null
+
+/**
+ * The state of this project's run lists, as the page needs it for "Needs you and running" (V5, V25). `ProjectsView` derives
+ * it from the run-list resource: `loading` while the lists load, `failed` when the request failed or every workflow's run
+ * list failed (with the reason to show), `ready` once they were read (partial failures are counted on the page from the run
+ * lists themselves). The section never claims an all-clear the data does not hold ([L12]).
+ */
+export type RunsState = { kind: 'loading' } | { kind: 'failed'; reason: string } | { kind: 'ready' }
 
 const ms = (iso: string) => Date.parse(iso)
 const movedOf = (entry: ChartRun) => ms(entry.run.activity?.last_activity_at ?? entry.run.updated_at)
@@ -38,6 +46,7 @@ type Props = {
   project: Project
   workflows: readonly WorkflowDefinition[]
   projectRuns: readonly WorkflowRuns[]
+  runsState: RunsState
   steps: ProjectSteps | null
   dispatch: ProjectDispatch | null
   overview: DispatchOverview | null
@@ -47,7 +56,7 @@ type Props = {
   onNavigate: (pathname: string) => void
 }
 
-export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, overview, allProjects, now, onNavigate }: Props) {
+export function ProjectPage({ project, workflows, projectRuns, runsState, steps, dispatch, overview, allProjects, now, onNavigate }: Props) {
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const [selected, setSelected] = useState<Selection>(null)
@@ -77,10 +86,13 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
       // The header tone reads the latest registry run, so it is right even where the step data is absent ([L1]).
       const latest = registryRuns.reduce<RunSummary | null>((best, run) => (best === null || ms(run.activity?.last_activity_at ?? run.updated_at) > ms(best.activity?.last_activity_at ?? best.updated_at) ? run : best), null)
       const headTone = latest ? stateTone({ status: latest.status, attention: latest.activity?.attention?.kind ?? null, accepted: latest.accepted }) : 'idle'
-      return { workflow, steps: stepsWorkflow, runs, headTone, landings }
+      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings }
     })
   }, [workflows, projectRuns, steps, git])
 
+  // A filter is active when the box holds any non-blank word; the step chart then says "0 of N runs match" for a group whose
+  // runs all filter out, never "0 runs" as if the feature never ran (V30).
+  const filtering = query.trim().length > 0
   const filtered: FeatureGroup[] = useMemo(() => {
     const words = query.toLowerCase().split(/\s+/).filter(Boolean)
     if (words.length === 0) return groups
@@ -107,10 +119,14 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
     })
   }, [order])
 
+  // Undocking returns focus to what opened the pane: a run row for a run, the "Commits ahead and landings" button for the
+  // commits view, as the run pane already did (V28). Both targets stay in the DOM when the pane unmounts, so Esc and Close
+  // (which both call this) land focus reliably.
   const close = useCallback(() => {
     setSelected(null)
-    if (selectedRunId) chartRef.current?.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(selectedRunId)}"]`)?.focus()
-  }, [selectedRunId])
+    if (selected?.kind === 'run') chartRef.current?.querySelector<HTMLElement>(`[data-run-id="${CSS.escape(selected.runId)}"]`)?.focus()
+    else if (selected?.kind === 'ahead') document.querySelector<HTMLElement>('[data-testid="dispatch-ahead-button"]')?.focus()
+  }, [selected])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -162,24 +178,32 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
   const cloneMates = cloneId === null ? [] : allProjects.filter(p => p.project_id !== project.project_id && overviewMap.get(p.project_id)?.git.clone_id === cloneId)
   const sameRepo = sameRepoText(cloneMates.map(p => p.name))
 
-  // The run's workflow, so a landing or an ahead commit that names a run can link to its run page.
+  // The run's workflow, so an ahead commit that names a run can link to its run page (V24). The map knows a run from the
+  // registry run lists and from the dispatch steps; both are bounded to the newest 50 per workflow (DEFAULT_RUN_LIMIT), so an
+  // older run names no workflow here. When the project has exactly one workflow, that one is the answer; otherwise the commit
+  // shows the run id as plain text with "older than the newest 50 runs", never a dead or guessed link ([L10], [L12]).
   const workflowOfRun = useMemo(() => {
     const map = new Map<string, string>()
     for (const w of projectRuns) for (const run of w.runs) map.set(run.run_id, w.workflow.workflow_id)
-    // The registry page is the newest 50 (DEFAULT_RUN_LIMIT); an ahead commit or landing can name an older run outside it. The
-    // dispatch steps carry every run directory the server read, so fall back to them so the link to that run's page survives (V6).
     for (const w of steps?.workflows ?? []) for (const r of w.runs) if (!map.has(r.run_id)) map.set(r.run_id, w.workflow_id)
     return map
   }, [projectRuns, steps])
+  const singleWorkflowId = workflows.length === 1 ? workflows[0].workflow_id : null
   const runHref = useCallback((runId: string): string | null => {
-    const workflowId = workflowOfRun.get(runId)
+    const workflowId = resolveRunWorkflow(runId, workflowOfRun, singleWorkflowId)
     return workflowId ? runPathname(project.project_id, workflowId, runId) : null
-  }, [workflowOfRun, project.project_id])
+  }, [workflowOfRun, singleWorkflowId, project.project_id])
+  // A landing carries its own `workflow_id`, so it always links to its run page ([L10]: Landings always link).
+  const landingHref = useCallback((workflowId: string, runId: string): string => runPathname(project.project_id, workflowId, runId), [project.project_id])
 
-  // "Needs you and running" (PRD 2, V5): this project's runs waiting on the operator and the running ones, before the chart.
+  // "Needs you and running" (PRD 2, V5, V25): the runs of the readable workflows that wait on the operator or are running,
+  // before the chart. A workflow whose run list failed contributes no runs (its `runs` is empty) but is counted as unread, so
+  // the section says "N feature(s) cannot be read" and never claims a plain all-clear the data does not hold ([L10], [L12]).
   const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
   const waitingRuns = allRuns.filter(({ run }) => waitingKind(run) !== null)
   const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && waitingKind(run) === null)
+  const unreadFeatures = projectRuns.filter(w => w.error !== null).length
+  const unreadText = unreadFeatures > 0 ? `${unreadFeatures} feature${unreadFeatures === 1 ? '' : 's'} cannot be read` : null
 
   return (
     <div className={`dispatch-project ${selected ? 'has-pane' : ''}`} data-testid="dispatch-project">
@@ -219,38 +243,53 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
           <input id="dispatch-filter" ref={filterRef} type="search" autoComplete="off" placeholder="Filter this project's runs" value={query} onChange={e => setQuery(e.target.value)} />
         </div>
       </header>
+      {/* The body is wrapped so its own width drives the chart/GitHub column count via a container query (V23): a container
+          query cannot style the container itself, so the inner `.dispatch-project-body` grid is queried against this wrapper. */}
+      <div className="dispatch-body-container">
       <div className="dispatch-project-body">
         <div className="dispatch-project-main">
           <section className="dispatch-needs" aria-label="Needs you and running" data-testid="dispatch-needs">
             <h2 className="dispatch-needs-h">Needs you and running</h2>
-            {waitingRuns.length === 0 && runningRuns.length === 0
-              ? <p className="dispatch-muted" data-testid="dispatch-needs-none">Nothing waits on you; nothing running.</p>
-              : (
-                <ul className="dispatch-needs-list">
-                  {waitingRuns.map(({ run, workflowId }) => (
-                    <li key={run.run_id} className="tone-warn">
-                      <StateGlyph tone="warn" />
-                      <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
-                      <span className="dispatch-muted">waits on you{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
-                    </li>
-                  ))}
-                  {runningRuns.map(({ run, workflowId }) => (
-                    <li key={run.run_id} className="tone-run">
-                      <StateGlyph tone="run" live />
-                      <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
-                      <span className="dispatch-muted">running{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+            {runsState.kind === 'loading'
+              ? <p className="dispatch-muted" data-testid="dispatch-needs-loading">Reading runs…</p>
+              : runsState.kind === 'failed'
+                ? <p className="dispatch-muted" data-testid="dispatch-needs-failed">Runs not read: {runsState.reason}</p>
+                : waitingRuns.length === 0 && runningRuns.length === 0 && unreadText === null
+                  ? <p className="dispatch-muted" data-testid="dispatch-needs-none">Nothing waits on you; nothing running.</p>
+                  : (
+                    <>
+                      {waitingRuns.length === 0 && runningRuns.length === 0
+                        ? <p className="dispatch-muted" data-testid="dispatch-needs-clear">Nothing waits on you; nothing running</p>
+                        : (
+                          <ul className="dispatch-needs-list">
+                            {waitingRuns.map(({ run, workflowId }) => (
+                              <li key={run.run_id} className="tone-warn">
+                                <StateGlyph tone="warn" />
+                                <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
+                                <span className="dispatch-muted">waits on you{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                              </li>
+                            ))}
+                            {runningRuns.map(({ run, workflowId }) => (
+                              <li key={run.run_id} className="tone-run">
+                                <StateGlyph tone="run" live />
+                                <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
+                                <span className="dispatch-muted">running{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      {unreadText && <p className="dispatch-muted" data-testid="dispatch-needs-unread"> · {unreadText}</p>}
+                    </>
+                  )}
           </section>
           <section id="dispatch-runs-section" aria-label="Runs by feature" tabIndex={-1} ref={chartRef}>
-            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
+            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} filtering={filtering} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
           </section>
         </div>
         <GithubColumn project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
           viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now}
           onShowAhead={() => setSelected({ kind: 'ahead' })} aheadOpen={selected?.kind === 'ahead'} onNavigate={onNavigate} />
+      </div>
       </div>
       {selected?.kind === 'run' && selectedEntry && selectedWorkflowId && (
         <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} steps={selectedEntry.steps} projectId={project.project_id} workflowId={selectedWorkflowId}
@@ -258,7 +297,7 @@ export function ProjectPage({ project, workflows, projectRuns, steps, dispatch, 
           onNext={() => move(1)} />
       )}
       {selected?.kind === 'ahead' && git && (
-        <AheadPane git={git} onClose={() => setSelected(null)} runHref={runHref} onNavigate={onNavigate}
+        <AheadPane git={git} onClose={close} runHref={runHref} landingHref={landingHref} onNavigate={onNavigate}
           phone={typeof window !== 'undefined' && window.innerWidth <= 480} />
       )}
     </div>

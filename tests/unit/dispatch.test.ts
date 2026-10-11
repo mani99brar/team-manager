@@ -8,13 +8,13 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
-  cardStateWord, commitsAheadMore, issueGroups, landingWording, prGroups, prRelation, railBadge, railOrder, relatedWhy,
-  relTime, sameRepoText, showMoreText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED,
-  type RailInfo,
+  cardStateWord, commitsAheadMore, everyRunListFailed, githubHeadState, githubNoHeadText, issueGroups, landingWording,
+  OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
+  showMoreText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED, type RailInfo,
 } from '../../src/projects/dispatch/derive.ts'
 import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
 import type { ProjectRuns, RunSummary, WorkflowDefinition, Project } from '../../src/projects/api.ts'
-import type { GitState, Issue, Pr } from '../../src/projects/dispatch/types.ts'
+import type { GithubState, GitState, Issue, Pr } from '../../src/projects/dispatch/types.ts'
 
 const phaseName = (nodeId: string, kind: string) => PHASES[phaseOf(nodeId, kind)]
 
@@ -151,6 +151,51 @@ describe('commits-ahead and fold wording (V6, V8)', () => {
     assert.equal(showMoreText(8, 5), 'Show 3 more')
     assert.equal(showMoreText(6, 5), 'Show 1 more')
     assert.equal(showMoreText(5, 5), null)
+  })
+})
+
+describe("a commit's run links to its workflow, else shows as older (V24, [L10])", () => {
+  const known = new Map<string, string>([['ui-polish-001', 'ui-polish']])
+  test('known from the run lists resolves to that workflow', () => {
+    assert.equal(resolveRunWorkflow('ui-polish-001', known, null), 'ui-polish')
+    // A single-workflow fallback never overrides a known run.
+    assert.equal(resolveRunWorkflow('ui-polish-001', known, 'only'), 'ui-polish')
+  })
+  test('a single-workflow project resolves an unknown run to that one workflow', () => {
+    assert.equal(resolveRunWorkflow('ship-900', new Map(), 'ship'), 'ship')
+  })
+  test('an unknown run on a multi-workflow project resolves to null (shown as older, not a dead link)', () => {
+    assert.equal(resolveRunWorkflow('ui-polish-900', known, null), null)
+    assert.equal(OLDER_THAN_LISTED, 'older than the newest 50 runs')
+  })
+})
+
+describe('"Needs you and running" run-list state (V25, [L12] note 5)', () => {
+  test('every workflow failed is "Runs not read"; a partial or empty list is not', () => {
+    assert.equal(everyRunListFailed([{ error: new Error('x') }, { error: new Error('y') }]), true)
+    assert.equal(everyRunListFailed([{ error: null }, { error: new Error('y') }]), false)
+    assert.equal(everyRunListFailed([{ error: null }]), false)
+    // A project with no workflows is fully read (the plain all-clear), never "Runs not read" with no reason.
+    assert.equal(everyRunListFailed([]), false)
+  })
+})
+
+const github = (over: Partial<GithubState>): GithubState => ({
+  status: 'read', reason: null, repo: 'acme/widgets', read_at: '2026-10-11T00:00:00Z', visibility: 'PUBLIC', default_branch: 'main',
+  pushed_at: null, head: { sha: 'abc1234', committed_at: '2026-10-10T00:00:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [], ...over,
+})
+
+describe('the GitHub head line (V26)', () => {
+  test('a read with a head shows the head; a read with no head says the branch has no commits; a not-read project says not read', () => {
+    assert.equal(githubHeadState(github({})), 'head')
+    assert.equal(githubHeadState(github({ head: null })), 'no-head')
+    assert.equal(githubHeadState(github({ head: null, default_branch: null })), 'no-head')
+    assert.equal(githubHeadState(github({ status: 'not_github', reason: 'not a GitHub remote', repo: null, head: null })), 'not-read')
+    assert.equal(githubHeadState(null), 'not-read')
+  })
+  test('the no-head wording names the default branch only when GitHub reports one, never the local branch', () => {
+    assert.equal(githubNoHeadText('main'), "GitHub's main has no commits.")
+    assert.equal(githubNoHeadText(null), "GitHub's default branch has no commits.")
   })
 })
 
