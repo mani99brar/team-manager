@@ -58,4 +58,5 @@ From the design session of 2026-10-10/11 with the operator (artifacts "Dispatch 
 
 ## Changes after launch
 
-(none yet)
+- [L1] (projects-dispatch-001, design challenge attempt 1, P1) `tests/project-workflows/accepted.spec.ts:73-76`, outside the viewer's owned paths, asserts the project page's `li[data-workflow-id] a.lists-group-head` tone hook, which the step chart would have removed. Settled: each step-chart feature group keeps that structure and tone class, `docs/VIEWER_DISPATCH.md` lists it, and the viewer keeps the `lists.ts` exports `tests/unit/accepted.test.ts` imports (viewer-task.md, "Specs and tests you do not own").
+- [L2] (projects-dispatch-001, design challenge attempt 1, P2s folded into the tasks) Changes [P22]: the phase map matches `node_id` first and `kind` only as the fallback (sidecar → Launch, repair → Verify). Also settled: steps list `runs_root` per run instead of `listRuns`, with digests warmed at `onReady`; a null GitHub author is `ghost`, and bad shas make only that project `unavailable`; seeds and tests use `-b main` and an explicit git identity; the dispatch seed is opt-in so `controls-app.ts` never reaches real `gh` or `~/.cache`; a landing false on both refs reads "integrated into <source_branch>"; `NOT_FOUND` is this route's code, and git-unavailable and no-remote GitHub states are fixed.

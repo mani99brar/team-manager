@@ -20,7 +20,7 @@ Everything is read-only. The server never fetches, pushes or writes to a reposit
   - `server/projectsConfig.ts` (the registry: `repository` is an absolute path, `~` is rejected, and today "nothing is read from it"; from now on git reads it). Import it, do not change it ([P7]);
   - `server/index.ts` (environment, listens on `127.0.0.1`).
 - **Run-controls routes:** run-controls-004 added `/api/run-controls` (`server/controls*.ts`). Follow its pattern for a new route module registered in `app.ts`. Do not change it.
-- **Step digests:** use `RunStore`'s own run loading (import it; do not change `projects.ts`) and cache each run's digest by its directory fingerprint, as `listRuns` does. The integrated commit is the sha in the run's succeeded `integrate` node message ("Fast-forwarded to <sha>"). `source_branch` and `base_commit` come from the run's inputs.
+- **Step digests:** use `RunStore`'s own run loading (import it; do not change `projects.ts`) and cache each run's digest by its directory fingerprint, as `listRuns` does. `listRuns` throws for the whole workflow when one run is invalid, and `runFingerprint` (`projects.ts:672`), `openDirectory` and `readBounded` are not exported ([L2]). So list `runs_root` yourself (with `ID_PATTERN` from `projectsConfig.ts`), call `loadRun` per directory, and reimplement the short fingerprint in `dispatchSteps.ts` with a comment citing `projects.ts:672`. Warm the digests in an `onReady` hook, as `warmSummaries` does. The integrated commit is the sha in the run's succeeded `integrate` node message ("Fast-forwarded to <sha>"). `source_branch` and `base_commit` come from the run's inputs.
 - **Git:** `execFile('git', ['--no-optional-locks', '-C', repo, ...])` with a 5 s timeout and the environment `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`; never a shell. Results are cached 15 s per repository. PRD section 5 gives the commands and every rule: default branch, `compare`, the reflog date, landings, `ahead_naming_run`, the GitHub URL forms, `repository_label` and `clone_id`.
 - **GitHub:**
   - an injected runner calls the executable `MD_MANAGER_GH` (default `gh`) with an argv array;
@@ -32,9 +32,11 @@ Everything is read-only. The server never fetches, pushes or writes to a reposit
   - `MD_MANAGER_GITHUB=off` means status `off`;
   - `MD_MANAGER_GITHUB_FIXTURE` replaces every `gh` call. It is read synchronously before the server listens, so the first response is already `read`, and nothing is written to the cache ([P6], [P20]).
 
+  GitHub returns `author: null` for PRs and issues by deleted accounts: map it to `ghost` with `author_is_bot: false`; that is not a missing field ([L2]). A git state whose shas fail Appendix A's `Sha` pattern becomes `unavailable` ("git failed") for that project only; the rest of the overview is unaffected.
+
   PRs come from one GraphQL query ordered by `UPDATED_AT` (Appendix A.3, binding). Reasons are the fixed texts of PRD section 5; never return or log stderr, a token or an environment value ([P14]).
 - **The viewer lane** mirrors Appendix A's types in `src/projects/dispatch/types.ts` and mocks your routes in its worker phase. In the candidate phase its browser specs run against your real routes, with git repositories it seeds under the test root and `MD_MANAGER_GITHUB_FIXTURE` set. Match Appendix A exactly: field names, nullability and status values.
-- **Tests** isolate every path under a temporary directory and `HOME`: real temporary git repositories (a bare origin; a clone with commits ahead and behind and a remote-tracking reflog; a `git worktree` of it; a clone without a local default branch; a non-GitHub remote; a lookalike host such as `https://evilgithub.com/o/n`; a missing path), an injected clock and an injected `gh` runner. Never touch the real `~/.config/md-manager/`, `~/.cache`, `~/.local/state` or any real repository.
+- **Tests** create every repository with `git init -b main` (`--initial-branch=main` for a bare one) and commit with explicit `-c user.name=… -c user.email=…`, since `HOME` is isolated ([L2]). They isolate every path under a temporary directory and `HOME`: real temporary git repositories (a bare origin; a clone with commits ahead and behind and a remote-tracking reflog; a `git worktree` of it; a clone without a local default branch; a non-GitHub remote; a lookalike host such as `https://evilgithub.com/o/n`; a missing path), an injected clock and an injected `gh` runner. Never touch the real `~/.config/md-manager/`, `~/.cache`, `~/.local/state` or any real repository.
 
 ## Constraints
 
@@ -72,7 +74,10 @@ Each item has a test in `server/dispatch.test.ts`, which `frontend-unit` (`npm r
    - each run's steps carry `label` and `kind` from its own recorded definition, with status and attempt;
    - each run has lanes, `source_branch` and `integrated_commit`;
    - an unreadable run appears in `errors`, and a workflow whose runs cannot be listed sets `error`; neither fails the response;
-   - an unknown project is 404 `NOT_FOUND`; POST is 405.
+   - an unknown project is 404 `NOT_FOUND` (this route's code, not `RunStore`'s `PROJECT_NOT_FOUND`); POST is 405.
+   - GitHub state for a project whose git is `unavailable` is `unavailable` with "git not read", and for a project with no `origin` remote it is `not_github` with "not a GitHub remote"; say so in the handoff ([L2]).
+   - a null-author PR reads as `ghost`, and one project with a bad git state leaves the other projects' overview intact ([L2]).
+   - one corrupt run appears in `errors` while its siblings still appear ([L2]).
 6. `contracts/projects/dispatch.ts` holds Appendix A's zod schemas (`DISPATCH_VERSION = '1.0.0'`). `contract.test.ts` validates the examples in `contracts/projects/examples.ts`: an overview with one project in each git and GitHub status, and a `ProjectSteps` with an `errors` entry. The routes parse their responses before sending.
 7. `docs/handoff/projects-dispatch-server.md` says what changed, how to turn GitHub reads off, and every open P2.
 

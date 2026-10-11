@@ -63,12 +63,18 @@ The operator opens the Projects tab and, as a user would:
     - an unreadable project.
 
     Registry paths are absolute (no `~`).
+
+    Tests run with `HOME` isolated, so create every repository with `git init -b main` (`--initial-branch=main` for the bare one) and commit with explicit `-c user.name=… -c user.email=…` ([L2]). `seedCandidate` is also called by `tests/project-workflows/controls-app.ts`, which sets no GitHub fixture or cache: add the dispatch projects only behind an explicit `seedCandidate` option (or a separate seed function) that only `playwright.config.ts` and `dispatch-app.ts` pass, both with `MD_MANAGER_GITHUB_FIXTURE` and `MD_MANAGER_GITHUB_CACHE` set. `controls-app.ts`'s call must seed no git repository ([L2]).
 - **Run controls:** the run-controls work (run-controls-004) is in this base. Leave `src/projects/controls/`, `CommandBlock.tsx` and the run page alone. The reading pane shows `CommandBlock` as it is ([D7]).
 - **Existing specs:** specs that open the Runs home must move to Triage:
   - `revamp-lists.spec.ts`, `ux-lists.spec.ts` (`[scenario:runs-home]`), `projects.spec.ts`, `lanes.spec.ts`, `revamp-pages.spec.ts`;
   - `support.ts` (`projectsUrl`).
 
-  Update their URLs and rail selectors; keep what they assert about the Runs home content. Keep the existing test ids where the meaning is the same (`projects-workspace`, `needs-you`, `running-runs`, `recent-runs`, `today-runs`, `run-list`). Write a short DOM contract for the new pages in `docs/VIEWER_DISPATCH.md` (test ids and structure), like `docs/VIEWER_SIGNAL_BOX.md`.
+  Update their URLs and rail selectors; keep what they assert about the Runs home content.
+- **Specs and tests you do not own still pass unchanged ([L1]):**
+  - `tests/project-workflows/accepted.spec.ts:73-76` opens `projectUrl(<project>)` and expects `li[data-workflow-id="<w>"] a.lists-group-head` to carry the feature's `tone-*` class, `tone-(override|fail|idle)` and never `tone-ok` when the latest run was accepted (today `RunsHome.tsx:344-346`, `toneClass(stateTone({ status, accepted }))`). Each step-chart feature group is therefore an `li[data-workflow-id=<w>]` whose header is an `a.lists-group-head` carrying that tone class. List this hook in `docs/VIEWER_DISPATCH.md`.
+  - `tests/unit/accepted.test.ts` imports `homeSections`, `projectTone`, `rowSummary`, `rowTime`, `waitingKind`, `filterRecent` and `isFinished` from `src/projects/lists.ts`. Keep those exports with their signatures.
+  - Before you complete, run `rg -n "projectUrl\(|projectsUrl|lists-group-head|data-workflow-id|projects-rail|from '.*src/projects/(lists|routes|RunsHome)" tests/` and check that every hit outside your owned paths still passes. A hit you cannot keep passing is a `question` completion. Keep the existing test ids where the meaning is the same (`projects-workspace`, `needs-you`, `running-runs`, `recent-runs`, `today-runs`, `run-list`). Write a short DOM contract for the new pages in `docs/VIEWER_DISPATCH.md` (test ids and structure), like `docs/VIEWER_SIGNAL_BOX.md`.
 - **The critique app** (policy `critique_app`): `npx --no-install tsx tests/project-workflows/dispatch-app.ts` runs in the candidate worktree with `CRITIQUE_WEB_PORT` and `CRITIQUE_API_PORT` set. It:
   - creates a temporary root, seeds the same registry, runs, git repositories and GitHub fixture as your candidate fixtures, with `MD_MANAGER_GITHUB_CACHE` under the root;
   - exits non-zero unless `/api/dispatch/projects` lists every seeded project and every fixture repository reads `status: 'read'` ([P6]);
@@ -76,6 +82,8 @@ The operator opens the Projects tab and, as a user would:
   - prints the Projects, project and Triage URLs;
   - forwards SIGTERM/SIGINT and removes the root on exit;
   - is ready at `/api/dispatch/projects`.
+- **Step-to-phase map ([L2], changes [P22]):** match `node_id` first, `kind` only as the fallback. Recorded definitions give the sidecar `kind: review` and repair nodes `kind: worker`, so kind first would put them in the wrong columns. Rules: `challenge`; `launch_*` and `sidecar` → Launch; `handoff`; `verify_*`; `candidate*`; `review*`, `attack*`, `critique*`, `panel*` → Review; `approval`; `integrate`; `repair-*` → Verify; then `kind`; else Verify. Match the mock-up's own map (`docs/design/projects-dispatch.html`, around lines 1004-1013) where it is more specific.
+- **Landings on neither ref ([L2]):** integration fast-forwards the run's `source_branch`, not the default branch, so an integrated run can read `on_default: false, on_origin: false`. Word that as "not on local <d> or origin/<d>; integrated into <source_branch>", never as "not landed". Add an `on_source` landing field to the handoff's follow-ups.
 - **The look:** tokens in `src/projects/theme.css`, `DESIGN.md` and `PRODUCT.md`. Load the `impeccable` skill for the pages' design and copy, and match the reference's hierarchy, spacing and wording.
 
 ## Constraints
@@ -92,7 +100,8 @@ The operator opens the Projects tab and, as a user would:
   - They pass in both phases: worker (mocked routes) and candidate (the real server, seeded repositories, the GitHub fixture).
   - The migrated existing specs pass too.
 - Unit tests in `tests/unit/dispatch.test.ts` cover:
-  - the step-to-phase map, including sidecar, attack, critique, panel and repair;
+  - the step-to-phase map, including sidecar, attack, critique, panel and repair: `sidecar` (kind review) → Launch and `repair-1` (kind worker) → Verify;
+  - the wording of a landing that is false on both refs;
   - rail order and badge words;
   - the card state word;
   - PR grouping (possibly related by exact branch only) and issue grouping (bots folded);
