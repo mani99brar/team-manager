@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import { join } from 'node:path'
-import { ProjectApiError, RunStore, compareRuns, type LoadedRun } from './projects.ts'
+import { ProjectApiError, RunStore, compareRuns, redactPaths, type LoadedRun } from './projects.ts'
 import { ID_PATTERN, type ProjectConfig } from './projectsConfig.ts'
 
 /**
@@ -75,9 +75,17 @@ export function buildDigest(loaded: LoadedRun): RunDigest {
   }
 }
 
+/** A run directory resolves to a digest, a cached error, or a skip (legacy / just-launched); errors and digests are cached by fingerprint ([S4]). */
+type Resolved =
+  | { type: 'digest'; digest: RunDigest }
+  | { type: 'error'; error: { run_id: string; code: string; message: string } }
+  | { type: 'skip' }
+
 export class StepDigests {
-  /** One cached digest per run directory, keyed `<project>/<workflow>/<run>`, invalidated by the directory fingerprint. */
-  private readonly cache = new Map<string, { key: string; digest: RunDigest }>()
+  /** One cached result per run directory, keyed `<project>/<workflow>/<run>`, invalidated by the directory fingerprint. Caches errors too, so a corrupt run is read and warn-logged once per fingerprint ([S4]). */
+  private readonly cache = new Map<string, { key: string; resolved: Resolved }>()
+  /** In-flight loads per run key, so the un-awaited `warm` at boot and the first request do not both load the same run (design-challenge note 4). */
+  private readonly inflight = new Map<string, Promise<Resolved>>()
   private readonly store: RunStore
   private readonly warn?: (message: string, details: Record<string, unknown>) => void
 
@@ -91,6 +99,39 @@ export class StepDigests {
       .filter(entry => entry.isDirectory() && ID_PATTERN.test(entry.name)).map(entry => entry.name)
   }
 
+  /**
+   * Loads one run directory, caching the digest or the error by the directory fingerprint and deduping concurrent
+   * loads of the same key. A newly computed error is warn-logged once; a cached error is reused silently ([S4]).
+   * `ProjectApiError` messages pass through `redactPaths` so no absolute path reaches the response ([L8], [P8]).
+   */
+  private async resolve(scope: ReturnType<RunStore['scope']>, dir: string, key: string, name: string, logDetails: Record<string, unknown>): Promise<Resolved> {
+    const fingerprint = await runFingerprint(dir)
+    const cached = fingerprint === null ? undefined : this.cache.get(key)
+    if (cached && cached.key === fingerprint) return cached.resolved
+    const pending = this.inflight.get(key)
+    if (pending) return pending
+    const task = (async (): Promise<Resolved> => {
+      try {
+        return { type: 'digest', digest: buildDigest(await this.store.loadRun(scope, name)) }
+      } catch (error) {
+        const code = error instanceof ProjectApiError ? error.code : 'RUN_READ_FAILED'
+        // Legacy (plan.json only) and just-launched (neither file) directories are not failures (note 2).
+        if (code === 'RUN_UNSUPPORTED' || code === 'RUN_NOT_FOUND') return { type: 'skip' }
+        this.warn?.('Run digest could not be read', { ...logDetails, run: name, code })
+        const message = error instanceof ProjectApiError ? redactPaths(error.message) : 'The run could not be read.'
+        return { type: 'error', error: { run_id: name, code, message } }
+      }
+    })()
+    this.inflight.set(key, task)
+    try {
+      const resolved = await task
+      if (fingerprint !== null && resolved.type !== 'skip') this.cache.set(key, { key: fingerprint, resolved })
+      return resolved
+    } finally {
+      this.inflight.delete(key)
+    }
+  }
+
   async workflows(project: ProjectConfig): Promise<WorkflowDigest[]> {
     const result: WorkflowDigest[] = []
     for (const workflow of project.workflows) {
@@ -99,28 +140,18 @@ export class StepDigests {
       try {
         names = await this.runDirs(workflow.runs_root)
       } catch {
-        result.push({ workflow_id: workflow.workflow_id, error: { code: 'RUNS_ROOT_UNAVAILABLE', message: 'The run storage for this workflow could not be listed.' }, runs: [], errors: [] })
+        result.push({ workflow_id: workflow.workflow_id, error: { code: 'RUNS_ROOT_UNAVAILABLE', message: redactPaths('The run storage for this workflow could not be listed.') }, runs: [], errors: [] })
         continue
       }
       const runs: RunDigest[] = []
       const errors: WorkflowDigest['errors'] = []
+      const logDetails = { project_id: project.project_id, workflow_id: workflow.workflow_id }
       for (const name of names) {
         const dir = join(workflow.runs_root, name)
         const key = `${project.project_id}/${workflow.workflow_id}/${name}`
-        const fingerprint = await runFingerprint(dir)
-        const cached = fingerprint === null ? undefined : this.cache.get(key)
-        if (cached && cached.key === fingerprint) { runs.push(cached.digest); continue }
-        try {
-          const digest = buildDigest(await this.store.loadRun(scope, name))
-          if (fingerprint !== null) this.cache.set(key, { key: fingerprint, digest })
-          runs.push(digest)
-        } catch (error) {
-          const code = error instanceof ProjectApiError ? error.code : 'RUN_READ_FAILED'
-          // Legacy (plan.json only) and just-launched (neither file) directories are not failures (note 2).
-          if (code === 'RUN_UNSUPPORTED' || code === 'RUN_NOT_FOUND') continue
-          this.warn?.('Run digest could not be read', { project_id: project.project_id, workflow_id: workflow.workflow_id, run: name, code })
-          errors.push({ run_id: name, code, message: error instanceof ProjectApiError ? error.message : 'The run could not be read.' })
-        }
+        const resolved = await this.resolve(scope, dir, key, name, logDetails)
+        if (resolved.type === 'digest') runs.push(resolved.digest)
+        else if (resolved.type === 'error') errors.push(resolved.error)
       }
       runs.sort(compareRuns)
       result.push({ workflow_id: workflow.workflow_id, error: null, runs: runs.slice(0, 50), errors })

@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { githubRepoReadSchema, type GithubRepoRead, type GithubState, type Issue, type Pr } from '../contracts/projects/dispatch.ts'
+import type { ExecFileLike } from './dispatchGit.ts'
 
 /**
  * GitHub for the dispatch overview (PRD_PROJECTS_DISPATCH section 5, Appendix A.3, decisions.md [P6][P12][P18][P20]).
@@ -31,10 +33,14 @@ export const GH_REASONS = {
 const GH_TIMEOUT_MS = 20_000
 const MAX_BUFFER = 16 * 1024 * 1024
 
-/** The production gh runner: the executable (`MD_MANAGER_GH`, default `gh`), inheriting `process.env` so gh finds its credentials (note 4). */
-export function realGhRunner(executable: string, timeoutMs = GH_TIMEOUT_MS): GhRunner {
+/**
+ * The production gh runner: the executable (`MD_MANAGER_GH`, default `gh`), carrying a spread of `process.env` so gh
+ * keeps its credentials (`GH_TOKEN`, `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME`, `PATH`; design-challenge notes 3 and 4).
+ * `exec` is injectable for the spawn-option test and defaults to the real `execFile`; never a shell, 20 s timeout.
+ */
+export function realGhRunner(executable: string, timeoutMs = GH_TIMEOUT_MS, exec: ExecFileLike = execFile as unknown as ExecFileLike): GhRunner {
   return argv => new Promise<GhResult>(resolve => {
-    execFile(executable, [...argv], { timeout: timeoutMs, maxBuffer: MAX_BUFFER }, (error, stdout, stderr) => {
+    exec(executable, [...argv], { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: { ...process.env } }, (error, stdout, stderr) => {
       const err = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null
       if (err) {
         if (err.code === 'ENOENT') return resolve({ code: -1, stdout: '', stderr: '', timedOut: false, enoent: true })
@@ -166,7 +172,12 @@ export function parseGithub(stdout: string): { read: GithubRepoRead; viewer_logi
   return { read, viewer_login: viewer?.login ?? null }
 }
 
-type Entry = { data: GithubRepoRead | null; readAtMs: number | null; failReason: string | null; attempted: boolean }
+/**
+ * `readAtMs` is the time of the last *good* read (for `read_at` and the restart cache); `attemptedAtMs` is the time
+ * of the last *attempt*, success or not. `due()` uses `attemptedAtMs` so a failed or never-successful read waits the
+ * whole refresh window before the next attempt, rather than retrying every tick ([S2]).
+ */
+type Entry = { data: GithubRepoRead | null; readAtMs: number | null; attemptedAtMs: number | null; failReason: string | null; attempted: boolean }
 
 const BLANK = {
   read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null,
@@ -192,14 +203,18 @@ export class GithubReader {
   private timer: NodeJS.Timeout | null = null
   private cycling = false
   private readonly options: GithubReaderOptions
+  /** Returns the current registry's GitHub keys; wired by `buildDispatch` so each tick follows the reloaded registry ([S3], [L9]). */
+  private discoverFn?: () => Promise<string[]>
 
   constructor(options: GithubReaderOptions) {
     this.options = options
+    this.discoverFn = options.discover
     this.refreshMs = (options.refreshMinutes ?? 15) * 60_000
     if (options.mode === 'fixture' && options.fixture) {
       this.viewerLoginValue = options.fixture.viewer_login
       for (const [key, data] of Object.entries(options.fixture.repos)) {
-        this.entries.set(key, { data, readAtMs: data.read_at ? Date.parse(data.read_at) : options.now(), failReason: null, attempted: true })
+        const at = data.read_at ? Date.parse(data.read_at) : options.now()
+        this.entries.set(key, { data, readAtMs: at, attemptedAtMs: at, failReason: null, attempted: true })
       }
     } else if (options.mode === 'runner' && options.cachePath) {
       this.loadCache(options.cachePath)
@@ -216,7 +231,10 @@ export class GithubReader {
       if (typeof parsed.viewer_login === 'string') this.viewerLoginValue = parsed.viewer_login
       for (const [key, value] of Object.entries(parsed.repos ?? {})) {
         const data = githubRepoReadSchema.safeParse(value)
-        if (data.success) this.entries.set(key, { data: data.data, readAtMs: data.data.read_at ? Date.parse(data.data.read_at) : this.options.now(), failReason: null, attempted: true })
+        if (data.success) {
+          const at = data.data.read_at ? Date.parse(data.data.read_at) : this.options.now()
+          this.entries.set(key, { data: data.data, readAtMs: at, attemptedAtMs: at, failReason: null, attempted: true })
+        }
       }
     } catch { /* a missing or unreadable cache is simply no prior reads */ }
   }
@@ -236,23 +254,32 @@ export class GithubReader {
   /** Registers keys as pending (runner mode) so the tick reads them; fixture and off modes ignore unknown keys. */
   register(keys: readonly string[]): void {
     if (this.options.mode !== 'runner') return
-    for (const key of keys) if (!this.entries.has(key)) this.entries.set(key, { data: null, readAtMs: null, failReason: null, attempted: false })
+    for (const key of keys) if (!this.entries.has(key)) this.entries.set(key, { data: null, readAtMs: null, attemptedAtMs: null, failReason: null, attempted: false })
   }
 
   private due(entry: Entry): boolean {
-    return entry.readAtMs === null || this.options.now() - entry.readAtMs >= this.refreshMs
+    return entry.attemptedAtMs === null || this.options.now() - entry.attemptedAtMs >= this.refreshMs
   }
 
-  /** Reads every due repository, one at a time (runner mode only). Called at start and on each tick; never by a request. */
-  async refreshDue(): Promise<void> {
+  /**
+   * Reads every due repository, one at a time (runner mode only). Called at start and on each tick; never by a request.
+   * With `keys`, only those are considered: a repository missing from the latest discovery is not read, though its entry
+   * and cached data are kept ([S3], [P12]). With no `keys` every known entry is considered (direct-call tests).
+   */
+  async refreshDue(keys?: readonly string[]): Promise<void> {
     if (this.options.mode !== 'runner' || !this.options.runner) return
-    for (const [key, entry] of this.entries) if (this.due(entry)) await this.read(key, entry)
+    const candidates = keys ?? [...this.entries.keys()]
+    for (const key of candidates) {
+      const entry = this.entries.get(key)
+      if (entry && this.due(entry)) await this.read(key, entry)
+    }
   }
 
   private async read(key: string, entry: Entry): Promise<void> {
     const runner = this.options.runner!
     const result = await runner(githubArgv(key))
     entry.attempted = true
+    entry.attemptedAtMs = this.options.now()
     if (result.enoent) { entry.failReason = GH_REASONS.notInstalled; return }
     if (result.timedOut) { entry.failReason = GH_REASONS.timedOut; return }
     if (result.code !== 0) { entry.failReason = /auth login/i.test(result.stderr) ? GH_REASONS.notLoggedIn : `gh failed (exit ${result.code})`; return }
@@ -287,12 +314,27 @@ export class GithubReader {
     return { status: 'pending', reason: GH_REASONS.pending, repo, ...BLANK }
   }
 
-  private async cycle(): Promise<void> {
+  /** Sets the discovery used by the tick, after the store exists (`buildDispatch`); the store does not exist where `index.ts` builds the reader ([S3]). */
+  setDiscover(discover: () => Promise<string[]>): void {
+    this.discoverFn = discover
+  }
+
+  /**
+   * One refresh cycle: discover the current registry's keys, register the new ones, and read whichever of *those* is
+   * due. Public so a test can drive it with an injected clock instead of fake timers (design-challenge note 5). A
+   * repository no longer discovered is left in place with its cached data but is not read ([S3], [P12]).
+   */
+  async cycle(): Promise<void> {
     if (this.cycling) return
     this.cycling = true
     try {
-      if (this.options.discover) this.register(await this.options.discover())
-      await this.refreshDue()
+      if (this.discoverFn) {
+        const keys = await this.discoverFn()
+        this.register(keys)
+        await this.refreshDue(keys)
+      } else {
+        await this.refreshDue()
+      }
     } catch (error) {
       this.options.warn?.('GitHub refresh cycle failed', { message: (error as Error).message })
     } finally {
@@ -311,4 +353,24 @@ export class GithubReader {
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null }
   }
+}
+
+/**
+ * Resolves the GitHub reader options from the environment (Appendix A.3), the single place `index.ts` uses so the
+ * fixture-file and `MD_MANAGER_GITHUB=off` paths are covered by a unit test rather than only the candidate browser
+ * phase ([S5], [P36]). `off` disables every `gh` call; `MD_MANAGER_GITHUB_FIXTURE` names a JSON file read synchronously
+ * and validated with the contract (no cache write); otherwise `gh` runs on a 20 s timeout and the last good reads are
+ * cached under `MD_MANAGER_GITHUB_CACHE`. Discovery is wired later by `buildDispatch`, where the store exists.
+ */
+export function githubReaderOptions(env: NodeJS.ProcessEnv, now: () => number): GithubReaderOptions {
+  const refreshMinutes = Number(env.MD_MANAGER_GITHUB_REFRESH_MINUTES ?? 15) || 15
+  if (env.MD_MANAGER_GITHUB === 'off') return { mode: 'off', now }
+  if (env.MD_MANAGER_GITHUB_FIXTURE) {
+    const parsed = JSON.parse(readFileSync(resolve(env.MD_MANAGER_GITHUB_FIXTURE), 'utf8')) as { viewer_login?: string | null; repos?: Record<string, unknown> }
+    const repos: Record<string, GithubRepoRead> = {}
+    for (const [key, value] of Object.entries(parsed.repos ?? {})) repos[key] = githubRepoReadSchema.parse(value)
+    return { mode: 'fixture', now, fixture: { viewer_login: parsed.viewer_login ?? null, repos } }
+  }
+  const cachePath = env.MD_MANAGER_GITHUB_CACHE || join(env.HOME || homedir(), '.cache', 'md-manager', 'github.json')
+  return { mode: 'runner', now, refreshMinutes, runner: realGhRunner(env.MD_MANAGER_GH || 'gh'), cachePath }
 }

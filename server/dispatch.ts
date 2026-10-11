@@ -5,7 +5,7 @@ import {
   DISPATCH_VERSION, dispatchOverviewSchema, gitStateSchema, projectStepsSchema,
   type GitState, type GithubState, type ProjectSteps,
 } from '../contracts/projects/dispatch.ts'
-import { GitReader, realGitRunner, type GitRunner } from './dispatchGit.ts'
+import { GitReader, discoverGithubRepos, realGitRunner, type GitRunner } from './dispatchGit.ts'
 import { GithubReader } from './dispatchGithub.ts'
 import { StepDigests } from './dispatchSteps.ts'
 import { ProjectApiError, RunStore } from './projects.ts'
@@ -54,8 +54,12 @@ export type DispatchAppOptions = {
 
 export function buildDispatch(store: RunStore, options: DispatchAppOptions, warn?: (message: string, details: Record<string, unknown>) => void): DispatchDeps {
   const now = options.now ?? Date.now
-  const git = new GitReader(options.gitRunner ?? realGitRunner(), options.home ?? homedir(), now)
+  const gitRunner = options.gitRunner ?? realGitRunner()
+  const git = new GitReader(gitRunner, options.home ?? homedir(), now)
   const github = options.github ?? new GithubReader({ mode: 'off', now })
+  // Discovery runs through the store the reloader keeps current: sync first, then discover the GitHub keys of the
+  // registry as it is now. The tick reads a repository added at runtime and skips one no longer registered ([S3], [L9]).
+  github.setDiscover(async () => { await store.sync(); return discoverGithubRepos(store.config.projects, gitRunner) })
   const steps = new StepDigests(store, warn)
   return { store, git, github, steps }
 }

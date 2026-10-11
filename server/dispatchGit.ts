@@ -37,11 +37,23 @@ export type GitRead = {
 const GIT_ENV = { GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1', GIT_OPTIONAL_LOCKS: '0' }
 const MAX_BUFFER = 8 * 1024 * 1024
 
+/**
+ * The subset of `execFile` the runners use. Injectable so a unit test can record the executable, argv and options
+ * (no shell, the timeout, the env) without a module-level mock that would break the file's own `execFileSync`
+ * setup (design-challenge note 2); it defaults to the real `execFile`.
+ */
+export type ExecFileLike = (
+  file: string,
+  args: readonly string[],
+  options: { timeout: number; env?: NodeJS.ProcessEnv; maxBuffer: number; shell?: boolean },
+  callback: (error: (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null, stdout: string | Buffer, stderr: string | Buffer) => void,
+) => unknown
+
 /** The production runner: inherits `process.env` (so `HOME`/`PATH` reach git, design-challenge note 4) with the read-only flags added. */
-export function realGitRunner(timeoutMs = 5000): GitRunner {
+export function realGitRunner(timeoutMs = 5000, exec: ExecFileLike = execFile as unknown as ExecFileLike): GitRunner {
   return (repo, args) => new Promise<GitResult>(resolve => {
     const env = { ...process.env, ...GIT_ENV, GIT_CEILING_DIRECTORIES: dirname(repo) }
-    execFile('git', ['--no-optional-locks', '-C', repo, ...args], { timeout: timeoutMs, env, maxBuffer: MAX_BUFFER }, (error, stdout, stderr) => {
+    exec('git', ['--no-optional-locks', '-C', repo, ...args], { timeout: timeoutMs, env, maxBuffer: MAX_BUFFER }, (error, stdout, stderr) => {
       const err = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null
       if (err) {
         if (err.code === 'ENOENT') return resolve({ code: -1, stdout: '', stderr: '', timedOut: false, enoent: true })
@@ -150,15 +162,17 @@ export async function readGitState(input: GitInput, home: string, run: GitRunner
     }
   }
 
+  // The local default branch is resolved on its own, not inside the origin block: a repository with
+  // `refs/heads/<d>` but no origin ref still knows its local default, so landings read true/false there ([S1]).
+  const localDefaultExists = default_branch ? await refExists(`refs/heads/${default_branch}`) : false
+
   // Origin comparison.
   let origin: GitState['origin'] = null
   const ahead_commits: GitState['ahead_commits'] = []
   let ahead_naming_run = 0
-  let localDefaultExists = false
   const originRef = default_branch ? `refs/remotes/origin/${default_branch}` : null
   const originSha = originRef ? await refSha(originRef) : null
   if (default_branch && originRef && originSha) {
-    localDefaultExists = await refExists(`refs/heads/${default_branch}`)
     const reflog = await text(['reflog', 'show', '-1', '--date=iso-strict', '--format=%gd', originRef])
     let updated_at: string | null = null
     if (reflog.code === 0) {
