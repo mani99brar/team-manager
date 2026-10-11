@@ -53,3 +53,4 @@ From the grill session of 2026-10-11 with the operator.
 - Recording lane reviewers' session ids for `pi` transports, and exporting session costs in `run-state.json` (a workflow lane; [O2] chose no engine change).
 - Night-shift actions from the run page (the run controls feature owns actions).
 - Transcript viewing.
+- [L2] (run-sessions-001, design challenge attempt 2, one P1 marked "Operator decides"; the recommended option adopted under [O6]) `src/projects/status.ts` and `src/projects/NodeHeader.tsx`, where the executor wording for kind `review` lives, are not owned paths. Settled: neither is edited; the stage card's executor wording comes from an owned wrapper in `src/projects/signal/`, the node-page header keeps the kind's wording, `NodeDetail` passes no print transport for projected ids, and the unit tests cover the wrapper.
