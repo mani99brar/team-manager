@@ -36,17 +36,15 @@ A feature's lane may declare `lane_review` with 1 to 4 reviewers. After that lan
 - Refused on a version before 2.9.0, naming `workers[<lane>].lane_review`: 2.9.0 joins every exact-match version set that lists 2.8.0 (shared learning `version-gates-are-sets-add-a-keeps-everything-test.md`).
 - `prepare` pins it into `plan.nodes[<lane>].lane_review` with the `pi` bin it proved, like the panel's `pi_bin`; `launch --dry-run` prints it per lane; DeepSeek models stay behind `panel.deepseek_guard`.
 
-## 4. Design (decisions.md [L1] changes 4.1 and 4.2: the review runs inside `verify_<lane>` and blocks its packet; the repair keeps trigger `verify` with `origin: "lane-review"`)
+## 4. Design (decisions.md [L1], [L2])
 
 ### 4.1 Where it runs
 
-After `verify_<lane>` passes for a lane with `lane_review`, and before `candidate`. The controller builds the lane's review context with the panel's own pieces, restricted to that lane's owned paths (`panel.review_sections(worktree, base, snapshot, paths=automatic.lane_paths(runtime, lane))`, `cap_sections`), plus the lane's task, `decisions.md` and the PRD; it runs each reviewer in-process as a bounded subprocess the way the panel does (`pi_command`, `pi_env`, `start_provider`, `parse_pi_stream`, `normalize_findings`), with a bundled lane-review brief.
+Inside the lane's own `verify_<lane>` step, after its policy checks pass, so lanes are reviewed in parallel by the existing verify fan-out; no new graph node. The packet is saved once, after the review verdict, and a `running` event is emitted when the review starts. The controller builds the lane's review context with the panel's own pieces, restricted to that lane's owned paths (`panel.review_sections(worktree, base, snapshot, paths=automatic.lane_paths(runtime, lane))`, `cap_sections`), plus the lane's task, `decisions.md` and the PRD; it runs each reviewer in-process as a bounded subprocess the way the panel does (`pi_command`, `pi_env`, `start_provider`, `parse_pi_stream`, `normalize_findings`), with a bundled lane-review brief. The record is keyed by (lane, snapshot commit): a resume, a fork or a sibling's failure reuses a terminal record instead of restarting reviewers.
 
 ### 4.2 The fix round
 
-Any P0 or P1 from any lane reviewer starts a repair of that lane through the existing fix loop (`repair.repair_session`, trigger `lane-review`), with the findings adapted to the repair brief's finding shape (`session_brief` takes `findings`; the reviewer schema's `severity`, `worker`, `message` are filled from the panel finding's `severity`, the lane, `title` + `detail` + `file:line`). The repair is journaled in `repairs.json` like every repair, and the lane is verified again. A lane whose `rounds` are used up goes on with its open findings recorded; the run's reviewers see them in their prompt. P2s never start a round; they are recorded and passed on.
-
-The alternative the grill weighs: send the findings to the *original* worker session (same context) instead of a repair session, through `claude --bg --resume <session id>` or the `answer` path's pane typing. Nothing in the controller resumes a finished worker today, and the receipt model assumes one session per node; the repair route reuses everything.
+A P0 or P1 from any lane reviewer blocks the lane's verify packet only when the plan is automatic, `fix_rounds(plan) > 0`, the lane has `rounds` left and `len(applied repairs) + 1 < MAX_REPAIRS`. The gate reasons are short (`lane-review: <severity> <file>:<line> <title, capped>`). The existing fix loop then repairs it as any failed `verify_<lane>`: trigger `verify`, `origin: "lane-review"` in its `repairs.json` entry (the export is unchanged), the adapted and capped findings passed to `session_brief` as `findings=`, and the lane verified again. Lane-review repairs count against `lane_review.rounds`, not `--fix-rounds`. A lane-review repair that ends blocked counts as a spent round and never exhausts the fix loop. When no round can start (rounds used up, fix loop off, manual plan, repair cap), the packet passes and the open findings are recorded and put in the run reviewers' prompt. P2s never start a round; they are recorded and passed on.
 
 ### 4.3 Never a failure of the run
 
@@ -65,7 +63,7 @@ A worker spawning its own agents (the controller runs the reviewers). More than 
 
 ## 6. Files
 
-`workflow/automatic.py` (placement after `verify_<lane>`, the round cap), `workflow/repair.py` (trigger `lane-review`, finding adapter), a new `workflow/lane_review.py` (context, provider run, record), `workflow/panel.py` (reuse only; the pieces may move into a shared module without changing the panel's behaviour), `workflow/launch.py`, `workflow/pipeline.py` (validate, pin, dry-run), the version-gate sets, `contracts/workflow/feature.schema.json`, `contracts/workflow/examples/feature.2.9.0.json`, `contracts/workflow/contract.test.ts`, a lane-review record schema, `workflow/RUNBOOK.md` ("Lane reviewer (feature.json 2.9.0)"), `workflow/README.md`, `workflow/skills/workflow-grill/SKILL.md` (2.9.0), tests, `docs/handoff/lane-reviewer.md`.
+`workflow/pipeline.py` and `workflow/automatic.py` (the review inside `verify_<lane>`, the gate, the round and repair caps, `fix_decision`/`fix_round` for `origin: "lane-review"`), `workflow/repair.py` (the `origin` key, the finding adapter), a new `workflow/lane_review.py` (context, provider run, record), `workflow/panel.py` (reuse only; the pieces may move into a shared module without changing the panel's behaviour), `workflow/launch.py`, `workflow/pipeline.py` (validate, pin, dry-run), the version-gate sets, `contracts/workflow/feature.schema.json`, `contracts/workflow/examples/feature.2.9.0.json`, `contracts/workflow/contract.test.ts`, a lane-review record schema, `workflow/RUNBOOK.md` ("Lane reviewer (feature.json 2.9.0)"), `workflow/README.md`, `workflow/skills/workflow-grill/SKILL.md` (2.9.0), tests, `docs/handoff/lane-reviewer.md`.
 
 ## 7. Acceptance (what the verifier and reviewers check)
 
@@ -75,4 +73,10 @@ A worker spawning its own agents (the controller runs the reviewers). More than 
 4. One reviewer that times out and one that returns garbage are both recorded `failed` and the run goes on to the candidate.
 5. A lane without `lane_review` and every 2.8.0 feature run byte for byte as today (the gate-set test; the plain lane's flow has no lane-review step).
 6. A 2.8.0 feature with `lane_review` is refused, naming the lane.
-7. `test:contracts` validates the 2.9.0 example and the record schema; the full workflow suite is green.
+7. A `--fix-rounds 0` automatic run (and a manual plan) with a reviewer P1 reaches the candidate with the P1 recorded and no blocked packet.
+8. A fake lane-review repair session that times out counts as the spent round; the run reaches the candidate.
+9. With two earlier verify repairs applied, the lane-review round is skipped and its findings recorded; a later review block can still be repaired.
+10. A run with a lane-review repair exports a fix-loop section without `error`.
+11. The repair brief for a lane-review repair holds the findings only in the quoted findings block; an oversized and an injected-instruction finding are capped and quoted; events and gate reasons carry no raw detail text.
+12. Lane A passes and is reviewed, lane B blocks, the run forks: A's reviewers are not started again; a fake provider that ignores SIGTERM is killed with its process group.
+13. `test:contracts` validates the 2.9.0 example and the record schema; the full workflow suite is green.
