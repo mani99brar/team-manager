@@ -1,6 +1,6 @@
 {
   "version": "2.10.0",
-  "name": "Projects dispatch, run 003 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-002's blocked review): close its open P1s (docked layout by container width, older-run links, no false all-clear, a GitHub read with no head) and the server's two weak tests, plus small critique fixes; a GPT 6.1 lane reviewer per lane; read-only",
+  "name": "Projects dispatch, run 004 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-003, whose review blocked only on the handoffs): finish the server handoff (a hand-break for every S5 test) and the viewer handoff (every open P2 kept); docs only; a GPT 6.1 lane reviewer per lane; read-only",
   "branch_prefix": "feature/projects-dispatch",
   "prd": "docs/PRD_PROJECTS_DISPATCH.md",
   "policy": "policy.json",
