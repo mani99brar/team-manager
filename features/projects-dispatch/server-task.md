@@ -17,7 +17,7 @@ Run projects-dispatch-001 built the read-only dispatch API, and it is in your ba
    - landings: a missing origin ref and a clone without a local default branch give `null`, never `false`;
    - the GraphQL query text has `first: 20` and `orderBy: {field: UPDATED_AT …}` for PRs and the issues order; `reader.state()` output for a full fixture parses with the contract schema and maps every Appendix A field (pushed_at, head.committed_at, read_at, PR title/url/state/draft/head_ref/base_ref/updated_at/merged_at/review_decision/labels, issue labels/assignees/created_at/updated_at);
    - a route request (`app.inject`) inside the refresh window never calls the runner ([P18]);
-   - the fixture file: `MD_MANAGER_GITHUB_FIXTURE` read from a file, and `MD_MANAGER_GITHUB=off`, through the same function `server/index.ts` uses (extract it if needed);
+   - the fixture file: `MD_MANAGER_GITHUB_FIXTURE` read from a file, and `MD_MANAGER_GITHUB=off`, through the same function `server/index.ts` uses: move that code into an exported function in `server/dispatchGithub.ts` (owned) that `index.ts` imports, not into a new file, which would be outside your owned paths ([P36]);
    - more than 50 runs: the steps route returns the newest 50;
    - a run whose recorded definition differs from the registry's: its steps carry the recorded `label` and `kind` ([P22]).
 6. **S6 The handoff.** Update `docs/handoff/projects-dispatch-server.md`: what run 002 changed, how to turn GitHub reads off, and every open P2, including the untested real `gh` path (the operator's tryout checks it) and the HOME/PATH spawn-option assertion if you do not add it.
@@ -43,7 +43,7 @@ Run projects-dispatch-001 built the read-only dispatch API, and it is in your ba
 
 ## Acceptance
 
-- S1 to S5 each have a test in `server/dispatch.test.ts` (which `frontend-unit` runs) that fails on f4623a4's code and passes on yours. Name each test after its item (`S1: …`).
+- S1 to S4 each have a test in `server/dispatch.test.ts` (which `frontend-unit` runs) that fails on f4623a4's code and passes on yours. The S5 tests cover behaviour that may already be right, so they may pass on f4623a4, but each must fail when the behaviour it guards is broken (say in the handoff which change you made by hand to see it fail) ([P37]). Name each test after its item (`S1: …`).
 - The 001 tests still pass, and `contracts/projects/contract.test.ts` still validates the examples.
 - `docs/handoff/projects-dispatch-server.md` is updated (S6).
 - `frontend-build`, `frontend-lint`, `shared-contract` and `frontend-unit` pass.

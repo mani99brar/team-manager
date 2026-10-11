@@ -150,7 +150,7 @@ The Projects tab opens on a **Projects page**: one card per registered project. 
     - landings: "3 of 4 landings on local main; 0 on origin; 1 unknown", where unknown means not comparable ([P9]);
     - a button listing the commits ahead (up to 50, with "and N more") and every landing in the reading pane.
   - **Pull requests**, with the aside "N open · showing the 20 most recently updated" ([P15]) and these groups:
-    - "Possibly related": head or base equals the checkout branch or a run's `source_branch`;
+    - "Possibly related": the head branch equals the checkout branch or a run's `source_branch`, or the base branch does when it is not the project's default branch; the row names the match (decisions.md [L5], run 002);
     - "Yours, open": the author is `viewer_login`;
     - "Others, open";
     - "Merged in the last 14 days", among the 20 shown.

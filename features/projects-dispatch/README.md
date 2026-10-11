@@ -18,4 +18,4 @@ Specification: `docs/PRD_PROJECTS_DISPATCH.md`. Visual reference: `docs/design/p
 
 Runs: projects-dispatch-001 (base eee4e83, review blocked at candidate f4623a4) and projects-dispatch-002 (base: this branch, from f4623a4; [L3]).
 
-Launch from this repository: `python -m workflow launch projects-dispatch --repo <this repository> --dry-run`, then `--live --automatic --by operator`. Run 002 needs a controller with feature.json 2.10.0 (md-manager 2dab17c or later): run the command from that checkout.
+Launch from this repository: `python -m workflow launch projects-dispatch --repo <this repository> --dry-run`, then `--live --automatic --fix-rounds 3 --by operator`; run 002 also passes `--run-root ~/.local/state/md-manager-workflows/projects-dispatch` (this checkout's name is not `md-manager`, so the default root would differ). Run 002 needs a controller with feature.json 2.10.0 (md-manager 2dab17c or later): run the command from that checkout.
