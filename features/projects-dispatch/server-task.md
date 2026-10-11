@@ -1,54 +1,44 @@
-# Server worker, run 002: fix the dispatch API's review findings (PRD_PROJECTS_DISPATCH)
+# Server worker, run 003: make the dispatch API's tests guard what they claim (PRD_PROJECTS_DISPATCH)
 
 ## Goal
 
-Run projects-dispatch-001 built the read-only dispatch API, and it is in your base (f4623a4): `server/dispatch*.ts`, `contracts/projects/dispatch.ts`, `docs/handoff/projects-dispatch-server.md`. Its independent review blocked it. `features/projects-dispatch/review-001.md` holds every finding verbatim. Fix the ones below, keep everything that already works, and prove each fix with a test that fails without it.
+Runs projects-dispatch-001 and 002 built and fixed the read-only dispatch API, and it is in your base (cb5af748, run 002's candidate): `server/dispatch*.ts`, `contracts/projects/dispatch.ts`, `server/dispatch.test.ts`, `docs/handoff/projects-dispatch-server.md`. Run 002's independent review blocked the candidate on the viewer; on the server it found no behaviour bug, only tests that would still pass if the behaviour they guard broke. `features/projects-dispatch/review-002.md` holds every finding verbatim. This run changes tests and the handoff only, unless a test you write exposes a real bug (then fix the code too and say so in the handoff).
 
-1. **S1 (P1) Landings without an origin ref.** In `server/dispatchGit.ts`, `localDefaultExists` is only set inside the origin block, so a repository with `refs/heads/<d>` and no origin ref reports every `on_default` as `null`. Resolve the local default branch independently of the origin ref. Done when a test on a local-only repository with an integrated sha on main reports `on_default: true` (and `false` for a sha not on main) with `on_origin: null`.
-2. **S2 (P1) Failed reads retry every tick.** `GithubReader.due()` looks only at `readAtMs`, so a repository whose read failed, or that was never read successfully, is read again every minute. Record the time of every attempt; a repository is due only when its last attempt, successful or not, is older than `MD_MANAGER_GITHUB_REFRESH_MINUTES`. The start read still runs once per repository. Done when a test with a failing runner and the real tick (fake timers, or the injected clock driving `cycle()`) shows one call per refresh window, not one per minute.
-3. **S3 Discovery follows the registry as it is now.** `server/index.ts` builds `discover` from the start-up registry. Discover from the registry the reloader keeps current: the reloader only runs through `RunStore.sync()`, which only request hooks call, so the tick's discover itself awaits `store.sync()` and then calls `discoverGithubRepos(store.config.projects, gitRunner)`, wired inside `createApp`/the dispatch module (both owned) since the store does not exist yet where `index.ts` builds the reader. A repository added at runtime is then read by the tick without a page request. A repository missing from the latest discovery (removed, cache-only, or a transient `git remote get-url` failure) is not read, but its entry and cached data are kept, never deleted, so it still answers `read` with its last data ([P12]). Done when a test rewrites the registry file and drives `cycle()` (or the fake-timer tick) with no `app.inject` and the runner sees the new repository, and a repository missing from one discovery is not read but still answers `read` with its cached data ([L9]).
-4. **S4 Unreadable runs are cached.** In `server/dispatchSteps.ts`, a run whose `loadRun` throws is retried and warn-logged on every overview request. Cache the error by the run directory's fingerprint, as good digests are cached, and log it once per fingerprint. Done when a test makes two overview requests and the loader is called once for the corrupt run.
-5. **S5 Tests that can fail.** Strengthen `server/dispatch.test.ts` so that each of these would fail on a regression:
-   - a recording git runner proves every git argv is read-only (never `fetch`, `pull`, `push`, `gc`, `checkout`, `reset`, `update-ref`, `config` with a value, or any other writing command); and a test that mocks `node:child_process` proves `realGitRunner` and `realGhRunner` call `execFile` with an argv array, no `shell` option, the 5 s and 20 s timeouts, and an env carrying `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`, HOME and PATH; removing any one fails it ([L9]);
-   - both routes: GET and HEAD answer, every other method is 405 with an `Allow` header; runner mode writes no file but `MD_MANAGER_GITHUB_CACHE`;
-   - the reflog date: two fetches at distinct, set times, and `updated_at` equals the remote-tracking reflog entry's time, not `FETCH_HEAD`'s;
-   - no absolute path anywhere in either route's whole JSON response (scan every string, including `errors[].message`), for a run whose loader error message holds a path. Fix it by running `ProjectApiError` messages (per-run `errors[]` and the workflow-level `error`) through `redactPaths` (exported by `server/projects.ts`, which the store already uses for these messages), never by replacing them with a fixed text: the viewer's `dispatch-chart` asserts the recorded message ("plan.json is missing") in the candidate phase. The test shows a `/tmp/…` path in a loader message comes back as `<path>` while the rest survives verbatim ([L8]);
-   - default branch: an `origin/HEAD` naming `dev` outranks a local `main`;
-   - landings: a missing origin ref and a clone without a local default branch give `null`, never `false`;
-   - the GraphQL query text has `first: 20` and `orderBy: {field: UPDATED_AT …}` for PRs and the issues order; `reader.state()` output for a full fixture parses with the contract schema and maps every Appendix A field (pushed_at, head.committed_at, read_at, PR title/url/state/draft/head_ref/base_ref/updated_at/merged_at/review_decision/labels, issue labels/assignees/created_at/updated_at);
-   - a route request (`app.inject`) inside the refresh window never calls the runner ([P18]);
-   - the fixture file: `MD_MANAGER_GITHUB_FIXTURE` read from a file, and `MD_MANAGER_GITHUB=off`, through the same function `server/index.ts` uses: move that code into an exported function in `server/dispatchGithub.ts` (owned) that `index.ts` imports, not into a new file, which would be outside your owned paths ([P36]);
-   - more than 50 runs: the steps route returns the newest 50;
-   - a run whose recorded definition differs from the registry's: its steps carry the recorded `label` and `kind` ([P22]).
-6. **S6 The handoff.** Update `docs/handoff/projects-dispatch-server.md`: what run 002 changed, how to turn GitHub reads off, and every open P2, including the untested real `gh` path (the operator's tryout checks it) and the HOME/PATH spawn-option assertion if you do not add it.
+1. **S7 (P1) The spawn test guards the production timeouts.** `server/dispatch.test.ts` ("S5 spawn", about lines 785-821) passes 5000 and 20_000 to `realGitRunner(5000, fakeGit)` and `realGhRunner('gh', 20_000, fakeGh)`, while production calls `realGitRunner()` (`server/index.ts`, `server/dispatch.ts`) and `realGhRunner(env.MD_MANAGER_GH || 'gh')` (`server/dispatchGithub.ts`) and relies on the defaults. Call each runner the way production does, with the default timeout (`realGitRunner(undefined, fakeGit)`, `realGhRunner('gh', undefined, fakeGh)`), and assert the `execFile` options carry 5000 and 20000. Done when changing either default (or removing it) fails the test.
+2. **S8 (P1) The recorded-definition test tells the run's kind from the registry's.** "S5: a run carries the label and kind of its own recorded definition" (about lines 990-1007) records the same kinds the registry's `MIN_NODES` has, so a kind taken from the registry passes. Give the recorded definition a node whose recorded `kind` differs from the registry's for the same node id (for example recorded `repair` where the registry says `worker`), and assert both `label` and `kind` come from the run ([P22], [L2]). Done when taking `kind` from the registry fails the test.
+3. **S9 The other S5 proofs, tightened** (P2s of run 002's review and lane review):
+   - `isReadOnlyGit` (about lines 758-783) rejects any long option that is an unambiguous prefix of a writing option (`--dele` for `--delete`, `--outp=` for `--output`), not only the exact names; a test feeds it `['symbolic-ref', '--dele', 'HEAD']` and `['log', '--outp=/x']` and expects a rejection.
+   - The path scan covers both routes' whole JSON: `/api/dispatch/projects` as well as `/api/dispatch/projects/<p>/steps`, including a workflow-level `error` whose loader message holds a path.
+   - S4 counts the warn calls too: two overview requests, one warning for the corrupt run.
+   - The GraphQL fixture has one draft PR and one issue with labels, and the mapping asserts `draft: true` and the labels by value.
+   - "Runner mode writes only the GitHub cache file" lists every file under the test's temporary HOME and working directory before and after, not only the cache directory, with the cache path set through `MD_MANAGER_GITHUB_CACHE` and the exported options function `server/index.ts` uses.
+   - "No local default branch gives null" uses an existing object (a real commit sha in the clone), so the null comes from the missing branch, not a missing object.
+4. **S10 The handoff.** Update `docs/handoff/projects-dispatch-server.md`: what run 003 changed, and for every S5 to S9 test the change you made by hand to see it fail ([P37]); keep the open P2s (the untested real `gh` path, which the operator's tryout checks; reftable).
 
-`docs/PRD_PROJECTS_DISPATCH.md` sections 2, 5 and 7 and Appendix A remain the specification; `features/projects-dispatch/decisions.md` wins where they differ. The response shapes do not change: Appendix A is frozen for this run ([L4]), so the `viewer` lane can rely on it.
+`docs/PRD_PROJECTS_DISPATCH.md` sections 2, 5 and 7 and Appendix A remain the specification; `features/projects-dispatch/decisions.md` wins where they differ. Appendix A stays frozen ([L4], [L10]).
 
 ## Context
 
-- **Your base already has the API.** Read `server/dispatch.ts`, `dispatchGit.ts`, `dispatchGithub.ts`, `dispatchSteps.ts`, `server/index.ts`, `server/app.ts` and `docs/handoff/projects-dispatch-server.md` before changing anything. Keep the module boundaries.
+- **Your base already has the API and its tests.** Read `server/dispatch.test.ts`, `server/dispatchGit.ts`, `server/dispatchGithub.ts`, `server/dispatchSteps.ts`, `server/index.ts` and the handoff before changing anything.
 - **Run-controls routes:** `/api/run-controls` (`server/controls*.ts`) is not yours. Do not change it.
-- **Git:** `execFile('git', ['--no-optional-locks', '-C', repo, ...])` with a 5 s timeout and `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`; never a shell. Cached 15 s per repository.
-- **GitHub:** timer-driven only ([P18]); one repository at a time with a 20 s timeout per call; requests never trigger or wait for a read; a failed refresh keeps `read` with the data and sets `reason` ([P12]); fixed reason texts only, never stderr ([P14]).
 - **Tests** create every repository with `git init -b main` (`--initial-branch=main` for a bare one) and commit with explicit `-c user.name=… -c user.email=…`, since `HOME` is isolated. They isolate every path under a temporary directory and `HOME`, with an injected clock and an injected `gh` runner. Never touch the real `~/.config/md-manager/`, `~/.cache`, `~/.local/state` or any real repository.
-- **A lane reviewer** (GPT 6.1) reviews your lane's diff after your checks pass, before the candidate. A P0/P1 from it starts one repair round of your lane.
-- **The viewer lane** works in parallel on the pages against Appendix A as it is. Do not rename, remove or retype a field.
+- **A lane reviewer** (GPT 6.1) reviews your lane's diff after your checks pass, before the candidate. A P0/P1 from it starts one repair round of your lane, and repairs are scarce (three per run), so make each test fail on the regression it names before you complete, and say how in the handoff.
+- **The viewer lane** works in parallel on the pages. Do not rename, remove or retype a field.
 
 ## Constraints
 
-- Owned paths only (policy.json `server`). Do not touch `src`, `tests/project-workflows`, `tests/unit`, `server/projectRoutes.ts`, `server/projects.ts`, `server/projectsConfig.ts` or the run-controls files. Helpers you need are imported, not changed. A change you cannot avoid is a `question` completion.
-- GET and HEAD only; other methods 405. No write anywhere except the GitHub cache file.
-- No `git fetch`, `pull`, `push`, `gc`, `checkout` or any command that writes; no shell.
+- Owned paths only (policy.json `server`). Do not touch `src`, `tests/project-workflows`, `tests/unit`, `server/projectRoutes.ts`, `server/projects.ts`, `server/projectsConfig.ts` or the run-controls files. A change you cannot avoid is a `question` completion.
+- No behaviour change unless a test exposes a bug; GET and HEAD only; no write anywhere except the GitHub cache file; no `git fetch`, `pull`, `push`, `gc`, `checkout` or any command that writes; no shell.
 - No new dependency. No change to Appendix A's shapes.
 
 ## Acceptance
 
-- S1 to S4 each have a test in `server/dispatch.test.ts` (which `frontend-unit` runs) that fails on f4623a4's code and passes on yours. The S5 tests cover behaviour that may already be right, so they may pass on f4623a4, but each must fail when the behaviour it guards is broken (say in the handoff which change you made by hand to see it fail) ([P37]). Name each test after its item (`S1: …`).
-- The 001 tests still pass, and `contracts/projects/contract.test.ts` still validates the examples.
-- `docs/handoff/projects-dispatch-server.md` is updated (S6).
+- S7, S8 and each S9 test pass on the base's code and fail when the behaviour they guard is broken by hand (the handoff names the change for each, S10); name each test after its item (`S7: …`, `S8: …`, `S9: …`), replacing the S5/S4 test it supersedes.
+- The 001 and 002 tests still pass, and `contracts/projects/contract.test.ts` still validates the examples.
+- `docs/handoff/projects-dispatch-server.md` is updated (S10).
 - `frontend-build`, `frontend-lint`, `shared-contract` and `frontend-unit` pass.
 
-Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; run browser specs only through check-report on this lane's own specs.
+Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion.
 
 ## Stop
 

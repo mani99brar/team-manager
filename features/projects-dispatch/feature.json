@@ -1,6 +1,6 @@
 {
   "version": "2.10.0",
-  "name": "Projects dispatch, run 002 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-001's blocked review): finish the project page (docked reading pane with CommandBlock, aligned axis, Needs you and running, commits ahead, folds, header truth) and fix the dispatch API's landing and refresh bugs, with tests that fail without each fix; a GPT 6.1 lane reviewer per lane; read-only",
+  "name": "Projects dispatch, run 003 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-002's blocked review): close its open P1s (docked layout by container width, older-run links, no false all-clear, a GitHub read with no head) and the server's two weak tests, plus small critique fixes; a GPT 6.1 lane reviewer per lane; read-only",
   "branch_prefix": "feature/projects-dispatch",
   "prd": "docs/PRD_PROJECTS_DISPATCH.md",
   "policy": "policy.json",
