@@ -1,0 +1,130 @@
+# PRD: Run sessions (every session of a workflow run is visible)
+
+Status: draft for the run-sessions workflow, 2026-10-11. Operator's words: "make the lane review panel as follow and also in the same run update the UI to show different reviwers as different node. Also add the panel. Basically each session part of the workflow shouldb be visible". Decisions: `features/run-sessions/decisions.md`.
+
+## 1. Problem
+
+A workflow run is a dozen agent sessions: the design challenge's print jobs, one worker per lane, the fix loop's repairs, a lane reviewer per lane and round (feature.json 2.10.0), the independent reviewers (general, coverage, critique), the multi-provider review panel when a feature opts in, and the night-shift panel's decisions (Claude, GPT, Jev) when the operator is away. The run page shows some of them and hides the rest:
+
+- The review step is one node. Its reviewers are chips inside the node sheet (`src/projects/signal/NodeSheet.tsx`) and a list on the review node page (`src/projects/ReviewDetail.tsx`); the graph never shows that general blocked while critique approved.
+- The lane reviewer is invisible. `workflow/lane_review.py` writes `<run>/lane-review/<lane>/<n>.json` and `lane_review:` event lines on `verify_<lane>`; nothing in `server/` or `src/` reads the records. An operator watching run projects-dispatch-002 could not see that GPT 6.1 blocked both lanes and started two repairs.
+- No page lists a run's sessions with their model, cost and session id. Costs live in per-session files (`<lane>.cost.json`, `review-<id>.cost.json`, `challenge-N.stdout.json`, `repair-N.cost.json`, `critique/<n>/stdout.json`, lane-review records); the export's `costs` section is stripped by the server (`server/projects.ts`).
+- Night-shift panel decisions live in `~/.local/state/md-manager-workflows/night-shift/<date>/states/<run>-<kind>-<time>/record.json`, outside the run directory. A run's page shows at most an event line such as "accepted by the panel".
+
+## 2. Goal
+
+Every session that worked on a run is visible on the run page, with what it did, what model ran it, what it cost, and how to reopen it; the review step and the lane reviewers are nodes of the graph.
+
+## 3. What the operator sees
+
+### 3.1 Reviewer nodes (the review step)
+
+- The run stage (Signal Box, `src/projects/signal/RunStage.tsx`) shows one node per reviewer of the run's latest review round, side by side in the column before the review gate, like worker lanes: `Reviewer · general`, `Reviewer · coverage`, `Reviewer · critique`, and `Panel` when the run has a `panel.json`. Each card shows the reviewer's state word (running, approved, blocked, late, not started, failed), its open P0/P1 count and its cost.
+- The `review` node stays the gate: its verdict, the fix loop and the approval follow it as today.
+- Each reviewer node has a node page: the reviewer's session block (3.4), its verdict and findings for the latest round (the existing finding list, filtered to that reviewer), and earlier rounds' verdicts (from the fix loop's archived rounds).
+
+### 3.2 Lane review nodes
+
+- Each lane with a lane reviewer gets one node per lane-review round, `Lane review · <lane> · round <n>`, right after that lane's verify step (as repair nodes sit after the step they answer). Its card shows the round's result: "0 P0, 3 P1" and whether it started a fix round ("fix round started: repair 1") or not ("recorded; no fix round: rounds used up"), and the reviewers' total cost.
+- Its node page lists the round's reviewers (transport, model, status, duration, cost) and every finding (severity, file:line, title, detail), the snapshot it reviewed, and the repair it started, linked to that repair node.
+
+### 3.3 The panels
+
+- **Multi-provider review panel** (`workflow/panel.py`, `panel.json`, route `/runs/:run_id/panels`): a `Panel` node beside the reviewer nodes (3.1). Its node page shows today's panel section (`src/projects/providerPanel.tsx`) and one session block per provider.
+- **Night-shift panel**: every decision the night shift recorded for this run appears on the node page of the node it decided (the challenge for `challenge_paused`, the approval for `awaiting_approval`, the asking worker's node for `question`, the controller section for `controller_blocked` and `review_blocked`): the kind, when, each provider's option, text, confidence and "needs the operator", their agreement, Jev's pick with its confidence and reason (or Jev's error), and whether it was executed (with the command) or held (with the reason). The run page shows a one-line count ("3 panel decisions: 2 executed, 1 held") linking to them.
+
+### 3.4 Sessions
+
+- A **Sessions** section on the run page lists every session of the run in start order, grouped by role: design challenge attempts, workers, repairs, lane reviewers, reviewers, critique, panel providers, night-shift providers. Each row: role and label, node (linked), model and transport, status, started, duration, cost, session id. A total cost line sums the known costs and says how many are not recorded.
+- Every node page that belongs to a session shows the same facts as a **session block**, and for a Claude Code session (a session id and the `claude` transport) a copyable resume command: `cd <working directory> && claude --resume <session id>`, with the directory written `~`-relative. When the directory is not under HOME or not recorded, the command is `claude --resume <session id>` with the note "run it in the session's worktree".
+- Never a transcript, never an absolute path, never a credential. Unknown facts say "not recorded".
+
+## 4. Data (server)
+
+The server reads the per-session files live from the run directory, as it already reads `panel.json` and `repairs.json`; the controller, the export (`run-state.json`, 1.12.0) and `contracts/workflow/` are unchanged ([O2]). It works for every run on disk, including runs that finished before this feature.
+
+- Sources per role (field names as the files hold them; a missing or malformed file makes that fact `null`, never an error for the whole run):
+  - challenge: `challenge-<n>.json`, `challenge-<n>.stdout.json` (session id, cost), `challenge-<n>.role.json` (model);
+  - worker: `<lane>.interactive.json` (session id, launch time, model, effort, worktree), `<lane>.cost.json`;
+  - repair: `repair-<n>.interactive.json`, `repair-<n>.cost.json`, the fix loop journal (`repairs.json`, including its `origin`, for example `lane-review`);
+  - lane reviewer: `lane-review/<lane>/<n>.json` (`contracts/workflow/lane-review.schema.json` 1.0.0) and, for a `claude` transport, the session id in `r<round>-<i>-<k>.pid` (`marker`);
+  - reviewer: `review-<id>.interactive.json`, `review-<id>.cost.json`, `review-<id>.completion.json`, `review.json`, archived rounds (`review.round-<n>.json`, `review-round-<n>/`);
+  - critique: `automatic-review-critique.json`, `critique/<round>/{status,stdout}.json`;
+  - panel provider: `panel.json`;
+  - night shift: the records under `MD_MANAGER_NIGHT_SHIFT_DIR` (default `~/.local/state/md-manager-workflows/night-shift`) whose `run_id` is the run's and whose texts name this run's directory or no directory; `claude.json`, `gpt.json` and `jev` beside each record.
+- Projected nodes join the run detail's definition and snapshot the way repair nodes already do (`insertRepairs`, `projectedDefinition` in `server/projects.ts`): existing node shapes and kinds, the pinned `definition_revision` unchanged, ids that cannot collide with the export's (`reviewer-<id>`, `panel`, `lane-review-<lane>-<n>`; refused like a colliding repair id). Reviewer and panel nodes depend on what `review` depends on, and `review` also depends on them; lane review nodes depend on `verify_<lane>` and nothing depends on them. Triage keeps them advisory (`contracts/projects/triage.ts` `ADVISORY_NODE_IDS`): never the focus, never the Now banner.
+- A new route serves the sessions, lane reviews and night-shift decisions of one run (Appendix A). Every text passes `redactPaths`; working directories become `~`-relative or are dropped.
+
+## 5. Out of scope
+
+- Transcript text, Herdr pane links (the `terminals.json` mapping goes stale across review rounds), live token streams.
+- Any controller or export change; recording lane reviewers' session ids for `pi` transports (they have none).
+- Night-shift actions from the page (the run controls feature owns actions).
+
+## 6. Acceptance
+
+- A seeded run with three reviewers, a lane reviewer per lane (one round that started a repair, one that did not), a panel and night-shift records shows: the reviewer nodes and the panel node before the gate, a lane review node after each verify step, every session in the Sessions list with its cost and a total, the night-shift decision on the approval node, a resume command for each Claude session, and no absolute path anywhere (`renderedText`).
+- A run without these files (an older export, no lane review, one reviewer) renders as before except for its reviewer node(s).
+- Both phases of the browser specs pass: worker (mocked routes) and candidate (the real server on seeded run directories and a seeded night-shift folder).
+
+## 7. Lanes
+
+- `server`: the session readers, the projected nodes, the new route, its contract, triage's advisory rule, unit tests.
+- `viewer`: the stage cards, the node pages, the Sessions section, the night-shift decision block, the browser specs, the critique app.
+
+## Appendix A: the sessions route (contract 1.13.0, `contracts/projects/sessions.ts`)
+
+`GET /api/projects/:project_id/workflows/:workflow_id/runs/:run_id/sessions` (GET and HEAD; 404 with the existing error shape for an unknown run):
+
+```ts
+{
+  contract_version: '1.13.0',
+  sessions: Array<{
+    key: string                       // stable within the run, e.g. 'worker:server', 'reviewer:general:2', 'lane:viewer:1:1'
+    role: 'challenge' | 'worker' | 'repair' | 'lane_reviewer' | 'reviewer' | 'critique' | 'panel_provider' | 'night_shift'
+    label: string                     // 'Design challenge attempt 2', 'Worker · server', 'Lane review · viewer · round 1 · GPT 6.1'
+    node_id: string | null            // the stage node it belongs to (pinned or projected)
+    lane: string | null
+    round: number | null              // review round, lane-review round, challenge attempt or repair number
+    transport: 'claude' | 'pi' | 'openrouter' | null
+    model: string | null
+    status: 'running' | 'succeeded' | 'failed' | 'stopped' | 'unknown'
+    verdict: string | null            // reviewers: approved | blocked | late ...; panel: the provider's option
+    findings: { p0: number; p1: number; p2: number } | null
+    started_at: string | null         // ISO Z
+    ended_at: string | null
+    duration_seconds: number | null
+    cost_usd: number | null
+    session_id: string | null         // only an id matching the export's ID pattern
+    resume: { dir: string | null; command: string } | null   // Claude sessions only; dir is '~/'-relative
+  }>
+  total_cost_usd: number              // the sum of known costs
+  costs_not_recorded: number          // sessions whose cost is null
+  lane_reviews: Array<{
+    lane: string
+    round: number
+    node_id: string                   // 'lane-review-<lane>-<round>'
+    snapshot: string                  // the reviewed snapshot sha
+    status: string                    // the record's status
+    started_at: string | null
+    ended_at: string | null
+    fix_round: { started: true; repair_node_id: string | null } | { started: false; reason: string }
+    reviewers: Array<{ transport: string; model: string; status: string; duration_seconds: number | null; cost_usd: number | null; error: string | null }>
+    findings: Array<{ severity: 'P0' | 'P1' | 'P2'; file: string | null; line: number | null; title: string; detail: string }>
+  }>
+  night_shift: Array<{
+    kind: string                      // challenge_paused | awaiting_approval | question | controller_blocked | review_blocked ...
+    node_id: string | null
+    decided_at: string
+    providers: Array<{ name: string; option: string | null; text: string | null; confidence: number | null; needs_operator: boolean | null; error: string | null }>
+    agreement: string                 // agree | split | one provider
+    jev: { pick: string; confidence: number | null; reason: string | null } | { error: string } | null
+    decision: 'executed' | 'held'
+    option: string | null
+    command: string | null            // redacted
+    held_reason: string | null
+  }>
+}
+```
+
+The run detail is unchanged in shape: projected nodes use the existing node and snapshot entries (`contracts/projects/v1.ts`).

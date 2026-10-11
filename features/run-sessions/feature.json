@@ -1,0 +1,61 @@
+{
+  "version": "2.10.0",
+  "name": "Run sessions (PRD_RUN_SESSIONS): every session of a workflow run is visible on the run page: reviewer, panel and lane-review nodes on the stage, node pages for each, a Sessions list with model, cost and a resume command, and the night-shift panel's decisions on the node they decided; read-only, no engine change",
+  "branch_prefix": "feature/run-sessions",
+  "prd": "docs/PRD_RUN_SESSIONS.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "server",
+      "task": "server-task.md",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md",
+      "skills": [
+        "impeccable"
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critique": {
+    "lanes": [
+      "viewer"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "timeout_minutes": 45
+  },
+  "critical": false,
+  "tryout": true
+}
