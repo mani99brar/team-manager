@@ -1,20 +1,40 @@
 {
-  "version": "2.9.0",
-  "name": "Projects dispatch (PRD_PROJECTS_DISPATCH): the Projects tab opens on a card per project; each opens a dedicated project page with the step chart of every feature's runs, local main against origin as last fetched, landings, and GitHub pull requests and issues read through gh; a projects-only rail on every Projects page but the run page; the Runs home becomes Triage; read-only",
+  "version": "2.10.0",
+  "name": "Projects dispatch, run 002 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-001's blocked review): finish the project page (docked reading pane with CommandBlock, aligned axis, Needs you and running, commits ahead, folds, header truth) and fix the dispatch API's landing and refresh bugs, with tests that fail without each fix; a GPT 6.1 lane reviewer per lane; read-only",
   "branch_prefix": "feature/projects-dispatch",
   "prd": "docs/PRD_PROJECTS_DISPATCH.md",
   "policy": "policy.json",
   "workers": [
     {
       "node_id": "server",
-      "task": "server-task.md"
+      "task": "server-task.md",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
     },
     {
       "node_id": "viewer",
       "task": "viewer-task.md",
       "skills": [
         "impeccable"
-      ]
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
     }
   ],
   "reviewers": [

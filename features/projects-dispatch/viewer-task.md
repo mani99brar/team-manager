@@ -1,116 +1,66 @@
-# Viewer worker: the Projects page, the project page, the rail and Triage (PRD_PROJECTS_DISPATCH)
+# Viewer worker, run 002: finish the project page and fix the review findings (PRD_PROJECTS_DISPATCH)
 
 ## Goal
 
-The operator opens the Projects tab and, as a user would:
+Run projects-dispatch-001 built the Projects page, the projects-only rail, Triage and a first project page, and they are in your base (f4623a4, `src/projects/dispatch/`). Its independent review blocked it: the project page misses parts the PRD requires, the reading pane breaks the layout, the chart's axis does not line up, and several tests pass whether or not the behaviour is there. `features/projects-dispatch/review-001.md` holds every finding verbatim. Fix the items below, keep what works, and make each one provable by a browser scenario or a unit test that fails without it.
 
-1. **Sees every project at once:** `/projects` is the Projects page. It has one card per registered project, in rail order. Each card shows:
-   - the state word ("1 of 3 features failed last" for a multi-feature project);
-   - for a GitHub project, the repository and visibility;
-   - `on <checkout>` with the sync, worded as PRD section 5 "Sync wording" says, the same on cards and headers ("2 ahead, 1 behind origin/main", "16 ahead of origin/main", "level with origin/main", "origin/dev at <sha>; no local dev to compare", "shares its clone with <primary>", "not compared with origin");
-   - the non-zero run counts and the latest run;
-   - open PRs and issues when GitHub was read, else "GitHub not read: <reason>".
+**The project page (PRD 2 and 4.3; the approved reference `docs/design/projects-dispatch.html`):**
 
-   A card is one link to the project page.
-2. **Uses a readable, projects-only rail:** on the Projects page, Triage, the project page and the workflow page, the rail shows "All projects" and "Triage", then only projects. Order: needs you, running, readable, unreadable, then by last activity.
-   - Each row: a glyph, the name, a badge, and a sub-line (repository · features or "cannot be read" · date).
-   - The badge: "N waits on you", "N paused", "N running", or "N unpushed" on the clone's primary only.
-   - The current page is marked.
-   - At 999px and below it becomes a chip row.
-3. **Opens Triage:** `/projects/-/triage` shows today's Runs home content (needs you, today, running, paused, recent) unchanged, under the new rail. There are no keyboard chords ([P17]).
-4. **Reads a project's header:** the repository link and visibility, checkout, sync line, figures, and jump buttons ("Runs by feature", "Local and GitHub", "Pull requests · N open", "Issues · N open") that move focus to their section.
-5. **Reads where each run stopped:** the step chart has a sticky axis of eight phases and one group per feature. Each group has a header with landed shas, a chain line of run chips, and run rows whose track is solid up to the stop and dotted after it.
-   - Lanes show as dots; `×N` marks attempts.
-   - The state glyph sits at the stop.
-   - At a chart width of 440px or less, multi-lane phases collapse to one mark.
-   - The "ended here" counts sit under each group.
-   - A feature that cannot be read shows its recorded error and the status command.
-6. **Opens a run without losing the page:** selecting a run docks the reading pane: facts, steps, lead sentence, the commands to copy (today's `CommandBlock`), and "Open run page". Esc or Close undocks it and returns focus. j/k moves the selection. With nothing selected the page uses the full width.
-7. **Reads GitHub truthfully:** the GitHub column holds four cards:
-   - Local and GitHub: the sync in full, "origin/<b> last updated here <time>" and "this page never fetches", GitHub's default-branch head with its commit date (never "last moved"), "K name a run; N−K do not name a known run", and landings with unknown shown as unknown;
-   - Pull requests ("showing the 20 most recently updated"): "Possibly related" (exact branch match only), "Yours, open", "Others, open", "Merged in the last 14 days" (among the 20 shown), each row with review decision, checks, draft, `head → base` and "updated <rel>";
-   - Issues: "Assigned to you", "Newest from people", "N from bots among the newest 20", "All N on GitHub";
-   - Also checked out as.
+1. **V1 (P1) The reading pane docks beside the chart.** `.dispatch-project.has-pane` (`dispatch.css`) is a 2-column grid with three children, so the body falls into the narrow column and the pane wraps below. At 1280, 1440 and 1920 px wide, selecting a run keeps the header full width and puts the pane beside the main area (chart and GitHub column), both in view at the top of the viewport, with no overlap and no horizontal page scroll. The page does not scroll away when a run is selected. Scenario `dispatch-dock`.
+2. **V2 (P1) The pane shows today's `CommandBlock`.** Replace the hand-made status line with `CommandBlock` (`src/projects/CommandBlock.tsx`, unchanged) fed by the run's `NextStep`, read with the existing `fetchRunDetail` (`src/projects/api.ts`, unchanged), with the NextStep's lead sentence. While the detail loads, or when it fails, the pane says so and still shows "Open run page". Scenario `dispatch-pane`.
+3. **V3 (P1) The axis lines up with the tracks.** The axis and every run track share one column template, so a stop glyph, its lane dots and the "ended here" count sit inside their phase's column at every width. Labels are never cut mid-word with an ellipsis ("Cha…"): where a column is narrower than its label, use fixed short forms (for example "Chal.", "Cand.", "Appr.", "Integ.") with the full name in `title` and the accessible name. Scenario `dispatch-axis` (geometry: each stop glyph's centre lies within its phase label's column at 1440 and at 1100 px).
+4. **V4 (P1) Every jump button moves focus.** "Runs by feature", "Local and GitHub", "Pull requests · N open" and "Issues · N open" each move focus to their section (a heading or region with `tabindex="-1"`), not only scroll. Scenario `dispatch-project` asserts `toBeFocused` for all four.
+5. **V5 (P1) "Needs you and running" comes before the chart** (PRD 2, Main column): the project's runs waiting on the operator and the running ones, each linking to its run, or "Nothing waits on you; nothing running". Use the existing run summaries (`fetchRegistryRuns`, `waitingKind`). Scenario `dispatch-sections`.
+6. **V6 (P1) The commits ahead and every landing.** The Local and GitHub card has a button that lists in the reading pane the commits ahead (up to 50: short sha, subject, the run it names as a link; "and N more" when `ahead` exceeds the list) and every landing with its local and origin state, unknown shown as unknown. Scenario `dispatch-ahead`.
+7. **V7 (P1) "Steps of this definition".** Each feature group has a fold (`<details>`) listing the definition's steps (label and phase) from its latest run's recorded steps. Scenario `dispatch-folds`.
+8. **V8 (P1) Long groups fold.** PR and issue groups longer than 5 fold to "Show N more", which expands in place. The seed gives one group more than 5 items. Scenario `dispatch-folds`.
+9. **V9 (P1) The merged group says its scope:** "Merged in the last 14 days", among the 20 shown ([P15]). Scenario `dispatch-github`.
+10. **V10 (P1) The header says what it knows.** The header adds "same repo as <other projects>" when the clone is shared, and the compared sync line adds "as of origin/<d> updated here <time>" or "update time not recorded" (PRD 5), in the header and on the card. A project whose git could not be read says "git not read", never "checkout detached". Scenarios `dispatch-sections` and `dispatch-git-truth`.
+11. **V11 The Local and GitHub card says when GitHub was not read:** "GitHub not read: <reason>" with no counts, as the PR and Issues cards do. Scenario `dispatch-github`.
+12. **V12 Phone (390 px).** "Queue" returns to the list (the mock-up's back action), never to the previous run. Every link, button and input on the Projects page, project page header, GitHub cards, pane and breadcrumbs is at least 44 px tall (the critique measured 21 to 40 px on several). Scenario `dispatch-phone`.
+13. **V13 Rail polish.** A visible gap between each label and its count ("All projects 8", not "All projects8"), a visible current-page marker on "All projects" and "Triage" as on project rows, and the glyph on the name's line. Scenario `dispatch-rail`.
+14. **V14 "Possibly related" carries signal** ([L5]): a PR matches on its head branch, or on its base branch only when that base is not the project's default branch. The wording names the match ("head is <branch>", "base is <branch>"). Unit test in `tests/unit/dispatch.test.ts`.
+15. **V15 The Projects page says when runs were read:** the header's "runs read <time>" is the time the run lists were read, not a ticking clock; "runs not read: <reason>" when the read failed.
 
-   When GitHub was not read, each card says "GitHub not read: <reason>" and shows no counts. When it was read but the latest refresh failed (`status: 'read'` with `reason`), the data shows with "Last read <time>; the latest refresh failed: <reason>".
-8. **On a phone (390px):** chips replace the rail, the cards stack, the project page stacks, a tapped run fills the screen with "Queue" and "Next", every target is at least 44px, and nothing scrolls sideways.
+**Tests that can fail (the coverage reviewer's P2s):**
 
-`docs/PRD_PROJECTS_DISPATCH.md` sections 2 to 5 and Appendix A are the specification. `docs/design/projects-dispatch.html` is the approved visual reference: open it in a browser and read its script for the rules it settles. `features/projects-dispatch/decisions.md` wins over both. The critique reviewer walks these eight flows on the app `tests/project-workflows/dispatch-app.ts` starts, so write your `verify_yourself` lines as the steps a user takes there.
+16. **V16** `dispatch-git-truth` asserts the landing counts by value (one on local main, one on origin, from a seed that has one of each), "origin/main last updated here <time>" and GitHub main's sha.
+17. **V17** `dispatch-overview` asserts card order equals rail order, each card's run counts and latest run, and that a card holds no other link. `dispatch-rail` checks the rail on a workflow page too, and that it holds no workflow rows or repository headers; a check at 999 and 1000 px proves the chip-row breakpoint.
+18. **V18** `dispatch-chart` asserts the sticky axis appears once, the solid track before the stop and the dotted one after, lane dots, the chain of run chips, the landed sha itself, the "ended here" counts, and the 440 px collapse; the workflow-level `error` row with the literal `<run-id>` placeholder ([P21]) is covered again (repair 2 of run 001 replaced it with a per-run error).
+19. **V19** `dispatch-pane` tests the Close button and Escape, `toBeFocused` on the row after either, full width with nothing selected, and the facts and lead sentence.
+20. **V20** `dispatch-github` asserts the Others group, a row's review decision, checks counts, draft, `head → base` and "updated <rel>", "Newest from people" after "Assigned to you", the Also checked out as card with its clone wording, "shows no counts" on a not-read project, and the failed-refresh line "Last read <time>; the latest refresh failed: <reason>" from a fixture whose repository is `read` with a `reason`.
+21. **V21** `renderedText` passes on the Projects page, Triage, every seeded project page (worktree, no-origin, non-GitHub, unreadable) and a workflow page.
+22. **V22 The handoff and the critique app.** `docs/handoff/projects-dispatch-viewer.md` says what run 002 changed and every open P2, lists the `on_source` landing field as a follow-up, and no longer says the candidate seed has empty run directories. The server routes are in your base now: run `tests/project-workflows/dispatch-app.ts` by hand, check `/api/dispatch/projects` answers 200 with every fixture repository `read`, and say so in the handoff.
+
+`docs/PRD_PROJECTS_DISPATCH.md` sections 2 to 5 and Appendix A are the specification, `docs/design/projects-dispatch.html` the approved look ([O4]), and `features/projects-dispatch/decisions.md` wins over both. The critique reviewer walks the eight flows of run 001 plus these fixes on the app `dispatch-app.ts` starts, so write your `verify_yourself` lines as the steps a user takes there.
 
 ## Context
 
-- **Routing:** there is no router library. `src/App.tsx` parses paths with `parseProjectsPathname` (`src/projects/routes.ts`: `ProjectsRoute`, `projectsPathname`, `projectPathname`, `workflowPathname`, `routeToPathname`, `PROJECT_ID_PATTERN`) and renders `ProjectsView` (`src/projects/ProjectsView.tsx`). Add a `triage` route for `/projects/-/triage` ([D1]).
-- **Today's pages:**
-  - `RunsHome` (`src/projects/RunsHome.tsx`) is the home page with the old rail (`projects-rail`, `railEntries`, `PREFIX_GROUP_MIN`, localStorage `mdm-rail-open`);
-  - `ProjectRunGroups` is the project page;
-  - the workflow page is inline in `ProjectsView`;
-  - `src/projects/lists.ts` holds `homeSections`, `NEXT_STEP`, `projectTone`, `rowSummary`, `LISTS_POLL_MS`;
-  - `src/projects/RunRow.tsx` is the run row.
-
-  Reuse what fits; the run page (`RunView`, `signal/`) is not yours.
-- **Data:**
-  - **Existing API (`src/projects/api.ts`, not yours):** `fetchProjects`, `fetchWorkflows`, `fetchRegistryRuns` (run summaries, `activity`) and the definition per workflow.
-  - **New:** `/api/dispatch/projects` and `/api/dispatch/projects/:p/steps` (PRD Appendix A). The `server` lane builds them in the same run, and lanes meet only at the candidate. So mirror Appendix A's types in `src/projects/dispatch/types.ts` and fetch through your own client in `src/projects/dispatch/`. Poll the overview at `LISTS_POLL_MS`.
-  - **Worker phase:** mock `/api/dispatch/**` in your spec, or in `mock.ts`, with payloads built from Appendix A.
-  - **Candidate phase:** the real server serves them. `tests/project-workflows/playwright.config.ts` must give the API `MD_MANAGER_GITHUB_FIXTURE` and `MD_MANAGER_GITHUB_CACHE`, both files under the test root ([P20]). The server reads the fixture before it listens, so the first response is `read`.
-  - **Seed:** today `seed.ts` points every project at one shared non-git `repository`, and `UxSeed` modules add workflows only. Add new registry projects, each with its own repository, in `tests/project-workflows/fixtures/dispatch.ts` (extend `fixtures/index.ts` and `seed.ts` so a fixture module can add projects) ([P16]). The repositories, created with real `git` under the test root:
-    - a bare repository as the origin: clone from it, then set `origin`'s URL to `https://github.com/acme/widgets.git`. The server never fetches, so the URL is only parsed, and the remote-tracking reflog comes from the clone and the seed's own fetch from the bare path;
-    - a primary clone 2 ahead and 1 behind with no waiting runs, whose integrated runs land one sha on local main and one on origin;
-    - a `git worktree` of it registered as a second project;
-    - a project whose remote is not GitHub;
-    - a project with no origin ref;
-    - a project with three features whose worst latest result is failed;
-    - an unreadable project.
-
-    Registry paths are absolute (no `~`).
-
-    Tests run with `HOME` isolated, so create every repository with `git init -b main` (`--initial-branch=main` for the bare one) and commit with explicit `-c user.name=… -c user.email=…` ([L2]). `seedCandidate` is also called by `tests/project-workflows/controls-app.ts`, which sets no GitHub fixture or cache: add the dispatch projects only behind an explicit `seedCandidate` option (or a separate seed function) that only `playwright.config.ts` and `dispatch-app.ts` pass, both with `MD_MANAGER_GITHUB_FIXTURE` and `MD_MANAGER_GITHUB_CACHE` set. `controls-app.ts`'s call must seed no git repository ([L2]).
-- **Run controls:** the run-controls work (run-controls-004) is in this base. Leave `src/projects/controls/`, `CommandBlock.tsx` and the run page alone. The reading pane shows `CommandBlock` as it is ([D7]).
-- **Existing specs:** specs that open the Runs home must move to Triage:
-  - `revamp-lists.spec.ts`, `ux-lists.spec.ts` (`[scenario:runs-home]`), `projects.spec.ts`, `lanes.spec.ts`, `revamp-pages.spec.ts`;
-  - `support.ts` (`projectsUrl`).
-
-  Update their URLs and rail selectors; keep what they assert about the Runs home content.
-- **Specs and tests you do not own still pass unchanged ([L1]):**
-  - `tests/project-workflows/accepted.spec.ts:73-76` opens `projectUrl(<project>)` and expects `li[data-workflow-id="<w>"] a.lists-group-head` to carry the feature's `tone-*` class, `tone-(override|fail|idle)` and never `tone-ok` when the latest run was accepted (today `RunsHome.tsx:344-346`, `toneClass(stateTone({ status, accepted }))`). Each step-chart feature group is therefore an `li[data-workflow-id=<w>]` whose header is an `a.lists-group-head` carrying that tone class. List this hook in `docs/VIEWER_DISPATCH.md`.
-  - `tests/unit/accepted.test.ts` imports `homeSections`, `projectTone`, `rowSummary`, `rowTime`, `waitingKind`, `filterRecent` and `isFinished` from `src/projects/lists.ts`. Keep those exports with their signatures.
-  - Before you complete, run `rg -n "projectUrl\(|projectsUrl|lists-group-head|data-workflow-id|projects-rail|from '.*src/projects/(lists|routes|RunsHome)" tests/` and check that every hit outside your owned paths still passes. A hit you cannot keep passing is a `question` completion. Keep the existing test ids where the meaning is the same (`projects-workspace`, `needs-you`, `running-runs`, `recent-runs`, `today-runs`, `run-list`). Write a short DOM contract for the new pages in `docs/VIEWER_DISPATCH.md` (test ids and structure), like `docs/VIEWER_SIGNAL_BOX.md`.
-- **The critique app** (policy `critique_app`): `npx --no-install tsx tests/project-workflows/dispatch-app.ts` runs in the candidate worktree with `CRITIQUE_WEB_PORT` and `CRITIQUE_API_PORT` set. It:
-  - creates a temporary root, seeds the same registry, runs, git repositories and GitHub fixture as your candidate fixtures, with `MD_MANAGER_GITHUB_CACHE` under the root;
-  - exits non-zero unless `/api/dispatch/projects` lists every seeded project and every fixture repository reads `status: 'read'` ([P6]);
-  - starts `npm run start:api` on `$CRITIQUE_API_PORT` and `npm run dev:web` on `$CRITIQUE_WEB_PORT`;
-  - prints the Projects, project and Triage URLs;
-  - forwards SIGTERM/SIGINT and removes the root on exit;
-  - is ready at `/api/dispatch/projects`.
-- **Step-to-phase map ([L2], changes [P22]):** match `node_id` first, `kind` only as the fallback. Recorded definitions give the sidecar `kind: review` and repair nodes `kind: worker`, so kind first would put them in the wrong columns. Rules: `challenge`; `launch_*` and `sidecar` → Launch; `handoff`; `verify_*`; `candidate*`; `review*`, `attack*`, `critique*`, `panel*` → Review; `approval`; `integrate`; `repair-*` → Verify; then `kind`; else Verify. Match the mock-up's own map (`docs/design/projects-dispatch.html`, around lines 1004-1013) where it is more specific.
-- **Landings on neither ref ([L2]):** integration fast-forwards the run's `source_branch`, not the default branch, so an integrated run can read `on_default: false, on_origin: false`. Word that as "not on local <d> or origin/<d>; integrated into <source_branch>", never as "not landed". Add an `on_source` landing field to the handoff's follow-ups.
-- **The look:** tokens in `src/projects/theme.css`, `DESIGN.md` and `PRODUCT.md`. Load the `impeccable` skill for the pages' design and copy, and match the reference's hierarchy, spacing and wording.
+- **Your base has the pages.** Read `src/projects/dispatch/` (`ProjectPage.tsx`, `StepChart.tsx`, `ReadingPane.tsx`, `GithubColumn.tsx`, `ProjectsPage.tsx`, `Rail.tsx`, `dispatch.css`, `derive.ts`, `projectModel.ts`, `phases.ts`), `tests/project-workflows/dispatch.spec.ts`, `fixtures/dispatch.ts`, `docs/VIEWER_DISPATCH.md` and `docs/handoff/projects-dispatch-viewer.md` before changing anything.
+- **The server routes are in your base too** (`server/dispatch*.ts`, built by run 001). You can run the candidate phase of your specs in your own worktree (`WORKFLOW_VERIFICATION_PHASE=candidate`). The `server` lane fixes server bugs in parallel without changing Appendix A's shapes ([L4]); its landing fix (S1) can change landing values for a local-only repository, never their type.
+- **Data:** `src/projects/api.ts` (not yours: `fetchProjects`, `fetchWorkflows`, `fetchRegistryRuns`, `fetchRunDetail`) and `src/projects/dispatch/client.ts` (yours) for `/api/dispatch/**`. Types mirror Appendix A in `src/projects/dispatch/types.ts`.
+- **Seeds and mocks:** extend `tests/project-workflows/fixtures/dispatch.ts` for what the new scenarios need (a group of more than 5 PRs, a local-only landing and an origin landing, a fixture repository that is `read` with a failed-refresh `reason`, a waiting run and a running run on the primary project). Repositories are created with `git init -b main` and an explicit `-c user.name=… -c user.email=…`. The dispatch seed stays opt-in ([L2]): `controls-app.ts`'s call seeds no git repository. Registry paths are absolute.
+- **Specs and tests you do not own still pass unchanged ([L1]):** `tests/project-workflows/accepted.spec.ts` (the `li[data-workflow-id] a.lists-group-head` tone hook on the step-chart feature groups) and `tests/unit/accepted.test.ts` (the `lists.ts` exports). Before you complete, run `rg -n "projectUrl\(|projectsUrl|lists-group-head|data-workflow-id|projects-rail|from '.*src/projects/(lists|routes|RunsHome)" tests/` and check that every hit outside your owned paths still passes.
+- **Run controls:** leave `src/projects/controls/`, `CommandBlock.tsx` and the run page alone; the pane imports `CommandBlock` as it is ([D7]).
+- **A lane reviewer** (GPT 6.1) reviews your lane's diff after your checks pass, before the candidate. A P0/P1 from it starts one repair round of your lane.
+- **The look:** tokens in `src/projects/theme.css`, `DESIGN.md` and `PRODUCT.md`. Load the `impeccable` skill for layout and copy, and compare each fixed part with the reference at the same width.
 
 ## Constraints
 
 - Owned paths only (policy.json `viewer`). Do not edit `server`, `contracts`, `src/projects/api.ts`, `src/projects/controls`, `src/projects/signal`, `src/projects/CommandBlock.tsx` or `workflow`. A field or route you need that Appendix A lacks is a `question` completion.
-- Never claim what the data does not hold: "not recorded", "GitHub not read: <reason>", "update time not recorded", unknown landings shown as unknown. Never render an absolute path: `support.ts` `renderedText` must pass on every new page.
-- Wrap localStorage reads and writes in try/catch.
-- No new dependency.
+- Never claim what the data does not hold: "not recorded", "GitHub not read: <reason>", "update time not recorded", "git not read", unknown landings shown as unknown. Never render an absolute path.
+- Wrap localStorage reads and writes in try/catch. No new dependency.
+- Do not weaken an existing assertion to make it pass; a test you change must still check the behaviour its scenario describes.
 
 ## Acceptance
 
-- The browser scenarios in `policy.json` pass through `check-report`: `dispatch-overview`, `dispatch-rail`, `dispatch-triage`, `dispatch-project`, `dispatch-chart`, `dispatch-pane`, `dispatch-github`, `dispatch-git-truth` and `dispatch-phone`.
+- The browser scenarios in `policy.json` pass through `check-report`: `dispatch-overview`, `dispatch-rail`, `dispatch-triage`, `dispatch-project`, `dispatch-chart`, `dispatch-pane`, `dispatch-github`, `dispatch-git-truth`, `dispatch-phone`, and the new `dispatch-dock`, `dispatch-axis`, `dispatch-sections`, `dispatch-ahead` and `dispatch-folds`.
   - Each appears in exactly one test title as `[scenario:<id>]`, with one `screenshot:<id>` attachment; the descriptions are the assertions.
-  - They pass in both phases: worker (mocked routes) and candidate (the real server, seeded repositories, the GitHub fixture).
-  - The migrated existing specs pass too.
-- Unit tests in `tests/unit/dispatch.test.ts` cover:
-  - the step-to-phase map, including sidecar, attack, critique, panel and repair: `sidecar` (kind review) → Launch and `repair-1` (kind worker) → Verify;
-  - the wording of a landing that is false on both refs;
-  - rail order and badge words;
-  - the card state word;
-  - PR grouping (possibly related by exact branch only) and issue grouping (bots folded);
-  - the relative time adding the year;
-  - sync wording for diverged, ahead, behind, level, no local branch, shared clone, no origin and git unavailable.
-
-  `tests/unit/routes.test.ts` covers the `triage` route, and that no project id can produce `/projects/-/triage`.
-- `tests/project-workflows/dispatch-app.ts` starts the app on the two ports and `/api/dispatch/projects` answers 200. Run it once by hand and say so in the handoff.
-- `frontend-build`, `frontend-lint`, `shared-contract` and `frontend-unit` pass. `docs/handoff/projects-dispatch-viewer.md` says what changed and every open P2.
+  - They pass in both phases: worker (mocked routes) and candidate (the real server, seeded repositories, the GitHub fixture). Run both phases yourself before completing.
+  - The migrated existing specs and `accepted.spec.ts` pass too.
+- `tests/unit/dispatch.test.ts` adds: V14's matching rule, the axis column template (V3), the commits-ahead "and N more" wording (V6), the "Show N more" count (V8) and the header's "same repo as" and "update time not recorded" wording (V10).
+- `docs/VIEWER_DISPATCH.md` lists the new test ids and structure; `docs/handoff/projects-dispatch-viewer.md` is updated (V22).
+- `frontend-build`, `frontend-lint`, `shared-contract` and `frontend-unit` pass.
 
 Run targeted tests while iterating, then this lane's non-browser policy checks once before writing the completion; run browser specs only through check-report on this lane's own specs.
 
@@ -125,6 +75,6 @@ Then check the report with the verifier's own rules: run the exact `check-report
 
 ## Stop
 
-- Stop with a `question` completion when a page needs a field or route that Appendix A does not define, or when the pages cannot be built without changing a file another lane owns.
+- Stop with a `question` completion when a page needs a field or route that Appendix A does not define, or when a fix cannot be made without changing a file another lane owns.
 - Stop and report `blocked` when the `impeccable` skill is not available through the `Skill` tool.
 - Do not change the run page, node pages or assignment page. Do not add run controls to these pages. Do not add a synthetic "example" mode.
