@@ -779,6 +779,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
     """The brief, then the rubric and the fixed blocks every reviewer gets: a follow-up run's delta (delta_line), bundle paths,
     task locations, lane vocabulary, the lane repairs, a 1.1.0 run's inputs and worker claims, the project's conventions and
     decisions.md. Both transports build on it (print_review_prompt; the native completion protocol), so a replay can too."""
+    from . import lane_review
     from .notes import notes_note
     from .repair import repair_note
     return (review_brief(reviewer) + " " + REVIEW_RUBRIC + " " + delta_line(runtime) +
@@ -789,7 +790,7 @@ def review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
             f"For every finding name the worker it concerns ({worker_vocabulary(runtime)}: multiple when it concerns several lanes, "
             "none for cross-cutting/policy findings) and, as `requirement`, a verbatim quote from that worker's task text that the "
             "finding relates to, or null when no single requirement applies. Never paraphrase a quote."
-            + repair_note(runtime.directory) + notes_note(runtime.directory, lanes(runtime)) + worker_claims(runtime) + conventions_block(runtime.plan) + decisions_block(runtime.plan))
+            + repair_note(runtime.directory) + notes_note(runtime.directory, lanes(runtime)) + worker_claims(runtime) + lane_review.reviewers_note(runtime) + conventions_block(runtime.plan) + decisions_block(runtime.plan))
 
 
 def print_review_prompt(runtime, patch: Path, reviewer: dict | None = None) -> str:
@@ -1851,8 +1852,14 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
     requests_path = runtime.directory / RETRY_REQUESTS
     requests = read_json(requests_path) if requests_path.exists() else {}
     targets, requested = [], []
+    from . import lane_review
     for name in failures:
         phase = "candidate" if name == "candidate" else "worker"
+        if phase == "worker":
+            node = name.removeprefix("verify_")
+            pkt = runtime.directory / "verification" / "worker" / node / str(runtime.attempt("worker", node)) / "packet.json"
+            if pkt.exists() and lane_review.is_lane_review_block(read_json(pkt)):
+                continue  # A lane-review block is fix_decision's to repair, never a flaky-check retry (design-challenge notes 2, 3).
         stage_targets, stage_requested = [], []
         for node in workers if phase == "candidate" else (name.removeprefix("verify_"),):
             attempt = runtime.attempt(phase, node)
@@ -2105,7 +2112,10 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
         lane, findings = block
         if lane is None or has_attack(runtime.plan):  # Findings on no single lane end the run as before; the attack pass is not looped (yet).
             return None
-        sessions = session_entries(runtime.directory, lane)
+        # Lane-review repairs count against `lane_review.rounds`, not `--fix-rounds`: leave them out of the ordinary count and
+        # the last-blocked test here too, as the verify branch does ([O5], [L1](d), [L2](b)). Otherwise a lane that used its
+        # lane-review round can no longer be repaired when the run's reviewers block on it.
+        sessions = [entry for entry in session_entries(runtime.directory, lane) if entry.get("origin") != "lane-review"]
         if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
             raise exhausted(runtime, lane, finding_lines(findings), "review")
         return lane, "review"
@@ -2122,7 +2132,12 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
     if not found or (trigger == "candidate" and len(found) != 1):
         return None
     lane, path = found[0]
-    sessions = session_entries(runtime.directory, lane)
+    from . import lane_review
+    if trigger == "verify" and lane_review.is_lane_review_block(read_json(path)):
+        # gate_allowed already ensured the lane has a lane-review round left and the repair cap leaves room; fix_round applies
+        # lane_review.rounds and records origin "lane-review" (decisions.md [L3](c)). Never the ordinary exhausted test.
+        return lane, trigger
+    sessions = [entry for entry in session_entries(runtime.directory, lane) if entry.get("origin") != "lane-review"]
     if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
         raise exhausted(runtime, lane, gate_reasons(path))
     return lane, trigger
@@ -2132,7 +2147,25 @@ def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
     """One controller round of the fix loop (repair.repair_session, `by: controller`): True once its repair is applied and
     the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start. A review round
     is archived only after the round's refusals passed (repair.session_refusals), and restored whenever no repair applies."""
+    from . import lane_review
     from .repair import open_session, repair_session, session_refusals
+    # feature.json 2.9.0: a verify block the lane review wrote is repaired with origin "lane-review"; a refusal or a blocked
+    # session is a spent round (the packet then passes), never `exhausted` ([L4](b)). The origin is re-derived from the open
+    # journal entry on a resume, else from the lane's current blocked packet's marker.
+    origin, snapshot = None, None
+    if trigger == "verify":
+        opened = open_session(runtime.directory)
+        if opened is not None and opened.get("by") == "controller":
+            origin = opened.get("origin")
+            snapshot = opened.get("workspace_commit")
+        else:
+            pkt = runtime.directory / "verification" / "worker" / lane / str(runtime.attempt("worker", lane)) / "packet.json"
+            if pkt.exists():
+                packet = read_json(pkt)
+                if lane_review.is_lane_review_block(packet):
+                    origin, snapshot = "lane-review", packet["expected"]["output_commit"]
+    if origin == "lane-review":
+        return _lane_review_round(runtime, graph, config, lane, snapshot)
     keys, archived = {}, False
     try:
         if trigger == "review" and open_session(runtime.directory) is None:
@@ -2160,6 +2193,45 @@ def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
             raise exhausted(runtime, lane, finding_lines(rounds[-1]["findings"]), "review")
         path = entry["blocked"]["packets"][0]["path"] if entry.get("blocked", {}).get("packets") else None
         raise exhausted(runtime, lane, gate_reasons(runtime.directory / path) if path else [])
+    return True
+
+
+def _lane_review_round(runtime, graph, config, lane: str, snapshot: str) -> bool:
+    """One lane-review fix round (origin "lane-review", trigger "verify"): the lane's open P0/P1 go to the repair as `findings=`
+    (the six-key shape, quoted as data). An applied repair forks the run and the lane is verified again (True). A refusal (any
+    ValueError) or a blocked session is a spent round: a mark is persisted against the (lane, snapshot) record, the lane's verify
+    is re-entered so the block is re-derived and now passes, and no `exhausted`/`blocked` event is raised ([L4](b), note 1)."""
+    from . import lane_review
+    from .repair import open_session, repair_session
+    findings = lane_review.findings_for_lane(runtime, lane, snapshot)
+    entry = open_session(runtime.directory)
+    try:
+        if entry is None:
+            entry = repair_session(runtime, graph, config, lane, actor="controller", trigger="verify",
+                                   findings=findings, origin="lane-review")
+        else:
+            entry = repair_session(runtime, graph, config, lane, actor="controller", trigger="verify")
+    except ValueError as error:  # The repair cap, a moved source, an applied repair not continued from: no session ran.
+        lane_review.add_spent_mark(runtime, lane, snapshot, "refused", f"the round could not start: {error}")
+        return _reenter_after_spent_round(runtime, lane)
+    # A session started (applied or blocked): the (lane, snapshot) record names it, and the event says a fix round started
+    # (PRD_LANE_REVIEWER 4.4: "the repair it started (if any)", "repair started or not"). A refusal left `repair` null above.
+    lane_review.set_repair(runtime, lane, snapshot, entry["n"])
+    runtime.event(f"verify_{lane}", "running", f"lane_review: {lane} round {entry['round']}: fix round started as repair-{entry['n']}")
+    if entry["status"] != "applied":
+        lane_review.add_spent_mark(runtime, lane, snapshot, "blocked", f"round {entry['round']} ended blocked: {entry.get('reason', '')}")
+        return _reenter_after_spent_round(runtime, lane)
+    return True
+
+
+def _reenter_after_spent_round(runtime, lane: str) -> bool:
+    """A spent lane-review round: re-enter `verify_<lane>` so the block is re-derived (now the spent mark drops rounds-left to 0,
+    the packet passes). retry_check raises ValueError at the attempt limit; that is turned into a RuntimeError so the run blocks
+    with an event rather than a bare traceback into the graph."""
+    try:
+        runtime.retry_check("worker", lane)
+    except ValueError as error:
+        raise RuntimeError(f"lane {lane}: a spent lane-review round could not re-verify ({error}); inspect retained evidence") from error
     return True
 
 
