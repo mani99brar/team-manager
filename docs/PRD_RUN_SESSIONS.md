@@ -56,7 +56,7 @@ The server reads the per-session files live from the run directory, as it alread
   - worker: `<lane>.interactive.json` (session id, launch time, model, effort, worktree), `<lane>.cost.json`;
   - repair: `repair-<n>.interactive.json`, `repair-<n>.cost.json`, the fix loop journal (`repairs.json`);
   - lane reviewer: `lane-review/<lane>/<n>.json` (`contracts/workflow/lane-review.schema.json` 1.0.0; a reviewer's `model` may be null, [P9]); its fix round is the record's own `repair` number, never a join on lane and round ([P8]); for the `claude` transport the session id from the reviewer entry or the `r<round>-<i>-<k>.pid` `marker`;
-  - reviewer: `automatic-review-<id>.json` (status, `late`, session id, round) ([P7]), `review-<id>.interactive.json`, `review-<id>.cost.json`, `review-<id>.completion.json`, `review.json`, archived rounds (`review.round-<n>.json`, `review-round-<n>/`);
+  - reviewer: `automatic-review-<id>.json` (status, `late`, session id, round) ([P7]), `review-<id>.interactive.json` (including its `worktree`, the resume directory, [L6]), `review-<id>.cost.json`, `review-<id>.completion.json`, `review.json`, archived rounds (`review.round-<n>.json`, `review-round-<n>/`);
   - critique: `automatic-review-critique.json`, `critique/<round>/{status,stdout}.json`;
   - sidecar and attack: `sidecar-<n>.stdout.json`, `attack-<n>.stdout.json` (the roles `workflow/costs.py` already counts) ([P12]);
   - panel provider: `panel.json` through the panels route's own reader;
