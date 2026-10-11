@@ -1,4 +1,5 @@
 import { createApp, type LocationStatus } from './app.ts'
+import { loadControlsConfig } from './controlsGuard.ts'
 import { ConfigError, loadConfig, type AppConfig } from './config.ts'
 import { ProjectsConfigError, loadProjectsConfig, projectsConfigReloader, type LoadedProjectsConfig } from './projectsConfig.ts'
 
@@ -29,9 +30,14 @@ try {
   throw error
 }
 
-const app = createApp(config.locations, { projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath) })
+// Run controls are off unless the whole environment of PRD Appendix A.3 is valid (decisions.md [L5]); a failed condition is a warning, never a startup failure.
+const controls = await loadControlsConfig(process.env)
+
+const app = createApp(config.locations, { controls: { setup: controls }, projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath) })
 try {
   await app.listen({ port: Number(process.env.MD_MANAGER_API_PORT ?? 3001), host: '127.0.0.1' })
+  for (const warning of controls.warnings) app.log.warn(warning)
+  app.log.info({ controls: controls.enabled }, controls.enabled ? 'Run controls are on' : 'Run controls are off')
   app.log.info({ mode: config.mode, configPath: config.configPath ?? null, locations: config.locations.length }, 'Configuration loaded')
   app.log.info({ configPath: projects.configPath, projects: projects.projects.length, workflows: projects.projects.reduce((count, project) => count + project.workflows.length, 0) }, 'Project registry loaded')
   // Per-location startup status: unavailable locations are a warning, never a startup failure.
