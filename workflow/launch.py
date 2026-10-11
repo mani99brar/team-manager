@@ -46,6 +46,10 @@ LANE_ROLE_FIELDS = ("model", "effort")
 # One more set the next bump must move.
 SKILLS_VERSION = "2.8.0"
 SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0"})
+# The feature versions whose `workers[]` may carry the lane's own `lane_review` (feature.json 2.9.0, PRD_LANE_REVIEWER section 3).
+# One more set the next bump must move.
+LANE_REVIEW_VERSION = "2.9.0"
+LANE_REVIEW_VERSIONS = frozenset({LANE_REVIEW_VERSION})
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -186,6 +190,8 @@ def load_feature(folder: Path) -> dict:
         critique.declared(manifest)  # Refuses `critique` on a version before 2.9.0, naming the key, before schema validation.
         lane_roles(manifest)  # Refuses a lane's `model`/`effort` on a version before 2.7.0, naming the lane and the key.
         lane_skills(manifest)  # Refuses a lane's `skills` on a version before 2.8.0, naming the lane and the key.
+        from . import lane_review
+        lane_review.declared(manifest)  # Refuses a lane's `lane_review` on a version before 2.9.0, naming the lane and the key.
     validate_schema("feature", manifest)
     ids = [worker["node_id"] for worker in manifest["workers"]]
     if len(set(ids)) != len(ids):
@@ -380,6 +386,17 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         from .skills import check_skill, skills_root
         for name in review_critique["skills"]:
             check_skill(critique.CRITIQUE, name, skills_root())
+    # 2.9.0: the lane reviewers (PRD_LANE_REVIEWER 4.1). The DeepSeek key guard and the transport probes are refused here,
+    # before any Git action (the dry run included); the proved pi bin is pinned at prepare into plan.nodes[<lane>].lane_review.
+    from . import lane_review
+    lane_reviews = lane_review.declared(manifest)
+    lr_proved = None
+    if lane_reviews:
+        for lr in lane_reviews.values():
+            for reviewer in lr["reviewers"]:
+                if reviewer["transport"] == "pi" and reviewer["model"].split("/", 1)[0] == "deepseek":
+                    panel.deepseek_guard()
+        lr_proved = (prove or panel.prove_transports)(lane_review.transports_of(lane_reviews))
     # Unknown ids, duplicates and an empty list are refused here, before any Git action.
     selected = parse_lane_selection(workers, declared)
     tryout = manifest.get("tryout") is True
@@ -481,6 +498,11 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             check_skill(node, name, skills_root())
         if node in lane_skill_names:
             prepare.extend(["--lane-skills", f"{node}={','.join(lane_skill_names[node])}"])
+    # 2.9.0: each selected lane's reviewers, with the pi bin the probe resolved; prepare pins plan.nodes[<lane>].lane_review
+    # with the bundled brief's text and sha256.
+    selected_reviews = {node: lane_reviews[node] for node in selected if node in lane_reviews}
+    if selected_reviews:
+        prepare.extend(["--lane-review-settings", json.dumps({"reviews": selected_reviews, "pi_bin": lr_proved["pi_bin"] if lr_proved else None}, sort_keys=True)])
     for reviewer_id, path in reviewers.items():
         builtin = next(item["prompt"] for item in manifest["reviewers"] if item["reviewer_id"] == reviewer_id).startswith(BUILTIN_PREFIX)
         prepare.extend(["--reviewer", f"{reviewer_id}={path if builtin else in_source(path)}"])
@@ -685,6 +707,9 @@ def main(argv=None):
             if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
                 printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
                                      "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
+            if "--lane-review-settings" in prepare:  # 2.9.0: what prepare pins as plan.nodes[<lane>].lane_review (per lane) and the proved pi bin.
+                settings = json.loads(prepare[prepare.index("--lane-review-settings") + 1])
+                printed["lane_review"] = {**settings, "guard": "clear: transports proved (claude --max-budget-usd / pi --version)"}
             feature_skills = lane_skills(manifest)  # 2.8.0: each selected lane's skills and the plugin dir prepare would write.
             if feature_skills:
                 from .skills import plugin_dir

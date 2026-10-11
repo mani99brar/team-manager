@@ -240,6 +240,23 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
   assert.equal(critiqueExample.version, '2.9.0')
   feature.parse(critiqueExample)
   assert.deepEqual(critiqueExample.critique.lanes, ['pages', 'shell'])
+  // 2.9.0 adds a lane's own reviewers: 1 to 4 {transport, model?, effort?}, rounds 0..2, timeout 1..30, budget 0.5..20 (PRD_LANE_REVIEWER section 3).
+  const reviewed29 = structuredClone(reviewed)
+  Object.assign(reviewed29.workers[0], { lane_review: { reviewers: [{ transport: 'pi', model: 'openai-codex/gpt-6.1-sol' }], rounds: 1, timeout_minutes: 10, budget_usd: 3 } })
+  feature.parse({ ...reviewed29, version: '2.9.0' })
+  feature.parse({ ...structuredClone(reviewed), version: '2.9.0' })  // a 2.9.0 feature with no lane_review still validates
+  for (const bad of [{ reviewers: [] }, { reviewers: [{ transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }, { transport: 'pi' }] },
+    { reviewers: [{ transport: 'codex' }] }, { reviewers: [{ transport: 'pi', model: 'x' }], rounds: 3 }, { reviewers: [{ transport: 'pi', model: 'x' }], timeout_minutes: 0 },
+    { reviewers: [{ transport: 'pi', model: 'x' }], budget_usd: 0 }, { reviewers: [{ transport: 'pi', model: 'x' }], extra: true }, {}]) {
+    const value = structuredClone(reviewed)
+    Object.assign(value.workers[0], { lane_review: bad })
+    assert.equal(feature.safeParse({ ...value, version: '2.9.0' }).success, false, JSON.stringify(bad))
+  }
+  // The committed 2.9.0 example (docs/PRD_LANE_REVIEWER.md section 3): one lane with lane_review, one without.
+  const laneReviewExample = readJson('./examples/feature.2.9.0.json')
+  assert.equal(laneReviewExample.version, '2.9.0')
+  feature.parse(laneReviewExample)
+  assert.ok(laneReviewExample.workers.some((w: { lane_review?: unknown }) => w.lane_review))
   // 2.2.0 (guardrails) adds the optional challenge flag and the PRD path, relative to the target.
   feature.parse({ ...structuredClone(reviewed), version: '2.2.0', challenge: false, prd: 'docs/PRD.md' })
   for (const prd of ['/etc/prd.md', '../prd.md', 'docs/../../prd.md', '']) assert.equal(feature.safeParse({ ...structuredClone(reviewed), version: '2.2.0', prd }).success, false, prd)
@@ -341,6 +358,31 @@ test('multi-provider panel record 1.0.0: both Appendix A records validate verbat
   assert.deepEqual(schema.$defs.provider.properties.status.enum, ['pending', 'running', 'ok', 'timed_out', 'error', 'parse_failed'])
   assert.deepEqual(Object.keys(schema.$defs.finding.properties), ['id', 'severity', 'file', 'line', 'title', 'detail', 'providers_raised', 'accepted', 'unanchored'])
   assert.equal(schema.$defs.output.type, 'object')  // The claude provider's --json-schema needs an object root.
+})
+
+test('lane-review record 1.0.0 keeps the full panel-shaped finding per reviewer and closes every object (feature.json 2.9.0)', () => {
+  const laneReview = handWritten('lane-review')
+  const finding = { severity: 'P1', file: 'workflow/x.py', line: 12, title: 'leak', detail: 'the key is logged', unanchored: false }
+  const reviewer = { index: 1, transport: 'pi', model: 'openai-codex/gpt-6.1-sol', effort: null, status: 'ok', cost_usd: 0.4, context_bytes: 1200, duration_seconds: 21, cwd: '/tmp/lane-review-ab', findings: [finding], error: null }
+  const record = { version: '1.0.0', lane: 'engine', round: 1, snapshot: 'a'.repeat(40), status: 'reviewed', reviewers: [reviewer], started_at: '2026-10-11T05:00:00Z', ended_at: '2026-10-11T05:01:00Z', spent_marks: [], repair: null }
+  laneReview.parse(record)
+  // Every nullable field, a failed reviewer, a blocked/refused spent mark and a started repair.
+  laneReview.parse({ ...structuredClone(record), status: 'running', ended_at: null, reviewers: [{ ...reviewer, status: 'running', cost_usd: null, context_bytes: null, duration_seconds: null, cwd: null }] })
+  laneReview.parse({ ...structuredClone(record), status: 'failed', reviewers: [{ ...reviewer, model: null, status: 'timed_out', findings: [], error: 'timed_out after 600 s' }], spent_marks: [{ status: 'refused', reason: 'the repair cap is reached', at: '2026-10-11T05:02:00Z' }], repair: 3 })
+  const reject = (label: string, mutate: (value: Record<string, unknown>) => void) => {
+    const value = structuredClone(record) as Record<string, unknown>
+    mutate(value)
+    assert.equal(laneReview.safeParse(value).success, false, label)
+  }
+  reject('unknown key', value => { (value as { extra?: boolean }).extra = true })
+  reject('unknown record status', value => { (value as { status: string }).status = 'ok' })
+  reject('unknown reviewer status', value => { (value as { reviewers: { status: string }[] }).reviewers[0].status = 'succeeded' })
+  reject('freelanced severity', value => { (value as { reviewers: { findings: { severity: string }[] }[] }).reviewers[0].findings[0].severity = 'high' })
+  reject('empty file', value => { (value as { reviewers: { findings: { file: string }[] }[] }).reviewers[0].findings[0].file = '' })
+  reject('bad snapshot', value => { (value as { snapshot: string }).snapshot = 'zz' })
+  const schema = readJson('./lane-review.schema.json')
+  assert.deepEqual(schema.$defs.reviewer.properties.status.enum, ['pending', 'running', 'ok', 'timed_out', 'error', 'parse_failed'])
+  assert.deepEqual(Object.keys(schema.$defs.finding.properties), ['severity', 'file', 'line', 'title', 'detail', 'unanchored'])
 })
 
 test('review completion 1.2.0 binds a file to one reviewer node and attributes findings to a lane id, multiple or none, never both', () => {
