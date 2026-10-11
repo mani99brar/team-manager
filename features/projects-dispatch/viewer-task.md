@@ -15,7 +15,7 @@ Run projects-dispatch-003's code passed every check, both lane reviews and the c
 ## Constraints
 
 - Owned paths only (policy.json `viewer`); in practice the two docs above. No code or test change.
-- The browser check runs the whole `tests/project-workflows` config; do not add retries. If `controls.spec.ts` `controls-unavailable` or `attack.spec.ts` `[scenario:attack-section]` (a `Protocol error … session closed` in run 003) fails under load, report it in `untested` with the log line, and do not edit it; the machine is shared with another run's worker phase.
+- The browser check runs the whole `tests/project-workflows` config; do not add retries. If `controls.spec.ts` `controls-unavailable` or `attack.spec.ts` `[scenario:attack-section]` (a `Protocol error … session closed` in run 003) fails under load, report it in `untested` with the log line, and do not edit it; the machine is shared with another run's worker phase. The browser check on this docs-only diff only re-confirms the unchanged code ([L15]).
 
 ## Acceptance
 
