@@ -109,12 +109,21 @@ test(`[scenario:panel-section] A run whose export carries the Appendix A panels 
   await expect(section(page)).toBeVisible()
   await expect(section(page).locator('h4')).toHaveText('Panel')
   await expect(stepSheet(page).getByTestId('panel-section')).toHaveCount(1)
-  await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node^="panel"]')).toHaveCount(0)
+  // run-sessions: the panels route answers, so the stage now also carries an advisory `panel` node of its own.
+  await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node="panel"]')).toHaveCount(1)
   await expect(page.getByTestId('attack-section')).toHaveCount(0)
   await expectSucceededSection(page)
   await expect(section(page).getByTestId('panel-source')).toHaveAttribute('data-source', 'export')
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'panel-section')
+  // run-sessions [L12] 1: the Panel card and its sheet take the panel's own word (it succeeded with deepseek timed out), count
+  // the providers that answered and the one P1 the panel accepted (f1, raised by two providers), not every provider's.
+  await expect(graphNode(page, 'panel').locator('.n-word')).toHaveText('reviewed')
+  await expect(graphNode(page, 'panel')).toHaveClass(/\btone-ok\b/)
+  await expect(graphNode(page, 'panel')).toContainText('1 open P0/P1')
+  await openStepSheet(page, 'panel')
+  await expect(stepSheet(page).getByTestId('sheet-status')).toHaveText('reviewed')
+  await expect(stepSheet(page).getByTestId('sheet-did')).toHaveText('2 of 3 providers answered; 1 open P0/P1.')
 
   // At 390 px nothing overflows, the folded findings and the provider rows included.
   await page.setViewportSize({ width: 390, height: 900 })
@@ -150,6 +159,13 @@ test(`[scenario:panel-section] A run whose export carries the Appendix A panels 
   expect(await texts(failedProviders.getByTestId('panel-provider-status'))).toEqual(['failed', 'parse failed'])
   await expect(failedProviders.nth(0).getByTestId('panel-provider-error')).toHaveText(`Error: ${CLAUDE_DIED}`)
   await expect(failedProviders.nth(1).getByTestId('panel-provider-error')).toHaveText(`Error: ${PI_PARSE_FAILED}`)
+  // PRD 3.2: the panel is report-only, so a failed or timed-out panel is a decided step (its card and section above say it
+  // failed); the header never says "The run cannot succeed without intervention."
+  for (const runId of [RUN_PANEL_FAILED, RUN_PANEL_TIMED_OUT]) {
+    await page.goto(nodePage(runId, 'panel'))
+    await expect(page.getByTestId('node-header').locator('.status-badge')).toHaveAttribute('data-status', 'succeeded')
+    await expect(page.getByTestId('node-status-meaning')).toHaveText('This step completed.')
+  }
   // A timed-out panel shows its error; every provider timed out.
   await page.goto(runPage(RUN_PANEL_TIMED_OUT))
   await openReviewSheet(page)

@@ -29,8 +29,7 @@ import {
   ADAPTER_ARTIFACTS, ADAPTER_CHECKS, ADAPTER_SESSION, BASE_COMMIT, CANDIDATE_COMMIT, OUTPUT_COMMIT_ADAPTER, OUTPUT_COMMIT_UI, PATH_TOKEN, PROJECT,
   REVIEWER_SESSION, UI_ARTIFACTS, UI_CHECKS, UI_SESSION, adapterTask, artifactRefs, backgroundId, checks, definition, laneGraphNodes, launchToken,
   offset, projectInputs, projectReview, runDetail, uiTask,
-  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection, type RawWorkerInput,
-} from '../fixtures.ts'
+  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection, type RawWorkerInput, sessionFactsOf} from '../fixtures.ts'
 import type { InternalEvent, SeedContext } from '../seed.ts'
 import type { UxFixtureModule, UxPayloads } from './index.ts'
 
@@ -378,6 +377,8 @@ function detailOf(fixture: Fixture): RunDetail {
 const taskTexts = (fixture: Fixture, leak: string) => Object.fromEntries(Object.entries(inputsSection(fixture, leak).workers).map(([lane, worker]) => [lane, worker.task]))
 
 const payloads: UxPayloads = {
+  // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+  reviewerIds: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, sessionFactsOf('1.4.0', fixture.review)])),
   workflows: [UX_RUN_DEFINITION],
   runDetails: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, detailOf(fixture)])),
   runEvents: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, servedEvents(fixture)])),

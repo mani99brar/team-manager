@@ -488,7 +488,9 @@ test('the project API is read-only: writes are 405 with Allow, HEAD works, and n
     const before = await snapshotTree(runsRoot('alpha', 'main'))
     const routes = ['/api/projects', url('alpha'), url('alpha', 'main'), url('alpha', 'main', 'run-001'), url('alpha', 'main', 'run-001', '/events'),
       url('alpha', 'main', 'run-001', '/results/ui/1'), url('alpha', 'main', 'run-001', '/artifacts/log-0-abc'),
-      url('alpha', 'main', 'run-002', '/reviews/1'), url('alpha', 'main', 'run-002', '/inputs'), url('alpha', 'main', 'run-002', `/artifacts/patch-review-${sha256(DIFF).slice(0, 12)}`)]
+      url('alpha', 'main', 'run-002', '/reviews/1'), url('alpha', 'main', 'run-002', '/inputs'), url('alpha', 'main', 'run-002', `/artifacts/patch-review-${sha256(DIFF).slice(0, 12)}`),
+      // run-sessions: the sessions route reads the run directory and the night-shift folder, and writes neither.
+      url('alpha', 'main', 'run-001', '/sessions'), url('alpha', 'main', 'run-002', '/sessions')]
     for (const route of routes) {
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
         const response = await app.inject({ method, url: route, payload: method === 'OPTIONS' ? undefined : { approve: true } })
@@ -1766,6 +1768,7 @@ test('a three-lane 1.3.0 export projects one launch and verify node per lane, la
     ]
     await writeRun(runsRoot('alpha', 'main'), { ...run, runId: 'three', version: '1.3.0', next: ['approval'], review: reviewSection({ findings }), inputs, diffFile: DIFF })
     const detail = validateRunDetail((await get(app, url('alpha', 'main', 'three'))).json())
+    // run-sessions: a 1.3.0 review section lists no reviewers, so no reviewer node is projected ([L10] 1, PRD 4).
     assert.deepEqual(detail.definition.nodes.map(node => node.node_id), ['launch_ui', 'launch_adapter', 'launch_docs', 'handoff', 'verify_ui', 'verify_adapter', 'verify_docs', 'candidate', 'review', 'approval', 'integrate'])
     const byId = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
     for (const lane of lanes) {
@@ -1934,6 +1937,9 @@ function snapshotFromEvents(run: CapturedRun, raw: RawEvent[]) {
 
 /** Every browser fixture run as the candidate phase seeds it, projected before B1: `node:status:attempt` in definition order. */
 const SEEDED_SNAPSHOTS: Record<string, string> = {
+  // run-sessions: a run whose raw review section lists reviewers (1.4.0+) gains one advisory reviewer node per entry, appended
+  // after the pinned steps; a section that lists none (an export before 1.4.0) gains none ([L10] 1). A 1.4.0+ run whose review
+  // section is null while `review` is not pending gains its plan's reviewers (the single `review`), not started ([L1]).
   'feature-flow/run-awaiting': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:awaiting_approval:1 approval:pending:0 integrate:pending:0',
   'feature-flow/run-blocked': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:failed:1 approval:pending:0 integrate:pending:0',
   'feature-flow/run-succeeded': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
@@ -1942,10 +1948,10 @@ const SEEDED_SNAPSHOTS: Record<string, string> = {
   'lanes-flow/run-one-lane': 'launch_docs:succeeded:1 handoff:succeeded:1 verify_docs:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
   'lanes-flow/run-three-lanes': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 launch_docs:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 verify_docs:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
   'reviewers-flow/run-legacy-reviewer': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
-  'reviewers-flow/run-reviewer-blocked': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:failed:1 approval:pending:0 integrate:pending:0',
-  'reviewers-flow/run-two-reviewers': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
-  'clarity-flow/run-files-captured': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
-  'guarded-flow/run-guarded': 'challenge:succeeded:2 launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'reviewers-flow/run-reviewer-blocked': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:failed:1 approval:pending:0 integrate:pending:0 reviewer-general:succeeded:1 reviewer-coverage:succeeded:1',
+  'reviewers-flow/run-two-reviewers': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1 reviewer-general:succeeded:1 reviewer-coverage:succeeded:1',
+  'clarity-flow/run-files-captured': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1 reviewer-general:succeeded:1 reviewer-coverage:succeeded:1',
+  'guarded-flow/run-guarded': 'challenge:succeeded:2 launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1 reviewer-review:succeeded:1',
   'guarded-flow/run-guarded-asking': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:pending:0 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'guarded-flow/run-guarded-blocked': 'challenge:succeeded:1 launch_ui:running:1 launch_adapter:running:1 handoff:failed:1 verify_ui:pending:0 verify_adapter:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'ux-time/run-short-check': 'launch_ui:succeeded:1 launch_adapter:succeeded:1 handoff:succeeded:1 verify_ui:succeeded:1 verify_adapter:failed:1 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
@@ -1958,8 +1964,8 @@ const SEEDED_SNAPSHOTS: Record<string, string> = {
   'ux-sidecar/review-sidecar-one-lane-plain': 'challenge:succeeded:1 launch_engine:running:1 handoff:pending:0 verify_engine:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'ux-sidecar/review-sidecar-blocked': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:running:1 launch_viewer:running:1 handoff:failed:1 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
   'ux-sidecar/review-sidecar-blocked-plain': 'challenge:succeeded:1 launch_engine:running:1 launch_viewer:running:1 handoff:failed:1 verify_engine:pending:0 verify_viewer:pending:0 candidate:pending:0 review:pending:0 approval:pending:0 integrate:pending:0',
-  'ux-sidecar/review-sidecar-integrated': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
-  'ux-sidecar/review-sidecar-integrated-plain': 'challenge:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1',
+  'ux-sidecar/review-sidecar-integrated': 'challenge:succeeded:1 sidecar:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1 reviewer-review:pending:0',
+  'ux-sidecar/review-sidecar-integrated-plain': 'challenge:succeeded:1 launch_engine:succeeded:1 launch_viewer:succeeded:1 handoff:succeeded:1 verify_engine:succeeded:1 verify_viewer:succeeded:1 candidate:succeeded:1 review:succeeded:1 approval:succeeded:1 integrate:succeeded:1 reviewer-review:pending:0',
 }
 
 type SeededActivity = { feature: string | null; last: string; finished: string; focus: string; attention: string; waiting: number; headline: string }
@@ -3053,7 +3059,9 @@ test('[attack] a seeded run with an attack pass has the activity and status of i
     const graph = nodes[key(withAttack)]
     const ids = graph.map(node => node.node_id)
     assert.equal(ids.indexOf('attack'), ids.indexOf('review') + 1)
-    assert.deepEqual(graph.find(node => node.node_id === 'attack')!.depends_on, graph.find(node => node.node_id === 'review')!.depends_on)
+    // run-sessions augments review's depends_on with its projected reviewer/panel nodes; attack still mirrors review's real upstream.
+    const upstream = (dep: string[]) => dep.filter(id => !id.startsWith('reviewer-') && id !== 'panel')
+    assert.deepEqual(graph.find(node => node.node_id === 'attack')!.depends_on, upstream(graph.find(node => node.node_id === 'review')!.depends_on))
     assert.deepEqual(graph.find(node => node.node_id === 'approval')!.depends_on, ['review', 'attack'])
     assert.equal(nodes[key(without)].some(node => node.node_id === 'attack'), false)
   }
@@ -3103,9 +3111,11 @@ test('[panel] a 1.9.0 export loads with the Appendix A record, the pending recor
     assert.deepEqual(list.runs.map(run => run.run_id).sort(), [PANEL_RUN, 'panel-array', 'panel-garbage', 'panel-null', 'panel-pending', 'panel-string', 'panel-threshold-zero'].sort())
     for (const run of list.runs) {
       const detail = validateRunDetail((await get(app, url('alpha', 'main', run.run_id))).json())
-      // No graph node this slice: the pinned definition is every older run's, and nothing of the activity reads the panel.
-      assert.deepEqual(detail.definition.nodes.map(node => node.node_id), DEFINITION.nodes.map(node => node.node_id), run.run_id)
-      assert.equal(detail.snapshot.nodes.some(node => node.node_id.startsWith('panel')), false)
+      // run-sessions: every panel run has a review section, so its single reviewer `review` projects a `reviewer-review`
+      // node; a `panel` node appears exactly when the panels route would answer (the valid record and the pending one).
+      const panelAnswers = run.run_id === PANEL_RUN || run.run_id === 'panel-pending'
+      assert.deepEqual(detail.definition.nodes.map(node => node.node_id), [...DEFINITION.nodes.map(node => node.node_id), 'reviewer-review', ...(panelAnswers ? ['panel'] : [])], run.run_id)
+      assert.equal(detail.snapshot.nodes.some(node => node.node_id === 'panel'), panelAnswers, run.run_id)
     }
     const served = validatePanelResults((await get(app, panelsRoute())).json())
     assert.deepEqual([served.contract_version, served.source, served.version, served.panels.length], ['1.9.0', 'export', '1.0.0', 1])
@@ -3433,6 +3443,7 @@ test('[fix loop] a 1.9.0 export with session repairs read live projects the revi
     await writeRun(root, fixRun({ runId: 'plain', version: '1.9.0', review: reviewSection(), values: reviewDone, tasks: [] }))
     const plain = await detailOf(app, 'plain')
     assert.deepEqual(Object.keys(plain).sort(), ['definition', 'run_dir', 'snapshot', 'summary'])
+    // run-sessions: the review section lists no reviewers, so no reviewer node; the pinned steps are unchanged ([L10] 1).
     assert.deepEqual(plain.definition.nodes.map(node => node.node_id), GRAPH_NODES.map(node => node.node_id))
     assert.equal(nodeOf(plain, 'review')?.attempt, 1)
     const review = validateReviewResult((await get(app, url('alpha', 'main', 'plain', '/reviews/1'))).json())

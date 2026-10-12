@@ -6,7 +6,8 @@
  */
 import type { Attention, AttentionKind, Instant, Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
 import { humanizeEvent } from '../../../contracts/projects/triage.ts'
-import type { ReviewFinding, ReviewResult, RunDetail, RunInputs, WorkflowEvent } from '../api.ts'
+import type { PanelResults, ReviewFinding, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
+import { isProjectedSessionNode, stageCardOf } from '../sessions/model.ts'
 import type { RepairEntry } from '../../../contracts/projects/v1.ts'
 import { isBlockingFinding } from '../api.ts'
 import { isRepairNode } from '../dag.ts'
@@ -56,6 +57,12 @@ export type StageNode = {
   findings: ReviewFinding[] | null
   /** A worker's questions to the operator, oldest first; null for a step that asks none. */
   questions: RunInputs['workers'][number]['questions'] | null
+  /** The open P0/P1 count the card shows (the review node's blocking findings, or a projected session card's); null when none. */
+  openFindings: number | null
+  /** The cost a projected session card shows (PRD 3.1); null for every pinned step. */
+  cost: string | null
+  /** Which projected session card this is ([L2]); null for every pinned step. */
+  projected: 'reviewer' | 'panel' | 'lane_review' | null
   /** The 2 or 3 facts the far view keeps on the card. */
   facts: string
 }
@@ -70,6 +77,10 @@ export type StageModelInput = {
   attention: RunAttention | null
   /** The review node's label line, as the run view derives it from the fix loop; null when there is none. */
   reviewRound: string | null
+  /** The run's sessions payload (run-sessions): it enriches the projected reviewer/panel/lane-review cards; null when unread. */
+  sessions?: Sessions | null
+  /** The panels route's record: the Panel card's state word, answered providers and accepted P0/P1 ([L12] 1); null when unread. */
+  panels?: PanelResults | null
 }
 
 const shortSha = (value: string) => value.slice(0, 7)
@@ -157,8 +168,14 @@ export function factsOf(node: Pick<StageNode, 'tone' | 'word' | 'attention' | 'a
   return bits.slice(0, 3).join(' · ')
 }
 
+/** Which projected session card a node id is ([L2]); null for a pinned step. */
+function projectedKindOf(nodeId: string): StageNode['projected'] {
+  if (!isProjectedSessionNode(nodeId)) return null
+  return nodeId === 'panel' ? 'panel' : nodeId.startsWith('lane-review-') ? 'lane_review' : 'reviewer'
+}
+
 export function stageNodes(input: StageModelInput, span: (ms: number) => string): StageNode[] {
-  const { detail, rows, events, inputs, review, attention, reviewRound } = input
+  const { detail, rows, events, inputs, review, attention, reviewRound, sessions, panels } = input
   const snapshot = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
   const rowOf = new Map(rows.map(row => [row.node_id, row]))
   const repairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
@@ -178,6 +195,11 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
     const attempt = Math.max(state?.attempt ?? 0, row?.attempt ?? 0)
     const isReview = node.node_id === 'review' && node.kind === 'review'
     const worker = node.kind === 'worker' && !repair ? inputs?.workers.find(entry => entry.launch_node_id === node.node_id) ?? null : null
+    // A projected session card's word, tone, open P0/P1, cost and facts come from the sessions payload (PRD 3.1/3.2), the panel's
+    // from its own record ([L12] 1): a blocked reviewer is a finished session (status succeeded) whose card carries the fail tone ([L11] 2). Its served status until it loads.
+    const projected = projectedKindOf(node.node_id)
+    const stageCard = projected ? stageCardOf(sessions ?? null, node.node_id, panels ?? null) : null
+    const reviewOpen = isReview && review ? review.findings.filter(finding => isBlockingFinding(finding) && finding.disposition !== 'resolved').length : null
     const card: Omit<StageNode, 'facts'> = {
       id: node.node_id,
       label: node.label,
@@ -187,24 +209,27 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
       dep: node.depends_on,
       status,
       shown,
-      tone,
-      word,
+      tone: stageCard ? stageCard.tone : tone,
+      word: stageCard ? stageCard.word : word,
       attempt,
       lane,
       attention: waits,
-      ms: row?.ms ?? null,
+      ms: stageCard ? (stageCard.seconds === null ? null : Math.round(stageCard.seconds * 1000)) : row?.ms ?? null,
       live: row?.live ?? false,
-      start: row?.start ?? null,
+      start: stageCard ? (stageCard.startedAt ? { at: stageCard.startedAt, source: 'receipt' } : null) : row?.start ?? null,
       end: row?.end ?? null,
-      models: modelsOf(node, repair, inputs),
+      models: stageCard ? stageCard.models : modelsOf(node, repair, inputs),
       repair,
       round: isReview ? reviewRound : repair ? `round ${repair.round} of ${repair.rounds} · ${repair.trigger}` : null,
       returnTo: repair?.blocked_step ?? null,
-      did: didOf(node, row, repair, inputs, review, reviewRound),
+      did: stageCard ? stageCard.did : didOf(node, row, repair, inputs, review, reviewRound),
       events: sorted.filter(event => event.node_id === node.node_id).map(event => ({ sequence: event.sequence, at: event.occurred_at, status: event.status, text: humanizeEvent(event) })),
       reviewers: isReview && review ? review.reviewers.map(entry => ({ id: entry.reviewer_id, verdict: entry.verdict, status: entry.status, findings: entry.findings.length, blocking: entry.findings.filter(isBlockingFinding).length })) : null,
       findings: isReview && review ? review.findings : null,
       questions: worker && worker.questions.length > 0 ? worker.questions : null,
+      openFindings: stageCard ? stageCard.openP01 : reviewOpen,
+      cost: stageCard ? stageCard.cost : null,
+      projected,
     }
     return { ...card, facts: factsOf(card, span) }
   })

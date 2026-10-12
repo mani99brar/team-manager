@@ -24,8 +24,7 @@ import {
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
   BASE_COMMIT, CANDIDATE_COMMIT, PROJECT, REVIEW_DIFF_ARTIFACT_ID, apiRunPath, artifactRefs, checks, definition, projectInputs, projectReview, runDetail, sha256,
-  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection,
-} from '../fixtures.ts'
+  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection, sessionFactsOf} from '../fixtures.ts'
 import type { InternalEvent, SeedContext } from '../seed.ts'
 import type { UxFixtureModule, UxPayloads } from './index.ts'
 
@@ -401,6 +400,8 @@ function detailOf(fixture: Fixture): RunDetail {
 }
 
 export const payloads: UxPayloads = {
+  // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+  reviewerIds: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, sessionFactsOf('1.10.0', fixture.review)])),
   workflows: [UX_REFINE_DEFINITION],
   runDetails: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, detailOf(fixture)])),
   runEvents: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, servedEvents(fixture)])),

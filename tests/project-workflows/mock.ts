@@ -7,9 +7,11 @@
  * none, exactly like the real adapter for exports that predate those sections.
  */
 import type { Page, Route } from '@playwright/test'
-import { artifactFiles, attackResults, panelResults, PROJECT, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
+import { artifactFiles, attackResults, panelResults, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
+import { sessionsByRun } from './fixtures/index.ts'
+import { injectSessionNodes } from './sessionProjection.ts'
 import { CONTROLS_TOKEN, controlsFor } from './fixtures/controls.ts'
 import type { ControlId, ControlRecord } from '../../src/projects/controls/types.ts'
 
@@ -33,12 +35,15 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (runsLiteral !== 'runs') return notFound('Unknown resource.')
   if (runId === undefined) {
     // Runs are listed per workflow (empty-flow and any other registered workflow without runs answer an empty page).
-    return json(projectId === PROJECT.project_id ? runLists[workflowId] ?? { runs: [], next_cursor: null } : { runs: [], next_cursor: null })
+    return json(runLists[workflowId] ?? { runs: [], next_cursor: null })
   }
-  const candidate = projectId === PROJECT.project_id ? runDetails[runId] : undefined
-  const detail = candidate && candidate.summary.workflow_id === workflowId ? candidate : undefined
+  // A run belongs to the project and workflow its summary names (run-sessions serves one run under the third project).
+  const candidate = runDetails[runId]
+  const detail = candidate && candidate.summary.project_id === projectId && candidate.summary.workflow_id === workflowId ? candidate : undefined
   if (!detail) return notFound(`Run "${runId}" was not found in workflow "${workflowId}".`)
-  if (rest.length === 0) return json(detail)
+  // run-sessions: the mock projects the same reviewer/panel/lane-review nodes the real server would, for every run, so both
+  // phases show the same `data-node-id` set (the parity test proves the sets match before any stage spec is updated).
+  if (rest.length === 0) return json(injectSessionNodes(detail))
   const [kind, ...tail] = rest
   if (kind === 'events' && tail.length === 0) {
     const after = Number(url.searchParams.get('after') ?? '0')
@@ -69,6 +74,10 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
   if (kind === 'panels' && tail.length === 0) {
     const result = panelResults[runId]
     return result ? json(result) : notFound('No panel is recorded for this run: it has no panels, its record is not readable or its export predates the multi-provider panel.', 'PANELS_NOT_FOUND')
+  }
+  if (kind === 'sessions' && tail.length === 0) {
+    const result = sessionsByRun[runId]
+    return result ? json(result) : notFound('No run with that ID exists in this workflow.', 'RUN_NOT_FOUND')
   }
   if (kind === 'artifacts' && tail.length === 1) {
     const artifact = artifactFiles[runId].find(file => file.artifact_id === tail[0])

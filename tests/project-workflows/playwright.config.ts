@@ -81,6 +81,8 @@ const apiEnv: Record<string, string> = {
   MD_MANAGER_API_PORT: String(apiPort),
   MD_MANAGER_WEB_PORT: String(webPort),
   WORKFLOW_VERIFICATION_PHASE: phase,
+  // run-sessions: the candidate server reads the night-shift folder the sessions seed wrote under the test root.
+  MD_MANAGER_NIGHT_SHIFT_DIR: join(root, 'projects', 'night-shift'),
   ...(projectsConfig ? { MD_MANAGER_PROJECTS_CONFIG: projectsConfig } : {}),
 }
 

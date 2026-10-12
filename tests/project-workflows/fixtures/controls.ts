@@ -25,8 +25,7 @@ import { eventSchema, type WorkflowEvent } from '../../../contracts/workflow/v1.
 import {
   BASE_COMMIT, OUTPUT_COMMIT_UI, PATH_TOKEN, PROJECT, UI_CHECKS, UI_SESSION,
   LANE_ARTIFACTS, backgroundId, definition, laneGraphNodes, launchToken, offset, projectInputs, runDetail, uiResult, uiTask,
-  type NodeState, type RawInputsSection, type RawQuestion, type RawWorkerInput,
-} from '../fixtures.ts'
+  type NodeState, type RawInputsSection, type RawQuestion, type RawWorkerInput, sessionFactsOf} from '../fixtures.ts'
 import type { InternalEvent, SeedContext } from '../seed.ts'
 import type { UxFixtureModule, UxPayloads } from './index.ts'
 import type { Control, ControlId, ControlRecord, RunControls } from '../../../src/projects/controls/types.ts'
@@ -202,6 +201,8 @@ function detailOf(fixture: Fixture): RunDetail {
 }
 
 const payloads: UxPayloads = {
+  // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+  reviewerIds: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, sessionFactsOf('1.5.0', null)])),
   workflows: [PINNED],
   runDetails: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, detailOf(fixture)])),
   runEvents: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, servedEvents(fixture)])),

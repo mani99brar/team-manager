@@ -3,7 +3,7 @@ import {
   buildTimeline, deriveAttention, deriveNow, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
+import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSessions, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { AttackPassBody } from './node/AttackSections.tsx'
@@ -13,6 +13,7 @@ import { assignmentPathname, runPathname } from './routes.ts'
 import { RunBar } from './RunHeader.tsx'
 import { IdentityLine } from './signal/IdentityLine.tsx'
 import { SignalRun } from './signal/SignalRun.tsx'
+import { NightShiftCount, SessionsSection } from './sessions/Sessions.tsx'
 import { isAttackNode, isSidecarNode } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
@@ -99,6 +100,11 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const loadPanels = useCallback((signal: AbortSignal) => orNotRecorded(fetchPanelResults(scope, signal), NOT_RECORDED.panels), [scope])
   const { state: panels, reload: reloadPanels } = useResource(`panels:${runKey}`, loadPanels, refreshToken, pollToken)
   const hasPanels = panels.status === 'error' || (panels.status === 'ready' && panels.data !== null)
+  // Every session that worked on the run (run-sessions), polled like the panel: a 404 RUN_NOT_FOUND loads as null and the
+  // page shows "not recorded" without changing layout.
+  const loadSessions = useCallback((signal: AbortSignal) => orNotRecorded(fetchSessions(scope, signal), NOT_RECORDED.sessions), [scope])
+  const { state: sessions } = useResource(`sessions:${runKey}`, loadSessions, refreshToken, pollToken)
+  const sessionsData = sessions.status === 'ready' ? sessions.data : null
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))
@@ -153,6 +159,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
+  const nodeLabel = useCallback((nodeId: string) => detail.definition.nodes.find(node => node.node_id === nodeId)?.label ?? nodeId, [detail.definition.nodes])
   const tabHref = (id: Tab) => (id === 'assignment' ? assignmentPathname(scope.projectId, scope.workflowId, scope.runId) : runHref)
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
@@ -286,10 +293,18 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
             now={now}
             clock={clock}
             reviewRound={reviewRound}
+            sessions={sessionsData}
+            panels={panels.status === 'ready' ? panels.data : null}
             nodeHref={nodeHref}
             onNavigate={onNavigate}
             sheetExtras={sheetExtras}
           />
+          {sessionsData && (
+            <>
+              <NightShiftCount sessions={sessionsData} nodeHref={nodeHref} nodeLabel={nodeLabel} onNavigate={onNavigate} />
+              <SessionsSection sessions={sessionsData} nodeHref={nodeHref} onNavigate={onNavigate} />
+            </>
+          )}
         </div>
       )}
 
@@ -338,6 +353,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                     onRetryAttack={reloadAttack}
                     panels={panels}
                     onRetryPanels={reloadPanels}
+                    sessions={sessions}
                     refreshToken={refreshToken}
                     onNavigate={onNavigate}
                     highlight={highlight}

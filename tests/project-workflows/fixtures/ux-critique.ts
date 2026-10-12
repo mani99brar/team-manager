@@ -28,8 +28,7 @@ import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEven
 import {
   BASE_COMMIT, CANDIDATE_COMMIT, PROJECT, artifactRefs, backgroundId, checks, definition, laneGraphNodes,
   launchToken, offset, projectInputs, runDetail, sha256, solidPng,
-  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection, type RawWorkerInput,
-} from '../fixtures.ts'
+  type ArtifactFile, type DefinitionNode, type NodeState, type RawInputsSection, type RawReviewSection, type RawWorkerInput, sessionFactsOf} from '../fixtures.ts'
 import type { InternalEvent, SeedContext } from '../seed.ts'
 import { projectDetail } from './ux-refine.ts'
 import type { UxFixtureModule, UxPayloads } from './index.ts'
@@ -244,6 +243,8 @@ function detail(): RunDetail {
 }
 
 const payloads: UxPayloads = {
+  // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+  reviewerIds: { [RUN_CRITIQUE]: sessionFactsOf('1.10.0', candidateReview()) },
   workflows: [UX_CRITIQUE_DEFINITION],
   runDetails: { [RUN_CRITIQUE]: detail() },
   runEvents: { [RUN_CRITIQUE]: servedEvents() },

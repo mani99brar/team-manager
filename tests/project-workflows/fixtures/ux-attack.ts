@@ -29,8 +29,7 @@ import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEven
 import {
   ADAPTER_ARTIFACTS, ADAPTER_SESSION, BASE_COMMIT, CANDIDATE_COMMIT, PROJECT, REVIEWER_SESSION, UI_ARTIFACTS, UI_SESSION,
   artifactRefs, checks, definition, laneGraphNodes, runDetail,
-  type ArtifactFile, type DefinitionNode, type NodeState,
-} from '../fixtures.ts'
+  type ArtifactFile, type DefinitionNode, type NodeState, sessionFactsOf} from '../fixtures.ts'
 import type { InternalEvent, SeedContext } from '../seed.ts'
 import type { UxFixtureModule, UxPayloads } from './index.ts'
 
@@ -430,6 +429,8 @@ export function resultAfterSkeptic(): AttackResult {
 }
 
 const payloads: Partial<UxPayloads> = {
+  // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+  reviewerIds: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, sessionFactsOf('1.8.0', null)])),
   workflows: [UX_ATTACK_DEFINITION],
   runDetails: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, detailOf(fixture)])),
   runEvents: Object.fromEntries(FIXTURES.map(fixture => [fixture.runId, servedEvents(fixture)])),

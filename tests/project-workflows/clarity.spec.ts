@@ -47,7 +47,8 @@ const reviewerToggles = (page: Page) => findings(page).getByTestId('findings-fil
 const filterButton = (page: Page, reviewer: string) => findings(page).getByTestId('findings-filters').locator(`button[data-filter="reviewer:${reviewer}"]`)
 const reviewerCard = (page: Page, reviewer: string) => page.locator(`[data-testid="reviewer-entry"][data-reviewer="${reviewer}"]`)
 
-const SOLID = ['launch_ui', 'launch_adapter', 'review']
+// run-sessions projects the declared reviewers (general, coverage) as advisory review-kind cards — agents too.
+const SOLID = ['launch_ui', 'launch_adapter', 'review', 'reviewer-general', 'reviewer-coverage']
 const DASHED = ['handoff', 'verify_ui', 'verify_adapter', 'candidate', 'approval', 'integrate']
 
 async function attributeList(locator: Locator, name: string): Promise<(string | null)[]> {

@@ -88,3 +88,38 @@ The run page (`/projects/<p>/workflows/<w>/runs/<r>`) is now **the graph as the 
 - Phone tests (390 px): the stage lays the flow top to bottom; the dock opens over the stage and folds when a step opens; the
   sheet is a bottom sheet; `document.documentElement.scrollWidth` must stay ≤ 390.
 - Do not loosen a check that still holds (counts, exact texts, read-only guarantees, no overflow, contrast).
+
+## Sessions cards (run-sessions, contract 1.13.0)
+
+The run-sessions feature (docs/PRD_RUN_SESSIONS.md) makes every session of a run visible on the run page, from
+`GET /…/runs/:run_id/sessions` (`contracts/projects/sessions.ts`) and the projected nodes the server joins into the run detail.
+
+- **Reviewer cards** on the stage, side by side in the column before the review gate: `Reviewer · general`, `Reviewer ·
+  coverage`, `Reviewer · critique`. The card's word is the reviewer's state (running, approved, blocked, late blocked, not
+  started, failed), then its open P0/P1 count (`isBlockingFinding`: an accepted P1 still counts) and its cost. A blocked reviewer
+  is a finished session that found problems: snapshot status `succeeded` (the node header never reads "This step failed"), card
+  tone `fail`, word `blocked`. The executor wording ("reviewer", "panel", "lane reviewer") comes from `signal/executor.ts`, never
+  from the unowned `status.ts`/`NodeHeader.tsx` ([L2]).
+- **Panel card** beside the reviewers, present exactly when the panels route answers; its page shows today's panel section and
+  one session block per provider; its cost keeps Claude's dollars apart from the covered estimates. Its word comes from the
+  panel's own record, never from its providers: running, failed (a panel failed or timed out), not started, or reviewed (a
+  provider that timed out inside a panel that succeeded leaves it reviewed). Its open P0/P1 count is the findings the panel
+  accepted, and its sheet says "N of M providers answered".
+- **Lane-review cards** after each `verify_<lane>` step, one per round (`Lane review · <lane> · round <n>`). The word says the
+  fix round in short form ("repair 1 started", "no fix round"); the last line says it whole ("0 P0, 1 P1. Fix round started:
+  repair 1."). Its page lists each reviewer, every finding, the reviewed snapshot and the repair link.
+- **The step sheet** of a projected card reads its session facts (started, duration, models) and says it is a session, not a
+  step the run waits at; it never offers a command.
+- **Session block** on every node page that belongs to a session (one per session: a challenge's attempts, newest first),
+  titled by the session's label: model, transport, status, verdict, started, ended, duration, cost, findings, session id, and
+  for a Claude Code session the copyable resume command with a 44 px Copy button that says "Copied" (the `cd ~/'…'` form only
+  for an exposed project whose directory exists under HOME; else the bare form and "run it in the session's worktree").
+- **Sessions section** below the stage: every session grouped by role in start order, each row one column of facts joined by
+  middle dots (one per line at 390 px), its label linking to its node, and the totals line ("Metered $X reported by Claude ·
+  subscription-covered estimates $Y · N costs not recorded"). The live dock's Spent reads the same totals.
+- **Night shift**: each decision on the node it decided (each provider's option, text, confidence word, needs-the-operator, the
+  agreement, Jev's pick, error or "Jev not called", executed with the redacted command or "Held: <reason>"); above the Sessions
+  section, the one-line count ("2 panel decisions: 1 executed, 1 held") with a 44 px link to each decided node.
+
+All of these obey the existing rules: colour means state only, every tone repeats a glyph and a word, controls are 44 px, the
+stage is top-to-bottom at 390 px with no sideways scroll, and "not recorded" in italic Pencil wherever a fact is null.

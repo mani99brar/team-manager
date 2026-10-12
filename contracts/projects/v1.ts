@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { artifactSchema, runSnapshotSchema } from '../workflow/v1.js'
+import { sessionsSchema } from './sessions.js'
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
 const version = z.literal('1.0.0')
@@ -945,6 +946,8 @@ export const schemas = {
   attackResult: attackResultSchema,
   panelResults: panelResultsSchema,
   fixLoop: fixLoopSchema,
+  /** 1.13.0 (docs/PRD_RUN_SESSIONS.md Appendix A): every session of a run, its lane reviews and its night-shift decisions. */
+  sessions: sessionsSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>

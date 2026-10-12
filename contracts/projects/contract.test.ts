@@ -14,6 +14,7 @@ import {
   sidecarLedgerFileSchema, SIDECAR_MESSAGE_REASONS, SIDECAR_MESSAGE_STATUSES, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult,
   validateFixLoop, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelResults,
 } from './v1.js'
+import { validateSessions } from './sessions.js'
 
 test('project examples and generated schemas agree', () => {
   for (const [name, schema] of Object.entries(schemas)) {
@@ -59,6 +60,25 @@ test('critique reviewer 1.11.0: a critique finding carries evidence (steps and c
   assert.ok(archived?.evidence && archived.evidence.screenshots[0].artifact_id === 'critique-1-0a1b2c3d4e5f', 'the archived round exports the critique finding evidence')
   // Evidence is optional and additive: the base reviewResult example (no critique) still validates with no evidence anywhere.
   assert.ok(validateReviewResult(examples.reviewResult).findings.every(finding => finding.evidence === undefined))
+})
+
+test('sessions 1.13.0: the Appendix A example validates against the schema and the cross-field rules', () => {
+  // The generic loop above already parses examples.sessions against the committed sessions.schema.json; this proves the
+  // cross-field validator too: unique keys and lane-review node ids, a command exactly when a night-shift decision executed.
+  const sessions = validateSessions(examples.sessions)
+  assert.equal(sessions.contract_version, '1.13.0')
+  assert.ok(sessions.sessions.some(row => row.role === 'reviewer' && row.verdict === 'blocked'))
+  assert.ok(sessions.sessions.some(row => row.resume?.dir?.startsWith("~/'")), 'an exposed Claude session carries the ~/ resume form')
+  assert.ok(sessions.lane_reviews.some(review => review.fix_round.started === true))
+  assert.ok(sessions.lane_reviews.some(review => review.fix_round.started === false))
+  assert.equal(sessions.night_shift.find(d => d.decision === 'executed')?.command !== null, true)
+  assert.equal(sessions.night_shift.find(d => d.decision === 'held')?.command, null)
+  const dupKey = structuredClone(examples.sessions)
+  dupKey.sessions.push({ ...dupKey.sessions[0] })
+  assert.throws(() => validateSessions(dupKey))
+  const executedWithoutCommand = structuredClone(examples.sessions)
+  executedWithoutCommand.night_shift.find(d => d.decision === 'executed')!.command = null
+  assert.throws(() => validateSessions(executedWithoutCommand))
 })
 
 test('rejects cyclic, dangling and duplicate graph nodes', () => {
