@@ -2,6 +2,8 @@
 
 ## Goal
 
+**Run 004 (follows run-sessions-003).** Run 003's worker built and checked the server and contract half (items 1-6: `contracts/projects/sessions.ts` and its schema and example, `server/sessions.ts`, `server/nightShift.ts`, the route, `server/sessions.test.ts`, 9 tests), then stopped after 27 minutes of its 8 hours without building the pages. Your prompt first restores your owned paths at 7a46eeb, which is that work; nobody has reviewed it yet. Read `docs/handoff/run-sessions.md` (its items 1-6 list what is left), check the restored server against items 1-6 and fix what falls short, then wire `projectSessionNodes` into the run detail and build items 7-14 with their specs and both browser phases. This lane has an 8-hour deadline ([L8]) and is meant to be finished in one session: a long lane, or a suite that is red while you work, is not a reason to stop. Commit as you go, and complete with `blocked` only for a reason under Stop ([L9]).
+
 Every session that worked on a run is visible on the run page (`docs/PRD_RUN_SESSIONS.md`; its Appendix A is the route's shape). You own the whole stack in one lane ([P14]): build the server side first, then the pages on it, and prove both phases of the browser specs in your own worktree.
 
 **Server**
