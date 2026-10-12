@@ -1536,7 +1536,9 @@ class RecordTests(unittest.TestCase):
             (f.root / f"{node}-task.md").write_text(f"Change {node}.\n")
             tasks += ["--task", f"{node}={f.root / f'{node}-task.md'}"]
         run = f.root / name
-        with patch.dict(os.environ, env or {}), patch("workflow.sessions.claude_version", return_value="2.1.288 (Claude Code)"):
+        # The operator's shell may export WORKFLOW_WORKER_EFFORT (prepare's default effort); a test sets it only through `env`.
+        environ = {key: value for key, value in os.environ.items() if key != "WORKFLOW_WORKER_EFFORT"} | (env or {})
+        with patch.dict(os.environ, environ, clear=True), patch("workflow.sessions.claude_version", return_value="2.1.288 (Claude Code)"):
             code, _, err = pipeline_cli("prepare", str(run), "--repo", str(f.repo), "--policy", str(policy), *tasks, *flags)
         return run, code, err
 

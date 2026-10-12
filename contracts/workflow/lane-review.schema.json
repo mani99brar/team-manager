@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lane review record v1.0.0",
+  "description": "`<run>/lane-review/<lane>/<n>.json` of a feature.json 2.9.0 run whose lane declares `lane_review` (docs/PRD_LANE_REVIEWER.md section 4), written only by the controller inside the lane's `verify_<lane>` step, validated with `workflow.verification.validate_schema(\"lane-review\", ...)` before every write. One record per reviewed snapshot of the lane, keyed by (lane, snapshot commit): `<n>` is the 1-based review round, and a resume, a fork or a sibling's failure reuses a terminal record instead of restarting reviewers. The export and the viewer are not changed by this feature. The record keeps the full panel-shaped finding (`severity`, `file`, `line`, `title`, `detail`, `unanchored`); the six-key review finding the repair journal and the export use is derived from it (the adapter in workflow/lane_review.py). The record `status` is `pending|running|reviewed|failed` (`reviewed` when at least one reviewer is `ok`, `failed` when every reviewer failed); a reviewer's is `pending|running|ok|timed_out|error|parse_failed`. `spent_marks` records a spent fix round: a `refused` round the repair loop declined without a session (note 1), or a `blocked` one for the record's own evidence. Rounds-left is the lane's `rounds` minus its lane-review repair sessions (applied or blocked, each a journal entry in repairs.json) minus its `refused` marks only; a `blocked` mark is not re-counted, since its session is already the journal entry, so counting it too would halve a `rounds: 2` lane after one blocked round. `repair` is the repair entry number this record's P0/P1 started, or null. Hand-written; no referential check.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "lane",
+    "round",
+    "snapshot",
+    "status",
+    "reviewers",
+    "started_at",
+    "ended_at"
+  ],
+  "properties": {
+    "version": {
+      "const": "1.0.0"
+    },
+    "lane": {
+      "type": "string",
+      "minLength": 1
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "snapshot": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "reviewed",
+        "failed"
+      ]
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reviewer"
+      }
+    },
+    "started_at": {
+      "$ref": "#/$defs/nullableId"
+    },
+    "ended_at": {
+      "$ref": "#/$defs/nullableId"
+    },
+    "spent_marks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "reason",
+          "at"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "refused",
+              "blocked"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "at": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "repair": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "nullableId": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        }
+      ]
+    },
+    "nullableText": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "maxLength": 4000
+        }
+      ]
+    },
+    "nullableCost": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "number",
+          "minimum": 0
+        }
+      ]
+    },
+    "nullableBytes": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "severity": {
+      "enum": [
+        "P0",
+        "P1",
+        "P2"
+      ]
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "transport",
+        "model",
+        "effort",
+        "status",
+        "cost_usd",
+        "context_bytes",
+        "duration_seconds",
+        "cwd",
+        "findings",
+        "error"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "transport": {
+          "enum": [
+            "claude",
+            "pi"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "effort": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "ok",
+            "timed_out",
+            "error",
+            "parse_failed"
+          ]
+        },
+        "cost_usd": {
+          "$ref": "#/$defs/nullableCost"
+        },
+        "context_bytes": {
+          "$ref": "#/$defs/nullableBytes"
+        },
+        "duration_seconds": {
+          "$ref": "#/$defs/nullableCost"
+        },
+        "cwd": {
+          "$ref": "#/$defs/nullableId"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/nullableText"
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "severity",
+        "file",
+        "line",
+        "title",
+        "detail",
+        "unanchored"
+      ],
+      "properties": {
+        "severity": {
+          "$ref": "#/$defs/severity"
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 0
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "unanchored": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

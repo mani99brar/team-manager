@@ -1,0 +1,154 @@
+{
+  "version": "1.2.0",
+  "feature": "Accepted by the operator: `workflow accept`, accepted.json, export and ledger (engine); the run outcome 'integrated (operator override)' on the Projects pages (viewer)",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow",
+        "contracts/workflow",
+        "docs/handoff/accept-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts/projects",
+        "src/projects",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/handoff/accept-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "server-projects",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit-regression",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "accepted-run-outcome",
+              "description": "A run whose export carries an accepted record (the operator merged its blocked candidate by hand) reads 'integrated (operator override)' on its run page and in the runs list, visibly distinct from a reviewed integration (its own chip, never the reviewed-integration style): the reason, who accepted it and when, the candidate's short sha, and every open P0/P1/P2 at the moment of acceptance listed with severity and title. The same run without the record still reads as before (blocked, or cancelled when abandoned). At 390 px no horizontal overflow"
+            },
+            {
+              "id": "accepted-after-abandon",
+              "description": "An abandoned run that was then accepted shows the override outcome, not cancelled, and keeps the abandon reason visible as history; a run with an accepted record and no open findings shows 'no open findings at acceptance'"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
