@@ -6,6 +6,7 @@ import { formatSpan } from '../time.ts'
 import { Time } from '../Time.tsx'
 import { severityClass, severityTone, toneClass } from '../tone.ts'
 import { SeverityChip } from '../ui/index.tsx'
+import { stageExecutor } from './executor.ts'
 import { Glyph } from './Glyph.tsx'
 import { repairCommit, type StageNode } from './model.ts'
 
@@ -63,7 +64,7 @@ export function NodeSheet({ node, now, isFocus, href, onNavigate, onClose, child
           <h3 id="sb-sheet-title">{node.label}</h3>
           <div className="sh-sub">
             <span className={`state ${toneClass(node.tone)}`} data-testid="sheet-status"><Glyph tone={node.tone} size={16} />{node.word}</span>
-            <span>{node.kindLabel} · {node.exec}</span>
+            <span>{node.kindLabel} · {stageExecutor(node).word}</span>
             <code>{node.id}</code>
           </div>
         </div>
@@ -89,7 +90,10 @@ export function NodeSheet({ node, now, isFocus, href, onNavigate, onClose, child
         </section>
         <section>
           <h4>Command</h4>
-          {isFocus && now ? <CommandBlock next={now.next} /> : <p className="nr-p">{now === null && isFocus ? 'Reading the run\'s events and results…' : 'No command is recorded for this step; the run waits elsewhere.'}</p>}
+          {node.projected
+            // A projected session card records a session of the review or a verify step; the run never waits at it (run-sessions).
+            ? <p className="nr-p" data-testid="sheet-session-note">A session of {node.projected === 'lane_review' ? 'the lane\'s verify step' : 'the review'}, not a step the run waits at; nothing to type here.{node.cost ? ` Cost: ${node.cost}.` : ''}</p>
+            : isFocus && now ? <CommandBlock next={now.next} /> : <p className="nr-p">{now === null && isFocus ? 'Reading the run\'s events and results…' : 'No command is recorded for this step; the run waits elsewhere.'}</p>}
         </section>
         {node.reviewers && (
           <section>

@@ -60,6 +60,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await runList.getByRole('link', { name: new RegExp(`^${RUN_THREE_LANES}`) }).click()
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
   await expect(page.getByTestId('definition-current')).toBeVisible()
+  // run-sessions: a 1.3.0 review section lists no reviewers, so no reviewer node is projected ([L10] 1).
   await expect(graphNodes(page)).toHaveCount(THREE_LANE_NODES.length)
   expect(await attributeList(graphNodes(page), 'data-graph-node')).toEqual(THREE_LANE_NODES.map(node => node.node_id))
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node][data-status="succeeded"]')).toHaveCount(THREE_LANE_NODES.length)
@@ -264,6 +265,7 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   // graph (PRD_VIEWER_UX 4.4).
   await page.goto(runUrl(RUN_LEGACY))
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'succeeded')
+  // run-sessions: a 1.0.0 export predates the reviewer list, so no reviewer node is projected ([L10] 1, [L11] 1).
   await expect(graphNodes(page)).toHaveCount(GRAPH_NODES.length)
   await openRunDetails(page)
   await expect(page.getByTestId('inputs-none')).toBeVisible()

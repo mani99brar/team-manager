@@ -104,8 +104,10 @@ test(`[scenario:attack-section] A run with an attack pass shows the report-only 
   await expectVerifiedSection(page)
   // The graph keeps its legend and draws the attack node beside the review (the same column, the next row).
   await expect(graphNode(page, 'attack')).toHaveCount(1)
-  const [review, attack] = await Promise.all([graphNode(page, 'review').boundingBox(), graphNode(page, 'attack').boundingBox()])
-  expect(Math.round(attack!.x)).toBe(Math.round(review!.x))
+  // run-sessions pushes the review gate one column right (it now depends on the projected reviewer node), so the report-only
+  // attack node sits in the column before the gate, beside the reviewer node (both depend on the candidate).
+  const [reviewer, attack] = await Promise.all([graphNode(page, 'reviewer-review').boundingBox(), graphNode(page, 'attack').boundingBox()])
+  expect(Math.round(attack!.x)).toBe(Math.round(reviewer!.x))
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'attack-section')
 

@@ -7,7 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { currentCrumb } from '../helpers.ts'
-import { EMPTY_PROJECT, PROJECT } from './fixtures.ts'
+import { EMPTY_PROJECT, UNEXPOSED_PROJECT, PROJECT } from './fixtures.ts'
 import {
   ANSWERED_QUESTION, LISTS_FEATURE, LISTS_NOW, mockRunDir, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL, RUN_LISTS_ASKING, RUN_LISTS_FAILED,
   RUN_LISTS_FAILED_EARLIER, RUN_LISTS_LIVE, RUN_LISTS_OLD, RUN_LISTS_STOPPED, UX_LISTS_WORKFLOW_ID, UX_LISTS_WORKFLOW_NAME,
@@ -77,6 +77,8 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   const projects = page.getByTestId('dispatch-rail-list')
   await expect(projects.locator('.dispatch-rail-row', { hasText: PROJECT.name })).toContainText(/\d+ features/)
   await expect(projects.locator('.dispatch-rail-row', { hasText: EMPTY_PROJECT.name })).toContainText('0 features')
+  // run-sessions adds a third project the registry does not expose, with its one workflow.
+  await expect(projects.locator('.dispatch-rail-row', { hasText: UNEXPOSED_PROJECT.name })).toContainText(/\b1 features?\b/)
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'runs-home')
 

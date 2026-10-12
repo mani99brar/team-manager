@@ -2,7 +2,8 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { layoutStage, NODE_HEIGHT, NODE_WIDTH, PHONE_STAGE_WIDTH, stepFrom, type Direction, type StageLayout } from './layout.ts'
 import type { StageNode } from './model.ts'
 import { Glyph } from './Glyph.tsx'
-import { executorOf, KIND_LABEL } from '../status.ts'
+import { KIND_LABEL } from '../status.ts'
+import { stageExecutor } from './executor.ts'
 import { toneClass, type Tone } from '../tone.ts'
 import { formatSpan } from '../time.ts'
 
@@ -38,8 +39,6 @@ const LEVELS = ['Overview', 'Standard', 'Full detail'] as const
 
 const levelOf = (k: number) => (k < 0.6 ? 0 : k < 1.25 ? 1 : 2)
 
-const EXECUTOR_WORD = { agent: 'agent', verifier: 'verifier', controller: 'controller' } as const
-
 const LEGEND_TONES: { tone: Tone; word: string }[] = [
   { tone: 'ok', word: 'succeeded' }, { tone: 'run', word: 'running' }, { tone: 'warn', word: 'needs you' },
   { tone: 'fail', word: 'failed or blocked' }, { tone: 'pause', word: 'paused' }, { tone: 'idle', word: 'pending' },
@@ -49,12 +48,13 @@ const LEGEND_TONES: { tone: Tone; word: string }[] = [
 function StepCard({ node, position, current, selected, now }: { node: StageNode; position: { x: number; y: number }; current: boolean; selected: boolean; now: boolean }) {
   const last = node.events.at(-1) ?? null
   const duration = node.ms === null ? null : formatSpan(node.ms)
-  const openP1 = node.findings === null ? null : node.findings.filter(finding => (finding.severity === 'P0' || finding.severity === 'P1') && finding.disposition !== 'resolved').length
+  const openP1 = node.openFindings
+  const executor = stageExecutor(node)
   // The accessible name keeps the definition graph's order (label, kind, status, attempt, the meta line, the executor), then
-  // what the card adds: the lane and the duration.
+  // what the card adds: the lane, the duration and a projected session card's cost.
   const name = [
     node.label, node.repair ? 'repair' : KIND_LABEL[node.kind].toLowerCase(), node.word, `attempt ${node.attempt}`, node.round,
-    `executed by ${executorOf(node.kind, undefined, node.id)}`, node.lane ? `lane ${node.lane}` : null, duration,
+    `executed by ${executor.phrase}`, node.lane ? `lane ${node.lane}` : null, duration, node.cost,
   ].filter(Boolean).join(', ')
   const classes = [
     'node', toneClass(node.tone), `exec-${node.exec}`, node.exec === 'agent' ? 'is-agent' : 'is-controller', `is-${node.shown}`,
@@ -79,15 +79,16 @@ function StepCard({ node, position, current, selected, now }: { node: StageNode;
       <span className="n-top"><Glyph tone={node.tone} className="g" /><span className="n-label">{node.label}</span></span>
       <span className="n-meta">
         <span className="n-word">{node.word}</span>
-        <span>{node.kindLabel} · {EXECUTOR_WORD[node.exec]}</span>
+        <span>{node.kindLabel} · {executor.word}</span>
         {node.attempt > 1 && <span>attempt <b>{node.attempt}</b></span>}
         {node.round && <span>{node.round}</span>}
       </span>
-      {(node.lane || duration || openP1 !== null) && (
+      {(node.lane || duration || openP1 !== null || node.cost) && (
         <span className="n-meta">
           {node.lane && <span className="lane">{node.lane}</span>}
           {duration && <span><b>{duration}</b></span>}
-          {openP1 !== null && <span><b>{openP1}</b> open P1</span>}
+          {openP1 !== null && <span><b>{openP1}</b> open P0/P1</span>}
+          {node.cost && <span className="n-cost">{node.cost}</span>}
         </span>
       )}
       <span className="n-last">{last ? `${last.at.slice(11, 16)} · ${last.text}` : node.did ?? 'No event recorded yet.'}</span>

@@ -7,7 +7,7 @@ import { mockResponse } from './mock.ts'
 import {
   APPROVAL_MESSAGE,
   CURRENT_LABEL,
-  EMPTY_PROJECT,
+  EMPTY_PROJECT, UNEXPOSED_PROJECT,
   EMPTY_WORKFLOW_ID,
   EMPTY_WORKFLOW_NAME,
   LOG_TEXT_PREFIX,
@@ -65,6 +65,8 @@ test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects op
   const list = page.getByTestId('dispatch-cards')
   await expect(list).toContainText(PROJECT.name)
   await expect(list).toContainText(EMPTY_PROJECT.name)
+  // run-sessions adds a third project the registry does not expose (fixtures.ts UNEXPOSED_PROJECT).
+  await expect(list).toContainText(UNEXPOSED_PROJECT.name)
   await expect(page.getByRole('toolbar', { name: 'File operations' })).toHaveCount(0)
   await expect(page.locator('.graph-canvas')).toHaveCount(0)
   await expectNoExecutionControls(page)
@@ -145,6 +147,7 @@ test(`[scenario:workflow-run-graph] Select a project, workflow and run and inspe
   await expect(page.getByTestId('run-status')).toContainText('Succeeded')
   await expect(page.getByTestId('definition-changed')).toBeVisible()
   await expect(graphNode(page, 'verify_ui')).toHaveAttribute('aria-label', new RegExp(`^${PINNED_LABEL.replace(/[()]/g, '\\$&')}, verification, succeeded, attempt 1`))
+  // run-sessions: this export's review section lists no reviewers, so no reviewer node is projected ([L10] 1).
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node]')).toHaveCount(9)
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node][data-status="succeeded"]')).toHaveCount(9)
   await expect(stageEdge(page, 'handoff', 'verify_ui')).toHaveCount(1)

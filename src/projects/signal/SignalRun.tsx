@@ -1,8 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
-import type { ReviewResult, RunDetail, RunInputs, WorkflowEvent } from '../api.ts'
+import type { PanelResults, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
 import type { StepRow } from '../steps.ts'
 import { formatSpan } from '../time.ts'
+import { spentText } from '../sessions/model.ts'
 import { GlyphDefs } from './Glyph.tsx'
 import { PHONE_STAGE_WIDTH } from './layout.ts'
 import { readDockOpen } from './dock.ts'
@@ -28,6 +29,10 @@ type Props = {
   now: Now | null
   clock: number
   reviewRound: string | null
+  /** The run's sessions payload (run-sessions): enriches the projected reviewer/panel/lane-review cards; null when unread. */
+  sessions: Sessions | null
+  /** The panels route's record (null when unread or not recorded): the Panel card's own state word ([L12] 1). */
+  panels?: PanelResults | null
   nodeHref: (nodeId: string) => string
   onNavigate: (pathname: string) => void
   /** Run-level records shown on the sheet of the step they belong to (the attack pass, the provider panel); null for the rest. */
@@ -40,13 +45,13 @@ type Props = {
  * stage's edge and from there its full page. The page keeps one selected step in its own state (the URL stays the run's), so
  * Back leaves the run, not the sheet.
  */
-export function SignalRun({ detail, rows, timeline, events, inputs, review, attention, now, clock, reviewRound, nodeHref, onNavigate, sheetExtras }: Props) {
+export function SignalRun({ detail, rows, timeline, events, inputs, review, attention, now, clock, reviewRound, sessions, panels = null, nodeHref, onNavigate, sheetExtras }: Props) {
   const stage = useRef<StageHandle>(null)
   const frame = useRef<HTMLDivElement>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [dockOpen, setDockOpen] = useState(readDockOpen)
   const [height, setHeight] = useState<number | null>(null)
-  const nodes = useMemo(() => stageNodes({ detail, rows, timeline, events, inputs, review, attention, reviewRound }, formatSpan), [detail, rows, timeline, events, inputs, review, attention, reviewRound])
+  const nodes = useMemo(() => stageNodes({ detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels }, formatSpan), [detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels])
   const labels = useMemo(() => new Map(detail.definition.nodes.map(node => [node.node_id, node.label])), [detail.definition.nodes])
   const latest = useMemo(() => latestEvents(timeline, labels), [timeline, labels])
   const nowId = nowNodeId(now, attention, nodes)
@@ -78,7 +83,7 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
     <div ref={frame} className="sb-frame" data-testid="run-board" style={height === null ? undefined : { height }}>
       <GlyphDefs />
       <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={dockOpen ? DOCK_RESERVE : 0} sheetOpen={selectedNode !== null}>
-        <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} />
+        <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} spent={sessions ? spentText(sessions.totals) : null} />
         {selectedNode && (
           <NodeSheet node={selectedNode} now={now} isFocus={selectedNode.id === (now?.focus?.node_id ?? null)} href={nodeHref(selectedNode.id)} onNavigate={onNavigate} onClose={() => select(null)}>
             {sheetExtras?.(selectedNode.id)}

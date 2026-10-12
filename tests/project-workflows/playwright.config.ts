@@ -82,6 +82,8 @@ const apiEnv: Record<string, string> = {
   MD_MANAGER_API_PORT: String(apiPort),
   MD_MANAGER_WEB_PORT: String(webPort),
   WORKFLOW_VERIFICATION_PHASE: phase,
+  // run-sessions: the candidate server reads the night-shift folder the sessions seed wrote under the test root.
+  MD_MANAGER_NIGHT_SHIFT_DIR: join(root, 'projects', 'night-shift'),
   ...(projectsConfig ? { MD_MANAGER_PROJECTS_CONFIG: projectsConfig } : {}),
   // The dispatch routes read GitHub from the fixture (never real `gh`) and cache under the test root ([P6], [P20]).
   ...(phase === 'candidate' ? { MD_MANAGER_GITHUB_FIXTURE: join(root, 'projects', 'github-fixture.json'), MD_MANAGER_GITHUB_CACHE: join(root, 'projects', 'github-cache.json') } : {}),

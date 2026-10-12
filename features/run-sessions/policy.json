@@ -1,0 +1,151 @@
+{
+  "version": "1.4.0",
+  "feature": "Run sessions: every session of a workflow run is visible on the run page (reviewer, panel and lane-review nodes, node pages, a Sessions list, night-shift decisions); read-only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "sessions",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server/projects.ts",
+        "server/projectRoutes.ts",
+        "server/sessions.ts",
+        "server/nightShift.ts",
+        "server/sessions.test.ts",
+        "server/projects.test.ts",
+        "contracts/projects/sessions.ts",
+        "contracts/projects/sessions.schema.json",
+        "contracts/projects/export.ts",
+        "contracts/projects/contract.test.ts",
+        "contracts/projects/examples.ts",
+        "contracts/projects/examples",
+        "contracts/projects/README.md",
+        "contracts/projects/triage.ts",
+        "contracts/projects/v1.ts",
+        "src/projects/signal",
+        "src/projects/sessions",
+        "src/projects/node",
+        "src/projects/RunView.tsx",
+        "src/projects/NodeDetail.tsx",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/providerPanel.tsx",
+        "src/projects/api.ts",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/VIEWER_SIGNAL_BOX.md",
+        "docs/handoff/run-sessions.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "sessions-stage",
+              "description": "On the seeded sessions run, the stage shows 'Reviewer · general', 'Reviewer · coverage', 'Reviewer · critique' and 'Panel' as separate cards in the column before the review gate, each with its state word (general blocked, coverage late blocked, critique approved), its open P0/P1 count and its cost; a 'Lane review · server · round 1' card follows verify_server and a 'Lane review · viewer · round 1' card follows verify_viewer; the review gate, repairs and approval keep their places; the Now banner and the focus never land on a reviewer, panel or lane review node; a seeded older run with no lane-review records and one reviewer shows only its reviewer node added, and the panel-old run has no Panel node"
+            },
+            {
+              "id": "sessions-lane-review",
+              "description": "The 'Lane review · server · round 1' node page lists its reviewer (transport pi, model openai-codex/gpt-6.1-sol, status, duration, cost), every finding with severity, file:line, title and detail, the reviewed snapshot's short sha, and 'Fix round started: repair 1' linking to the repair-1 node (from the record's own repair number); the viewer lane's round says 'Recorded; no fix round: rounds used up, fix loop off or repair cap' (the engine's own words); the stage card of each says the same in short form"
+            },
+            {
+              "id": "sessions-reviewer",
+              "description": "The 'Reviewer · general' node page shows its session block (model, transport, status, started, duration, cost, session id) with the copyable resume command \"cd ~/'<worktree>' && claude --resume <id>\" on the seeded project that exposes its run directory, and 'claude --resume <id>' with 'run it in the session's worktree' on the seeded project that does not; its verdict and only its own findings for the latest round, and its earlier round's verdict; the coverage node says 'late blocked'; the critique node page shows the critique session and its findings; no absolute path is rendered (renderedText)"
+            },
+            {
+              "id": "sessions-list",
+              "description": "The run page's Sessions section lists every seeded session in start order grouped by role (design challenge attempts, workers, repairs, lane reviewers, reviewers, critique, panel providers, night-shift providers), each row with label, linked node, model, status, started, duration, cost and session id, and a totals line with the metered cost, the subscription-covered estimates and how many costs are not recorded, by value; Claude rows offer the resume command and pi rows do not; no absolute path is rendered"
+            },
+            {
+              "id": "sessions-panel",
+              "description": "The 'Panel' node page shows the multi-provider panel's providers with model, status, cost and findings; the approval node page shows the seeded held night-shift decision: kind awaiting_approval, each provider's option, text, confidence word and needs-the-operator, the agreement, Jev's pick with confidence and pass-floor (or 'Jev not called'), and 'Held: <reason>'; the challenge node page shows the executed one with its redacted command; the night-shift record of another run with the same id is not shown; the run page shows '2 panel decisions: 1 executed, 1 held' linking to them"
+            },
+            {
+              "id": "sessions-phone",
+              "description": "At 390 px wide the reviewer, panel and lane review cards stack in the stage's top-to-bottom flow, the Sessions list reads as one column per session with no horizontal page scroll, and every link and button in the Sessions list and session blocks is at least 44 px tall"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/sessions-app.ts"
+    ],
+    "ready_path": "/api/projects",
+    "timeout_seconds": 180
+  }
+}

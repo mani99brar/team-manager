@@ -507,6 +507,25 @@ const DISPOSITION_TONE: Record<ReviewFinding['disposition'], Tone> = { open: 'wa
  * disposition, reviewer and lane, the full message, and the task lines the quoted requirement was found in. The table below
  * keeps listing them too; a card is not a `finding` row.
  */
+/**
+ * One reviewer's own findings of the recorded round, as the review page's finding cards (run-sessions, PRD 3.1): the reviewer
+ * node page shows exactly these, never another reviewer's. Empty, it says so.
+ */
+export function ReviewerFindings({ review, reviewerId, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onOpenRequirement, onOpenFile }: { review: ReviewResult; reviewerId: string } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri' | 'onNavigate'>) {
+  const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
+  const own = review.findings.filter(finding => finding.reviewer === reviewerId)
+  if (own.length === 0) return <p className="projects-muted" data-testid="reviewer-findings-none">{reviewerId} recorded no findings in this round.</p>
+  return (
+    <ul className="finding-cards" data-testid="reviewer-findings" data-reviewer={reviewerId}>
+      {own.map(finding => (
+        <li key={review.findings.indexOf(finding)}>
+          <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export function BlockingFindings({ review, scope, definitionNodes, inputs, onOpenRequirement }: { review: ReviewResult } & Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement'>) {
   return (
     <ul className="blocking-cards">

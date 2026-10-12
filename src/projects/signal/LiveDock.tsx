@@ -36,6 +36,8 @@ type Props = {
   /** The step page's link, for the Now banner's "Open" affordance, which here centres the step instead. */
   nodeHref: (nodeId: string) => string
   onNavigate: (pathname: string) => void
+  /** What the run's sessions cost, from the Sessions totals (run-sessions); null when none is recorded or not yet read. */
+  spent?: string | null
 }
 
 /**
@@ -44,7 +46,7 @@ type Props = {
  * command to type next, copied, never run), the latest five moments of the run, how long it ran and its deadlines, and where
  * the state came from. Everything in it links to the step on the stage. Collapsed, only the bar stays.
  */
-export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, inputs, open, onOpenChange, onGo, nodeHref, onNavigate }: Props) {
+export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, inputs, open, onOpenChange, onGo, nodeHref, onNavigate, spent = null }: Props) {
   const [, tick] = useState(0)
   // The ages in the dock move every half minute; the clock prop already ticks every second while the run can change.
   useEffect(() => {
@@ -130,7 +132,7 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
         <div className="lv-sec">
           <dl className="lv-figs" data-testid="live-dock-figures">
             <div><dt>Ran</dt><dd data-testid="run-span">{ran === null ? <span className="nr">not recorded</span> : formatSpan(ran)}</dd></div>
-            <div><dt>Spent</dt><dd><span className="nr" title="The export carries no cost section the viewer can read.">not recorded</span></dd></div>
+            <div><dt>Spent</dt><dd data-testid="run-spent">{spent === null ? <span className="nr" title="No session of this run recorded a cost.">not recorded</span> : <span title="The Sessions totals below: Claude's own figures apart from the subscription-covered estimates.">{spent}</span>}</dd></div>
             <div><dt>Deadlines</dt><dd>{inputs?.automatic ? deadlinesLabel(inputs.automatic) : <span className="nr">not recorded</span>}</dd></div>
           </dl>
         </div>

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { schemas, validateAttackResult, validatePanelResults, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
+import { validateSessions } from '../contracts/projects/sessions.ts'
 import { eventSchema, workerResultSchema } from '../contracts/workflow/v1.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 import { DEFAULT_RUN_LIMIT, MAX_RUN_LIMIT, ProjectApiError, RunStore, compareRuns, decodeCursor, encodeCursor } from './projects.ts'
@@ -114,6 +115,7 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     sidecar: '/:project_id/workflows/:workflow_id/runs/:run_id/sidecar',
     attack: '/:project_id/workflows/:workflow_id/runs/:run_id/attack',
     panels: '/:project_id/workflows/:workflow_id/runs/:run_id/panels',
+    sessions: '/:project_id/workflows/:workflow_id/runs/:run_id/sessions',
   }
   for (const url of Object.values(paths)) {
     scope.route({
@@ -200,6 +202,12 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const params = request.params as Params
     const result = await store.panelResults(scopeOf(params), requireId(params.run_id, 'run'))
     return conform(schemas.panelResults, crossChecked(() => validatePanelResults(result), log), log)
+  })
+
+  scope.get(paths.sessions, async request => {
+    const params = request.params as Params
+    const sessions = await store.sessions(scopeOf(params), requireId(params.run_id, 'run'))
+    return conform(schemas.sessions, crossChecked(() => validateSessions(sessions), log), log)
   })
 
   scope.get(paths.artifact, async (request, reply) => {

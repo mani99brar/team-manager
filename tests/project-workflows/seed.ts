@@ -37,6 +37,7 @@ import {
   CLARITY_WORKFLOW_ID,
   CLARITY_WORKFLOW_NAME,
   EMPTY_PROJECT,
+  UNEXPOSED_PROJECT,
   EMPTY_WORKFLOW_DEFINITION,
   EMPTY_WORKFLOW_ID,
   EMPTY_WORKFLOW_NAME,
@@ -284,6 +285,8 @@ export type SeedContext = {
   receipt: typeof receipt
   internalEvent: typeof internalEvent
   leakFor: typeof leakFor
+  /** The night-shift folder the candidate server reads (`MD_MANAGER_NIGHT_SHIFT_DIR`); the sessions module seeds records here. */
+  nightShiftDir: string
 }
 
 /**
@@ -646,6 +649,7 @@ export function seedCandidate(root: string, options: { dispatch?: boolean } = {}
       return directory
     },
     writeRun, writePacket, receipt, internalEvent, leakFor,
+    nightShiftDir: join(root, 'night-shift'),
   })
 
   const registry = {
@@ -661,10 +665,15 @@ export function seedCandidate(root: string, options: { dispatch?: boolean } = {}
           { workflow_id: REVIEWERS_WORKFLOW_ID, runs_root: reviewersRunsRoot, definition: { name: REVIEWERS_WORKFLOW_NAME, nodes: REVIEWERS_NODES } },
           { workflow_id: CLARITY_WORKFLOW_ID, runs_root: clarityRunsRoot, definition: { name: CLARITY_WORKFLOW_NAME, nodes: CLARITY_NODES } },
           { workflow_id: GUARDED_WORKFLOW_ID, runs_root: guardedRunsRoot, definition: { name: GUARDED_WORKFLOW_NAME, nodes: GUARDED_NODES } },
-          ...ux.workflows,
+          ...ux.workflows.filter(workflow => (workflow.project_id ?? PROJECT.project_id) === PROJECT.project_id),
         ],
       },
       { project_id: EMPTY_PROJECT.project_id, name: EMPTY_PROJECT.name, repository, workflows: [] },
+      // run-sessions: a third project the registry does not list under `viewer.expose_run_dir` (defined once in fixtures.ts).
+      {
+        project_id: UNEXPOSED_PROJECT.project_id, name: UNEXPOSED_PROJECT.name, repository,
+        workflows: ux.workflows.filter(workflow => workflow.project_id === UNEXPOSED_PROJECT.project_id).map(({ workflow_id, runs_root, definition }) => ({ workflow_id, runs_root, definition })),
+      },
     ],
   }
   // The dispatch feature's own registry projects with their own git repositories, opt-in so controls-app.ts never creates them.

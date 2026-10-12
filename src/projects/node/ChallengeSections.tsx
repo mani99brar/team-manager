@@ -11,11 +11,12 @@ import './review.css'
  * `challenge.json`: the folded record and the operator's reason, then the concerns (P0/P1 open, P2 one line each), the
  * alternative with the experiment, and the earlier attempts' P0/P1 (C49). The headline above the index is `ChallengeHeadline`, rendered by the node page.
  */
-export function ChallengeSections({ inputs, onRetryInputs }: { inputs: Resource<RunInputs | null>; onRetryInputs: () => void }) {
+export function ChallengeSections({ inputs, onRetryInputs, sessionsRecorded = false }: { inputs: Resource<RunInputs | null>; onRetryInputs: () => void; sessionsRecorded?: boolean }) {
   if (inputs.status === 'loading' || inputs.status === 'idle') return <LoadingPanel>Loading the design challenge…</LoadingPanel>
   if (inputs.status === 'error') return <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetryInputs} />
   const challenge = inputs.data?.challenge ?? null
-  if (challenge === null) return <p className="projects-muted" data-testid="challenge-none">No design challenge was recorded for this run.</p>
+  // With its print sessions on record (run-sessions), the inputs lack only the outcome: never "no challenge" above its sessions.
+  if (challenge === null) return <p className="projects-muted" data-testid="challenge-none">{sessionsRecorded ? 'The run inputs record no outcome for the design challenge; its sessions are listed below.' : 'No design challenge was recorded for this run.'}</p>
   return (
     <div className="challenge" data-testid="challenge" data-challenge-status={challenge.status}>
       <ChallengeFacts challenge={challenge} />

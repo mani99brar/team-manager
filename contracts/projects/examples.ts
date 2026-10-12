@@ -2,6 +2,7 @@ import type { WorkerResult } from '../workflow/v1.js'
 import type { Control, ControlId, ControlRecord, ControlRequest, ControlsStatus, ParamSpec, RunControls } from './controls.js'
 import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, ReviewFinding, RepairEntry, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
 import type { DispatchOverview, ProjectSteps, GithubRepoRead } from './dispatch.js'
+import type { Sessions } from './sessions.js'
 
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
@@ -987,6 +988,109 @@ export const projectSteps: ProjectSteps = {
         },
       ],
       errors: [{ run_id: 'projects-dispatch-000', code: 'RUN_STORAGE_INVALID', message: 'Run "projects-dispatch-000" has malformed or contradictory persisted state: plan.json is missing' }],
+    },
+  ],
+}
+
+/**
+ * A run as the sessions route (1.13.0, docs/PRD_RUN_SESSIONS.md Appendix A) serves it: a worker, a repair, a lane reviewer,
+ * three reviewers (general blocked, coverage late blocked, critique approved) and a panel provider as sessions; a lane-review
+ * round that started a repair and one recorded with no fix round; a held and an executed night-shift decision. The metered
+ * dollars (Claude sessions) and the covered estimates (pi providers) are kept apart, with one cost not recorded.
+ */
+export const sessions: Sessions = {
+  contract_version: '1.13.0',
+  sessions: [
+    {
+      key: 'worker:server', role: 'worker', label: 'Worker · server', node_id: 'launch_server', lane: 'server', round: null,
+      transport: null, model: 'claude-opus-4-8', status: 'succeeded', verdict: null, findings: null,
+      started_at: '2026-01-01T11:13:32Z', ended_at: '2026-01-01T12:11:17Z', duration_seconds: 3463.9, cost_usd: 9.17806,
+      cost_kind: 'metered', session_id: '2ec98f78-7ccf-44c4-9d09-63b372816e19',
+      resume: { dir: "~/'runs/run-001/worktree-server'", command: "cd ~/'runs/run-001/worktree-server' && claude --resume 2ec98f78-7ccf-44c4-9d09-63b372816e19" },
+    },
+    {
+      key: 'repair:1', role: 'repair', label: 'Repair · server · 1', node_id: 'repair-1', lane: 'server', round: 1,
+      transport: null, model: 'claude-opus-4-8', status: 'succeeded', verdict: null, findings: null,
+      started_at: '2026-01-01T12:20:00Z', ended_at: '2026-01-01T12:40:00Z', duration_seconds: 1200, cost_usd: 1.5,
+      cost_kind: 'metered', session_id: null,
+      resume: null,
+    },
+    {
+      key: 'lane:server:1:1', role: 'lane_reviewer', label: 'Lane review · server · round 1 · GPT 6.1', node_id: 'lane-review-server-1', lane: 'server', round: 1,
+      transport: 'pi', model: 'openai-codex/gpt-6.1-sol', status: 'succeeded', verdict: null,
+      findings: { p0: 0, p1: 3, p2: 0 },
+      started_at: '2026-01-01T12:13:11Z', ended_at: '2026-01-01T12:13:39Z', duration_seconds: 28.1, cost_usd: 0.129156,
+      cost_kind: 'covered', session_id: null, resume: null,
+    },
+    {
+      key: 'reviewer:general:1', role: 'reviewer', label: 'Reviewer · general', node_id: 'reviewer-general', lane: null, round: 1,
+      transport: 'native', model: null, status: 'succeeded', verdict: 'blocked', findings: { p0: 0, p1: 2, p2: 1 },
+      started_at: '2026-01-01T13:00:00Z', ended_at: '2026-01-01T13:40:00Z', duration_seconds: 2400, cost_usd: 4.2,
+      cost_kind: 'metered', session_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3306',
+      resume: { dir: null, command: 'claude --resume 3f2504e0-4f89-41d3-9a0c-0305e82c3306' },
+    },
+    {
+      key: 'reviewer:coverage:1', role: 'reviewer', label: 'Reviewer · coverage', node_id: 'reviewer-coverage', lane: null, round: 1,
+      transport: 'native', model: null, status: 'succeeded', verdict: 'late blocked', findings: { p0: 0, p1: 1, p2: 0 },
+      started_at: '2026-01-01T13:00:00Z', ended_at: '2026-01-01T13:41:30Z', duration_seconds: 2490, cost_usd: 3.1,
+      cost_kind: 'metered', session_id: '85323d9c-d437-4b65-8d21-161b3dfb7b6f',
+      resume: { dir: null, command: 'claude --resume 85323d9c-d437-4b65-8d21-161b3dfb7b6f' },
+    },
+    {
+      key: 'reviewer:critique:1', role: 'critique', label: 'Reviewer · critique', node_id: 'reviewer-critique', lane: null, round: 1,
+      transport: 'native', model: null, status: 'succeeded', verdict: 'approved', findings: { p0: 0, p1: 0, p2: 0 },
+      started_at: '2026-01-01T13:00:00Z', ended_at: '2026-01-01T13:30:00Z', duration_seconds: 1800, cost_usd: null,
+      cost_kind: null, session_id: 'abda90ef-5635-47b5-a11e-d81f0e899100',
+      resume: { dir: null, command: 'claude --resume abda90ef-5635-47b5-a11e-d81f0e899100' },
+    },
+    {
+      key: 'panel:0:openai-codex/gpt-6-sol', role: 'panel_provider', label: 'Panel · GPT 6', node_id: 'panel', lane: null, round: null,
+      transport: 'pi', model: 'openai-codex/gpt-6-sol', status: 'succeeded', verdict: null, findings: { p0: 0, p1: 1, p2: 2 },
+      started_at: '2026-01-01T13:00:00Z', ended_at: '2026-01-01T13:05:00Z', duration_seconds: 300, cost_usd: 0.2,
+      cost_kind: 'covered', session_id: null, resume: null,
+    },
+    {
+      key: 'night:awaiting_approval:0:approval:0:claude', role: 'night_shift', label: 'Night shift · awaiting_approval · claude', node_id: 'approval', lane: null, round: null,
+      transport: 'claude', model: 'claude', status: 'succeeded', verdict: 'hold', findings: null,
+      started_at: null, ended_at: '2026-01-01T03:53:52Z', duration_seconds: null, cost_usd: 0.33914375,
+      cost_kind: 'metered', session_id: null, resume: null,
+    },
+  ],
+  totals: { metered_usd: 18.17720375, covered_usd: 0.329156, not_recorded: 1 },
+  lane_reviews: [
+    {
+      lane: 'server', round: 1, node_id: 'lane-review-server-1', snapshot: '2635fbfe1da48811b687b96c9de4159efc1168b7',
+      status: 'reviewed', started_at: '2026-01-01T12:13:11Z', ended_at: '2026-01-01T12:13:39Z',
+      fix_round: { started: true, repair_node_id: 'repair-1' },
+      reviewers: [{ transport: 'pi', model: 'openai-codex/gpt-6.1-sol', status: 'ok', duration_seconds: 28.1, cost_usd: 0.129156, error: null }],
+      findings: [{ severity: 'P1', file: 'server/dispatch.test.ts', line: null, title: 'S3 does not test registry reload wiring', detail: 'The test changes an injected array rather than rewriting a registry file.' }],
+    },
+    {
+      lane: 'viewer', round: 1, node_id: 'lane-review-viewer-1', snapshot: 'e6cec9dac58e6b821472d56e6c3f085a420fee88',
+      status: 'reviewed', started_at: '2026-01-01T12:20:00Z', ended_at: '2026-01-01T12:21:00Z',
+      fix_round: { started: false, reason: 'rounds used up, fix loop off or repair cap' },
+      reviewers: [{ transport: 'pi', model: 'openai-codex/gpt-6.1-sol', status: 'ok', duration_seconds: 37.7, cost_usd: 0.2, error: null }],
+      findings: [],
+    },
+  ],
+  night_shift: [
+    {
+      kind: 'awaiting_approval', node_id: 'approval', decided_at: '2026-01-01T03:53:52Z',
+      providers: [
+        { name: 'claude', option: 'hold', text: 'Confirm scope in the morning before approving.', confidence: 'high', needs_operator: true, cost_usd: 0.33914375, error: null },
+        { name: 'gpt-6-astra', option: null, text: null, confidence: null, needs_operator: null, cost_usd: null, error: 'openai-codex/gpt-6-astra failed rc=1: token expired' },
+      ],
+      agreement: 'one provider', jev: { error: 'not called: one provider' }, decision: 'held', option: 'hold',
+      command: null, held_reason: 'one provider (openai-codex/gpt-6-astra failed rc=1: token expired)',
+    },
+    {
+      kind: 'challenge_paused', node_id: 'challenge', decided_at: '2026-01-01T15:09:21Z',
+      providers: [
+        { name: 'claude', option: 'accept-challenge', text: 'The clarification is handled inside decisions.md.', confidence: 'medium', needs_operator: false, cost_usd: 0.21, error: null },
+        { name: 'gpt-6-astra', option: 'accept-challenge', text: 'Agree; accept.', confidence: 'high', needs_operator: false, cost_usd: null, error: null },
+      ],
+      agreement: 'agree', jev: { pick: 'accept-challenge', confidence: 0.82, pass_floor: true }, decision: 'executed', option: 'accept-challenge',
+      command: 'cd <path> && python -m workflow resume <path> --accept-challenge "…" --by panel', held_reason: null,
     },
   ],
 }

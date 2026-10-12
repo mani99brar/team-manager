@@ -11,8 +11,7 @@ import { join } from 'node:path'
 import type { RunAccepted } from '../../../contracts/projects/v1.ts'
 import {
   ADAPTER_ARTIFACTS, ADAPTER_SESSION, adapterResult, CANDIDATE_COMMIT, definition, done, event, GRAPH_NODES, OUTPUT_COMMIT_ADAPTER, OUTPUT_COMMIT_UI, PROJECT,
-  runDetail, T1, T3, UI_ARTIFACTS, UI_SESSION, uiResult, type NodeState,
-} from '../fixtures.ts'
+  runDetail, T1, T3, UI_ARTIFACTS, UI_SESSION, uiResult, type NodeState, sessionFactsOf} from '../fixtures.ts'
 import type { UxFixtureModule } from './index.ts'
 
 export const UX_ACCEPTED_WORKFLOW_ID = 'ux-accepted'
@@ -79,6 +78,8 @@ export const uxAccepted: UxFixtureModule = {
   payloads: {
     workflows: [UX_ACCEPTED_DEFINITION],
     runDetails: Object.fromEntries(SPECS.map(spec => [spec.runId, detailOf(spec)])),
+    // run-sessions ([L5]): the raw facts its seed writes, for the shared session-node projection.
+    reviewerIds: Object.fromEntries(SPECS.map(spec => [spec.runId, sessionFactsOf('1.12.0', null)])),
     runEvents: Object.fromEntries(SPECS.map(spec => [spec.runId, [
       event(spec.runId, 1, { type: 'status_changed', node_id: 'candidate', attempt: 1, status: 'succeeded', message: 'Combined candidate checks passed' }),
       event(spec.runId, 2, { type: 'status_changed', node_id: 'review', attempt: 1, status: 'failed', message: BLOCKED_REVIEW_MESSAGE }),

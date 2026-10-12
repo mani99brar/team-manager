@@ -38,12 +38,14 @@ import {
   type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
+import { validateSessions, type LaneReview, type LaneReviewFinding, type LaneReviewReviewer, type NightShiftDecision, type NightShiftProvider, type SessionRow, type Sessions, type SessionTotals } from '../../contracts/projects/sessions.ts'
 
 export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunAccepted, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { LaneReview, LaneReviewFinding, LaneReviewReviewer, NightShiftDecision, NightShiftProvider, SessionRow, Sessions, SessionTotals }
 export { isBlockingFinding }
 
 /** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
-export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND', panels: 'PANELS_NOT_FOUND' } as const
+export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND', panels: 'PANELS_NOT_FOUND', sessions: 'RUN_NOT_FOUND' } as const
 
 export type ApiErrorKind = 'network' | 'http' | 'malformed'
 
@@ -106,6 +108,7 @@ export const paths = {
   sidecar: (scope: RunScope) => `${paths.run(scope)}/sidecar`,
   attack: (scope: RunScope) => `${paths.run(scope)}/attack`,
   panels: (scope: RunScope) => `${paths.run(scope)}/panels`,
+  sessions: (scope: RunScope) => `${paths.run(scope)}/sessions`,
 }
 
 async function request(path: string, signal: AbortSignal | undefined, accept: string): Promise<Response> {
@@ -307,6 +310,14 @@ export function fetchAttackResult(scope: RunScope, signal?: AbortSignal): Promis
  */
 export function fetchPanelResults(scope: RunScope, signal?: AbortSignal): Promise<PanelResults> {
   return requestJson(paths.panels(scope), input => validatePanelResults(input), signal)
+}
+
+/**
+ * Every session that worked on the run (contract 1.13.0, docs/PRD_RUN_SESSIONS.md Appendix A), read live: polled like the
+ * panel. An unknown run is a 404 `RUN_NOT_FOUND`, which `orNotRecorded` loads as null (the page then shows "not recorded").
+ */
+export function fetchSessions(scope: RunScope, signal?: AbortSignal): Promise<Sessions> {
+  return requestJson(paths.sessions(scope), input => validateSessions(input), signal)
 }
 
 /** Whether a failure is the contract's 404 for a section the run's export does not carry. */

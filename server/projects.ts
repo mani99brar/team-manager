@@ -15,6 +15,9 @@ import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult,
 import { DIRECTORY_FLAGS, at } from './files.ts'
 import { archivedRounds, FixLoopError, mapRepairs, mapReviewRounds, REPAIRS_FILE, REPAIR_BYTE_LIMIT, redactDeep, REVIEW_ROUNDS_FILE } from './fixLoop.ts'
 import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConfig, type ProjectsConfig, type WorkflowConfig } from './projectsConfig.ts'
+import { nightShiftDir, readNightShift } from './nightShift.ts'
+import { panelNodeStatus, projectSessionNodes, readLaneReviewFacts, readReviewerReceipts, readSessions, type ProjectedNode, type SessionNodeInput, type SessionsInput } from './sessions.ts'
+import type { Sessions } from '../contracts/projects/sessions.ts'
 
 /**
  * Read-only access to persisted workflow runs. A run is a directory below a registered workflow's `runs_root`
@@ -126,10 +129,36 @@ export const PANEL_BYTE_LIMIT = 4 * 1024 * 1024
 /**
  * Absolute filesystem paths in persisted messages are never forwarded to clients. A path starts at the string start
  * or after any character that cannot be part of a path (so Markdown punctuation such as `[`, `|`, `<`, `*` and `(`
- * counts), or as the target of a `file://` URI, which is redacted together with its scheme.
+ * counts), or as the target of a `file://` URI, which is redacted together with its scheme. A segment holds any Unicode
+ * letter, mark or digit, so a directory named `données` or `用户` is a path segment like an ASCII one. Only a letter of a
+ * script written with spaces (Latin, Greek, Cyrillic) or a digit before the slash makes it a relative path: CJK, Thai and
+ * other scripts put no space before a path, so `无法读取/home/u` is redacted (a relative path in them may be over-redacted).
  */
 export function redactPaths(text: string): string {
-  return text.replace(/(?:file:\/\/(?=\/)|(?<![A-Za-z0-9._@~+/-]))(?:~|\/[A-Za-z0-9._@~+-]+)(?:\/[A-Za-z0-9._@~+-]*)+/g, '<path>')
+  return text.replace(/(?:file:\/\/(?=\/)|(?<![\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}._@~+/-]))(?:~|\/[\p{L}\p{M}\p{N}._@~+-]+)(?:\/[\p{L}\p{M}\p{N}._@~+-]*)+/gu, '<path>')
+}
+
+/**
+ * Credential-shaped strings are never forwarded (docs/PRD_RUN_SESSIONS.md 4, [P6], [L1]): a GitHub token, an OpenAI-style
+ * `sk-` key, a Slack `xox?-` token, a `Bearer` header or a `token=`/`password=` assignment becomes `<redacted>`. Each pattern
+ * is anchored on a word boundary with a minimum tail, so ordinary words such as `task-file` or a lone `sk-` stay intact.
+ */
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /\bghp_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g,
+  /\btoken=[A-Za-z0-9._~+/-]{12,}/g,
+  /\bpassword=\S{6,}/g,
+]
+export function redactCredentials(text: string): string {
+  return CREDENTIAL_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text)
+}
+
+/** Every free text served under the sessions route: path-redacted, then credential-filtered (the resume command is exempt). */
+export function redactText(text: string): string {
+  return redactCredentials(redactPaths(text))
 }
 
 /** `stored` id pattern shared with the registry; also keeps run directories one safe component. */
@@ -457,6 +486,10 @@ export type LoadedRun = {
   panels: unknown
   /** The controller PID the events last logged, for the list cache's liveness check; null when none was logged. */
   controller: ControllerPin | null
+  /** The facts the run-sessions stage projection was keyed on (PRD 4); the sessions route reads the same ones. */
+  sessionInput: SessionNodeInput
+  /** The panel record the panels route serves (live `panel.json` first, then the export), or null when it answers 404. */
+  panelRecord: PanelResults | null
 }
 
 export type ArtifactContent = {
@@ -626,7 +659,7 @@ function errno(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException)?.code
 }
 
-function isMissing(error: unknown): boolean {
+export function isMissing(error: unknown): boolean {
   const code = errno(error)
   return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP' || code === 'ENXIO'
 }
@@ -636,7 +669,7 @@ function isMissing(error: unknown): boolean {
  * redirect the read outside it. Returns null when any component is missing, a symlink or not the expected kind.
  * The final file is read at most `limit` bytes; a larger file is refused rather than truncated.
  */
-async function readBounded(directory: FileHandle, components: readonly string[], limit: number): Promise<Buffer | null> {
+export async function readBounded(directory: FileHandle, components: readonly string[], limit: number): Promise<Buffer | null> {
   const handles: FileHandle[] = []
   try {
     let parent = directory
@@ -683,7 +716,7 @@ async function runFingerprint(directory: FileHandle): Promise<string> {
   return hash.digest('hex')
 }
 
-async function openDirectory(parent: FileHandle, name: string): Promise<FileHandle | null> {
+export async function openDirectory(parent: FileHandle, name: string): Promise<FileHandle | null> {
   try {
     return await fs.open(at(parent, name), DIRECTORY_FLAGS)
   } catch (error) {
@@ -1284,39 +1317,104 @@ export class RunStore {
   async panelResults(scope: Scope, runId: string): Promise<PanelResults> {
     const run = await this.loadRun(scope, runId)
     const notRecorded = () => new ProjectApiError(404, 'PANELS_NOT_FOUND', 'No panel is recorded for this run: it has no panels, its record is not readable or its export predates the multi-provider panel.')
-    // A run without `plan.panels` exports null and never writes `panel.json`: a stray live file is not a panel of this run.
-    if (run.panels === undefined || run.panels === null) throw notRecorded()
     const skip = (source: PanelResults['source'], reason: string) => this.options.warn?.('Panel record skipped', {
       project_id: scope.project.project_id, workflow_id: scope.workflow.workflow_id, run: runId, source, reason,
     })
-    const live = await this.withRunsRoot(scope, async root => {
+    const record = await this.withRunsRoot(scope, async root => {
       const directory = await openDirectory(root, runId)
-      if (!directory) return null
       try {
-        return await readBounded(directory, [PANEL_FILE], PANEL_BYTE_LIMIT)
-      } catch (error) {
-        if (!(error instanceof ProjectApiError)) throw error
-        skip('live', `${PANEL_FILE} exceeds the ${PANEL_BYTE_LIMIT} byte read limit`)
-        return null
+        return await resolvePanelRecord(directory, run.panels, skip)
+      } finally {
+        await directory?.close()
+      }
+    })
+    if (record === null) throw notRecorded()
+    return record
+  }
+
+  /**
+   * Every session that worked on a run (contract 1.13.0, docs/PRD_RUN_SESSIONS.md Appendix A): the per-session files read live
+   * from the run directory, the lane-review records, and the night-shift decisions read from `MD_MANAGER_NIGHT_SHIFT_DIR`. A
+   * missing or malformed file makes a fact null or drops one row, never an error for the run ([O2]). An unknown run is a 404.
+   */
+  async sessions(scope: Scope, runId: string): Promise<Sessions> {
+    const run = await this.loadRun(scope, runId)
+    const definition = run.detail.definition
+    // Lanes come from the definition's `verify_<lane>` nodes (what `laneMap` tracks), so the reader works for any run on disk.
+    const lanes = laneNamesOf(definition)
+    // The latest `lane_review:` event words per lane and round on `verify_<lane>` (PRD 3.2): the no-fix reason's source.
+    const laneReviewEventWords = new Map<string, string>()
+    for (const event of run.events) {
+      const match = /^lane_review: ([a-z][a-z0-9-]*) round (\d+)(?::)?(.*)$/.exec(event.message)
+      if (match && event.node_id === `verify_${match[1]}`) laneReviewEventWords.set(`${match[1]}:${match[2]}`, match[3]!.trim() || event.message)
+    }
+    const exposed = this.config.viewer?.expose_run_dir.includes(scope.project.project_id) ?? false
+    const facts = await this.nightShiftFacts(scope, runId)
+    const nightShift = await readNightShift(nightShiftDir(this.options.home, process.env.MD_MANAGER_NIGHT_SHIFT_DIR), {
+      runId, home: this.options.home, ...facts, redact: redactText,
+    })
+    return this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) throw new ProjectApiError(404, 'RUN_NOT_FOUND', 'No run with that ID exists in this workflow.')
+      try {
+        const input: SessionsInput = {
+          directory, runId, definition, lanes, review: run.review, nodes: run.sessionInput, fixLoop: run.fixLoop,
+          panels: run.panelRecord, laneReviewEventWords, nightShift, resume: { exposed, home: this.options.home },
+        }
+        return await readSessions(input)
       } finally {
         await directory.close()
       }
     })
-    if (live !== null) {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(live.toString('utf8'))
-      } catch {
-        parsed = undefined
-      }
-      const served = parsed === undefined ? { error: `${PANEL_FILE} is not valid JSON` } : projectPanels(parsed, 'live')
-      if ('result' in served) return served.result
-      skip('live', served.error)
+  }
+
+  /**
+   * The export-visible facts the sessions projection is keyed on (PRD 4, [P2], [L1], [L4], [L11]): whether the export carries a
+   * review section and its raw reviewer list with each one's status, whether it is 1.4.0+, the plan's reviewer ids and their
+   * live receipts (for a round still running), the review node's status, the panel node's status when the panels route answers,
+   * and the lane-review records on disk with their status. The mock reproduces these from each fixture's seed ([L5]).
+   */
+  private async sessionNodeInput(directory: FileHandle, definition: WorkflowDefinition, state: RunExport, planJson: unknown, snapshot: RunSnapshot, panelRecord: PanelResults | null): Promise<SessionNodeInput> {
+    const rawReviewers = state.review?.reviewers?.map(entry => ({ reviewer_id: entry.reviewer_id, status: entry.status })) ?? null
+    const planReviewerIds = readPlanReviewerIds(planJson)
+    const receiptIds = [...planReviewerIds, ...(rawReviewers ?? []).map(entry => entry.reviewer_id), DEFAULT_REVIEWER_ID]
+    return {
+      reviewSection: state.review != null,
+      exportAtLeast140: EXPORT_VERSIONS.indexOf(state.version) >= EXPORT_VERSIONS.indexOf('1.4.0'),
+      rawReviewers,
+      planReviewerIds,
+      receipts: await readReviewerReceipts(directory, receiptIds),
+      reviewNodeStatus: snapshot.nodes.find(node => node.node_id === 'review')?.status ?? null,
+      panelStatus: panelRecord === null ? null : panelNodeStatus(panelRecord),
+      laneReviews: await readLaneReviewFacts(directory, laneNamesOf(definition)),
+      existingNodeIds: new Set(definition.nodes.map(node => node.node_id)),
     }
-    const served = projectPanels(run.panels, 'export')
-    if ('result' in served) return served.result
-    skip('export', served.error)
-    throw notRecorded()
+  }
+
+  /** The night-shift matching facts ([P13]): this run's realpath, every registered runs-root realpath, and run-id uniqueness. */
+  private async nightShiftFacts(scope: Scope, runId: string): Promise<{ runDirRealpath: string | null; runsRootRealpaths: Set<string>; uniqueRunId: boolean }> {
+    const runDirRealpath = await this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) return null
+      try {
+        return await realpathOrNull(at(directory))
+      } finally {
+        await directory.close()
+      }
+    })
+    const runsRootRealpaths = new Set<string>()
+    let matches = 0
+    for (const project of this.config.projects) {
+      for (const workflow of project.workflows) {
+        const real = await realpathOrNull(workflow.runs_root)
+        if (real !== null) runsRootRealpaths.add(real)
+        try {
+          const names = await fs.readdir(workflow.runs_root, { withFileTypes: true })
+          matches += names.filter(entry => entry.isDirectory() && entry.name === runId).length
+        } catch { /* an unreadable root contributes no match */ }
+      }
+    }
+    return { runDirRealpath, runsRootRealpaths, uniqueRunId: matches === 1 }
   }
 
   /**
@@ -1389,7 +1487,8 @@ export class RunStore {
     if (state.run_id !== runId) throw invalidRun(runId, 'run-state.json names a different run_id than its directory')
     const planBytes = await readBounded(directory, ['plan.json'], this.options.exportByteLimit)
     if (planBytes === null) throw invalidRun(runId, 'plan.json is missing')
-    const plan = planSchema.safeParse(parseJson(planBytes, `plan.json of run "${runId}"`))
+    const planJson = parseJson(planBytes, `plan.json of run "${runId}"`)
+    const plan = planSchema.safeParse(planJson)
     if (!plan.success) throw invalidRun(runId, `plan.json ${issueText(plan.error)}`)
     if (plan.data.run_id !== state.run_id || plan.data.base_commit !== state.base_commit) throw invalidRun(runId, 'plan.json and run-state.json disagree about the run identity')
     let definition: WorkflowDefinition
@@ -1450,14 +1549,27 @@ export class RunStore {
     const critiqueArtifacts = (state.review?.critique_artifacts ?? []).map(a => ({ id: a.id, path: a.path, sha256: a.sha256, bytes: a.bytes }))
     const activity = await this.runActivity(directory, { detail, events, inputs, review }, rawEvents)
     const run_dir = await this.runDirectory(scope, directory)
+    // The sessions feature's advisory stage nodes (reviewer/panel/lane-review) are joined into the served graph after the
+    // run's own status and activity are fixed, so they never move the fold, the focus or the Now banner ([G3], PRD 4). The
+    // run detail passed to triage above is the base graph, so the server never focuses one; the one pure projection function
+    // the worker-phase mock also calls keeps both phases showing the same cards ([L1], [P2]).
+    // The panel node exists exactly when the panels route answers: the same live-then-export resolution ([P3], [L11] 4).
+    const panelRecord = await resolvePanelRecord(directory, state.panels, () => {})
+    const sessionInput = await this.sessionNodeInput(directory, shown, state, planJson, snapshot, panelRecord)
+    const sessionNodes = projectSessionNodes(shown, sessionInput)
+    const gateDeps = sessionNodes.filter(node => node.projected !== 'lane_review').map(node => node.node_id)
+    const withGate = <T extends { node_id: string; depends_on: string[] }>(nodes: readonly T[]): T[] =>
+      nodes.map(node => node.node_id === 'review' && gateDeps.length > 0 ? { ...node, depends_on: [...node.depends_on, ...gateDeps] } : node)
+    const detailDefinition = { ...shown, nodes: [...withGate(shown.nodes), ...sessionNodes.map(sessionDefinitionNode)] }
+    const detailSnapshot = { ...snapshot, nodes: [...withGate(snapshot.nodes), ...sessionNodes.map(sessionSnapshotNode)] }
     try {
-      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition: shown, snapshot, run_dir, ...(loop ? { fixLoop: loop } : {}), ...accepted ? { accepted } : {} })
+      detail = validateRunDetail({ summary: { ...summary, contract_version: '1.5.0', activity }, definition: detailDefinition, snapshot: detailSnapshot, run_dir, ...(loop ? { fixLoop: loop } : {}), ...accepted ? { accepted } : {} })
     } catch (error) {
       throw contractFailure('run activity', error)
     }
     const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
     const controller = logged ? { pid: Number(PID_ROW.exec(logged.message)![1]), at: logged.time } : null
-    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, critiqueArtifacts, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller }
+    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, critiqueArtifacts, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller, sessionInput, panelRecord }
   }
 
 
@@ -1942,6 +2054,31 @@ function repairDefinitionNode(repair: RepairEntry): WorkflowDefinition['nodes'][
   return { node_id: repair.node_id, label: `Repair ${repair.lane} ${repair.n}`, kind: 'worker', depends_on: [repair.blocked_step] }
 }
 
+/** A projected session node as a pinned-definition node (its label, kind and dependencies), joined like a repair node. */
+function sessionDefinitionNode(node: ProjectedNode): WorkflowDefinition['nodes'][number] {
+  return { node_id: node.node_id, label: node.label, kind: node.kind, depends_on: [...node.depends_on] }
+}
+
+/** A projected session node as a snapshot node: its advisory status, no result link, never part of the run's status fold. */
+function sessionSnapshotNode(node: ProjectedNode): RunSnapshot['nodes'][number] {
+  return { node_id: node.node_id, kind: node.kind, depends_on: [...node.depends_on], status: node.status, attempt: node.status === 'pending' ? 0 : 1, session_id: node.session_id, result_uri: null, lane_results: [] }
+}
+
+/** The reviewer ids a run's plan declares (`plan.json` `reviewers[].reviewer_id`), as written; [] when it declares none. */
+function readPlanReviewerIds(planJson: unknown): string[] {
+  if (planJson && typeof planJson === 'object' && Array.isArray((planJson as { reviewers?: unknown }).reviewers)) {
+    return ((planJson as { reviewers: unknown[] }).reviewers)
+      .map(entry => entry && typeof entry === 'object' ? (entry as { reviewer_id?: unknown }).reviewer_id : null)
+      .filter((value): value is string => typeof value === 'string' && ID_PATTERN.test(value))
+  }
+  return []
+}
+
+/** A run's lanes as its definition names them: every `verify_<lane>` node. */
+function laneNamesOf(definition: WorkflowDefinition): string[] {
+  return definition.nodes.flatMap(node => node.node_id.startsWith('verify_') ? [node.node_id.slice('verify_'.length)] : [])
+}
+
 /** Inserts each repair node right after the step it answers (repairs of one step in journal order); nothing depends on them. */
 function insertRepairs<T extends { node_id: string }>(nodes: readonly T[], loop: FixLoop | null, make: (repair: RepairEntry) => T): T[] {
   if (!loop || loop.repairs.length === 0) return [...nodes]
@@ -2072,6 +2209,41 @@ function projectAttack(runId: string, raw: unknown, source: AttackResult['source
 // ---- The multi-provider panel's record (contract 1.9.0) --------------------------------------------------------
 
 /**
+ * The record the panels route serves (Appendix A's live-vs-export rule), or null where it answers 404 `PANELS_NOT_FOUND`: the
+ * live `<run>/panel.json` whenever it is readable and valid (a valid live file always wins), else the export's `panels`
+ * section when valid; null for an export before 1.9.0 or a run without panels (even beside a live file: a run without
+ * `plan.panels` exports null and never writes one), or a record invalid both live and in the export. The route and the
+ * `panel` node's projection both call this, so the node exists exactly when the route answers ([P3], [L11] 4).
+ */
+async function resolvePanelRecord(directory: FileHandle | null, exportPanels: unknown, skip: (source: PanelResults['source'], reason: string) => void): Promise<PanelResults | null> {
+  if (exportPanels === undefined || exportPanels === null) return null
+  if (directory !== null) {
+    let live: Buffer | null = null
+    try {
+      live = await readBounded(directory, [PANEL_FILE], PANEL_BYTE_LIMIT)
+    } catch (error) {
+      if (!(error instanceof ProjectApiError)) throw error
+      skip('live', `${PANEL_FILE} exceeds the ${PANEL_BYTE_LIMIT} byte read limit`)
+    }
+    if (live !== null) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(live.toString('utf8'))
+      } catch {
+        parsed = undefined
+      }
+      const served = parsed === undefined ? { error: `${PANEL_FILE} is not valid JSON` } : projectPanels(parsed, 'live')
+      if ('result' in served) return served.result
+      skip('live', served.error)
+    }
+  }
+  const served = projectPanels(exportPanels, 'export')
+  if ('result' in served) return served.result
+  skip('export', served.error)
+  return null
+}
+
+/**
  * The record (`<run>/panel.json` or the export's `panels` section) onto the contract: Appendix A's shape and rules, path-
  * redacted texts (a finding's title, detail and file label, every error), Z times. Unknown keys are dropped. The record names
  * no run, so there is no foreign-file check. Returns the reason instead when it does not conform.
@@ -2178,7 +2350,7 @@ function consistentQuestions(questions: readonly WorkerQuestion[]): boolean {
     && (question.answer === null) === (question.answered_at === null) && (question.answer !== null || index === questions.length - 1))
 }
 
-async function realpathOrNull(path: string): Promise<string | null> {
+export async function realpathOrNull(path: string): Promise<string | null> {
   try {
     return await fs.realpath(path)
   } catch {

@@ -1,6 +1,9 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import { attemptResultUris, type Now, type Timeline } from '../../contracts/projects/triage.ts'
-import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
+import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type Sessions, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
+import { decisionsForNode, isProjectedSessionNode, laneReviewerRowsOf, laneReviewOf, sessionsForNode } from './sessions/model.ts'
+import { LaneReviewBody, NightShiftBlock, PanelSessions, ReviewerNodeBody, SessionBlock } from './sessions/Sessions.tsx'
+import { ReviewerFindings } from './ReviewDetail.tsx'
 import { ChallengeHeadline } from './Challenge.tsx'
 import { archivedRounds } from './critique.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
@@ -51,6 +54,8 @@ type Props = {
   /** The multi-provider panel's record, polled by the run page (null once loaded when not recorded); the challenge view shows its `challenge`-stage panels. */
   panels: Resource<PanelResults | null>
   onRetryPanels: () => void
+  /** The run's sessions payload (run-sessions), polled by the run page (null once loaded when not recorded). */
+  sessions: Resource<Sessions | null>
   /** The run's timeline, once its events loaded: the header's times, attempts and markers. */
   timeline: Timeline | null
   /** The run's situation, once derived: its next step is repeated on the focus node. */
@@ -94,9 +99,15 @@ function WorkerFigures({ worker, files }: { worker: RunInputs['workers'][number]
  * controller's own steps) and History, always last. Empty sections are absent; a result the launch and verify nodes share is said once.
  * An earlier attempt's page shows that attempt's own result under a banner that leads back to the latest.
  */
-export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, sidecar, onRetrySidecar, attack, onRetryAttack, panels, onRetryPanels, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
+export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, sidecar, onRetrySidecar, attack, onRetryAttack, panels, onRetryPanels, sessions, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
   const definitionNodes = detail.definition.nodes
   const snapshotNodes = detail.snapshot.nodes
+  // Run-sessions: a projected reviewer/panel/lane-review node, and the session block and night-shift block every node may carry.
+  const isProjectedSession = isProjectedSessionNode(node.node_id)
+  const sessionsData = sessions.status === 'ready' ? sessions.data : null
+  const repairHref = useCallback((nodeId: string) => detail.definition.nodes.some(candidate => candidate.node_id === nodeId) ? runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId) : null, [detail.definition.nodes, scope])
+  // A reviewer node (`reviewer-<id>`) reads the recorded review for its own findings; the panel and lane reviews read sessions.
+  const projectedReviewer = isProjectedSession && node.node_id.startsWith('reviewer-') ? node.node_id.slice('reviewer-'.length) : null
 
   const isWorker = definition.kind === 'worker'
   const isChallenge = isChallengeNode(definition)
@@ -155,7 +166,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   // (docs/PRD_VIEWER_UX.md 4.7, 4.9). The snapshot links it; an older export has no link, so the first attempt is asked for
   // once the node ran. The fallback path before a review is recorded equals the linked one after, so the key also names
   // what the node shows, and a review opened before its verdict is read again when the node's status changes.
-  const reviewSource = isReview ? node : isApproval ? reviewNode : null
+  const reviewSource = isReview ? node : isApproval || projectedReviewer !== null ? reviewNode : null
   const reviewPath = reviewSource === null ? null
     : reviewSource.result_uri !== null ? scopedReviewPath(scope, reviewSource.result_uri)
       : reviewSource.status === 'pending' ? null : paths.review(scope, Math.max(reviewSource.attempt, 1))
@@ -238,6 +249,11 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     ...(challengePanels > 0 ? [{ key: 'panel', label: 'Panel', count: challengePanels }] : []),
     ...(isSidecar ? sidecarSectionEntries(sidecar.status === 'ready' ? sidecar.data : null) : []),
     ...(isAttack ? [{ key: 'attack', label: 'Attack pass' }] : []),
+    // Run-sessions: a projected node's own sections, then the session blocks and night-shift decisions a pinned node carries.
+    ...(isProjectedSession ? (node.node_id === 'panel' ? [{ key: 'panel', label: 'Panel' }, { key: 'provider-sessions', label: 'Provider sessions' }]
+      : node.node_id.startsWith('lane-review-') ? [{ key: 'lane-review', label: 'Lane review' }] : [{ key: 'reviewer', label: 'Reviewer' }]) : []),
+    ...(sessionsData && !isProjectedSession && sessionsForNode(sessionsData, node.node_id).length > 0 ? [{ key: 'sessions', label: 'Sessions', count: sessionsForNode(sessionsData, node.node_id).length }] : []),
+    ...(sessionsData && decisionsForNode(sessionsData, node.node_id).length > 0 ? [{ key: 'night-shift', label: 'Night shift', count: decisionsForNode(sessionsData, node.node_id).length }] : []),
     ...(reuse.length > 0 ? [{ key: 'reuse', label: 'Reuse', count: reuse.length }] : []),
     { key: 'history', label: 'History', ...(events.status === 'ready' ? { count: nodeEvents.length } : {}) },
   ]
@@ -316,7 +332,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           />
         ) : isChallenge ? (
           <>
-            <ChallengeSections inputs={inputs} onRetryInputs={onRetryInputs} />
+            <ChallengeSections inputs={inputs} onRetryInputs={onRetryInputs} sessionsRecorded={sessionsData !== null && sessionsForNode(sessionsData, node.node_id).length > 0} />
             {challengePanels > 0 && (
               <NodeSection sectionKey="panel" title="Panel" testId="panel-section">
                 <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="challenge" />
@@ -354,6 +370,41 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             review={reviewData}
             renderResult={renderResult}
           />
+        ) : isProjectedSession ? (
+          // Run-sessions: a projected node is a session of the review (a reviewer, the panel) or of a verify step (a lane review).
+          sessionsData === null ? (
+            <NodeSection sectionKey="session" title="Session" testId="session-section">
+              <p className="projects-muted" data-testid="session-not-recorded">{sessions.status === 'loading' || sessions.status === 'idle' ? 'Loading the run\'s sessions…' : 'No session of this run is recorded.'}</p>
+            </NodeSection>
+          ) : node.node_id === 'panel' ? (
+            <>
+              <NodeSection sectionKey="panel" title="Panel" testId="panel-section">
+                <ProviderPanelBody record={panels} onRetry={onRetryPanels} />
+              </NodeSection>
+              <NodeSection sectionKey="provider-sessions" title="Provider sessions" testId="panel-sessions-section">
+                <PanelSessions sessions={sessionsData} />
+              </NodeSection>
+            </>
+          ) : node.node_id.startsWith('lane-review-') ? (
+            <NodeSection sectionKey="lane-review" title="Lane review" testId="lane-review-section">
+              {laneReviewOf(sessionsData, node.node_id)
+                ? <LaneReviewBody review={laneReviewOf(sessionsData, node.node_id)!} rows={laneReviewerRowsOf(sessionsData, node.node_id)} repairHref={repairHref} onNavigate={onNavigate} />
+                : <p className="projects-muted" data-testid="lane-review-none">No lane review is recorded for this node.</p>}
+            </NodeSection>
+          ) : (
+            <NodeSection sectionKey="reviewer" title="Reviewer" testId="reviewer-section">
+              <ReviewerNodeBody
+                sessions={sessionsData}
+                nodeId={node.node_id}
+                findings={reviewData && projectedReviewer !== null && reviewData.reviewers.some(entry => entry.reviewer_id === projectedReviewer) ? (
+                  <ReviewerFindings
+                    review={reviewData} reviewerId={projectedReviewer} scope={scope} definitionNodes={definitionNodes} snapshotNodes={snapshotNodes}
+                    inputs={inputs} refreshToken={refreshToken} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile}
+                  />
+                ) : <p className="projects-muted" data-testid="reviewer-findings-none">{review.status === 'loading' ? 'Loading the recorded review…' : 'No findings are recorded for this round yet.'}</p>}
+              />
+            </NodeSection>
+          )
         ) : (
           <>
             {lanes.length > 0 && (
@@ -374,6 +425,21 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             ))}
           </>
         )
+      )}
+
+      {sessionsData && !isProjectedSession && sessionsForNode(sessionsData, node.node_id).length > 0 && (
+        // Every session that worked on this node (a challenge's attempts, newest first; a worker; a repair), each its own block.
+        <NodeSection sectionKey="sessions" title={sessionsForNode(sessionsData, node.node_id).length === 1 ? 'Session' : 'Sessions'} testId="session-section">
+          <div className="ss-blocks">
+            {sessionsForNode(sessionsData, node.node_id).map(row => <SessionBlock key={row.key} row={row} />)}
+          </div>
+        </NodeSection>
+      )}
+
+      {sessionsData && decisionsForNode(sessionsData, node.node_id).length > 0 && (
+        <NodeSection sectionKey="night-shift" title="Night-shift decisions" testId="night-shift-section">
+          <NightShiftBlock decisions={decisionsForNode(sessionsData, node.node_id)} />
+        </NodeSection>
       )}
 
       {reuse.length > 0 && (

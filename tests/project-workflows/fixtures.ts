@@ -41,9 +41,12 @@ import {
   type AttackResult, type PanelResults, type Project, type ReviewResult, type RunDetail, type RunInputs, type SidecarLedger, type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
+import type { SessionFacts } from './fixtures/index.ts'
 
 export const PROJECT: Project = { project_id: 'alpha-project', name: 'Alpha project' }
 export const EMPTY_PROJECT: Project = { project_id: 'empty-project', name: 'Empty project' }
+/** A third project the registry does not list under `viewer.expose_run_dir` (run-sessions: the bare resume form, [L3], [L11] 5). */
+export const UNEXPOSED_PROJECT: Project = { project_id: 'gamma-project', name: 'Gamma project' }
 export const WORKFLOW_ID = 'feature-flow'
 export const WORKFLOW_NAME = 'Feature flow'
 /** The workflow whose policy declares three lanes; its runs are exported at 1.3.0. */
@@ -213,10 +216,11 @@ export const REVIEWERS_DEFINITION = definition(PROJECT.project_id, REVIEWERS_WOR
 export const CLARITY_DEFINITION = definition(PROJECT.project_id, CLARITY_WORKFLOW_ID, CLARITY_WORKFLOW_NAME, CLARITY_NODES)
 export const GUARDED_DEFINITION = definition(PROJECT.project_id, GUARDED_WORKFLOW_ID, GUARDED_WORKFLOW_NAME, GUARDED_NODES)
 
-export const projectList = { projects: [PROJECT, EMPTY_PROJECT] }
+export const projectList = { projects: [PROJECT, EMPTY_PROJECT, UNEXPOSED_PROJECT] }
 export const workflowLists: Record<string, { workflows: WorkflowDefinition[] }> = {
   [PROJECT.project_id]: { workflows: [CURRENT_DEFINITION, EMPTY_WORKFLOW_DEFINITION, LANES_DEFINITION, REVIEWERS_DEFINITION, CLARITY_DEFINITION, GUARDED_DEFINITION] },
   [EMPTY_PROJECT.project_id]: { workflows: [] },
+  [UNEXPOSED_PROJECT.project_id]: { workflows: [] },
 }
 
 export const T0 = '2026-03-01T10:00:00Z'
@@ -1085,6 +1089,19 @@ export function reviewFindings(runId: string, leak = PATH_TOKEN): RawFinding[] {
     { severity: 'P2', message: 'The review route re-reads the export on every request.', disposition: 'accepted', worker: 'adapter', requirement: ADAPTER_QUOTE },
     { severity: 'P2', message: 'Both lanes duplicate the redaction regex in their tests.', disposition: 'accepted', worker: 'both', requirement: null },
   ]
+}
+
+/**
+ * run-sessions ([L5]): the raw facts a seeded run gives the shared session-node projection, from the same values its seed
+ * passes to `writeRun`: the export version, the review section it writes (none before export 1.2.0 or when null; its raw
+ * reviewers with each status, null when it lists none) and the reviewers its plan pins.
+ */
+export function sessionFactsOf(version: string, review: RawReviewSection | null | undefined, planReviewers?: readonly string[]): SessionFacts {
+  return {
+    version,
+    review: version === '1.0.0' || !review ? null : { reviewers: review.reviewers?.map(entry => ({ reviewer_id: entry.reviewer_id, status: entry.status })) ?? null },
+    plan: [...(planReviewers ?? [])],
+  }
 }
 
 /** The export's `review` section for a run, or null for runs whose review was not reached or not exported. */
