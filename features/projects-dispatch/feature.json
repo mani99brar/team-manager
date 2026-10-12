@@ -1,6 +1,6 @@
 {
   "version": "2.10.0",
-  "name": "Projects dispatch, run 004 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-003, whose review blocked only on the handoffs): finish the server handoff (a hand-break for every S5 test) and the viewer handoff (every open P2 kept); docs only; a GPT 6.1 lane reviewer per lane; read-only",
+  "name": "Projects dispatch, run 005 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-004, whose review an access outage cut; restores its candidate d688375, which follows 003, whose review blocked only on the handoffs): finish the server handoff (a hand-break for every S5 test) and the viewer handoff (every open P2 kept); docs only; a GPT 6.1 lane reviewer per lane; read-only",
   "branch_prefix": "feature/projects-dispatch",
   "prd": "docs/PRD_PROJECTS_DISPATCH.md",
   "policy": "policy.json",

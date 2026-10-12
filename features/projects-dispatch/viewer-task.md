@@ -1,6 +1,8 @@
-# Viewer worker, run 004: finish the viewer handoff (PRD_PROJECTS_DISPATCH)
+# Viewer worker, run 005: finish the viewer handoff (PRD_PROJECTS_DISPATCH)
 
 ## Goal
+
+**Run 005 (follows projects-dispatch-004).** Run 004's candidate d688375 passed every check and its lane review (no findings); its independent review never ran: Claude subscription access failed for every session on 2026-10-11 18:44-18:52 UTC and the reviewer deadline ran out ([L16]). Your prompt first restores your owned paths at d688375, which is run 004's finished work for the items below. Check each acceptance line against the restored files and change only what fails it; an unchanged restore is the expected outcome. Say in the completion what you checked.
 
 Run projects-dispatch-003's code passed every check, both lane reviews and the critique; its independent review blocked only on the handoffs (`features/projects-dispatch/review-003.md`). Your base is 003's candidate. Change `docs/handoff/projects-dispatch-viewer.md` (and `docs/VIEWER_DISPATCH.md` if it names deleted rules) only.
 
