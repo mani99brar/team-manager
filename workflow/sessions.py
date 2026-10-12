@@ -382,9 +382,11 @@ def worker_effort(env=None, plan: dict | None = None) -> list[str]:
 # DEFAULT_WORKER_MODEL; a judge model left unset means Claude Code's default, and no --model is passed. The judges default to
 # high effort, the workers to WORKFLOW_WORKER_EFFORT read once at prepare. Plans pinned before roles keep today's behaviour:
 # the variable for workers, nothing for the judges.
+# The default is Opus 5.5, never Opus 4.8 (operator rule, 2026-10-12): a feature still sets each lane's own `model`, Sonnet 5.5
+# for UI lanes and Opus 5.5 for contracts, server and controller lanes.
 ROLES = ("worker", "judges")
 JUDGE_EFFORT = "high"
-DEFAULT_WORKER_MODEL = "claude-opus-4-8"
+DEFAULT_WORKER_MODEL = "claude-opus-5-5"
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9]\S{0,127}")
 
 

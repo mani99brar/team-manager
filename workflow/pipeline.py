@@ -1428,7 +1428,7 @@ def main():
                                                                     "attention (default 2, 0 disables), pinned")
     parser.add_argument("--critical", action="store_true", help="prepare --automatic: the feature is marked critical (feature.json 2.4.0); "
                                                                 "the run stops after review for approve, whatever the profile")
-    parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-4-8, sessions.DEFAULT_WORKER_MODEL)")
+    parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-5-5, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="prepare: the workers' effort, pinned (default: WORKFLOW_WORKER_EFFORT, read now)")
     parser.add_argument("--lane-model", action="append", metavar="LANE=MODEL",
                         help="prepare: one lane's worker model, pinned as plan.nodes[<lane>].roles (feature.json 2.7.0 workers[].model; default: --worker-model)")

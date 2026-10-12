@@ -1550,7 +1550,7 @@ class RecordTests(unittest.TestCase):
         run, code, err = self.prepare_cli("pinned-run", env={"WORKFLOW_WORKER_EFFORT": "medium"})
         self.assertEqual(code, 0, err)
         plan = read_json(run / "plan.json")
-        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-4-8", "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-5-5", "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
         self.assertEqual(plan["controller"], {"commit": git(CONTROLLER, "rev-parse", "HEAD"),
                                               "dirty": bool(git(CONTROLLER, "status", "--porcelain", "--untracked-files=no")),
                                               "claude_version": "2.1.288 (Claude Code)"})
@@ -1584,15 +1584,15 @@ class RecordTests(unittest.TestCase):
         run, code, err = self.prepare_cli("lane-run", "--worker-effort", "low", "--lane-model", "ui=claude-sonnet-5", "--lane-effort", "adapter=max")
         self.assertEqual(code, 0, err)
         plan = read_json(run / "plan.json")
-        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-4-8", "effort": "low"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(plan["roles"], {"worker": {"model": "claude-opus-5-5", "effort": "low"}, "judges": {"model": None, "effort": "high"}})
         self.assertEqual(plan["nodes"]["ui"]["roles"], {"model": "claude-sonnet-5", "effort": "low"})
-        self.assertEqual(plan["nodes"]["adapter"]["roles"], {"model": "claude-opus-4-8", "effort": "max"})
-        self.assertEqual(role_flags(plan, "worker", node="adapter"), ["--model", "claude-opus-4-8", "--effort", "max"])
+        self.assertEqual(plan["nodes"]["adapter"]["roles"], {"model": "claude-opus-5-5", "effort": "max"})
+        self.assertEqual(role_flags(plan, "worker", node="adapter"), ["--model", "claude-opus-5-5", "--effort", "max"])
         run, code, err = self.prepare_cli("plain-run")
         self.assertEqual(code, 0, err)
         plan = read_json(run / "plan.json")
         self.assertEqual({node: plan["nodes"][node]["roles"] for node in ("ui", "adapter")},
-                         {node: {"model": "claude-opus-4-8", "effort": None} for node in ("ui", "adapter")})
+                         {node: {"model": "claude-opus-5-5", "effort": None} for node in ("ui", "adapter")})
         for flags, pattern in ((["--workers", "ui", "--lane-model", "adapter=claude-sonnet-5"], "adapter"),
                                (["--lane-model", "ui=two words"], "model"), (["--lane-effort", "ui=med"], "not one of"),
                                (["--lane-model", "ui=a", "--lane-model", "ui=b"], "twice"), (["--lane-effort", "ui"], "<lane>=")):

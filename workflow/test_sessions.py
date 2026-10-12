@@ -250,9 +250,9 @@ class RunClaudeTests(unittest.TestCase):
         env = {"WORKFLOW_WORKER_EFFORT": "medium"}
         from .sessions import DEFAULT_WORKER_MODEL
         # Without --worker-model the workers run DEFAULT_WORKER_MODEL; the judges keep Claude Code's default (no --model).
-        self.assertEqual(DEFAULT_WORKER_MODEL, "claude-opus-4-8")
-        self.assertEqual(pin_roles(env=env), {"worker": {"model": "claude-opus-4-8", "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
-        self.assertEqual(pin_roles(env={}), {"worker": {"model": "claude-opus-4-8", "effort": None}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(DEFAULT_WORKER_MODEL, "claude-opus-5-5")
+        self.assertEqual(pin_roles(env=env), {"worker": {"model": "claude-opus-5-5", "effort": "medium"}, "judges": {"model": None, "effort": "high"}})
+        self.assertEqual(pin_roles(env={}), {"worker": {"model": "claude-opus-5-5", "effort": None}, "judges": {"model": None, "effort": "high"}})
         roles = pin_roles(worker_model="claude-sonnet-5", worker_effort="low", judge_model="claude-opus-5-5", judge_effort="xhigh", env=env)
         self.assertEqual(roles, {"worker": {"model": "claude-sonnet-5", "effort": "low"}, "judges": {"model": "claude-opus-5-5", "effort": "xhigh"}})
         for bad in ({"worker_effort": "med"}, {"judge_effort": "extreme"}, {"worker_model": "--effort"}, {"judge_model": "two words"}, {"worker_model": ""}):
@@ -264,7 +264,7 @@ class RunClaudeTests(unittest.TestCase):
         self.assertEqual(worker_effort({"WORKFLOW_WORKER_EFFORT": "max"}, plan), ["--effort", "low"])
         self.assertEqual(role_flags(plan, "judges"), ["--model", "claude-opus-5-5", "--effort", "xhigh"])
         unset = {"roles": pin_roles(env={})}
-        self.assertEqual((role_flags(unset, "worker", env), role_flags(unset, "judges")), (["--model", "claude-opus-4-8"], ["--effort", "high"]))
+        self.assertEqual((role_flags(unset, "worker", env), role_flags(unset, "judges")), (["--model", "claude-opus-5-5"], ["--effort", "high"]))
         # A plan pinned before roles: the variable for workers, nothing for the judges, as before.
         self.assertEqual((role_flags({}, "worker", env), role_flags({}, "judges", env)), (["--effort", "medium"], []))
         with self.assertRaisesRegex(ValueError, "roles"):
