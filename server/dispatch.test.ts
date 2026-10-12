@@ -1001,20 +1001,31 @@ test('S9: the GraphQL query orders PRs and issues, and state() maps every Append
   assert.equal(issue.updated_at, '2026-10-10T12:00:00.000Z')
 })
 
-test('S5: a route request inside the refresh window never calls the runner ([P18])', async () => {
+test('S5: a route request never triggers a gh read, even when a repository is due ([P18])', async () => {
   const ghRepo = fresh('p18')
   git(ghRepo, 'init', '-b', 'main', '.')
   commit(ghRepo, 'c')
   git(ghRepo, 'remote', 'add', 'origin', 'https://github.com/kleros/kleros-v2.git')
   let calls = 0
-  const github = new GithubReader({ mode: 'runner', now, refreshMinutes: 15, runner: async () => { calls += 1; return ghOk() } })
-  github.register(['kleros/kleros-v2'])
-  await github.refreshDue() // one read inside the window
-  assert.equal(calls, 1)
+  let ghT = CLOCK
+  // The reader has its own mutable clock so the repository can be made *due* after the start read; the app's git clock
+  // stays fixed. No pre-read here: createApp's onReady fires github.start() unawaited (server/app.ts:124,
+  // server/dispatchGithub.ts start()), whose start cycle discovers this repo from the registry and reads it once
+  // (design-challenge note 1). A request must never trigger a read, even once the repository is due.
+  const github = new GithubReader({ mode: 'runner', now: () => ghT, refreshMinutes: 15, runner: async () => { calls += 1; return ghOk() } })
   const config = registry([{ project_id: 'ghproj', name: 'GH', repository: ghRepo, workflows: [] }])
   const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now, github } })
   after(() => app.close())
   await app.ready()
+  // Poll until the unawaited start cycle has performed its first read (bounded, ~2 s so a never-discovered key cannot
+  // hang the suite), then give the cycle one more setImmediate to settle before the clock moves, so the clock advance
+  // does not race the in-flight start-cycle discovery ([L15], design-challenge note 1).
+  const deadline = Date.now() + 2000
+  while (calls < 1 && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls, 1, 'the start cycle performed the first read')
+  await new Promise(resolve => setImmediate(resolve))
+  // Move the clock past the refresh window so the repository is now due; a request still must not read it.
+  ghT += 16 * 60_000
   const before = calls
   await app.inject({ method: 'GET', url: '/api/dispatch/projects' })
   await app.inject({ method: 'GET', url: '/api/dispatch/projects' })
