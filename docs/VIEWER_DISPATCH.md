@@ -60,8 +60,9 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
   `[data-testid="dispatch-landings"]`), `#g-prs`/`[data-testid="dispatch-gh-prs"]`, `#g-iss`/`[data-testid="dispatch-gh-issues"]`,
   and `[data-testid="dispatch-gh-others"]`. When GitHub was not read each card says "GitHub not read: <reason>".
 - **Reading pane** (`src/projects/dispatch/ReadingPane.tsx`), `aside[data-testid="dispatch-pane"][data-run-id]`, docks only while
-  a run is selected: the lead sentence (`[data-testid="dispatch-pane-lead"]`), facts, `[data-testid="dispatch-pane-steps"]`, a
-  copyable command (`[data-testid="dispatch-pane-command"]`/`dispatch-pane-copy`), and `a[data-testid="dispatch-open-run"]`.
+  a run is selected: the lead sentence (`[data-testid="dispatch-pane-lead"]`), facts, `[data-testid="dispatch-pane-steps"]`, the
+  run page's `CommandBlock` (`[data-testid="now-next"]`, its command `now-command` and `copy-command`; run 002, V2), and
+  `a[data-testid="dispatch-open-run"]`.
   `[data-testid="dispatch-pane-close"]` and Escape undock it; j/k move the selection. On a phone it fills the screen with
   `[data-testid="dispatch-pane-queue"]`/`dispatch-pane-next`.
 
@@ -82,7 +83,7 @@ New test ids and structure the run 002 scenarios read:
 - **Reading pane (run):** `section[data-testid="dispatch-pane-nextstep"]` holds the run page's `CommandBlock` (`[data-testid="now-next"]`), fed by the run's `NextStep` read with `fetchRunDetail` + `deriveNow` (V2); the separate lead paragraph (`dispatch-pane-next-lead`) was removed in run 003 (V27, below), since the CommandBlock already states the label once; loading/failure say so (`dispatch-pane-next-loading`/`-error`). Close and Escape return focus to the row. On a phone, `dispatch-pane-queue` returns to the list.
 - **Reading pane (ahead):** `aside[data-testid="dispatch-pane"][data-pane="ahead"]`, opened by `button[data-testid="dispatch-ahead-button"]` in the Local and GitHub card: `ul[data-testid="dispatch-ahead-commits"]` (short sha, subject, a run link), `p[data-testid="dispatch-ahead-more"]` ("and N more"), and `ul[data-testid="dispatch-ahead-landings"]` (each landing's local/origin state) (V6).
 - **GitHub cards:** PR/issue groups longer than five show `button[data-testid="dispatch-show-more"]` ("Show N more", V8); the merged group's `.dispatch-gh-note` says "among the 20 shown" (V9); the Local and GitHub card shows `p[data-testid="dispatch-gh-local-notread"]` when GitHub was not read but keeps its local counts (V11); a "Possibly related" row's `.dispatch-gh-why` names the match ("head is <b>"/"base is <b>", V14).
-- **Docked layout:** `.dispatch-project.has-pane` is a two-column grid; the header spans full width and the pane docks beside the body; the GitHub column stacks under the chart unless the viewport has room for three columns (V1, [P26]).
+- **Docked layout:** `.dispatch-project.has-pane` is a two-column grid; the header spans full width and the pane docks beside the body; the GitHub column stacks under the chart unless the body is at least 876px wide (the `dispatch-body` container query of run 003, V23; it replaced the viewport rule of V1, [P26]).
 - **Rail:** `a.dispatch-rail-home` (flex, with `.dispatch-rail-home-l` and `.dispatch-rail-home-n`) and `a.dispatch-rail-row` (grid) keep their layout — the base `.dispatch-rail a` rule no longer forces `display:block` (V13).
 - **Scenarios:** `dispatch-dock`, `dispatch-axis`, `dispatch-sections`, `dispatch-ahead`, `dispatch-folds` join the nine run-001 scenarios; all 14 pass in both phases.
 
