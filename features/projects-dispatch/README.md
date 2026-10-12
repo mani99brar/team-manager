@@ -1,0 +1,21 @@
+# projects-dispatch
+
+The Projects tab opens on a Projects page: one card per registered project. Each card opens a dedicated project page with:
+- the step chart of every feature's runs;
+- local default branch against origin, as this clone has it;
+- landings;
+- pull requests and issues read through `gh`.
+
+A projects-only rail sits on every Projects page except run pages. The former Runs home becomes Triage.
+
+Specification: `docs/PRD_PROJECTS_DISPATCH.md`. Visual reference: `docs/design/projects-dispatch.html`. Two lanes run in one run, `server` and `viewer` (PRD section 8). The critique reviewer walks the `viewer` lane's flows.
+
+- `feature.json` 2.10.0: the lanes, their task files, one GPT 6.1 lane reviewer per lane (decisions.md [L3]), the reviewers, the `prd`, `critique` on the `viewer` lane, and `tryout: true` (decisions.md [D9]).
+- `policy.json` 1.4.0: each lane's owned paths and checks, the browser scenarios, and `critique_app`. The critique app is `tests/project-workflows/dispatch-app.ts`, written by the `viewer` lane, and is ready at `/api/dispatch/projects`.
+- `server-task.md`, `viewer-task.md`: the lanes' tasks, written as outcome briefs.
+- `decisions.md`: the operator's words, Claude's defaults, the panel's settlements and the changes after launch ([L1] to [L13]).
+- `review-001.md` to `review-003.md`: runs 001 to 003's independent review findings, verbatim; runs 002 to 004 fix the ones their tasks name.
+
+Runs: projects-dispatch-001 (base eee4e83, review blocked at candidate f4623a4), projects-dispatch-002 (from f4623a4, review blocked at candidate cb5af748; [L3]), projects-dispatch-003 (from cb5af748, review blocked on the handoffs at candidate ebcaf40; [L10]) projects-dispatch-004 (from ebcaf40; [L13]; candidate d688375, review cut by an access outage) and projects-dispatch-005 (base: this branch, `--restore-from d688375`; [L16]).
+
+Launch from this repository: `python -m workflow launch projects-dispatch --repo <this repository> --dry-run`, then `--live --automatic --fix-rounds 3 --by operator`; runs 002 to 005 also pass `--run-root ~/.local/state/md-manager-workflows/projects-dispatch` (this checkout's name is not `md-manager`, so the default root would differ). Runs 002 to 005 need a controller with feature.json 2.10.0 (md-manager 2dab17c or later): run the command from that checkout.

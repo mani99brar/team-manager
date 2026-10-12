@@ -15,6 +15,8 @@ export const PROJECTS_ROUTE = 'projects'
 
 export type ProjectsRoute =
   | { level: 'projects' }
+  /** Triage, `/projects/-/triage` (the former Runs home). `-` cannot start a project id, so the path never collides ([D1]). */
+  | { level: 'triage' }
   | { level: 'project'; projectId: string }
   | { level: 'workflow'; projectId: string; workflowId: string }
   /** `attempt` is present only on an attempt's own page, `/nodes/<node>/attempts/<k>`; a node page shows its latest attempt. */
@@ -30,6 +32,13 @@ function encode(segments: string[]): string {
 
 export function projectsPathname(): string {
   return `/${PROJECTS_ROUTE}`
+}
+
+/** The literal after `/projects/-/` that selects Triage. A project id can never be `-`, so this path is unambiguous ([D1]). */
+export const TRIAGE_SEGMENT = 'triage'
+
+export function triagePathname(): string {
+  return `/${PROJECTS_ROUTE}/-/${TRIAGE_SEGMENT}`
 }
 
 export function projectPathname(projectId: string): string {
@@ -66,6 +75,7 @@ export function attemptPathname(projectId: string, workflowId: string, runId: st
 export function routeToPathname(route: ProjectsRoute): string {
   switch (route.level) {
     case 'projects': return projectsPathname()
+    case 'triage': return triagePathname()
     case 'project': return projectPathname(route.projectId)
     case 'workflow': return workflowPathname(route.projectId, route.workflowId)
     case 'run':
@@ -96,6 +106,8 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
   }
   if (segments.length === 0) return { level: 'projects' }
   const [projectId, workflowsLiteral, workflowId, runsLiteral, runId, nodesLiteral, nodeId, attemptsLiteral, attempt, ...rest] = segments
+  // Triage lives at `/projects/-/triage`; `-` is never a valid project id, so the match is decided before any id lookup ([D1]).
+  if (projectId === '-') return workflowsLiteral === TRIAGE_SEGMENT && workflowId === undefined ? { level: 'triage' } : null
   if (!isContractId(projectId)) return null
   if (workflowsLiteral === undefined) return { level: 'project', projectId }
   if (workflowsLiteral !== 'workflows' || workflowId === undefined || !isContractId(workflowId)) return null

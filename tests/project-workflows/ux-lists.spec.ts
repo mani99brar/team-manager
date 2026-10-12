@@ -12,7 +12,7 @@ import {
   ANSWERED_QUESTION, LISTS_FEATURE, LISTS_NOW, mockRunDir, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL, RUN_LISTS_ASKING, RUN_LISTS_FAILED,
   RUN_LISTS_FAILED_EARLIER, RUN_LISTS_LIVE, RUN_LISTS_OLD, RUN_LISTS_STOPPED, UX_LISTS_WORKFLOW_ID, UX_LISTS_WORKFLOW_NAME,
 } from './fixtures/ux-lists.ts'
-import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, phase, runUrl, triageUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -27,8 +27,9 @@ const banner = (page: Page) => page.getByTestId('run-now')
 
 test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across projects; the project page groups rows by feature; the feature page folds its definition (${phase})`, async ({ page }, testInfo) => {
   await page.clock.setFixedTime(LISTS_NOW)
-  await page.goto(projectsUrl)
-  await expect(currentCrumb(page)).toHaveText('Projects')
+  // Runs home moved to Triage ([D1]); its content is unchanged under the new rail.
+  await page.goto(triageUrl)
+  await expect(currentCrumb(page)).toHaveText('Triage')
   await expect(page.getByTestId('projects-info')).toContainText('Read-only')
   const needs = page.getByTestId('needs-you')
   const today = page.getByTestId('today-runs')
@@ -72,11 +73,10 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   await expect(page.locator(`a[data-run-id="${RUN_LISTS_OLD}"]`)).toHaveCount(0)
   for (const runId of OWN_RUNS) expect(await page.locator(`a[data-run-id="${runId}"]`).count(), runId).toBeLessThanOrEqual(1)
 
-  // Compact project cards, one link each.
-  const projects = page.getByTestId('projects-list')
-  await expect(projects.getByRole('link')).toHaveCount(2)
-  await expect(projects.getByRole('link', { name: new RegExp(`^${PROJECT.name}`) })).toContainText(/\d+ features/)
-  await expect(projects.getByRole('link', { name: new RegExp(`^${EMPTY_PROJECT.name}`) })).toContainText('0 features')
+  // The projects-only rail lists each project with its feature count; it replaces the old prefix rail.
+  const projects = page.getByTestId('dispatch-rail-list')
+  await expect(projects.locator('.dispatch-rail-row', { hasText: PROJECT.name })).toContainText(/\d+ features/)
+  await expect(projects.locator('.dispatch-rail-row', { hasText: EMPTY_PROJECT.name })).toContainText('0 features')
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'runs-home')
 
@@ -93,17 +93,13 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   expect(await (page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>)).toBeLessThanOrEqual(0)
   await page.setViewportSize({ width: 1280, height: 720 })
 
-  // The project page: the same rows grouped by feature; a group header links to the feature's runs, and the old run stays here.
-  await page.getByTestId('projects-list').getByRole('link', { name: new RegExp(`^${PROJECT.name}`) }).click()
+  // The project page: the step chart groups features; the group is an li[data-workflow-id] whose header links to the feature.
+  await page.getByTestId('dispatch-rail-list').locator('.dispatch-rail-row', { hasText: PROJECT.name }).click()
   await expect(currentCrumb(page)).toHaveText(PROJECT.name)
-  const groups = page.getByTestId('workflows-list')
-  const group = groups.locator(`[data-workflow-id="${UX_LISTS_WORKFLOW_ID}"]`)
-  const header = group.getByRole('link', { name: new RegExp(`^${LISTS_FEATURE}`) })
-  await expect(header).toContainText(`${UX_LISTS_WORKFLOW_ID} · ${OWN_RUNS.length} runs`)
-  await expect(row(group, RUN_LISTS_OLD)).toHaveAttribute('data-status', 'failed')
-  await expect(row(group, RUN_LISTS_ASKING)).toHaveAttribute('data-attention', 'question')
-  await expect(row(group, RUN_LISTS_ASKING).locator('.run-row-glyph')).toHaveText('?')
-  expect((await ownIds(group)).sort()).toEqual([...OWN_RUNS].sort())
+  const group = page.locator(`li[data-workflow-id="${UX_LISTS_WORKFLOW_ID}"]`)
+  const header = group.locator('a.lists-group-head')
+  await expect(header).toContainText(UX_LISTS_WORKFLOW_ID)
+  await expect(header).toHaveClass(/tone-/)
 
   // The feature page: the same rows in run-list, and the current definition closed below them.
   await header.click()
@@ -112,6 +108,11 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   const runList = page.getByTestId('run-list')
   await expect(runList.locator('li')).toHaveCount(OWN_RUNS.length)
   await expect(runList.getByRole('link', { name: new RegExp(`^${RUN_LISTS_OLD}(?:\\s|$)`) })).toHaveCount(1)
+  // The feature's rows carry the same state the lists did: the old failed run, and the question waiting on the operator.
+  await expect(row(runList, RUN_LISTS_OLD)).toHaveAttribute('data-status', 'failed')
+  await expect(row(runList, RUN_LISTS_ASKING)).toHaveAttribute('data-attention', 'question')
+  await expect(row(runList, RUN_LISTS_ASKING).locator('.run-row-glyph')).toHaveText('?')
+  expect((await ownIds(runList)).sort()).toEqual([...OWN_RUNS].sort())
   const definition = page.getByTestId('current-definition')
   await expect(definition).toHaveJSProperty('tagName', 'DETAILS')
   await expect(definition).toHaveJSProperty('open', false)

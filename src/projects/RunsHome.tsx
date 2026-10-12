@@ -3,17 +3,17 @@ import { describeApiError, type Project, type ProjectRuns, type RunSummary, type
 import {
   PAUSED_SHOWN,
   filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
-  projectFacts, projectTone, railEntries, RECENT_SHOWN, recentCounts, rowSummary, searchRows, sincePausedLabel, stepTally, waitingKind, workflowTitle,
+  RECENT_SHOWN, recentCounts, rowSummary, searchRows, sincePausedLabel, stepTally, waitingKind, workflowTitle,
   type ListRow, type RecentFilter, type WaitingKind,
 } from './lists.ts'
 import { LiveStatus } from './LiveStatus.tsx'
 import { AppLink, LoadingPanel, StatusBadge } from './panels.tsx'
-import { projectPathname, runPathname, workflowPathname } from './routes.ts'
+import { runPathname, workflowPathname } from './routes.ts'
 import { RunRow } from './RunRow.tsx'
 import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
-import { stateTone, TONE_LABEL, toneClass, type Tone } from './tone.ts'
+import { stateTone, toneClass } from './tone.ts'
 import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
 import { useTimeZone } from './useNow.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
@@ -42,18 +42,6 @@ const hrefOf = (row: Row) => runPathname(row.project.project_id, row.workflow.wo
 
 /** What a Needs-you card's chip says waits, in words beside its colour. */
 const WAITING_LABEL: Record<WaitingKind, string> = { question: 'question waits', pane: 'pane needs you', approval: 'approval waits' }
-/** The rail groups the reader left open, remembered across visits. */
-const RAIL_OPEN_KEY = 'mdm-rail-open'
-const TONE_ORDER: readonly Tone[] = ['warn', 'fail', 'run', 'ok', 'pause', 'idle']
-
-function readOpenGroups(): string[] {
-  try {
-    const value: unknown = JSON.parse(window.localStorage.getItem(RAIL_OPEN_KEY) ?? '[]')
-    return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
-  } catch {
-    return []
-  }
-}
 
 /**
  * A run that waits on the operator (docs/PRD_VIEWER_REVAMP.md 5.1): a warn card whose link is its direct child, named by the
@@ -86,21 +74,6 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
   )
 }
 
-function RailProject({ project, entry, onNavigate }: { project: Project; entry: ProjectRuns | null; onNavigate: (pathname: string) => void }) {
-  const runs = entry && entry.error === null ? entry.workflows.flatMap(item => item.runs) : null
-  const tone: Tone = runs === null ? 'idle' : projectTone(runs)
-  const facts = runs === null || entry === null ? null : projectFacts(entry.workflows.length, runs)
-  const more = entry?.workflows.some(item => item.more) ?? false
-  return (
-    <AppLink href={projectPathname(project.project_id)} onNavigate={onNavigate} className="rail-project" data-project-id={project.project_id}>
-      <span className="rail-name">{project.name}</span>
-      <span className={`rail-dot ${toneClass(tone)}`} data-tone={tone} title={TONE_LABEL[tone]} aria-hidden="true" />
-      <span className="visually-hidden"> · {TONE_LABEL[tone]} · </span>
-      {facts && runs && <span className="rail-facts">{facts.features} · {runs.length}{more ? '+' : ''} {runs.length === 1 && !more ? 'run' : 'runs'}</span>}
-    </AppLink>
-  )
-}
-
 type HomeProps = {
   projects: readonly Project[]
   runs: Resource<ProjectRuns[]>
@@ -117,7 +90,7 @@ type HomeProps = {
  * as cards and a searchable, filterable Recent grouped by day. Everything renders from the run lists' served activity; no run
  * detail is read for it.
  */
-export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }: HomeProps) {
+export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps) {
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
@@ -138,19 +111,6 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
     return () => { document.title = title }
   }, [needsCount])
 
-  const [openGroups, setOpenGroups] = useState<string[]>(readOpenGroups)
-  const toggleGroup = (prefix: string, open: boolean) => {
-    setOpenGroups(previous => {
-      const next = open ? [...new Set([...previous, prefix])] : previous.filter(item => item !== prefix)
-      try { window.localStorage.setItem(RAIL_OPEN_KEY, JSON.stringify(next)) } catch { /* remembered for this page only */ }
-      return next
-    })
-  }
-  const entryOf = (project: Project) => loaded?.find(item => item.project.project_id === project.project_id) ?? null
-  const toneOf = (project: Project): Tone => {
-    const entry = entryOf(project)
-    return entry && entry.error === null ? projectTone(entry.workflows.flatMap(item => item.runs)) : 'idle'
-  }
   // A jump link scrolls its section into view and hands the focus to its first run, so the keyboard continues from there.
   const jumpTo = (id: string) => (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault()
@@ -158,7 +118,6 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
     target?.scrollIntoView({ block: 'start' })
     target?.querySelector<HTMLElement>('a[data-run-id]')?.focus({ preventScroll: true })
   }
-  const jumpToNeeds = jumpTo('needs-you')
   const jumps: { id: string; label: string; count: number | null }[] = [
     { id: 'needs-you', label: 'Needs you', count: needsCount },
     { id: 'today-runs', label: 'Today', count: count(sections.today) },
@@ -176,36 +135,7 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
   )
 
   return (
-    <div className="home-layout">
-      <aside className="home-rail" aria-label="Projects" data-testid="projects-rail">
-        <a href="#needs-you" className={`rail-needs ${needsCount ? 'has-waiting' : ''}`} data-testid="rail-needs-you" onClick={jumpToNeeds}>
-          Needs you{needsCount !== null && ` · ${needsCount}`}
-        </a>
-        <h2 className="rail-title" id="projects-title">Projects</h2>
-        <ul className="projects-list rail-list" data-testid="projects-list">
-          {railEntries(projects).map(entry => {
-            if (entry.kind === 'project') {
-              return <li key={entry.project.project_id}><RailProject project={entry.project} entry={entryOf(entry.project)} onNavigate={onNavigate} /></li>
-            }
-            const tone = TONE_ORDER.find(candidate => entry.projects.some(project => toneOf(project) === candidate)) ?? 'idle'
-            return (
-              <li key={`group:${entry.prefix}`} className="rail-group-item">
-                <details className="rail-group" data-prefix={entry.prefix} open={openGroups.includes(entry.prefix)} onToggle={event => toggleGroup(entry.prefix, event.currentTarget.open)}>
-                  <summary>
-                    {entry.prefix} ({entry.projects.length})
-                    <span className={`rail-dot ${toneClass(tone)}`} data-tone={tone} title={TONE_LABEL[tone]} aria-hidden="true" />
-                    <span className="visually-hidden"> · {TONE_LABEL[tone]}</span>
-                  </summary>
-                  <ul className="rail-list">
-                    {entry.projects.map(project => <li key={project.project_id}><RailProject project={project} entry={entryOf(project)} onNavigate={onNavigate} /></li>)}
-                  </ul>
-                </details>
-              </li>
-            )
-          })}
-        </ul>
-        {note !== null && <p className="rail-note" data-testid="projects-info">{note}</p>}
-      </aside>
+    <div className="home-layout triage-layout">
       <section className="runs-home" aria-labelledby="runs-home-title">
         <div className="runs-home-head">
           <h2 id="runs-home-title">Runs</h2>
@@ -261,6 +191,7 @@ export function RunsHome({ projects, runs, meta, now, note = null, onNavigate }:
             )}
           </>
         )}
+        {note !== null && <p className="rail-note" data-testid="projects-info">{note}</p>}
       </section>
     </div>
   )

@@ -50,7 +50,8 @@ function prepare(): { root: string; apiPort: number; webPort: number; projectsCo
   // pi-missing is configured but deliberately not created: an unavailable location, as in the root harness.
   const sources = { version: 1, locations: SKILL_LOCATIONS.map(({ id, source, label, directory, category }) => ({ id, source, label, path: join(root, directory), category })) }
   writeFileSync(join(root, 'sources.json'), `${JSON.stringify(sources, null, 2)}\n`)
-  const projectsConfig = phase === 'candidate' ? seedCandidate(join(root, 'projects')) : null
+  // The candidate phase seeds the dispatch feature's git repositories too, and its GitHub fixture + cache live under the root ([P16], [P20]).
+  const projectsConfig = phase === 'candidate' ? seedCandidate(join(root, 'projects'), { dispatch: true }) : null
   let apiPort = freePort()
   let webPort = freePort()
   while (webPort === apiPort) webPort = freePort()
@@ -82,6 +83,8 @@ const apiEnv: Record<string, string> = {
   MD_MANAGER_WEB_PORT: String(webPort),
   WORKFLOW_VERIFICATION_PHASE: phase,
   ...(projectsConfig ? { MD_MANAGER_PROJECTS_CONFIG: projectsConfig } : {}),
+  // The dispatch routes read GitHub from the fixture (never real `gh`) and cache under the test root ([P6], [P20]).
+  ...(phase === 'candidate' ? { MD_MANAGER_GITHUB_FIXTURE: join(root, 'projects', 'github-fixture.json'), MD_MANAGER_GITHUB_CACHE: join(root, 'projects', 'github-cache.json') } : {}),
 }
 
 // Only controls.spec.ts sees the controls: every other spec reads pages without a Controls button (their allow-lists predate

@@ -12,6 +12,8 @@ import { installProjectMocks } from './mock.ts'
 export const phase = verificationPhase()
 
 export const projectsUrl = '/projects'
+/** Triage, the former Runs home, now under `/projects/-/triage` ([D1]). */
+export const triageUrl = '/projects/-/triage'
 export const projectUrl = (projectId: string) => `/projects/${encodeURIComponent(projectId)}`
 export const workflowUrl = (projectId: string, workflowId: string) => `${projectUrl(projectId)}/workflows/${encodeURIComponent(workflowId)}`
 export const runUrl = (runId: string, nodeId?: string, workflowId: string = WORKFLOW_ID) => `${workflowUrl(PROJECT.project_id, workflowId)}/runs/${encodeURIComponent(runId)}${nodeId ? `/nodes/${encodeURIComponent(nodeId)}` : ''}`

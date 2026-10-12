@@ -5,7 +5,7 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentPathname, attemptPathname, parseProjectsPathname, routeToPathname, runPathname, type ProjectsRoute } from '../../src/projects/routes.ts'
+import { assignmentPathname, attemptPathname, parseProjectsPathname, routeToPathname, runPathname, triagePathname, type ProjectsRoute } from '../../src/projects/routes.ts'
 
 const RUN = '/projects/alpha/workflows/flow/runs/run-1'
 
@@ -65,6 +65,21 @@ describe('parseProjectsPathname', () => {
   test('a run whose id is `assignment` is still a run', () => {
     assert.deepEqual(parseProjectsPathname('/projects/alpha/workflows/flow/runs/assignment'), { level: 'run', projectId: 'alpha', workflowId: 'flow', runId: 'assignment', nodeId: null, tab: 'run' })
   })
+
+  test('`/projects/-/triage` is Triage ([D1])', () => {
+    assert.deepEqual(parseProjectsPathname('/projects/-/triage'), { level: 'triage' })
+    assert.deepEqual(parseProjectsPathname('/projects/-/triage/'), { level: 'triage' })
+  })
+
+  test('no project id can produce `/projects/-/triage`: `-` is not a valid id and only `triage` follows it', () => {
+    // `-` fails the project id pattern, so no real project routes through it; any other literal after `-` is malformed.
+    assert.equal(parseProjectsPathname('/projects/-'), null)
+    assert.equal(parseProjectsPathname('/projects/-/workflows/flow'), null)
+    assert.equal(parseProjectsPathname('/projects/-/triage/extra'), null)
+    assert.equal(parseProjectsPathname('/projects/-/other'), null)
+    // A project literally named "triage" is a project, never Triage; Triage is only ever under `-`.
+    assert.deepEqual(parseProjectsPathname('/projects/triage'), { level: 'project', projectId: 'triage' })
+  })
 })
 
 describe('building pathnames', () => {
@@ -82,9 +97,15 @@ describe('building pathnames', () => {
     assert.equal(attemptPathname('alpha', 'flow', 'run-1', 'verify_ui', 2), `${RUN}/nodes/verify_ui/attempts/2`)
   })
 
+  test('Triage round-trips through its pathname', () => {
+    assert.equal(triagePathname(), '/projects/-/triage')
+    assert.deepEqual(parseProjectsPathname(triagePathname()), { level: 'triage' })
+  })
+
   test('every route round-trips through its pathname', () => {
     const routes: ProjectsRoute[] = [
       { level: 'projects' },
+      { level: 'triage' },
       { level: 'project', projectId: 'alpha' },
       { level: 'workflow', projectId: 'alpha', workflowId: 'flow' },
       { level: 'run', projectId: 'alpha', workflowId: 'flow', runId: 'run-1', nodeId: null, tab: 'run' },

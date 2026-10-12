@@ -1,0 +1,254 @@
+{
+  "version": "1.4.0",
+  "feature": "Projects dispatch: a Projects page of project cards, a dedicated project page with the step chart, git sync and GitHub PRs and issues, a projects-only rail, Triage; read-only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "server",
+      "role": "backend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "server/dispatch.ts",
+        "server/dispatchGit.ts",
+        "server/dispatchGithub.ts",
+        "server/dispatchSteps.ts",
+        "server/dispatch.test.ts",
+        "server/app.ts",
+        "server/index.ts",
+        "contracts/projects/dispatch.ts",
+        "contracts/projects/contract.test.ts",
+        "contracts/projects/examples.ts",
+        "contracts/projects/export.ts",
+        "contracts/projects/dispatchOverview.schema.json",
+        "contracts/projects/projectSteps.schema.json",
+        "contracts/projects/README.md",
+        "docs/handoff/projects-dispatch-server.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/dispatch",
+        "src/projects/RunsHome.tsx",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/routes.ts",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/RunRow.tsx",
+        "src/App.tsx",
+        "tests/unit/dispatch.test.ts",
+        "tests/unit/lists.test.ts",
+        "tests/unit/routes.test.ts",
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/dispatch-app.ts",
+        "tests/project-workflows/fixtures/dispatch.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/mock.ts",
+        "tests/project-workflows/seed.ts",
+        "tests/project-workflows/support.ts",
+        "tests/project-workflows/playwright.config.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/lanes.spec.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "docs/VIEWER_DISPATCH.md",
+        "docs/handoff/projects-dispatch-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "dispatch-overview",
+              "description": "/projects shows the Projects page: the heading 'Projects', a line naming the project and repository counts and when runs and GitHub were read, and one card per registered project in rail order; each card shows the name, the state word ('1 of 3 features failed last' for the seeded three-feature project whose worst latest result is failed), 'on <checkout>' with the sync ('2 ahead, 1 behind origin/main' for the seeded primary clone, the same wording as its header), the non-zero run counts and the latest run id with its state word; a GitHub project's card also shows 'acme/widgets'-style repository, a public or private chip and open PR and issue counts, while the non-GitHub project's card shows 'GitHub not read: not a GitHub remote' and no chip or counts; clicking a card opens /projects/<id>; the cards appear in the rail's order, each card's run counts and latest run are asserted by value, and a card holds no link but itself; the header's 'runs read <time>' does not advance when the clock moves and nothing is re-read (V15, V17)"
+            },
+            {
+              "id": "dispatch-rail",
+              "description": "On the Projects page, Triage, a project page and a workflow page the rail shows 'All projects', 'Triage', then one row per project and nothing else (no workflow rows, no repository headers); projects with runs waiting on the operator (the Busy project among them) come first with an 'N waits on you' badge, the unreadable project comes last with 'cannot be read'; the seeded primary clone shows '2 unpushed' and its worktree project shows no unpushed badge; the current page's row has aria-current=page; clicking a row opens that project's page; the rail is also checked on a workflow page; 'All projects' and 'Triage' show a visible gap before their counts and a visible current-page marker; at 1000 px the rail is a column and at 999 px a chip row (V13, V17)"
+            },
+            {
+              "id": "dispatch-triage",
+              "description": "/projects/-/triage shows the former Runs home content (needs-you, today-runs, running-runs, recent-runs sections and their cards) under the new rail, with 'Triage' marked current; the rail's 'Triage' entry reaches it from a project page and 'All projects' returns to the Projects page"
+            },
+            {
+              "id": "dispatch-project",
+              "description": "The seeded primary clone's project page header shows the project name, a link to https://github.com/acme/widgets, the visibility chip, the checkout, a '~'-relative or basename repository label and no absolute path, the sync line '2 ahead, 1 behind origin/main' with 'as of origin/main updated here <time>', the succeeded/failed/cancelled figures, and jump buttons 'Runs by feature', 'Local and GitHub', 'Pull requests · N open', 'Issues · N open'; activating 'Issues · N open' moves focus to the Issues card; the filter box narrows the run rows and Escape clears it; each of the four jump buttons moves focus to its section (toBeFocused), not only scroll (V4); a project whose git could not be read says 'git not read', never 'checkout detached' (V10)"
+            },
+            {
+              "id": "dispatch-chart",
+              "description": "The step chart shows the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate, Review, Approval, Integrate) once in a sticky axis; a run that failed at verification draws its stop glyph in the Verify column with '×3' over it when the verify step was attempted three times, a solid track before it and a dotted track after; a run integrated shows its landed sha; the feature header lists its landed shas and a chain of run chips; a feature whose run state cannot be read shows one 'cannot be read' row with the recorded error and 'python -m workflow status <run-id> --by operator'; the axis appears once and is sticky, lane dots and the chain of run chips are drawn, the landed sha itself is shown, the 'ended here' counts sit under each group, multi-lane phases collapse to one mark at a chart width of 440 px, and a workflow-level read error (Trio's extra workflow, whose runs_root cannot be listed) shows its row with the literal '<run-id>' placeholder (V18; [P34]) A landed sha in a run row sits on one line at 1100 px; a filter matching none of a feature's runs says '0 of N runs match' in its group header (V29, V30)."
+            },
+            {
+              "id": "dispatch-pane",
+              "description": "With no run selected the project page has no reading pane and uses the full width; clicking a run row docks the pane with the run id, its state, facts, the steps with attempts, the NextStep lead sentence and today's CommandBlock with the run's NextStep commands, the same ones the run page shows for that run (not a fixed status line), and an 'Open run page' link to the run's URL; j and k move the selection; Escape and the Close button each undock the pane and return focus to the row (toBeFocused) (V2, V19) The lead sentence appears once in the pane, and the CommandBlock's command text equals the selected run's NextStep command by value (V27)."
+            },
+            {
+              "id": "dispatch-github",
+              "description": "The Pull requests card says it shows the 20 most recently updated and groups PRs as 'Possibly related' (a PR whose head branch equals the checkout branch or a run's source branch, or whose base branch does when that base is not the project's default branch, [L5]), 'Yours, open' (author equals viewer_login), 'Others, open' and 'Merged in the last 14 days', each row with its number, title linking to GitHub, review decision, checks counts and 'updated' time; the Issues card lists 'Assigned to you' first, then 'Newest from people', folds bot authors into 'N from bots among the newest 20', shows a year on an issue opened in an earlier year, and links 'All N on GitHub'; for the project whose remote is not GitHub every GitHub card says 'GitHub not read: not a GitHub remote' and shows no counts; the merged group reads 'Merged in the last 14 days' with 'among the 20 shown'; the Others group and one row's review decision, checks counts, draft, 'head → base' and 'updated' time are asserted; 'Newest from people' follows 'Assigned to you'; the Local and GitHub card of a not-read project says 'GitHub not read: <reason>' and no card of it shows a GitHub count (local sync, ahead and landing counts stay); in the worker phase only, a mocked repository read with a failed refresh shows 'Last read <time>; the latest refresh failed: <reason>' ([P35]); 'Possibly related' matches a PR on its head branch, or its base branch only when that is not the default branch, and names the match (V9, V11, V14, V20) In the worker phase a mocked repository read with head null shows that GitHub's default branch has no commits, not 'GitHub not read', and keeps its PR and issue counts; the cards say 'N open', never 'N opens', and the PULL REQUESTS heading sits on one line at 1100 and 1440 px (V26, V29)."
+            },
+            {
+              "id": "dispatch-git-truth",
+              "description": "The worktree project's header and card say 'shares its clone with <primary>' and show no unpushed count; the primary's Local and GitHub card says the sync is counted against origin/main as this clone has it, with 'origin/main last updated here <time>' and that this page never fetches, says 'Of the 2 ahead, 1 name a run; 1 do not name a known run' (or the seeded counts), shows GitHub main's sha with its commit date, and lists the landings; the project with no origin ref says 'not compared with origin'; no rendered text on these pages contains /tmp/ or /home/; the landing counts are asserted by value from Widgets' two seeded landings, one on local main and origin/main and one on local main only: 2 on local main, 1 on origin, 0 unknown ([P25]), with GitHub main's sha; the Also checked out as card names the other checkout and 'same clone'; renderedText passes on the Projects page, Triage, every seeded project page and a workflow page (V16, V20, V21)"
+            },
+            {
+              "id": "dispatch-phone",
+              "description": "At 390 px wide the rail is a chip row starting 'All projects', 'Triage', the Projects page cards are one column, the project page stacks the GitHub column under the chart, tapping a run fills the screen with the reading pane and 'Queue' and 'Next' buttons, 'Queue' returns to the run list (never to the previous run), every link, button and input inside the dispatch regions (the Projects page cards and header, the rail chips, the project header and breadcrumbs, the GitHub cards and the pane; not the app shell's tabs) is at least 44 px tall, and neither the Projects page nor the project page scrolls sideways (V12) The 44 px scan also covers the open reading pane (Close, Open run page, Queue and the CommandBlock's buttons), measured before Queue closes it (V31)."
+            },
+            {
+              "id": "dispatch-dock",
+              "description": "At 1280, 1440 and 1920 px wide, selecting a run on the seeded primary project keeps the header full width and docks the reading pane beside the main area: the chart and the pane are both visible at the top of the viewport, their boxes do not overlap, the chart is not squeezed under 480 px (the GitHub column stacks under the chart where three columns would not fit, as at 1280 px), the window does not scroll when the run is selected, and the page does not scroll sideways (V1) Also at 1600, 1680, 1720 and 1760 px: at each width either the GitHub column sits under the chart or the chart's box is at least 480 px wide; the GitHub column is under the chart at 1280 and 1440 px and beside it at 1920 px; the column count comes from the project body's width (a container query), not a viewport media query (V23)."
+            },
+            {
+              "id": "dispatch-axis",
+              "description": "At 1440 and 1100 px wide, each run's stop glyph has its horizontal centre inside the column of the phase it stopped at, as the axis label of that phase spans it, and each group's 'ended here' count sits in the same column as its glyph; no axis label is cut with an ellipsis: narrow columns use the fixed short forms, with the full phase name as the accessible name (V3)"
+            },
+            {
+              "id": "dispatch-sections",
+              "description": "The seeded Busy project's page has a 'Needs you and running' section before the step chart listing its waiting run and its running run, each linking to its run page; the Widgets primary, which has neither, says 'Nothing waits on you; nothing running'; the Widgets header says 'same repo as <the worktree project>' and the worktree project's header says 'same repo as Widgets'; a compared sync line whose reflog time is missing says 'update time not recorded' in the header and on the card (V5, V10; [P24], [P28]) Each Busy link's href is that run's page; Trio, whose trio-locked workflow cannot be listed, never shows the plain all-clear and says '1 feature cannot be read'; in the worker phase a run-list request held open shows 'Reading runs…' and a failed one 'Runs not read: <reason>'; the Widgets assertion matches what its seeded run lists return in each phase, never a substring the qualified line would also match (V25)."
+            },
+            {
+              "id": "dispatch-ahead",
+              "description": "On the seeded primary project, the Local and GitHub card's commits-ahead button opens in the reading pane the commits ahead with short sha and subject, the one that names a run linking to that run, and every landing with its local main and origin state, an unknown one shown as unknown; the Busy project, seeded 52 commits ahead, lists 50 and shows 'and 2 more' (V6; [P33]) A commit naming a run whose workflow the page cannot resolve shows its run id as text with 'older than the newest 50 runs' (unit test, [L10]); Escape and Close on the Local commits pane return focus to the 'Commits ahead and landings' button (toBeFocused) (V24, V28)."
+            },
+            {
+              "id": "dispatch-folds",
+              "description": "Each feature group on the project page has a 'Steps of this definition' fold that lists the definition's steps with their phases when opened; a PR or issue group with more than 5 items shows 5 and 'Show N more', which reveals the rest when activated (V7, V8)"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/dispatch-app.ts"
+    ],
+    "ready_path": "/api/dispatch/projects",
+    "timeout_seconds": 180
+  }
+}

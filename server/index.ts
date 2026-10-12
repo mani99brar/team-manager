@@ -2,6 +2,8 @@ import { createApp, type LocationStatus } from './app.ts'
 import { loadControlsConfig } from './controlsGuard.ts'
 import { ConfigError, loadConfig, type AppConfig } from './config.ts'
 import { ProjectsConfigError, loadProjectsConfig, projectsConfigReloader, type LoadedProjectsConfig } from './projectsConfig.ts'
+import { realGitRunner } from './dispatchGit.ts'
+import { GithubReader, githubReaderOptions } from './dispatchGithub.ts'
 
 // Configuration is read once, before anything listens. A missing or invalid config is a startup failure
 // with a local diagnostic (which may name configured paths); there is no fallback to the fixtures.
@@ -33,7 +35,17 @@ try {
 // Run controls are off unless the whole environment of PRD Appendix A.3 is valid (decisions.md [L5]); a failed condition is a warning, never a startup failure.
 const controls = await loadControlsConfig(process.env)
 
-const app = createApp(config.locations, { controls: { setup: controls }, projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath) })
+// The dispatch API's GitHub reads (PRD Appendix A.3). Options are resolved here from the environment (the same
+// `githubReaderOptions` a unit test exercises, [S5]/[P36]); the reader is passed to createApp so a plain server stays
+// GitHub-off (note 7). Discovery is wired inside buildDispatch, where the store the registry reloader keeps current
+// exists — the tick follows the reloaded registry rather than the start-up snapshot ([S3], [L9]).
+const gitRunner = realGitRunner()
+const github = new GithubReader(githubReaderOptions(process.env, Date.now))
+
+const app = createApp(config.locations, {
+  controls: { setup: controls }, projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath),
+  dispatch: { gitRunner, github },
+})
 try {
   await app.listen({ port: Number(process.env.MD_MANAGER_API_PORT ?? 3001), host: '127.0.0.1' })
   for (const warning of controls.warnings) app.log.warn(warning)

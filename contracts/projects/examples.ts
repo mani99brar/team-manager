@@ -1,6 +1,7 @@
 import type { WorkerResult } from '../workflow/v1.js'
 import type { Control, ControlId, ControlRecord, ControlRequest, ControlsStatus, ParamSpec, RunControls } from './controls.js'
 import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, ReviewFinding, RepairEntry, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
+import type { DispatchOverview, ProjectSteps, GithubRepoRead } from './dispatch.js'
 
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
@@ -867,3 +868,125 @@ export const runControls: RunControls = runControlsStates.stoppedAutomatic
 export const controlRequest: ControlRequest = { request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3306', run_state_token: 'rs-stopped', params: {} }
 export const cleanPreviewRequest = { run_state_token: 'rs-finished' }
 export const cleanPreviewResponse = { exitCode: 0, output: 'Would remove 2 worktrees\nWould keep evidence' }
+
+// --- Dispatch (Appendix A, contract 1.0.0) ---
+
+const githubRead: GithubRepoRead = {
+  read_at: '2026-10-11T03:38:00Z',
+  visibility: 'PUBLIC',
+  default_branch: 'main',
+  pushed_at: '2026-10-10T21:15:00Z',
+  head: { sha: '6ac7f5c1d2e3f40506', committed_at: '2026-10-10T21:14:00Z' },
+  open_prs: 2,
+  open_issues: 3,
+  prs: [
+    {
+      number: 42, title: 'Add the dispatch overview', url: 'https://github.com/kleros/kleros-v2/pull/42',
+      state: 'OPEN', draft: false, author: 'mani99brar', author_is_bot: false,
+      head_ref: 'observe/projects-dispatch', base_ref: 'main', updated_at: '2026-10-11T02:00:00Z', merged_at: null,
+      review_decision: 'REVIEW_REQUIRED', checks: { passing: 4, failing: 0, pending: 1 }, labels: ['feature'],
+    },
+    {
+      number: 40, title: 'Dependency bump', url: 'https://github.com/kleros/kleros-v2/pull/40',
+      state: 'MERGED', draft: false, author: 'dependabot[bot]', author_is_bot: true,
+      head_ref: 'deps/zod', base_ref: 'main', updated_at: '2026-10-09T10:00:00Z', merged_at: '2026-10-09T10:05:00Z',
+      review_decision: null, checks: null, labels: [],
+    },
+  ],
+  issues: [
+    {
+      number: 101, title: 'Rail order is unclear', url: 'https://github.com/kleros/kleros-v2/issues/101',
+      author: 'ghost', author_is_bot: false, labels: ['ux'], assignees: ['mani99brar'],
+      created_at: '2026-10-08T09:00:00Z', updated_at: '2026-10-10T12:00:00Z',
+    },
+  ],
+}
+
+/** One project in each git status (read, unavailable) and each GitHub status (read, pending, off, not_github, unavailable). */
+export const dispatchOverview: DispatchOverview = {
+  contract_version: '1.0.0',
+  read_at: '2026-10-11T03:40:00Z',
+  viewer_login: 'mani99brar',
+  projects: [
+    {
+      project_id: 'kleros-v2',
+      git: {
+        status: 'read', reason: null, repository_label: '~/dev/kleros-v2', checkout: 'observe/projects-dispatch',
+        head: '1501ea9abc', default_branch: 'main', clone_id: '0a1b2c3d4e5f', clone_primary: 'kleros-v2',
+        origin: { ref: 'origin/main', sha: '6ac7f5c1d2e3', updated_at: '2026-10-09T09:54:00Z', compare: 'compared', ahead: 2, behind: 1 },
+        ahead_commits: [
+          { sha: '762b8fd1', subject: 'Workflow projects-dispatch-001: feature files', committed_at: '2026-10-11T05:48:00Z', run_id: 'projects-dispatch-001' },
+          { sha: 'eee4e83a', subject: 'projects-dispatch: apply the panel review', committed_at: '2026-10-11T05:40:00Z', run_id: null },
+        ],
+        ahead_naming_run: 1,
+        landings: [{ workflow_id: 'projects-dispatch', run_id: 'projects-dispatch-001', sha: '762b8fd1', on_default: true, on_origin: false }],
+        read_at: '2026-10-11T03:40:00Z',
+      },
+      github: { status: 'read', reason: null, repo: 'kleros/kleros-v2', ...githubRead },
+    },
+    {
+      project_id: 'kleros-v2-worktree',
+      git: {
+        status: 'read', reason: null, repository_label: '~/dev/kleros-v2-wt', checkout: 'review/1',
+        head: 'abc1234', default_branch: 'main', clone_id: '0a1b2c3d4e5f', clone_primary: 'kleros-v2',
+        origin: { ref: 'origin/main', sha: '6ac7f5c1d2e3', updated_at: null, compare: 'no_local_branch', ahead: null, behind: null },
+        ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
+      },
+      github: { status: 'pending', reason: 'not read yet', repo: 'kleros/kleros-v2', read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+    },
+    {
+      project_id: 'team-manager',
+      git: {
+        status: 'read', reason: null, repository_label: 'team-manager', checkout: null,
+        head: 'def5678', default_branch: 'master', clone_id: 'fedcba987654', clone_primary: 'team-manager',
+        origin: null, ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
+      },
+      github: { status: 'off', reason: 'GitHub reads are turned off', repo: 'kleros/team-manager', read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+    },
+    {
+      project_id: 'vendored',
+      git: {
+        status: 'read', reason: null, repository_label: 'vendored', checkout: 'main',
+        head: '0123abc', default_branch: 'main', clone_id: '112233445566', clone_primary: 'vendored',
+        origin: { ref: 'origin/main', sha: 'aabbccddeeff', updated_at: '2026-10-01T00:00:00Z', compare: 'compared', ahead: 0, behind: 0 },
+        ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
+      },
+      github: { status: 'not_github', reason: 'not a GitHub remote', repo: null, read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+    },
+    {
+      project_id: 'missing',
+      git: {
+        status: 'unavailable', reason: 'repository not found', repository_label: 'missing', checkout: null,
+        head: null, default_branch: null, clone_id: null, clone_primary: null,
+        origin: null, ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
+      },
+      github: { status: 'unavailable', reason: 'git not read', repo: null, read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+    },
+  ],
+}
+
+export const projectSteps: ProjectSteps = {
+  contract_version: '1.0.0',
+  project_id: 'kleros-v2',
+  workflows: [
+    {
+      workflow_id: 'projects-dispatch',
+      error: null,
+      runs: [
+        {
+          run_id: 'projects-dispatch-001',
+          source_branch: 'observe/projects-dispatch',
+          base_commit: '5dc3ae2000',
+          integrated_commit: '762b8fd1',
+          lanes: ['launch_server', 'launch_viewer'],
+          steps: [
+            { node_id: 'challenge', label: 'Design challenge', kind: 'review', status: 'succeeded', attempt: 1 },
+            { node_id: 'launch_server', label: 'Server lane', kind: 'worker', status: 'running', attempt: 1 },
+            { node_id: 'integrate', label: 'Integrate', kind: 'integration', status: 'pending', attempt: 0 },
+          ],
+        },
+      ],
+      errors: [{ run_id: 'projects-dispatch-000', code: 'RUN_STORAGE_INVALID', message: 'Run "projects-dispatch-000" has malformed or contradictory persisted state: plan.json is missing' }],
+    },
+  ],
+}

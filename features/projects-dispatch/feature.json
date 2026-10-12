@@ -1,0 +1,61 @@
+{
+  "version": "2.10.0",
+  "name": "Projects dispatch, run 005 (PRD_PROJECTS_DISPATCH; follows projects-dispatch-004, whose review an access outage cut; restores its candidate d688375, which follows 003, whose review blocked only on the handoffs): finish the server handoff (a hand-break for every S5 test) and the viewer handoff (every open P2 kept); docs only; a GPT 6.1 lane reviewer per lane; read-only",
+  "branch_prefix": "feature/projects-dispatch",
+  "prd": "docs/PRD_PROJECTS_DISPATCH.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "server",
+      "task": "server-task.md",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md",
+      "skills": [
+        "impeccable"
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "critique": {
+    "lanes": [
+      "viewer"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "timeout_minutes": 45
+  },
+  "critical": false,
+  "tryout": true
+}

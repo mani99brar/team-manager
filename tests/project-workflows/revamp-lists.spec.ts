@@ -14,10 +14,10 @@ import { validateReviewResult, type ReviewResult, type RunSummary } from '../../
 import { EMPTY_WORKFLOW_ID, PROJECT } from './fixtures.ts'
 import {
   PANE_MESSAGE, REVAMP_FAILED_RUNS, REVAMP_FINISHED_RUNS, REVAMP_LANES, REVAMP_LATEST_RUN, REVAMP_NOW, REVAMP_OWN_RUNS, REVAMP_PREFIX, REVAMP_SUCCEEDED_RUNS,
-  REVAMP_TITLE, RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_PANE, RUN_DESK_PAUSED, RUN_DESK_STALE, UX_REVAMP_LISTS_WORKFLOW_ID,
+  RUN_DESK_HELD, RUN_DESK_INTERRUPTED, RUN_DESK_LIVE, RUN_DESK_LIVE_QUIET, RUN_DESK_PANE, RUN_DESK_PAUSED, RUN_DESK_STALE, UX_REVAMP_LISTS_WORKFLOW_ID,
 } from './fixtures/ux-revamp-lists.ts'
 import { mockResponse } from './mock.ts'
-import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, phase, projectsUrl, projectUrl, runUrl, triageUrl, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -91,7 +91,7 @@ test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards
   await page.clock.setFixedTime(REVAMP_NOW)
   // The Runs home data path is read against the mock: record one run-list fetch (P2: no browser test of it before).
   const recorded = page.waitForRequest(request => request.method() === 'GET' && RUNS_LIST_PATH.test(new URL(request.url()).pathname))
-  await page.goto(projectsUrl)
+  await page.goto(triageUrl)
   await testInfo.attach('runs-home-fetch', { body: new URL((await recorded).url()).pathname, contentType: 'text/plain' })
 
   // Needs you: a warn card with the cause and the next-step label; the section names its own count.
@@ -152,7 +152,7 @@ test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards
   }
 
   // The project rail keeps its state dots; the header and the workspace act on no run.
-  await expect(page.getByTestId('projects-list').locator('.rail-dot').first()).toHaveAttribute('data-tone', /.+/)
+  await expect(page.getByTestId('dispatch-rail-list').locator('.dispatch-rail-row').first()).toHaveClass(/tone-/)
   await expectNoHeaderExecutionControls(page)
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'home-sections')
@@ -168,7 +168,7 @@ test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards
 test(`[scenario:home-phone] Runs home and the Projects header at 390 px: one column, 16 px gutters, 44 px header and row controls, the rail collapsed, and dark without a horizontal overflow (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
   await page.clock.setFixedTime(REVAMP_NOW)
-  await page.goto(projectsUrl)
+  await page.goto(triageUrl)
   await page.setViewportSize({ width: 390, height: 844 })
   const overflow = () => page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as Promise<number>
 
@@ -193,12 +193,12 @@ test(`[scenario:home-phone] Runs home and the Projects header at 390 px: one col
     expect((await rowControls.nth(index).boundingBox())!.height, `row control ${index}`).toBeGreaterThanOrEqual(44)
   }
 
-  // The rail collapses above the sections as the revamp specified: it sits above Needs you and scrolls as a row within itself.
-  const rail = page.getByTestId('projects-rail')
-  const railBox = await rail.boundingBox()
+  // The rail collapses into a chip row above the sections: it sits above Needs you and scrolls as a row within itself ([D1]).
+  const chips = page.getByTestId('dispatch-chips')
+  const railBox = await chips.boundingBox()
   const needsBox = await page.getByTestId('needs-you').boundingBox()
   expect(railBox!.y + railBox!.height).toBeLessThanOrEqual(needsBox!.y + 1)
-  expect(await rail.locator('.rail-list').first().evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).overflowX)).toBe('auto')
+  expect(await chips.evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).overflowX)).toBe('auto')
   await attach(page, testInfo, 'home-phone')
 
   // Dark theme: still a single column with no horizontal overflow.
@@ -242,7 +242,7 @@ async function renderedChips(shell: Locator) {
 test(`[scenario:revamp-look] Calm is the only look: no look switch and no data-look anywhere, and every chip reads at 4.5:1 in both themes (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
   await page.clock.setFixedTime(REVAMP_NOW)
-  await page.goto(projectsUrl)
+  await page.goto(triageUrl)
   const shell = page.getByTestId('projects-workspace')
   const needsCard = page.getByTestId('needs-you').locator(`li:has(> a[data-run-id="${RUN_DESK_PANE}"])`)
   const background = (target: Locator) => target.evaluate(element => element.ownerDocument.defaultView!.getComputedStyle(element).backgroundColor)
@@ -285,22 +285,38 @@ test(`[scenario:revamp-look] Calm is the only look: no look switch and no data-l
 })
 
 test(`Runs home with nothing waiting: "Needs you · 0" with the empty state in the section sub-header (${phase})`, async ({ page }) => {
-  // Every run list answers without the runs that wait on the operator (the same waitingKind predicate Runs home uses).
+  // Every run list that answered drops the runs that wait on the operator (the same waitingKind predicate Runs home uses).
+  // A list that could not be read carries no runs (the combined candidate seeds a `broken` workflow whose runs error): pass
+  // its response through untouched, so Runs home shows it under Attention exactly as it would without this override.
+  const filterWaiting = (body: { runs: RunSummary[]; next_cursor: string | null }) =>
+    ({ ...body, runs: body.runs.filter(run => waitingKind(run) === null) })
   await page.route(isRunList, async route => {
-    const body = await original(route) as { runs: RunSummary[]; next_cursor: string | null }
-    await route.fulfill({ json: { ...body, runs: body.runs.filter(run => waitingKind(run) === null) } })
+    if (phase === 'candidate') {
+      const response = await route.fetch()
+      const body = await response.json() as { runs?: RunSummary[]; next_cursor: string | null }
+      await (Array.isArray(body.runs) ? route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) }) : route.fulfill({ response }))
+      return
+    }
+    // A run list that could not be read carries no `runs` array (an unlistable workflow answers with an error): pass its
+    // response through untouched, status and all, so Runs home reads it under Attention exactly as it would without this override.
+    const resp = mockResponse(new URL(route.request().url()))
+    const body = JSON.parse(String(resp.body)) as { runs?: RunSummary[]; next_cursor: string | null }
+    if (!Array.isArray(body.runs)) { await route.fulfill({ status: resp.status, contentType: resp.contentType, body: resp.body }); return }
+    await route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) })
   })
   await page.clock.setFixedTime(REVAMP_NOW)
-  await page.goto(projectsUrl)
+  await page.goto(triageUrl)
   const needs = page.getByTestId('needs-you')
   // The rest of Runs home still reads its runs, so the empty state is not a page that failed to load.
   await expect(row(page.getByTestId('today-runs'), RUN_DESK_LIVE)).toHaveCount(1)
   await expect(needs.locator('.ui-section-header h2')).toHaveText('Needs you · 0')
   await expect(needs.locator('.ui-section-header .ui-sub')).toHaveText('nothing waits on you')
   await expect(needs.locator('li, a[data-run-id]')).toHaveCount(0)
-  await expect(page.getByTestId('rail-needs-you')).toHaveText('Needs you · 0')
+  await expect(page.getByTestId('rail-triage')).not.toContainText('waits on you')
   await expect(page.locator(`a[data-run-id="${RUN_DESK_PANE}"]`)).toHaveCount(0)
-  await expect(page.getByTestId('lists-errors')).toHaveCount(0)
+  // The revamp runs loaded (the empty needs is not a page that failed): no Attention card names this feature.
+  await expect(page.getByTestId('lists-errors').locator('li', { hasText: UX_REVAMP_LISTS_WORKFLOW_ID })).toHaveCount(0)
+  await expect(page.getByTestId('recent-runs').locator('a[data-run-id]').first()).toBeVisible()
   expect(await page.title()).not.toMatch(/^\(\d+\)/)
   await expectNoExecutionControls(page)
 })
@@ -309,7 +325,7 @@ test(`Runs home with a run list that failed to load: a fail-toned Attention card
   const failing = `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs`
   await page.route(url => url.pathname === failing, route => route.fulfill({ status: 500, json: { error: { code: 'revamp_test', message: 'The run list could not be read' } } }))
   await page.clock.setFixedTime(REVAMP_NOW)
-  await page.goto(projectsUrl)
+  await page.goto(triageUrl)
   const attention = page.getByTestId('lists-errors')
   await expect(attention).toHaveAttribute('role', 'alert')
   // Named by its heading, as Needs you, Running and Recent are.
@@ -349,7 +365,7 @@ for (const failure of LIST_FAILURES) {
     // The answer is the failure itself in both phases: nothing of the original response is read.
     await page.route(url => url.pathname === failing, failure.answer)
     await page.clock.setFixedTime(REVAMP_NOW)
-    await page.goto(projectsUrl)
+    await page.goto(triageUrl)
     const attention = page.getByRole('alert', { name: /^Attention · \d+$/ })
     await expect(attention).toHaveAttribute('data-testid', 'lists-errors')
     const card = attention.locator('li', { hasText: `${PROJECT.name} · ${UX_REVAMP_LISTS_WORKFLOW_ID}` })
@@ -404,8 +420,9 @@ test(`Self-hosted fonts: the Projects pages request fonts only from their own or
   })()`) as Promise<{ origin: string; faces: { family: string; urls: string[]; src: string }[]; unreadable: string[]; fontSet: string[]; links: string[] }>
 
   const pages = [
-    { url: projectsUrl, ready: page.locator('.ui-section-header h2').first() },
-    { url: projectUrl(PROJECT.project_id), ready: page.locator('.ui-section-header h2').first() },
+    { url: triageUrl, ready: page.locator('.ui-section-header h2').first() },
+    { url: projectsUrl, ready: page.getByTestId('dispatch-cards') },
+    { url: projectUrl(PROJECT.project_id), ready: page.getByTestId('dispatch-project-header') },
     { url: workflowUrl(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.locator('.ui-section-header h2').first() },
     // The run page (the Signal Box stage) uses the same two faces.
     { url: runUrl(RUN_DESK_LIVE, undefined, UX_REVAMP_LISTS_WORKFLOW_ID), ready: page.getByTestId('run-stage') },
@@ -454,18 +471,15 @@ test(`Project and feature pages (PRD_VIEWER_REVAMP 5.2): feature cards with the 
   test.setTimeout(90_000)
   await page.clock.setFixedTime(REVAMP_NOW)
 
-  // The project page: a feature card toned by its last run, which it names with a status chip beside the colour.
+  // The project page: the step chart's feature group, an li[data-workflow-id] whose header is a tone-carrying a.lists-group-head
+  // ([L1]); the tone is the latest registry run's (desk-live-1, running). The run rows live on the feature page below.
   await page.goto(projectUrl(PROJECT.project_id))
-  const group = page.getByTestId('workflows-list').locator(`[data-workflow-id="${UX_REVAMP_LISTS_WORKFLOW_ID}"]`)
+  const group = page.locator(`li[data-workflow-id="${UX_REVAMP_LISTS_WORKFLOW_ID}"]`)
   const head = group.locator('a.lists-group-head')
-  await expect(head.locator('.projects-card-title')).toHaveText(REVAMP_TITLE)
-  await expect(head).toContainText(`${UX_REVAMP_LISTS_WORKFLOW_ID} · ${REVAMP_OWN_RUNS.length} runs`)
-  // The last run is the one updated last (desk-live-1, running), not the oldest (a failed run) nor any other.
-  const [latestLabel, , latestTone] = HISTORY[REVAMP_LATEST_RUN.runId]
-  await expect(head.locator('.lists-group-last')).toContainText(new RegExp(`^last run ${latestLabel} · last activity `))
-  await expect(head.locator('.lists-group-last .status-badge')).toHaveAttribute('data-status', REVAMP_LATEST_RUN.status)
-  expect(await head.getAttribute('class')).toMatch(new RegExp(`\\bui-card\\b.*\\btone-${latestTone}\\b`))
-  // Neither page shows the rail or other registry-wide data; the breadcrumb is their navigation.
+  await expect(head).toContainText(UX_REVAMP_LISTS_WORKFLOW_ID)
+  const [, , latestTone] = HISTORY[REVAMP_LATEST_RUN.runId]
+  await expect(head).toHaveClass(new RegExp(`\\bui-card\\b.*\\btone-${latestTone}\\b`))
+  // The old prefix rail is gone; the projects-only rail replaces it.
   await expect(page.getByTestId('projects-rail')).toHaveCount(0)
 
   // The feature page: the lanes from the definition, then one history chip per listed run (glyph, title and a name that

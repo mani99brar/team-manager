@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
+import { dispatchSchemas, gitStateSchema, githubStateSchema } from './dispatch.js'
 import {
   CONTROL_IDS, RECORD_STATUSES, cleanPreviewRequestSchema, cleanPreviewResponseSchema, controlErrorSchema, controlRecordSchema, controlRequestSchema, controlsStatusSchema, runControlsSchema,
 } from './controls.js'
@@ -901,4 +902,29 @@ test('run controls (Appendix A): the schemas refuse what the API never sends', (
   assert.throws(() => cleanPreviewRequestSchema.parse({ run_state_token: 't', request_id: examples.controlRequest.request_id }), 'the preview body is the token only ([L4])')
   assert.throws(() => controlRequestSchema.parse({ ...examples.controlRequest, request_id: 'nope' }))
   assert.throws(() => controlErrorSchema.parse({ error: { code: 'SOMETHING_ELSE', message: 'x' } }))
+})
+
+test('dispatch examples and generated schemas agree (Appendix A, contract 1.0.0)', () => {
+  for (const [name, schema] of Object.entries(dispatchSchemas)) {
+    schema.parse(examples[name as keyof typeof examples])
+    const exported = JSON.parse(readFileSync(new URL(`./${name}.schema.json`, import.meta.url), 'utf8'))
+    assert.deepEqual(exported, z.toJSONSchema(schema))
+  }
+  // The overview covers one project in each git and GitHub status; ProjectSteps carries an errors entry.
+  const gitStatuses = new Set(examples.dispatchOverview.projects.map(project => project.git.status))
+  const githubStatuses = new Set(examples.dispatchOverview.projects.map(project => project.github.status))
+  assert.deepEqual([...gitStatuses].sort(), ['read', 'unavailable'])
+  assert.deepEqual([...githubStatuses].sort(), ['not_github', 'off', 'pending', 'read', 'unavailable'])
+  assert.ok(examples.projectSteps.workflows[0].errors.length >= 1, 'a ProjectSteps example has an errors entry')
+})
+
+test('dispatch (Appendix A): the schemas refuse what the routes never send', () => {
+  const overview = structuredClone(examples.dispatchOverview)
+  // Sha pattern: a non-hex head fails, so the route degrades that project to unavailable "git failed" (note 6).
+  assert.throws(() => gitStateSchema.parse({ ...overview.projects[0].git, head: 'ZZZZZZZ' }), 'head must match the Sha pattern')
+  // A numeric-offset timestamp (git %cI, gh dates) is rejected, so the server converts every time to a Z offset.
+  assert.throws(() => gitStateSchema.parse({ ...overview.projects[0].git, read_at: '2026-10-11T03:40:00+02:00' }), 'read_at must be a Z timestamp')
+  // GitHub: only the five states, and no extra keys.
+  assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, status: 'loading' }))
+  assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, extra: true }))
 })
