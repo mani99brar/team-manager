@@ -20,7 +20,8 @@
         ],
         "rounds": 1,
         "timeout_minutes": 15
-      }
+      },
+      "model": "claude-opus-5-5"
     }
   ],
   "reviewers": [
