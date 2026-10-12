@@ -1,6 +1,6 @@
 ---
 name: workflow-grill
-description: Interview the operator before a workflow feature launch and write features/<feature>/decisions.md. Use when the user runs /workflow-grill <feature>, or asks to grill, interview or settle the decisions of a workflow feature before `python -m workflow launch`. Asks at most five questions, one at a time, each with a recommended default and its consequence, then reads back every bullet the operator did not choose before any launch; never writes code.
+description: Interview the operator before a workflow feature launch and write features/<feature>/decisions.md. Use for /workflow-grill <feature> or "grill me on this feature". At most five questions, each with a recommended default; never writes code.
 argument-hint: <feature> [--repo <target repository>]
 allowed-tools: Read, Glob, Grep, Write, Edit
 ---
