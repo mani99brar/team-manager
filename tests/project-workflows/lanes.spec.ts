@@ -47,6 +47,13 @@ const assignmentWorker = (page: Page, lane: string) => page.locator(`[data-testi
 const attributeList = (locator: Locator, attribute: string) => locator.evaluateAll((elements, name) => elements.map(element => element.getAttribute(name)), attribute)
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+/** Opens every closed fold of the Assignment view (decisions, a task, owned paths, checks) under `scope`. */
+async function openFolds(scope: Locator) {
+  // The closed set shrinks as each fold opens, so always open the first one still closed.
+  const closed = scope.locator('details.assignment-fold:not([open])')
+  while (await closed.count() > 0) await closed.first().locator('> summary').click()
+}
+
 test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and verify nodes, three workers and findings grouped by lane (${phase})`, async ({ page }, testInfo) => {
   // The lanes workflow is listed beside the two-lane one and holds its own runs.
   await page.goto(workflowUrl(PROJECT.project_id, LANES_WORKFLOW_ID))
@@ -83,6 +90,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await expect(page.getByTestId('assignment-selected-workers')).toHaveText(THREE_LANES.join(', '))
   await expect(page.getByTestId('assignment-excluded-workers')).toHaveCount(0)
   await expect(page.getByTestId('assignment-lanes')).toContainText('3 worker lanes in this run')
+  await openFolds(page.getByTestId('assignment'))
   const docs = assignmentWorker(page, 'docs')
   const docsHeading = docs.getByRole('heading', { level: 4 })
   await expect(docsHeading).toContainText('Worker docs (writer)')
@@ -152,6 +160,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   }
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'viewer-three-lanes')
+  await workerGroup(page, 'docs').getByTestId('finding-more').click()
   await workerGroup(page, 'docs').getByTestId('finding-task-link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_docs')
   await expect(page.getByTestId('task-highlight')).toHaveText(DOCS_QUOTE)

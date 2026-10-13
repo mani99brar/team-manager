@@ -211,6 +211,7 @@ test(`[scenario:output-first-task-collapsed] The launch node's result and files 
 
   // A finding's requirement link opens the disclosure and highlights the quote in view.
   await page.goto(clarityRunUrl(RUN_FILES, 'review'))
+  await findingRow(page, FILE_FINDING_PLAIN).getByTestId('finding-more').click()
   await findingRow(page, FILE_FINDING_PLAIN).getByTestId('finding-task-link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
   await expect(taskDetails(page)).toHaveAttribute('open', '')
@@ -309,6 +310,7 @@ test(`[scenario:findings-on-files] A captured file lists exactly the findings wh
   }
   await expect(findingRow(page, FILE_FINDING_SIMILAR).getByTestId('finding-file-link')).toHaveCount(0)
   await expect(findingRow(page, FILE_FINDING_NONE).getByTestId('finding-file-link')).toHaveCount(0)
+  await findingRow(page, FILE_FINDING_RANGE).getByTestId('finding-more').click()
   await findingRow(page, FILE_FINDING_RANGE).getByTestId('finding-file-link').click()
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
   await expect(capturedFile(page, AUDIT_PATH)).toBeVisible()

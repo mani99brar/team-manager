@@ -285,7 +285,7 @@ test(`[scenario:completion-evidence-shown] The launch node shows untested, the f
   await page.goto(guardedRunUrl('launch_ui', RUN_GUARDED_BLOCKED))
   const refused = page.getByTestId('worker-completion')
   await expect(refused).toContainText(GUARDED_FOURTH_SUMMARY)
-  await expect(refused.locator('.status-badge[data-status]')).toHaveAttribute('data-status', 'blocked')
+  await expect(refused.getByTestId('report-completion')).toHaveAttribute('data-status', 'blocked')
   await expect(page.getByTestId('completion-question-refused')).toContainText('Treated as blocked: the worker asked a fourth question')
   await expect(page.getByTestId('completion-question-text')).toHaveText(GUARDED_FOURTH_QUESTION)
   await expect(page.getByTestId('completion-evidence')).toHaveCount(0)
@@ -363,11 +363,100 @@ test(`[scenario:worker-questions-shown] Answered and waiting worker questions ar
   await expect(page.getByTestId('worker-questions-none')).toHaveText('No questions were recorded for this worker.')
 })
 
+/** Opens every closed fold of the Assignment view (decisions, a task, owned paths, checks) under `scope`. */
+async function openFolds(scope: Locator) {
+  // The closed set shrinks as each fold opens, so always open the first one still closed.
+  const closed = scope.locator('details.assignment-fold:not([open])')
+  while (await closed.count() > 0) await closed.first().locator('> summary').click()
+}
+
+test(`[scenario:assignment-folded] The Assignment view prints the feature once and folds its documents: decisions and each task are closed details with their size, owned paths and checks too; opened they read at most 70ch wide; the lane table names its numbers, its lane names go to their sections, and at 390 px each lane is a card (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(guardedRunUrl())
+  await page.getByTestId('tab-assignment').click()
+  const assignment = page.getByTestId('assignment')
+  await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(1)
+
+  // The feature title is printed once.
+  const feature = (await assignment.getByTestId('assignment-setup-line').locator('strong').textContent())!.trim()
+  expect(feature.length).toBeGreaterThan(0)
+  await expect(assignment.getByText(feature, { exact: true })).toHaveCount(1)
+
+  // Documents are closed details whose summaries carry their size.
+  const decisionsFold = assignment.getByTestId('assignment-decisions-fold')
+  await expect(decisionsFold).not.toHaveAttribute('open', '')
+  await expect(decisionsFold.locator('summary')).toHaveText(/^Decisions · [\d,]+ words?$/)
+  const taskFolds = assignment.getByTestId('assignment-task-fold')
+  expect(await taskFolds.count()).toBeGreaterThan(0)
+  for (const fold of await taskFolds.all()) {
+    await expect(fold).not.toHaveAttribute('open', '')
+    await expect(fold.locator('summary')).toHaveText(/^Task · [\d,]+ characters?$/)
+  }
+  for (const fold of await assignment.getByTestId('assignment-owned-fold').all()) {
+    await expect(fold).not.toHaveAttribute('open', '')
+    await expect(fold.locator('summary')).toHaveText(/^Owned paths · \d+$/)
+  }
+  for (const fold of await assignment.getByTestId('assignment-checks-fold').all()) {
+    await expect(fold).not.toHaveAttribute('open', '')
+    await expect(fold.locator('summary')).toHaveText(/^Required checks · \d+$/)
+  }
+  await expect(assignment.getByTestId('assignment-decisions-rendered')).toBeHidden()
+  await expect(assignment.getByTestId('assignment-task').first()).toBeHidden()
+
+  // The lane table says what its numbers are; a lane name goes to that worker's section and moves the focus there.
+  await expect(assignment.getByTestId('assignment-lane-table').locator('thead th')).toHaveText(['Lane', 'Role', 'Model', 'Skills', 'Owned paths', 'Checks', 'Task (chars)'])
+  const lane = (await assignment.getByTestId('assignment-lane-row').first().getAttribute('data-lane'))!
+  await assignment.getByTestId('assignment-lane-row').first().getByTestId('assignment-lane-link').click()
+  await expect(assignment.locator(`[data-testid="assignment-worker"][data-worker="${lane}"] h4`)).toBeFocused()
+
+  // Opened, decisions render as before (inert Markdown) and, like a task, at a readable measure at 1920 px.
+  await decisionsFold.locator('summary').click()
+  await expect(assignment.getByTestId('assignment-decisions-rendered').getByRole('heading', { level: 1, name: 'Decisions: workflow guardrails' })).toBeVisible()
+  await expectInert(assignment.getByTestId('assignment-decisions-rendered'))
+  await taskFolds.first().locator('summary').click()
+  await expect(assignment.getByTestId('assignment-task').first()).toBeVisible()
+  await expect(assignment.getByTestId('assignment-task').first().locator('.markdown')).toHaveAttribute('data-inert', 'true')
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  const zero = (target: Locator) => target.evaluate(element => {
+    const doc = (globalThis as unknown as { document: { createElement: (tag: string) => { textContent: string; style: { cssText: string }; getBoundingClientRect: () => { width: number }; remove: () => void } } }).document
+    const probe = doc.createElement('span')
+    probe.textContent = '0'
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
+    ;(element as unknown as { appendChild: (node: unknown) => void }).appendChild(probe)
+    const width = probe.getBoundingClientRect().width
+    probe.remove()
+    return width
+  })
+  for (const prose of [assignment.getByTestId('assignment-decisions-rendered'), assignment.getByTestId('assignment-task').first()]) {
+    const width = (await prose.boundingBox())!.width
+    const character = await zero(prose)
+    expect(character).toBeGreaterThan(0)
+    expect(width).toBeLessThanOrEqual(character * 70 + 1)
+  }
+  await attach(page, testInfo, 'assignment-folded')
+
+  // At 390 px each lane is a card with its labels, and the page does not scroll sideways.
+  await page.setViewportSize({ width: 390, height: 844 })
+  const rows = assignment.getByTestId('assignment-lane-row')
+  const first = rows.first()
+  expect((await first.evaluate(element => (globalThis as unknown as { getComputedStyle: (node: unknown) => { display: string } }).getComputedStyle(element).display))).toBe('block')
+  expect(await first.locator('td[data-label]').evaluateAll(cells => cells.map(cell => cell.getAttribute('data-label')))).toEqual(['Role', 'Model', 'Skills', 'Owned paths', 'Checks', 'Task (chars)'])
+  const label = await first.locator('td[data-label="Owned paths"]').evaluate(element => (globalThis as unknown as { getComputedStyle: (node: unknown, pseudo: string) => { content: string } }).getComputedStyle(element, '::before').content)
+  expect(label).toContain('Owned paths')
+  expect((await first.boundingBox())!.width).toBeLessThanOrEqual(390)
+  await expect.poll(() => page.evaluate('document.documentElement.scrollWidth') as Promise<number>).toBeLessThanOrEqual(390)
+})
+
 test(`[scenario:decisions-shown] The Assignment page renders decisions.md as Markdown; a run without it says so (${phase})`, async ({ page }, testInfo) => {
   await page.goto(guardedRunUrl())
   await page.getByTestId('tab-assignment').click()
   const decisions = page.getByTestId('assignment-decisions')
-  await expect(decisions.getByRole('heading', { name: 'Decisions', exact: true, level: 4 })).toBeVisible()
+  // Decisions is a closed fold whose summary says its size; opened, it renders as it always did.
+  const fold = decisions.getByTestId('assignment-decisions-fold')
+  await expect(fold.locator('summary')).toHaveText(/^Decisions · [\d,]+ words?$/)
+  await expect(fold).not.toHaveAttribute('open', '')
+  await fold.locator('summary').click()
   const rendered = decisions.getByTestId('assignment-decisions-rendered')
   // Rendered, not source: its headings and list items are elements, and no Markdown syntax is left.
   await expect(rendered.getByRole('heading', { level: 1, name: 'Decisions: workflow guardrails' })).toBeVisible()
@@ -408,6 +497,7 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
 
   // decisions.md on the Assignment page.
   await page.getByTestId('tab-assignment').click()
+  await openFolds(page.getByTestId('assignment'))
   const decisions = page.getByTestId('assignment-decisions-rendered')
   await expect(decisions).toBeVisible()
   await decisions.scrollIntoViewIfNeeded()

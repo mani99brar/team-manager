@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Locator, type Page } from '@playwright/test'
 import {
   ADAPTER_COMPLETION_SUMMARY,
   ADAPTER_HANDOFF_ASSUMPTION,
@@ -26,6 +26,13 @@ installHooks()
 const taskPanel = (page: Page) => page.getByTestId('task-panel')
 const findingRows = (page: Page) => page.getByTestId('review-findings').getByTestId('finding')
 const assignmentWorker = (page: Page, lane: string) => page.locator(`[data-testid="assignment-worker"][data-worker="${lane}"]`)
+
+/** Opens every closed fold of the Assignment view (decisions, a task, owned paths, checks) under `scope`. */
+async function openFolds(scope: Locator) {
+  // The closed set shrinks as each fold opens, so always open the first one still closed.
+  const closed = scope.locator('details.assignment-fold:not([open])')
+  while (await closed.count() > 0) await closed.first().locator('> summary').click()
+}
 
 test(`[scenario:run-assignment] The Assignment tab shows what the run was asked to do, with tasks rendered as Markdown (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED))
@@ -67,7 +74,8 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
   await expect(assignment).toContainText('Attempt cap')
   await expect(assignment).toContainText('3 per lane and phase')
 
-  // Each worker's task is rendered as Markdown: headings and list items, not raw text; ownership and checks follow.
+  // Each worker's task is rendered as Markdown: headings and list items, not raw text; ownership and checks follow (folded until opened).
+  await openFolds(assignment)
   const ui = assignmentWorker(page, 'ui')
   const uiTaskPanel = ui.getByTestId('assignment-task')
   await expect(uiTaskPanel.getByRole('heading', { name: 'UI worker' })).toBeVisible()
@@ -209,6 +217,7 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
   const link = linked.getByTestId('finding-task-link')
   await expect(link).toHaveAttribute('data-lane', 'ui')
   await expect(link).toHaveAttribute('href', runUrl(RUN_SUCCEEDED, 'launch_ui'))
+  await linked.getByTestId('finding-more').click()
   await link.click()
   await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED, 'launch_ui')}$`))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'launch_ui')
@@ -241,7 +250,9 @@ test(`[scenario:finding-to-task] A verbatim requirement quote links to the worke
 
   // A quote that names a directory still links, and the highlighted text is the redacted form.
   await page.goto(runUrl(RUN_SUCCEEDED, 'review'))
-  await findingRows(page).filter({ hasText: uiPathQuote(PATH_TOKEN) }).getByTestId('finding-task-link').click()
+  const pathFinding = findingRows(page).filter({ hasText: uiPathQuote(PATH_TOKEN) })
+  await pathFinding.getByTestId('finding-more').click()
+  await pathFinding.getByTestId('finding-task-link').click()
   await expect(page.getByTestId('task-highlight')).toHaveText(uiPathQuote(PATH_TOKEN))
 })
 
@@ -279,6 +290,7 @@ test(`[scenario:inputs-paths-redacted] No absolute path from the seeded inputs r
   await page.getByTestId('tab-assignment').click()
   const assignment = page.getByTestId('assignment')
   await expect(assignment.getByTestId('assignment-worker')).toHaveCount(2)
+  await openFolds(assignment)
   expect(await renderedText(assignment)).toContain(PATH_TOKEN)
   await attach(page, testInfo, 'inputs-paths-redacted')
 

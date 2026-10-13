@@ -47,6 +47,15 @@
 .run-bar-status { flex: 1 1 320px; flex-wrap: nowrap; }
 .run-bar-status > .status-badge { flex: none; }
 .run-bar-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; }
+.run-bar-assignment { flex: none; white-space: nowrap; font-size: 0.9rem; }
+@media (min-width: 761px) {
+  /* One line: the Now headline gives way (ellipsis) so the id, the status, the Assignment link, the chip and the switch stay. */
+  .run-bar { flex-wrap: nowrap; }
+  .run-bar h2 { flex: none; }
+  .run-bar-status { display: flex; flex: 1 1 0; }
+  .run-bar-now { flex: 0 1 auto; }
+  .run-bar .run-freshness { flex: none; }
+}
 
 /* ---- Now banner: its content is NowBanner's; here a left rule in its tone over the tone's soft background ---- */
 .run-now { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--border); border-left-width: 4px; border-left-color: var(--idle); border-radius: var(--radius); background: var(--surface); font-size: 0.9rem; line-height: 21px; min-width: 0; }

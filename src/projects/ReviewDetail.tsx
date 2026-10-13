@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import {
   isBlockingFinding,
   isNotRecorded,
@@ -12,14 +12,14 @@ import {
 } from './api.ts'
 import { CRITIQUE_DECIDED_WORDING, CRITIQUE_JOB_WORDING, critiqueOutcomeWording, evidenceOf, isCritiqueReviewer, missingScreenshot, reviewBlockedBy } from './critique.ts'
 import { DIFF_BYTE_LIMIT, diffTotals, fetchDiffText, MAX_DIFF_LINES, parseDiff, type DiffFile } from './diff.ts'
-import { findingsForFile, laneWording, runLanes, workerWording } from './findings.ts'
+import { findingsForFile, runLanes, splitFirstSentence, workerWording } from './findings.ts'
 import { Screenshots } from './Screenshots.tsx'
 import './critique.css'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
-import { blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
+import { BLOCKING_ONLY, blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
@@ -50,6 +50,10 @@ type Props = {
   /** Opens a captured file's panel on the launch node that shows it (the run view navigates and hands the path over). */
   onOpenFile: (nodeId: string, path: string) => void
 }
+
+/** The filter-row id of All, pressed whenever nothing else is. */
+const ALL_FINDINGS = 'all'
+const ALL_PRESSED: ReadonlySet<string> = new Set([ALL_FINDINGS])
 
 const TRANSPORT_WORDING: Record<Reviewer['transport'], string> = {
   native: 'native session',
@@ -104,14 +108,20 @@ export function CritiqueEvidence({ scope, finding }: { scope: RunScope; finding:
 }
 
 /**
- * One finding as a card (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in its severity's colour, the severity and disposition as
- * chips (a blocking one says so in words), the message with the captured files it names, then the worker, the reviewer and
- * the quoted requirement with the tasks it was found in. The `finding` test id and its data attributes are the table row's.
+ * One finding as a card (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in its severity's colour. The head is the severity, the
+ * reviewer, the lane and the message's first sentence at normal weight (a blocking one carries "blocks integration" in
+ * place); the rest of the message, the captured files it names and the quoted requirement with the tasks it was found in sit
+ * behind More. The `finding` test id and its data attributes are the table row's.
  */
 function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequirement, onOpenFile, capturedFiles }: CardProps) {
+  const [open, setOpen] = useState(false)
   const blocking = isBlockingFinding(finding)
   // A finding links to every captured file its message names verbatim; the review result itself records no location.
   const files = [...capturedFiles].filter(([path]) => findingsForFile([finding], path).length > 0)
+  const { lead, rest } = splitFirstSentence(finding.message)
+  const evidence = evidenceOf(finding) !== null || missingScreenshot(finding)
+  const more = rest.trim() !== '' || files.length > 0 || finding.requirement !== null || evidence
+  const bodyId = useId()
   return (
     <Card
       tone={blocking ? 'fail' : 'idle'}
@@ -121,14 +131,25 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
       data-disposition={finding.disposition}
       data-worker={finding.worker ?? 'unrecorded'}
       data-reviewer={finding.reviewer}
+      data-blocking={blocking ? 'true' : undefined}
     >
       <div className="finding-card-head">
-        <SeverityChip severity={finding.severity} />
+        <SeverityChip severity={finding.severity} />{' '}
+        <span className="finding-reviewer" data-testid="finding-reviewer">{finding.reviewer}</span>{' '}
+        <span className="finding-lane" data-testid="finding-worker">{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</span>{' '}
         <Chip tone={DISPOSITION_TONE[finding.disposition]} plain data-testid="finding-disposition">{finding.disposition}</Chip>
-        {blocking && <Chip tone="fail">blocks integration</Chip>}
+        {blocking && <>{' '}<Chip tone="fail" data-testid="finding-blocks">blocks integration</Chip></>}
       </div>
-      <p className="finding-message">
-        {finding.message}
+      <p className="finding-message" data-testid="finding-message">
+        {lead}
+        <span id={bodyId} className="finding-rest" hidden={!open}>{rest}</span>
+        {more && (
+          <button type="button" className="button button-small finding-more" aria-expanded={open} aria-controls={bodyId} data-testid="finding-more" onClick={() => setOpen(value => !value)}>
+            {open ? 'Less' : 'More'}
+          </button>
+        )}
+      </p>
+      <div className="finding-body" hidden={!open}>
         {files.map(([path, nodeId]) => (
           <AppLink
             key={path}
@@ -137,45 +158,42 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
             className="finding-file-link"
             data-testid="finding-file-link"
             data-path={path}
-            style={{ display: 'block' }}
           >
             Open the captured {path}
           </AppLink>
         ))}
-      </p>
-      <dl className="finding-fields">
-        <div><dt className="finding-field-label">Worker</dt><dd data-testid="finding-worker">{finding.worker === null ? <span className="projects-muted">not recorded</span> : workerWording(finding.worker)}</dd></div>
-        <div><dt className="finding-field-label">Reviewer</dt><dd data-testid="finding-reviewer">{finding.reviewer}</dd></div>
-        <div className="finding-requirement-field">
-          <dt className="finding-field-label">Requirement</dt>
-          <dd>
-            {finding.requirement === null ? <span data-testid="finding-requirement-none">—</span> : (
-              <>
-                <q data-testid="finding-requirement">{finding.requirement}</q>
-                {finding.requirement_found_in.length === 0 ? (
-                  <span className="projects-muted finding-task-note" data-testid="finding-task-unlinked">not found verbatim in the task</span>
-                ) : finding.requirement_found_in.map(lane => {
-                  const nodeId = launchNodeFor(lane, definitionNodes, inputs)
-                  const quote = finding.requirement!
-                  return (
-                    <AppLink
-                      key={lane}
-                      href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)}
-                      onNavigate={() => onOpenRequirement(nodeId, quote)}
-                      className="finding-task-link"
-                      data-testid="finding-task-link"
-                      data-lane={lane}
-                    >
-                      Open in the {lane} task
-                    </AppLink>
-                  )
-                })}
-              </>
-            )}
-          </dd>
-        </div>
-      </dl>
-      <CritiqueEvidence scope={scope} finding={finding} />
+        <dl className="finding-fields">
+          <div className="finding-requirement-field">
+            <dt className="finding-field-label">Requirement</dt>
+            <dd>
+              {finding.requirement === null ? <span data-testid="finding-requirement-none">—</span> : (
+                <>
+                  <q data-testid="finding-requirement">{finding.requirement}</q>
+                  {finding.requirement_found_in.length === 0 ? (
+                    <span className="projects-muted finding-task-note" data-testid="finding-task-unlinked">not found verbatim in the task</span>
+                  ) : finding.requirement_found_in.map(lane => {
+                    const nodeId = launchNodeFor(lane, definitionNodes, inputs)
+                    const quote = finding.requirement!
+                    return (
+                      <AppLink
+                        key={lane}
+                        href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)}
+                        onNavigate={() => onOpenRequirement(nodeId, quote)}
+                        className="finding-task-link"
+                        data-testid="finding-task-link"
+                        data-lane={lane}
+                      >
+                        Open in the {lane} task
+                      </AppLink>
+                    )
+                  })}
+                </>
+              )}
+            </dd>
+          </div>
+        </dl>
+        <CritiqueEvidence scope={scope} finding={finding} />
+      </div>
     </Card>
   )
 }
@@ -390,17 +408,23 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
       { id: 'full', label: 'Full diff', artifactId: diffArtifactId },
     ]
   }, [diffArtifactId, deltaArtifactId, deltaFrom])
-  // One filter row (docs/PRD_VIEWER_REVAMP.md 5.4): each reviewer, each lane and Open only, any of them pressed at once.
-  const [pressed, setPressed] = useState<ReadonlySet<string>>(() => new Set())
+  // One filter row: Open P0/P1, a severity each, each reviewer, each lane and Open only, any of them pressed at once. A review
+  // with something blocking opens on Open P0/P1; All clears the row.
+  const [pressed, setPressed] = useState<ReadonlySet<string>>(() => new Set(blockingFindings(review).length > 0 ? [BLOCKING_ONLY] : []))
   const lanes = runLanes(definitionNodes, inputs)
   const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
   const ordered = orderFindings(review.findings, lanes, reviewers.map(reviewer => reviewer.reviewer_id))
   const visible = filterFindings(ordered, pressed)
   const toggles = findingFilterIds(review, lanes)
   // In the toggles' order, so the attribute reads the same however they were pressed.
-  const pressedIds = [...toggles.reviewers, ...toggles.lanes, toggles.open].map(toggle => toggle.id).filter(id => pressed.has(id))
+  const rowToggles = [toggles.blocking, ...toggles.severities, ...toggles.reviewers, ...toggles.lanes, toggles.open]
+  const pressedIds = rowToggles.map(toggle => toggle.id).filter(id => pressed.has(id))
   const onlyReviewer = pressedIds.length === 1 && pressedIds[0].startsWith('reviewer:') ? pressedIds[0].slice('reviewer:'.length) : null
   const onToggle = (id: string, on: boolean) => {
+    if (id === ALL_FINDINGS) {
+      setPressed(new Set())
+      return
+    }
     setPressed(previous => {
       const next = new Set(previous)
       if (on) next.add(id)
@@ -470,8 +494,8 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
             className="findings-filters"
             data-testid="findings-filters"
             aria-label="Narrow the findings"
-            filters={[...toggles.reviewers, ...toggles.lanes, toggles.open]}
-            selected={pressed}
+            filters={[{ id: ALL_FINDINGS, label: 'All', count: review.findings.length }, ...rowToggles]}
+            selected={pressedIds.length === 0 ? ALL_PRESSED : pressed}
             onToggle={onToggle}
           />
         )}
@@ -503,11 +527,6 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
 const DISPOSITION_TONE: Record<ReviewFinding['disposition'], Tone> = { open: 'warn', resolved: 'ok', accepted: 'idle' }
 
 /**
- * The findings that block integration, one card each, before the findings table (docs/PRD_VIEWER_UX.md 4.7): severity,
- * disposition, reviewer and lane, the full message, and the task lines the quoted requirement was found in. The table below
- * keeps listing them too; a card is not a `finding` row.
- */
-/**
  * One reviewer's own findings of the recorded round, as the review page's finding cards (run-sessions, PRD 3.1): the reviewer
  * node page shows exactly these, never another reviewer's. Empty, it says so.
  */
@@ -520,34 +539,6 @@ export function ReviewerFindings({ review, reviewerId, scope, definitionNodes, s
       {own.map(finding => (
         <li key={review.findings.indexOf(finding)}>
           <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
-        </li>
-      ))}
-    </ul>
-  )
-}
-
-export function BlockingFindings({ review, scope, definitionNodes, inputs, onOpenRequirement }: { review: ReviewResult } & Pick<Props, 'scope' | 'definitionNodes' | 'inputs' | 'onOpenRequirement'>) {
-  return (
-    <ul className="blocking-cards">
-      {blockingFindings(review).map((finding, index) => (
-        <li key={index} className={`blocking-card ui-card tone-fail ${severityClass(severityTone(finding.severity))}`} data-testid="blocking-finding" data-severity={finding.severity} data-reviewer={finding.reviewer}>
-          <p className="blocking-card-head">
-            <SeverityChip severity={finding.severity} className="finding-severity" /> · {finding.disposition} · {finding.reviewer} · {laneWording(finding.worker)}
-          </p>
-          <p className="blocking-card-message">{finding.message}</p>
-          {finding.requirement !== null && finding.requirement_found_in.length > 0 && (
-            <p className="blocking-card-links">
-              {finding.requirement_found_in.map(lane => {
-                const nodeId = launchNodeFor(lane, definitionNodes, inputs)
-                const quote = finding.requirement!
-                return (
-                  <AppLink key={lane} href={runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId)} onNavigate={() => onOpenRequirement(nodeId, quote)} className="blocking-card-link">
-                    Requirement in the {lane} task ›
-                  </AppLink>
-                )
-              })}
-            </p>
-          )}
         </li>
       ))}
     </ul>

@@ -57,6 +57,7 @@ test(`[scenario:critique-evidence] The review lists the critique as a headless j
   await attach(page, testInfo, 'critique-evidence')
 
   // Activating the thumbnail opens the one full-size dialog; Escape closes it and the focus returns to the thumbnail.
+  await p1.getByTestId('finding-more').click()
   await thumb.click()
   const dialog = page.getByTestId('screenshot-dialog')
   await expect(dialog).toBeVisible()
@@ -71,6 +72,9 @@ test(`[scenario:critique-evidence] The review lists the critique as a headless j
   await expect(noShot.getByTestId('critique-no-screenshot')).toHaveText('no screenshot')
   await expect(noShot.locator('.screenshot-thumb')).toHaveCount(0)
   await expect(noShot.getByTestId('critique-steps').locator('li')).toHaveCount(3)
+
+  // The review opens on open P0/P1; "All" brings the P2 card into the list.
+  await page.getByRole('button', { name: /^All \d+$/ }).click()
 
   // Another reviewer's finding carries no evidence block.
   const general = findingCard(page, 'general', 'P2', 'pages')

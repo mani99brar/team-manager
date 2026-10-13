@@ -1,3 +1,4 @@
+import type { MouseEvent } from 'react'
 import { Markdown } from '../document/Markdown.tsx'
 import type { ReviewResult, RunInputs, RunScope } from './api.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
@@ -17,6 +18,20 @@ type Props = {
   tabId: string
 }
 
+const workerSectionId = (lane: string) => `assignment-worker-${lane}`
+
+/** A lane name in the table goes to that worker's section and moves the focus to its heading, without touching the path. */
+function openWorkerSection(event: MouseEvent<HTMLAnchorElement>, lane: string) {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+  event.preventDefault()
+  const heading = document.getElementById(workerSectionId(lane))
+  if (!heading) return
+  heading.focus({ preventScroll: true })
+  heading.scrollIntoView({ block: 'start' })
+}
+
+const numberWord = (value: number, unit: string) => `${value.toLocaleString('en-US')} ${unit}${value === 1 ? '' : 's'}`
+
 /** The Assignment setup line and lane table (docs/PRD_VIEWER_REFINE 5.5): the run's shape, before any long text. */
 function AssignmentSummary({ inputs, review }: { inputs: RunInputs; review: ReviewResult | null }) {
   const model = assignmentModel(inputs, review)
@@ -32,18 +47,18 @@ function AssignmentSummary({ inputs, review }: { inputs: RunInputs; review: Revi
       </p>
       <table className="assignment-lanes-table" data-testid="assignment-lane-table">
         <thead>
-          <tr><th scope="col">Lane</th><th scope="col">Role</th><th scope="col">Model</th><th scope="col">Skills</th><th scope="col">Owned</th><th scope="col">Checks</th><th scope="col">Task</th></tr>
+          <tr><th scope="col">Lane</th><th scope="col">Role</th><th scope="col">Model</th><th scope="col">Skills</th><th scope="col">Owned paths</th><th scope="col">Checks</th><th scope="col">Task (chars)</th></tr>
         </thead>
         <tbody>
           {lanes.map(lane => (
             <tr key={lane.node_id} data-testid="assignment-lane-row" data-lane={lane.node_id}>
-              <th scope="row">{lane.node_id}</th>
-              <td>{lane.role}</td>
-              <td data-testid="assignment-lane-pin">{lane.pin ?? <span className="projects-muted">no pin</span>}</td>
-              <td>{lane.skills.length === 0 ? <span className="projects-muted">none</span> : lane.skills.join(', ')}</td>
-              <td className="assignment-num">{lane.ownedPaths}</td>
-              <td className="assignment-num">{lane.checks}</td>
-              <td className={lane.taskTruncated ? undefined : 'assignment-num'} data-testid="assignment-task-length">{taskLengthLabel(lane)}</td>
+              <th scope="row"><a href={`#${workerSectionId(lane.node_id)}`} className="assignment-lane-link" data-testid="assignment-lane-link" onClick={event => openWorkerSection(event, lane.node_id)}>{lane.node_id}</a></th>
+              <td data-label="Role">{lane.role}</td>
+              <td data-label="Model" data-testid="assignment-lane-pin">{lane.pin ?? <span className="projects-muted">no pin</span>}</td>
+              <td data-label="Skills">{lane.skills.length === 0 ? <span className="projects-muted">none</span> : lane.skills.join(', ')}</td>
+              <td data-label="Owned paths" className="assignment-num">{lane.ownedPaths}</td>
+              <td data-label="Checks" className="assignment-num">{lane.checks}</td>
+              <td data-label="Task (chars)" className={lane.taskTruncated ? undefined : 'assignment-num'} data-testid="assignment-task-length">{taskLengthLabel(lane)}</td>
             </tr>
           ))}
         </tbody>
@@ -68,7 +83,6 @@ export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, pa
       <>
         <AssignmentSummary inputs={data} review={review} />
         <dl className="projects-facts">
-          <div><dt>Feature</dt><dd>{data.feature}</dd></div>
           <div><dt>Source branch</dt><dd>{data.source_branch === null ? 'None recorded' : <code>{data.source_branch}</code>}</dd></div>
           <div><dt>Base commit</dt><dd><code title={data.base_commit}>{shortRevision(data.base_commit)}</code></dd></div>
           <div><dt>Mode</dt><dd>{data.mode}</dd></div>
@@ -94,15 +108,18 @@ export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, pa
           </div>
         </dl>
 
-        <section className="assignment-decisions" data-testid="assignment-decisions" aria-labelledby="assignment-decisions-title">
-          <h4 id="assignment-decisions-title">Decisions</h4>
+        <section className="assignment-decisions" data-testid="assignment-decisions" aria-label="Decisions">
           {data.decisions === null ? (
-            <p className="projects-muted" data-testid="assignment-decisions-none">{DECISIONS_NONE_SENTENCE}</p>
-          ) : (
             <>
+              <h4>Decisions</h4>
+              <p className="projects-muted" data-testid="assignment-decisions-none">{DECISIONS_NONE_SENTENCE}</p>
+            </>
+          ) : (
+            <details className="assignment-fold" data-testid="assignment-decisions-fold">
+              <summary>Decisions · {numberWord(data.decisions.split(/\s+/).filter(Boolean).length, 'word')}</summary>
               <p className="projects-muted">The feature's <code>decisions.md</code> as pinned at prepare; every worker and reviewer prompt included it. Links and images in it are shown as text.</p>
               <div className="task-rendered" data-testid="assignment-decisions-rendered"><Markdown content={data.decisions} inert /></div>
-            </>
+            </details>
           )}
         </section>
 
@@ -118,38 +135,45 @@ export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, pa
         )}
 
         {data.workers.map(worker => (
-          <section key={worker.node_id} className="assignment-worker" data-testid="assignment-worker" data-worker={worker.node_id} aria-labelledby={`assignment-worker-${worker.node_id}`}>
-            <h4 id={`assignment-worker-${worker.node_id}`}>
+          <section key={worker.node_id} className="assignment-worker" data-testid="assignment-worker" data-worker={worker.node_id} aria-labelledby={workerSectionId(worker.node_id)}>
+            <h4 id={workerSectionId(worker.node_id)} tabIndex={-1}>
               Worker {worker.node_id} ({worker.role}) · launched by{' '}
               <AppLink href={runPathname(scope.projectId, scope.workflowId, scope.runId, worker.launch_node_id)} onNavigate={onNavigate}>{worker.launch_node_id}</AppLink>
             </h4>
-            <div className="task-rendered" data-testid="assignment-task"><Markdown content={worker.task.text} inert /></div>
-            {worker.task.truncated && <p className="projects-notice" role="note">The task text was truncated by the viewer API; the marker at its end says how many characters were left out.</p>}
-            <h5 id={`assignment-owned-${worker.node_id}`}>Owned paths</h5>
-            {worker.owned_paths.length === 0 ? <p className="projects-muted">No owned paths were pinned.</p> : (
-              <ul className="evidence-list evidence-files" aria-labelledby={`assignment-owned-${worker.node_id}`}>
-                {worker.owned_paths.map(path => <li key={path}><code>{path}</code></li>)}
-              </ul>
-            )}
-            <h5 id={`assignment-checks-${worker.node_id}`}>Required checks</h5>
-            <p className="projects-muted" data-testid="assignment-required-kinds">
-              Required check kinds: {worker.required_check_kinds.length === 0 ? 'none pinned' : worker.required_check_kinds.join(', ')}
-            </p>
-            {worker.checks.length === 0 ? <p className="projects-muted">No checks were required.</p> : (
-              <ul className="evidence-list" aria-labelledby={`assignment-checks-${worker.node_id}`}>
-                {worker.checks.map(check => (
-                  <li key={check.id}>
-                    <code>{check.command}</code>
-                    <span className="projects-muted"> · {check.id} · {check.kind} · timeout {formatDuration(check.timeout_seconds)}</span>
-                    {check.scenarios.length > 0 && (
-                      <ul className="evidence-list assignment-scenarios">
-                        {check.scenarios.map(scenario => <li key={scenario.id}><code>{scenario.id}</code> — {scenario.description}</li>)}
-                      </ul>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <details className="assignment-fold" data-testid="assignment-task-fold">
+              <summary>Task · {numberWord(worker.task.text.length, 'character')}{worker.task.truncated ? ' (truncated)' : ''}</summary>
+              <div className="task-rendered" data-testid="assignment-task"><Markdown content={worker.task.text} inert /></div>
+              {worker.task.truncated && <p className="projects-notice" role="note">The task text was truncated by the viewer API; the marker at its end says how many characters were left out.</p>}
+            </details>
+            <details className="assignment-fold" data-testid="assignment-owned-fold">
+              <summary id={`assignment-owned-${worker.node_id}`}>Owned paths · {worker.owned_paths.length}</summary>
+              {worker.owned_paths.length === 0 ? <p className="projects-muted">No owned paths were pinned.</p> : (
+                <ul className="evidence-list evidence-files" aria-labelledby={`assignment-owned-${worker.node_id}`}>
+                  {worker.owned_paths.map(path => <li key={path}><code>{path}</code></li>)}
+                </ul>
+              )}
+            </details>
+            <details className="assignment-fold" data-testid="assignment-checks-fold">
+              <summary id={`assignment-checks-${worker.node_id}`}>Required checks · {worker.checks.length}</summary>
+              <p className="projects-muted" data-testid="assignment-required-kinds">
+                Required check kinds: {worker.required_check_kinds.length === 0 ? 'none pinned' : worker.required_check_kinds.join(', ')}
+              </p>
+              {worker.checks.length === 0 ? <p className="projects-muted">No checks were required.</p> : (
+                <ul className="evidence-list" aria-labelledby={`assignment-checks-${worker.node_id}`}>
+                  {worker.checks.map(check => (
+                    <li key={check.id}>
+                      <code>{check.command}</code>
+                      <span className="projects-muted"> · {check.id} · {check.kind} · timeout {formatDuration(check.timeout_seconds)}</span>
+                      {check.scenarios.length > 0 && (
+                        <ul className="evidence-list assignment-scenarios">
+                          {check.scenarios.map(scenario => <li key={scenario.id}><code>{scenario.id}</code> — {scenario.description}</li>)}
+                        </ul>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
           </section>
         ))}
       </>

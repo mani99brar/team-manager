@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import type { Now, SpanStatus, Timeline } from '../../contracts/projects/triage.ts'
 import type { ReviewResult, RunDetail } from './api.ts'
 import { CommandBlock } from './CommandBlock.tsx'
-import { attemptWord, type StripItem, type Timing } from './node/model.ts'
+import { attemptWord, type StripItem, type Timing, type VerdictLead } from './node/model.ts'
 import { AppLink, StatusBadge } from './panels.tsx'
 import { executorCategory, executorOf, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
@@ -159,6 +159,8 @@ type Props = {
   strip: StripItem[]
   loaded: (uri: string) => boolean
   attemptHref: (attempt: number) => string
+  /** A reviewer's verdict, which the header leads with in place of the step's status wording, and the session's outcome beside it; null for every other step. */
+  verdict: { lead: VerdictLead; outcome: string | null } | null
   /** The run's likely next step when this node is its focus and the latest attempt is shown; null otherwise. */
   next: Now['next'] | null
   onNavigate: (pathname: string) => void
@@ -169,11 +171,11 @@ type Props = {
  * its times (the source named when it is not an event); what the status means, worded by its cause; the attempt strip
  * when there were several; and the run's next step when this node is where the run stopped.
  */
-export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, next, onNavigate }: Props) {
+export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, verdict, next, onNavigate }: Props) {
   const starts = timing?.start ? Date.parse(timing.start.at) : Infinity
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && marker.node_id === definition.node_id && Date.parse(marker.at) <= starts).map(marker => marker.repair?.n ?? 0).filter(n => n > 0)
   return (
-    <header className={`node-header ${toneClass(status === 'no_record' ? 'idle' : statusTone(status))}`} data-testid="node-header">
+    <header className={`node-header ${toneClass(verdict ? verdict.lead.tone : status === 'no_record' ? 'idle' : statusTone(status))}`} data-testid="node-header">
       <div className="node-title-row">
         <h3 id="node-detail-title" tabIndex={-1}>{definition.label} <span className="projects-muted node-detail-id">({definition.node_id})</span></h3>
         {status === 'no_record'
@@ -187,7 +189,12 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
         {timing && <TimingText timing={timing} clock={clock} />}
       </p>
       <p className="node-status-meaning" data-testid="node-status-meaning">
-        {statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
+        {verdict ? (
+          <>
+            <strong className="node-verdict" data-testid="node-verdict" data-verdict={verdict.lead.verdict ?? 'none'}>{verdict.lead.text}</strong>
+            {verdict.outcome && <span className="projects-muted node-verdict-outcome" data-testid="node-verdict-outcome"> · {verdict.outcome}</span>}
+          </>
+        ) : statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
       </p>
       {strip.length > 0 && <AttemptStrip items={strip} loaded={loaded} shown={attempt} attemptHref={attemptHref} onNavigate={onNavigate} />}
       {next && (

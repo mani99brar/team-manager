@@ -7,16 +7,6 @@
 .review-figures .figure-list { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 15px; }
 .review-figures .figure-list > span { white-space: nowrap; }
 
-/* What blocks integration: one card per unresolved P0/P1, before the findings, a fail stripe and the severity chip. */
-.blocking-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.blocking-card { min-width: 0; gap: 4px; background: var(--fail-soft); }
-.blocking-card p { margin: 0; overflow-wrap: anywhere; }
-.blocking-card-head { font-size: 0.85rem; }
-.blocking-card-message { font-weight: 600; }
-.blocking-card-links { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 0.85rem; }
-/* On the card's tinted background the accent can fall under 4.5:1: its links take the text colour, underlined. */
-.projects-shell .blocking-card a { color: var(--fg); text-decoration: underline; }
-
 /* Findings as cards (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in the severity's colour; the filter row above them. */
 .review-findings-head { margin: 4px 0 6px; }
 .findings-filters { margin-bottom: 8px; }
@@ -27,7 +17,16 @@
 .projects-shell .finding-card.sev-p1 { border-left-color: var(--p1); }
 .projects-shell .finding-card.sev-p2 { border-left-color: var(--p2); }
 .finding-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.finding-message { margin: 0; overflow-wrap: anywhere; }
+.finding-reviewer, .finding-lane { font-size: 0.85rem; }
+.finding-reviewer { font-weight: 400; }
+.finding-lane { color: var(--text-muted); }
+/* Long prose reads at a measure (DESIGN.md Hierarchy): the head's first sentence and, opened, the rest of the message. */
+.finding-message { margin: 0; overflow-wrap: anywhere; font-weight: 400; max-width: 70ch; }
+.finding-more { margin-left: 8px; vertical-align: baseline; }
+/* The author display rules below would beat the hidden attribute, so the folded parts say it themselves. */
+.finding-body { display: grid; gap: 6px; }
+.finding-body[hidden], .finding-rest[hidden] { display: none; }
+.finding-body .finding-file-link { display: block; }
 .finding-fields { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 18px; font-size: 0.85rem; }
 .finding-fields > div { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
 .finding-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }

@@ -10,6 +10,11 @@
 .projects-shell .node-title-row h3 { font-family: var(--font-display); }
 /* A node's figures (review, verify, launch) open its page under the header. */
 .node-detail .ui-figures { margin-top: 10px; }
+@media (min-width: 1024px) {
+  /* The figure tiles share one row. */
+  .projects-shell .node-detail .ui-figures { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+}
+.node-verdict { font-weight: 600; }
 .node-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
 .workspace-projects .node-title-row h3 { margin: 0; }
 .node-executor-line { font-size: 0.85rem; color: var(--text-muted); }
@@ -32,8 +37,8 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
 .node-next { margin-top: 4px; }
 .attempt-banner { margin: 8px 0 0; }
 
-/* The section index sticks under the step strip once the page scrolls; its top is measured from the strip. */
-.section-index { position: sticky; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin: 8px 0 0; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); }
+/* The section index scrolls with the page: the step strip is the node page's only sticky band. */
+.section-index { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin: 8px 0 0; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); }
 .section-index-link[data-count] .section-index-count { display: inline-block; min-width: 1.4em; padding: 0 5px; border-radius: 999px; background: var(--idle-soft); text-align: center; }
 .section-index-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
 .section-index-list li, .node-attempts-list li { flex: none; }
@@ -50,3 +55,6 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
   .section-index-list, .node-attempts-list { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
   .section-index-link, .node-attempt-chip { min-height: 44px; }
 }
+
+/* Long prose reads at a measure of at most 70ch (DESIGN.md Hierarchy): task and decision text, concerns, summaries. */
+.task-rendered, .challenge-concern > p, .earlier-finding-message, .worker-summary, .worker-question-text { max-width: 70ch; }

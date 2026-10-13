@@ -95,3 +95,19 @@ export function linesNamed(message: string, path: string): [number, number][] {
   }
   return ranges
 }
+
+/** Abbreviations whose full stop does not end a sentence. */
+const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|vs|cf|no|fig)$/i
+
+/**
+ * A finding message split at its first sentence: `lead` is that sentence, `rest` the remainder with its leading space
+ * (so `lead + rest` is always the whole message). A message of one sentence has an empty rest.
+ */
+export function splitFirstSentence(message: string): { lead: string; rest: string } {
+  for (const match of message.matchAll(/[.!?]+(?=\s)/g)) {
+    const end = match.index + match[0].length
+    if (ABBREVIATION.test(message.slice(0, match.index))) continue
+    return { lead: message.slice(0, end), rest: message.slice(end) }
+  }
+  return { lead: message, rest: '' }
+}

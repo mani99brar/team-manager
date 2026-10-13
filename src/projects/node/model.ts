@@ -5,6 +5,7 @@
  */
 import { attemptResultUris, humanizeEvent, type Instant, type Span, type SpanStatus, type Timeline } from '../../../contracts/projects/triage.ts'
 import type { RunDetail, WorkerResult, WorkflowEvent } from '../api.ts'
+import type { Tone } from '../tone.ts'
 
 /** `reason`: a failed attempt's reasons in a few words ("unit, integration"), "same" when they repeat the attempt before; empty otherwise. */
 export type AttemptChip = { attempt: number; status: SpanStatus; start: Instant | null; ms: number | null; outcome: string; reason: string; uris: string[] }
@@ -207,7 +208,8 @@ export function resultRole(detail: RunDetail, nodeId: string): ResultRole {
 // ---- The section index (4.4, 7) ----------------------------------------------------------------------------------
 
 /** One section of a node page: its anchor key, its name in the index and, when it lists items, how many. */
-export type SectionEntry = { key: string; label: string; count?: number }
+/** `note` is a short phrase after the count, such as the open P0/P1 among a findings count. */
+export type SectionEntry = { key: string; label: string; count?: number; note?: string }
 
 export const sectionId = (key: string) => `node-section-${key}`
 
@@ -347,4 +349,42 @@ export function phaseState<T extends PhaseTone>(rows: readonly { at: string; seq
         : tone === 'run' ? 'running'
           : tone === 'ok' ? 'all passed' : ''
   return { tone, words }
+}
+
+// ---- A reviewer's verdict lead (the review step and the projected reviewer nodes) ------------------------------------
+
+/** What a reviewer's header leads with: the verdict in words, its tone and the verdict word for the step strip. */
+export type VerdictLead = { text: string; tone: Tone; verdict: 'approved' | 'blocked' | null }
+
+type VerdictInput = {
+  /** The verdict word a reviewer recorded: `approved`, `blocked` or `late blocked`; null while undecided. */
+  verdict: string | null
+  round: number | null
+  /** The open P0/P1 the reviewer left; null when its record counts none of its own. */
+  open: { p0: number; p1: number } | null
+  /** The reviewer session's status; null when the verdict comes from the review record alone. */
+  status: 'running' | 'succeeded' | 'failed' | 'stopped' | 'unknown' | null
+}
+
+const sentenceCase = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
+
+/**
+ * The line a reviewer's node page leads with, by value: "Blocked · round 2 · 4 open P1", "Late, blocked · round 1 · 1 open P1",
+ * "Approved · round 1", "No verdict yet" while it runs, "No verdict · the session failed" and, with no record of the
+ * reviewer at all, "No verdict recorded". The session's outcome is metadata the header adds beside it, never the lead.
+ */
+export function reviewerLead(input: VerdictInput | null): VerdictLead {
+  if (input === null) return { text: 'No verdict recorded', tone: 'idle', verdict: null }
+  const { verdict, round, open, status } = input
+  const roundWords = round === null ? [] : [`round ${round}`]
+  if (verdict === 'approved') return { text: ['Approved', ...roundWords].join(' · '), tone: 'ok', verdict: 'approved' }
+  if (verdict === 'blocked' || verdict === 'late blocked') {
+    const openWords = open === null ? [] : [open.p0 > 0 ? `${open.p0} open P0` : '', open.p1 > 0 ? `${open.p1} open P1` : ''].filter(Boolean)
+    return { text: [verdict === 'blocked' ? 'Blocked' : 'Late, blocked', ...roundWords, ...(openWords.length > 0 ? [openWords.join(', ')] : [])].join(' · '), tone: 'fail', verdict: 'blocked' }
+  }
+  if (verdict !== null) return { text: [sentenceCase(verdict), ...roundWords].join(' · '), tone: 'idle', verdict: null }
+  if (status === 'running') return { text: 'No verdict yet', tone: 'run', verdict: null }
+  if (status === 'failed') return { text: 'No verdict · the session failed', tone: 'fail', verdict: null }
+  if (status === 'stopped') return { text: 'No verdict · the session was stopped', tone: 'idle', verdict: null }
+  return { text: 'No verdict recorded', tone: 'idle', verdict: null }
 }

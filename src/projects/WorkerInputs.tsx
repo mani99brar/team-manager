@@ -7,8 +7,10 @@ import { reportDelta } from './node/launch.ts'
 import { OwnedPaths, RequiredChecks, type CheckTarget } from './node/Requirements.tsx'
 import { AppLink } from './panels.tsx'
 import { keepInView } from './scroll.ts'
+import { Chip } from './ui/index.tsx'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
+import type { Tone } from './tone.ts'
 import type { Resource } from './useResource.ts'
 
 type TaskProps = {
@@ -170,7 +172,7 @@ function Assumptions({ items }: { items: string[] }) {
 type Completion = NonNullable<RunInputWorker['completion']>
 export type { CheckTarget }
 
-const COMPLETION_BADGE: Record<Completion['status'], string> = { completed: 'status-succeeded', blocked: 'status-failed', question: 'status-awaiting_approval' }
+const COMPLETION_TONE: Record<Completion['status'], Tone> = { completed: 'ok', blocked: 'fail', question: 'warn' }
 
 /**
  * The falsifying check the worker named: a declared check id links to the verify node that shows that check executed; a
@@ -344,12 +346,10 @@ export function WorkerReport({ completion, handoff, worker, result, checksNode, 
       <section className="evidence-section worker-report" aria-labelledby="worker-completion-title" data-testid="worker-completion">
         <div className="worker-report-head">
           <h4 id="worker-completion-title">Worker's report</h4>
-          {completion !== null && (
-            <span className="worker-report-status">
-              <span className={`status-badge ${COMPLETION_BADGE[completion.status]}`} data-status={completion.status}><span>{completion.status}</span></span>
-              {' '}<span className="projects-muted">as signalled by the session, not verified</span>
-            </span>
-          )}
+          <span className="worker-report-status">
+            <Chip tone={completion === null ? 'idle' : COMPLETION_TONE[completion.status]} data-testid="report-completion" data-status={completion?.status ?? 'none'}>{completion?.status ?? 'none yet'}</Chip>
+            {completion !== null && <>{' '}<span className="projects-muted">as signalled by the session, not verified</span></>}
+          </span>
         </div>
         {completion === null ? (
           <p className="projects-muted">No completion signal recorded.</p>

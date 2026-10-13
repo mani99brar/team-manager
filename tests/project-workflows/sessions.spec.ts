@@ -10,7 +10,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { SessionRow } from '../../contracts/projects/sessions.ts'
 import { costText, durationText, groupSessions, totalsText } from '../../src/projects/sessions/model.ts'
-import { UNEXPOSED_PROJECT } from './fixtures.ts'
+import { RUN_SUCCEEDED, UNEXPOSED_PROJECT } from './fixtures.ts'
 import {
   LANE_FINDINGS, NIGHT, NO_FIX_REASON, ROUND2_FINDINGS, RUN_SESSIONS, RUN_SESSIONS_HIDDEN, RUN_SESSIONS_OLDER, SESSION, sessionsPayload,
   UX_SESSIONS_HIDDEN_WORKFLOW_ID, UX_SESSIONS_WORKFLOW_ID,
@@ -324,4 +324,53 @@ test(`[scenario:sessions-phone] At 390 px the reviewer, panel and lane-review ca
   await page.goto(nodePage(RUN_SESSIONS, 'challenge'))
   await minHeight(page.getByTestId('session-section'))
   await noSideways()
+})
+
+test(`[scenario:reviewer-verdict] A reviewer's page leads with its verdict ('Blocked · round 2 · 2 open P1') and shows the session's outcome as neutral metadata; an approving reviewer leads with 'Approved · round 2'; the step strip tones each reviewer chip by its verdict and agrees with the graph; a worker still reads 'not workflow completion' (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const lead = page.getByTestId('node-verdict')
+  const chip = (id: string) => page.getByTestId('run-node-list').locator(`li[data-node-id="${id}"]`)
+
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'reviewer-general')
+  await expect(lead).toHaveText('Blocked · round 2 · 2 open P1')
+  await expect(lead).toHaveAttribute('data-verdict', 'blocked')
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('Blocked · round 2 · 2 open P1 · session succeeded')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveText('· session succeeded')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveClass(/projects-muted/)
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+  // The step strip: each reviewer chip carries the verdict and its tone; the li keeps the step's own status.
+  await expect(chip('reviewer-general')).toHaveAttribute('data-status', 'succeeded')
+  await expect(chip('reviewer-general').locator('.step-chip')).toHaveAttribute('data-verdict', 'blocked')
+  await expect(chip('reviewer-general').locator('.step-chip')).toHaveClass(/\btone-fail\b/)
+  await expect(chip('reviewer-coverage').locator('.step-chip')).toHaveAttribute('data-verdict', 'blocked')
+  await expect(chip('reviewer-coverage').locator('.step-chip')).toHaveClass(/\btone-fail\b/)
+  await expect(chip('reviewer-critique')).toHaveAttribute('data-status', 'succeeded')
+  await expect(chip('reviewer-critique').locator('.step-chip')).toHaveAttribute('data-verdict', 'approved')
+  await expect(chip('reviewer-critique').locator('.step-chip')).toHaveClass(/\btone-ok\b/)
+  await attach(page, testInfo, 'reviewer-verdict')
+
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-coverage'))
+  await expect(lead).toHaveText('Late, blocked · round 2 · 1 open P1')
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-critique'))
+  await expect(lead).toHaveText('Approved · round 2')
+  await expect(lead).toHaveAttribute('data-verdict', 'approved')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveText('· session succeeded')
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+
+  // The combined review leads with its verdict as well.
+  await page.goto(nodePage(RUN_SESSIONS, 'review'))
+  await expect(lead).toHaveText('Blocked · round 2 · 3 open P1')
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+
+  // The graph agrees with the strip on each reviewer's tone.
+  await page.goto(runPage(RUN_SESSIONS))
+  for (const id of ['reviewer-general', 'reviewer-coverage']) await expect(card(page, id)).toHaveClass(/\btone-fail\b/)
+  await expect(card(page, 'reviewer-critique')).toHaveClass(/\btone-ok\b/)
+
+  // A worker keeps its wording.
+  await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
+  await expect(page.getByTestId('node-status-meaning')).toContainText('not workflow completion')
+  await expect(page.getByTestId('node-verdict')).toHaveCount(0)
 })

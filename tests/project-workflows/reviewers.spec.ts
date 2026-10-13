@@ -37,6 +37,8 @@ const findingRows = (page: Page) => findings(page).getByTestId('finding')
 const rowsOf = (page: Page, reviewer: string) => findings(page).locator(`[data-testid="finding"][data-reviewer="${reviewer}"]`)
 // One filter row of toggles (docs/PRD_VIEWER_REVAMP.md 5.4, 8): a reviewer's is `reviewer:<id>`; dispositions and workers are
 // each card's data attributes.
+/** The findings list opens on the open P0/P1 when something blocks; All shows every finding. */
+const showAll = (page: Page) => findings(page).getByTestId('findings-filters').locator('button[data-filter="all"]').click()
 const filterButton = (page: Page, reviewer: string) => findings(page).getByTestId('findings-filters').locator(`button[data-filter="reviewer:${reviewer}"]`)
 const reviewerToggles = (page: Page) => findings(page).getByTestId('findings-filters').locator('button[data-filter^="reviewer:"]')
 const byDisposition = (page: Page, disposition: string) => findings(page).locator(`[data-testid="finding"][data-disposition="${disposition}"]`)
@@ -56,6 +58,7 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
 
   // ---- Both reviewers approved: the combined verdict is the headline and the strip lists the controller's verdict for each reviewer. ----
   await page.goto(reviewersRunUrl(RUN_TWO_REVIEWERS, 'review'))
+  await showAll(page)
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(reviewPanel(page)).toHaveAttribute('data-reviewer-count', '2')
   await expect(page.getByTestId('review-verdict')).toHaveText('Approved')
@@ -85,7 +88,11 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
 
   // The union of findings: a Reviewer field on every card, both tags, and the finding both reviewers raised listed twice, never merged.
   await expect(findings(page)).toHaveAttribute('data-filters', 'all')
-  for (const row of await findingRows(page).all()) await expect(row.locator('.finding-field-label')).toHaveText(['Worker', 'Reviewer', 'Requirement'])
+  for (const row of await findingRows(page).all()) {
+    await expect(row.getByTestId('finding-worker')).toHaveCount(1)
+    await expect(row.getByTestId('finding-reviewer')).toHaveCount(1)
+    await expect(row.locator('.finding-field-label')).toHaveText(['Requirement'])
+  }
   await expect(findingRows(page)).toHaveCount(5)
   await expect(rowsOf(page, 'general')).toHaveCount(2)
   await expect(rowsOf(page, 'coverage')).toHaveCount(3)
@@ -140,6 +147,7 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
 
   // ---- One reviewer blocked while the other was superseded: the headline says which, and the strip shows both outcomes. ----
   await page.goto(reviewersRunUrl(RUN_REVIEWER_BLOCKED, 'review'))
+  await showAll(page)
   await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'failed')
   // A node page shows the step strip, not the graph (PRD_VIEWER_UX 4.4): the strip carries each step's status.
   await expect(nodeListItem(page, 'review')).toHaveAttribute('data-status', 'failed')
@@ -181,6 +189,7 @@ test(`[scenario:viewer-two-reviewers] A two-reviewer run shows both verdicts in 
 
   // ---- A single-reviewer export from before reviewers were declared: one entry named `review`, same code path. ----
   await page.goto(reviewersRunUrl(RUN_LEGACY_REVIEWER, 'review'))
+  await showAll(page)
   await expect(reviewPanel(page)).toHaveAttribute('data-reviewer-count', '1')
   await expect(page.getByTestId('review-verdict')).toHaveText('Approved')
   await expect(entries(page)).toHaveCount(1)

@@ -6,6 +6,8 @@ import {
 import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSessions, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
+import { reviewerLead } from './node/model.ts'
+import { isProjectedSessionNode, stageCardOf } from './sessions/model.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
 import { AppLink, ErrorPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
@@ -18,7 +20,7 @@ import { isAttackNode, isSidecarNode } from './status.ts'
 import { StepStrip } from './StepStrip.tsx'
 import { stepRows, withoutGlyph } from './steps.ts'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
-import { stateTone, TONE_LABEL } from './tone.ts'
+import { stateTone, TONE_LABEL, type Tone } from './tone.ts'
 import { useNow, useTimeReference, useTimeZone } from './useNow.ts'
 import { useResource, type ResourceMeta } from './useResource.ts'
 import { useRunResults, useRunReview } from './useRunData.ts'
@@ -65,8 +67,8 @@ function emptyTimeline(detail: RunDetail): Timeline {
 /**
  * One run (docs/PRD_VIEWER_UX.md 4.2-4.4, redrawn by the Signal Box design of 2026-10-09). The run page: the identity line,
  * then the stage with the run's graph, the live dock (the situation and the likely next step) and the step sheet. The
- * Assignment view keeps the identity line over the assignment. A node page: the one-line run bar, the tabs, the sticky step
- * strip and the node in full width. One clock ticks here while the run can still change; selecting a step's page moves the
+ * Assignment view keeps the identity line over the assignment. A node page: the one-line run bar (its Assignment link
+ * replaces the tabs), the sticky step strip and the node in full width. One clock ticks here while the run can still change; selecting a step's page moves the
  * focus to its heading, and coming back returns it to the step's card on the stage.
  */
 export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
@@ -156,6 +158,18 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const [pendingFile, setPendingFile] = useState<FileFocus | null>(null)
   const clearFile = useCallback(() => setPendingFile(null), [])
   const fileFocus = pendingFile !== null && pendingFile.nodeId === selectedNodeId ? pendingFile.path : null
+
+  // A reviewer's step chip takes the tone and verdict of its card on the graph (the sessions' reviewer row), not the session's status.
+  const verdicts = useMemo(() => {
+    const map = new Map<string, { tone: Tone; verdict: 'approved' | 'blocked' | null }>()
+    if (sessionsData === null) return map
+    for (const node of definition.nodes) {
+      if (!node.node_id.startsWith('reviewer-') || !isProjectedSessionNode(node.node_id)) continue
+      const card = stageCardOf(sessionsData, node.node_id)
+      if (card) map.set(node.node_id, { tone: card.tone, verdict: reviewerLead({ verdict: card.word, round: null, open: null, status: null }).verdict })
+    }
+    return map
+  }, [sessionsData, definition.nodes])
 
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
@@ -320,11 +334,10 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
       {selectedNodeId !== null && (
         <>
-          <RunBar detail={detail} now={now} clock={clock} runHref={runHref} freshness={freshness} onNavigate={onNavigate} />
+          <RunBar detail={detail} now={now} clock={clock} runHref={runHref} assignmentHref={tabHref('assignment')} freshness={freshness} onNavigate={onNavigate} />
           <div className="run-views">
-            {tabs}
-            <div role="tabpanel" id="run-panel-run" aria-labelledby="run-tab-run" className="run-body">
-              <StepStrip detail={detail} rows={rows} current={selectedNodeId} runHref={runHref} nodeHref={nodeHref} onNavigate={onNavigate} />
+            <div className="run-body">
+              <StepStrip detail={detail} rows={rows} current={selectedNodeId} runHref={runHref} nodeHref={nodeHref} verdicts={verdicts} onNavigate={onNavigate} />
               <div className="run-node-area">
                 {(selectedDefinition === null || selectedState === null) && (
                   <div className="projects-error" role="alert" data-testid="node-missing">

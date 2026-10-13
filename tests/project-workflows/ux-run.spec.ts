@@ -8,13 +8,13 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import {
   BUNDLE_SHA256, GUARDED_WORKFLOW_ID, REVIEWERS_WORKFLOW_ID, RUN_GUARDED, RUN_GUARDED_ASKING, RUN_REVIEWER_BLOCKED, RUN_SUCCEEDED, apiRunPath, laneGraphNodes,
-  runInputs,
+  PROJECT, WORKFLOW_ID, runInputs,
 } from './fixtures.ts'
 import {
   APPROVAL_BUNDLE, DEADLINE_MESSAGE, RUN_AWAITING_APPROVAL, RUN_CONTROLLER_INTERRUPTED, RUN_DEADLINE, RUN_FREEZE_INTERRUPTED, RUN_IDENTICAL, RUN_PANE,
   RUN_REPAIRED, RUN_REVIEW_INTERRUPTED, UX_RUN_WORKFLOW_ID,
 } from './fixtures/ux-run.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openStepSheet, phase, runUrl, stepSheet } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openStepSheet, phase, runUrl, stepSheet, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -399,4 +399,56 @@ test(`[scenario:tryout-untried] A succeeded run that asks for a tryout carries t
   await expect(now(page)).toContainText('· tried: works')
   await expect(chip).toHaveCount(0)
   await expect(commands(page)).toHaveCount(0)
+})
+
+test(`[scenario:storage-missing] A workflow whose run storage cannot be opened says what to fix: it leads with 'Run storage missing', names the project and its runs_root entry in projects.json, links to the project, keeps Retry secondary and folds the HTTP code and path; any other 503 keeps the generic panel (${phase})`, async ({ page }, testInfo) => {
+  const runsPath = `/api/projects/${PROJECT.project_id}/workflows/${WORKFLOW_ID}/runs`
+  let failing: { code: string; message: string } | null = { code: 'RUNS_ROOT_UNAVAILABLE', message: 'The configured run storage for this workflow does not exist. Check the registry configuration.' }
+  await page.route(url => url.pathname === runsPath, async route => {
+    if (failing) await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: failing }) })
+    else await route.fallback()
+  })
+  await page.goto(workflowUrl(PROJECT.project_id, WORKFLOW_ID))
+  const error = page.getByTestId('projects-error')
+  await expect(error).toContainText('Run storage missing')
+  await expect(error).toContainText(PROJECT.project_id)
+  await expect(error.getByTestId('storage-project')).toHaveText(PROJECT.project_id)
+  await expect(error).toContainText('runs_root')
+  await expect(error).toContainText('projects.json')
+  await expect(error).not.toContainText('Retry once it has recovered')
+
+  // A link back to the project; Retry is still there, after it and not the lead action.
+  const link = error.getByRole('link', { name: /project/ })
+  await expect(link).toHaveAttribute('href', `/projects/${PROJECT.project_id}`)
+  const retry = error.getByRole('button', { name: 'Retry' })
+  await expect(retry).toBeVisible()
+  await expect(retry).toHaveClass(/button-small/)
+  const [linkBox, retryBox] = [await link.boundingBox(), await retry.boundingBox()]
+  expect(retryBox!.x).toBeGreaterThan(linkBox!.x)
+
+  // The HTTP code and the request path sit in a closed Technical details until opened.
+  const details = error.getByTestId('technical-details')
+  await expect(details).not.toHaveAttribute('open', '')
+  await expect(error.getByText('HTTP 503')).toBeHidden()
+  await expect(error.getByText(runsPath)).toBeHidden()
+  await attach(page, testInfo, 'storage-missing')
+  await details.locator('summary').click()
+  await expect(error.getByText('HTTP 503')).toBeVisible()
+  await expect(error.getByText(runsPath)).toBeVisible()
+
+  // Retry reads the runs again once the storage is back.
+  failing = null
+  await retry.click()
+  await expect(page.getByTestId('run-list')).toBeVisible()
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
+
+  // Any other 503 renders the generic panel exactly as before.
+  failing = { code: 'registry_unavailable', message: 'The project registry could not be read.' }
+  await page.goto(workflowUrl(PROJECT.project_id, WORKFLOW_ID))
+  await expect(error).toContainText('could not be loaded')
+  await expect(error).toContainText('The project registry could not be read.')
+  await expect(error).toContainText('Retry once it has recovered')
+  await expect(error).toContainText(runsPath)
+  await expect(error).not.toContainText('Run storage missing')
+  await expect(error.getByTestId('technical-details')).toHaveCount(0)
 })

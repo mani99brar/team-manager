@@ -71,14 +71,11 @@ export function blockingFindings(review: Pick<ReviewResult, 'findings'>): Review
   return review.findings.filter(isBlockingFinding)
 }
 
-/** A review's index entries: its blocking findings when there are any, then every finding (the section holding the table). */
+/** A review's index entries: one for the findings list, counting every finding and noting the open P0/P1 among them. */
 export function reviewSectionEntries(review: ReviewResult | null): SectionEntry[] {
   if (review === null) return []
   const blocking = blockingFindings(review).length
-  return [
-    ...(blocking > 0 ? [{ key: 'blocking', label: 'Blocking', count: blocking }] : []),
-    { key: 'review', label: 'Findings', count: review.findings.length },
-  ]
+  return [{ key: 'review', label: 'Findings', count: review.findings.length, ...(blocking > 0 ? { note: `${blocking} open P0/P1` } : {}) }]
 }
 
 /** "1 P1", "1 P0 and 2 P1": the counts of the given severities present. */
@@ -198,8 +195,11 @@ const SEVERITY_RANK: Record<ReviewFinding['severity'], number> = { P0: 0, P1: 1,
 /** How a lane group that is not a lane of the run is said on a figure. */
 const GROUP_WORDS: Record<string, string> = { multiple: 'multiple workers', none: 'no worker', unrecorded: 'worker not recorded' }
 
-/** The filter id of "Open only"; a reviewer's is `reviewer:<id>`, a lane group's `lane:<key>`. */
+/** The filter id of "Open only"; a reviewer's is `reviewer:<id>`, a lane group's `lane:<key>`, a severity's `severity:<P0|P1|P2>`. */
 export const OPEN_ONLY = 'open'
+/** The filter id of "Open P0/P1": the findings that block integration. */
+export const BLOCKING_ONLY = 'blocking'
+export const severityFilterId = (severity: ReviewFinding['severity']) => `severity:${severity}`
 export const reviewerFilterId = (reviewerId: string) => `reviewer:${reviewerId}`
 export const laneFilterId = (key: string) => `lane:${key}`
 
@@ -225,15 +225,19 @@ export function orderFindings<T extends Finding>(findings: readonly T[], lanes: 
 }
 
 /**
- * The findings the pressed filters keep. Toggles of one kind add up (two reviewers show both reviewers' findings); kinds
- * narrow each other (a reviewer, a lane and Open only keep that reviewer's open findings on that lane). Nothing pressed keeps all.
+ * The findings the pressed filters keep. Toggles of one kind add up (two reviewers show both reviewers' findings, P0 and P1
+ * show both severities); kinds narrow each other (a reviewer, a lane and Open only keep that reviewer's open findings on that
+ * lane). Open P0/P1 keeps the unresolved P0 and P1. Nothing pressed keeps all.
  */
 export function filterFindings<T extends Finding>(findings: readonly T[], pressed: ReadonlySet<string>): T[] {
   const of = (prefix: string) => [...pressed].filter(id => id.startsWith(prefix)).map(id => id.slice(prefix.length))
   const reviewers = of('reviewer:')
   const lanes = of('lane:')
+  const severities = of('severity:')
   return findings.filter(finding => (reviewers.length === 0 || reviewers.includes(finding.reviewer))
     && (lanes.length === 0 || lanes.includes(workerGroupOf(finding)))
+    && (severities.length === 0 || severities.includes(finding.severity))
+    && (!pressed.has(BLOCKING_ONLY) || (finding.severity !== 'P2' && finding.disposition !== 'resolved'))
     && (!pressed.has(OPEN_ONLY) || finding.disposition === 'open'))
 }
 
@@ -260,10 +264,12 @@ export function reviewFigures(review: { findings: readonly ReviewFinding[]; revi
 
 export type FindingFilter = { id: string; label: string; count: number }
 
-/** The filter row's toggles: one per reviewer (declared order), one per populated lane group (labelled by its id), and Open only. */
-export function findingFilterIds(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): { reviewers: FindingFilter[]; lanes: FindingFilter[]; open: FindingFilter } {
+/** The filter row's toggles: Open P0/P1, a severity each, one per reviewer (declared order), one per populated lane group (labelled by its id), and Open only. */
+export function findingFilterIds(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): { blocking: FindingFilter; severities: FindingFilter[]; reviewers: FindingFilter[]; lanes: FindingFilter[]; open: FindingFilter } {
   const figures = reviewFigures(review, lanes)
   return {
+    blocking: { id: BLOCKING_ONLY, label: 'Open P0/P1', count: figures.blocking },
+    severities: SEVERITIES.map(severity => ({ id: severityFilterId(severity), label: severity, count: review.findings.filter(finding => finding.severity === severity).length })),
     reviewers: figures.reviewers.map(item => ({ id: reviewerFilterId(item.id), label: item.id, count: item.count })),
     lanes: figures.lanes.map(item => ({ id: laneFilterId(item.key), label: item.key, count: item.count })),
     open: { id: OPEN_ONLY, label: 'Open only', count: figures.open },

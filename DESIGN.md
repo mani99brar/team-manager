@@ -229,6 +229,7 @@ Severities, on severity chips only, with `sev-fg` text: **P0 Red** (#a51d27), **
 - **Word** (700, 12px, 0.02em, lower case): the state word in its pill.
 - **Label** (600, 13px, 0.08em, uppercase, Pencil): section headers on the list pages (unchanged).
 - **Mono** (400, 13px): commands, ids, lane chips (600, 12px), the sheet's file lists.
+- **Measure**: long prose (finding messages, decisions and task text) at most 70ch.
 
 **The Lower-Case Word Rule.** State words on cards, pills and the sheet are lower case (`succeeded`, `running · needs you`); only the list pages' status badges keep their capitalised labels.
 
@@ -288,7 +289,7 @@ A 440 px Sheet with a hairline on its stage side and the float shadow: a head wi
 Mono 13px on an Inset box with a hairline, 8 px corners; a Copy button beside it that says "Copied" or "Selected"; the honesty caption under the block. Unchanged in content from the Calm look.
 
 ### Lists, rails, rows, finding cards, section headers, buttons
-The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces.
+The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces. A finding card's head is the severity, the reviewer, the lane and the message's first sentence at normal weight, with the rest of the message, the requirement and the fields behind More; a blocking finding is marked in place (a "blocks integration" chip and the fail stripe) in the one findings list, which opens on the open P0/P1, never repeated in a second list. Figures are numbers only; a state (a worker's completion) is a chip on the heading it belongs to. On node pages the step strip is the only sticky band and there are no tabs (an Assignment link in the run bar replaces them); the run page and the Assignment view keep their tabs.
 
 **The Selection Is Not State Rule.** Selection and the current item are drawn in Signal Violet (the ring, the hot edge) or Ink (the "now" outline), never in a tone.
 

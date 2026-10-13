@@ -10,13 +10,15 @@ import type { ResourceMeta } from './useResource.ts'
 
 /**
  * The one-line run bar of a node page (docs/PRD_VIEWER_UX.md 4.4): the run, its status in a few words and the Now headline,
- * which links back to the run page, where the full banner is; then the live chip and the Local/UTC switch.
+ * which links back to the run page, where the full banner is; then the Assignment link (a node page has no tabs), the live chip
+ * and the Local/UTC switch.
  */
-export function RunBar({ detail, now, clock, runHref, freshness, onNavigate }: {
+export function RunBar({ detail, now, clock, runHref, assignmentHref, freshness, onNavigate }: {
   detail: RunDetail
   now: Now | null
   clock: number
   runHref: string
+  assignmentHref: string
   freshness: ResourceMeta
   onNavigate: (pathname: string) => void
 }) {
@@ -36,6 +38,7 @@ export function RunBar({ detail, now, clock, runHref, freshness, onNavigate }: {
           </span>
         )}
       </p>
+      <AppLink href={assignmentHref} onNavigate={onNavigate} className="run-bar-assignment" data-testid="tab-assignment">Assignment</AppLink>
       <div className="run-freshness">
         <LiveStatus status={summary.status} meta={freshness} now={clock} />
         <TimeZoneToggle />

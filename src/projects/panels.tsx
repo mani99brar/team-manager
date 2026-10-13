@@ -1,5 +1,7 @@
 import type { AnchorHTMLAttributes, ReactNode } from 'react'
 import { describeApiError, ProjectsApiError } from './api.ts'
+import { projectIdFromPath, RUNS_ROOT_UNAVAILABLE } from './node/errors.ts'
+import { projectPathname } from './routes.ts'
 import { OVERRIDE_LABEL, OVERRIDE_TITLE, RUN_STATUS_MEANING, STATUS_LABEL, STATUS_TITLE, type RunStatus } from './status.ts'
 
 export function StatusBadge({ status, explain = false, accepted = false }: { status: RunStatus; explain?: boolean; accepted?: boolean }) {
@@ -27,6 +29,7 @@ export function LoadingPanel({ children }: { children: ReactNode }) {
 /** A failed request: what failed, why, and what the reader can do. Never replaced by sample data. */
 export function ErrorPanel({ error, what, onRetry, children }: { error: unknown; what: string; onRetry?: () => void; children?: ReactNode }) {
   const api = error instanceof ProjectsApiError ? error : null
+  if (api?.kind === 'http' && api.code === RUNS_ROOT_UNAVAILABLE) return <StorageMissingPanel error={api} onRetry={onRetry}>{children}</StorageMissingPanel>
   return (
     <div className="projects-error" role="alert" data-testid="projects-error" data-error-kind={api?.kind ?? 'unknown'}>
       <p><strong>{what} could not be loaded.</strong> {describeApiError(error)}</p>
@@ -35,6 +38,34 @@ export function ErrorPanel({ error, what, onRetry, children }: { error: unknown;
       {api && <p className="projects-error-path">Request: <code>{api.path}</code></p>}
       <div className="projects-actions">
         {onRetry && <button type="button" className="button" onClick={onRetry}>Retry</button>}
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A workflow whose run storage cannot be opened: it leads with the fix (the project's `runs_root` entry in the projects
+ * registry), links back to the project and keeps the HTTP code and request path behind a closed disclosure.
+ */
+function StorageMissingPanel({ error, onRetry, children }: { error: ProjectsApiError; onRetry?: () => void; children?: ReactNode }) {
+  const projectId = projectIdFromPath(error.path)
+  return (
+    <div className="projects-error" role="alert" data-testid="projects-error" data-error-kind={error.kind} data-error-code={error.code ?? undefined}>
+      <p>
+        <strong>Run storage missing.</strong>{' '}
+        {projectId === null ? 'Fix the failing project\'s' : <>The run storage of project <code data-testid="storage-project">{projectId}</code> cannot be opened. Fix its</>}{' '}
+        <code>runs_root</code> entry in the projects registry (<code>projects.json</code>), then retry.
+      </p>
+      <p className="projects-muted">{error.message}</p>
+      <details className="projects-error-details" data-testid="technical-details">
+        <summary>Technical details</summary>
+        <p>HTTP {error.status} · <code>{error.code}</code></p>
+        <p className="projects-error-path">Request: <code>{error.path}</code></p>
+      </details>
+      <div className="projects-actions">
+        {projectId !== null && <a href={projectPathname(projectId)} data-testid="storage-project-link">Back to project {projectId}</a>}
+        {onRetry && <button type="button" className="button button-small" onClick={onRetry}>Retry</button>}
         {children}
       </div>
     </div>
