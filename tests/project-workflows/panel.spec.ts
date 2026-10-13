@@ -227,6 +227,7 @@ test(`[scenario:panel-challenge-and-live] A challenge-stage panel renders on the
   await expect(stepSheet(page).getByTestId('sheet-did')).toHaveText('Not started.')
   // The Panel node's page shows the review-stage panel; the challenge-stage one shows on the challenge node's page.
   await page.goto(nodePage(RUN_PANEL_CHALLENGE, 'panel'))
+  await expect(section(page).getByTestId('panel')).toHaveCount(1)
   expect(await attributes(section(page).getByTestId('panel'), 'data-stage')).toEqual(['review'])
   await page.goto(runPage(RUN_PANEL_CHALLENGE))
   await openStep(page, 'challenge')
