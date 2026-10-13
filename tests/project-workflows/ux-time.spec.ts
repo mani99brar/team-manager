@@ -10,6 +10,7 @@
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { PROJECT, RUN_FAILED, RUN_SUCCEEDED, WORKFLOW_ID } from './fixtures.ts'
 import { RUN_SHORT_CHECK, UX_TIME_WORKFLOW_ID } from './fixtures/ux-time.ts'
+import { RUN_DESK_LIVE, RUN_DESK_PAUSED, UX_REVAMP_LISTS_WORKFLOW_ID } from './fixtures/ux-revamp-lists.ts'
 import { apiRun, attach, expectNoExecutionControls, installHooks, nodeDetail, openRunDetails, phase, runUrl, workflowUrl } from './support.ts'
 
 installHooks()
@@ -112,6 +113,8 @@ test.describe('in a zone west of UTC', () => {
 
 test(`[scenario:live-freshness] A live chip says whether the run is polled and how fresh it is; Refresh keeps the page in place (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
+  // The page's timers run on page.clock, so the stale and recovery steps below move the clock instead of waiting on it.
+  await page.clock.install()
   const detailRequest = (url: URL) => url.pathname === apiRun(RUN_FAILED)
   const succeededRequest = (url: URL) => url.pathname === apiRun(RUN_SUCCEEDED)
   const refresh = page.getByRole('button', { name: /^Refresh/ })
@@ -137,21 +140,24 @@ test(`[scenario:live-freshness] A live chip says whether the run is polled and h
   await expect(refreshFailed).toHaveCount(0)
   await expect(announcer(page)).toContainText(`Refreshed. Loaded run ${RUN_SUCCEEDED}`)
 
-  // A failed run is still watched, because it can be repaired or resumed.
+  // A failed run is still watched, because it can be repaired or resumed; its chip leads with its state and day.
   await page.goto(runUrl(RUN_FAILED))
   const view = page.getByTestId('run-view')
   await expect(view).toHaveAttribute('data-run-status', 'failed')
   await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching')
-  await expect(liveStatus(page)).toContainText(/Watching · updated (just now|\d+ s ago)/)
+  await expect(liveStatus(page)).toContainText(/Failed [A-Z][a-z]{2} \d{1,2}(?: \d{4})? · checked (just now|\d+ s ago)/)
 
-  // Two failed polls in a row: the chip says the page is not updating, and the last loaded run stays shown.
+  // Two failed polls in a row (a failed run is re-read every 15 s): the chip says the page is not updating, and the last
+  // loaded run stays shown.
   await page.route(detailRequest, route => route.abort('connectionrefused'))
+  await page.clock.runFor(31_000)
   await expect(liveStatus(page)).toHaveAttribute('data-state', 'stale', { timeout: 20_000 })
   await expect(liveStatus(page)).toContainText('Not updating · showing data from')
   await expect(view).toHaveAttribute('data-run-status', 'failed')
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
   await attach(page, testInfo, 'live-freshness')
   await page.unroute(detailRequest)
+  await page.clock.runFor(16_000)
   await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching', { timeout: 15_000 })
 
   // Refresh reloads in the background: while the run is re-read, the node stays shown at the same scroll position, the
@@ -186,4 +192,43 @@ test(`[scenario:live-freshness] A live chip says whether the run is polled and h
   await expect(nodeDetail(page)).toBeVisible()
   expect(await scrollY(page)).toBe(scrolled)
   await expectNoExecutionControls(page)
+})
+
+test(`[scenario:run-freshness] The run chip leads with the run's state and day; a failed run is re-read at the lists' 15 s cadence and never reads stale between on-time polls (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.clock.install({ time: new Date('2026-03-12T20:00:00Z') })
+  const isDetail = (url: URL) => url.pathname === apiRun(RUN_FAILED)
+  let reads = 0
+  page.on('request', request => { if (isDetail(new URL(request.url()))) reads += 1 })
+  await page.goto(runUrl(RUN_FAILED))
+  await expect(page.getByTestId('run-view')).toHaveAttribute('data-run-status', 'failed')
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching')
+  await expect(liveStatus(page)).toContainText(/Failed [A-Z][a-z]{2} \d{1,2}(?: \d{4})? · checked (just now|\d+ s ago)/)
+  await expect(liveStatus(page)).not.toContainText('Watching')
+  await expect.poll(() => reads).toBeGreaterThanOrEqual(1)
+  const first = reads
+  // Between two on-time polls the chip never turns stale; 31 s after the first read the detail was read twice more, not six times.
+  await page.clock.runFor(14_000)
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching')
+  await page.clock.runFor(17_000)
+  await expect.poll(() => reads - first).toBe(2)
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching')
+  await attach(page, testInfo, 'run-freshness')
+  // Two failed polls turn it "Not updating …".
+  await page.route(isDetail, route => route.abort('connectionrefused'))
+  await page.clock.runFor(31_000)
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'stale')
+  await expect(liveStatus(page)).toContainText('Not updating')
+  await page.unroute(isDetail)
+
+  // A paused run: "Paused since <Mon D> · checked …", still data-state watching.
+  await page.goto(runUrl(RUN_DESK_PAUSED, undefined, UX_REVAMP_LISTS_WORKFLOW_ID))
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'watching')
+  await expect(liveStatus(page)).toContainText(/Paused since Mar 12 · checked (just now|\d+ s ago)/)
+  // A running run reads as before, and a succeeded one is not polled.
+  await page.goto(runUrl(RUN_DESK_LIVE, undefined, UX_REVAMP_LISTS_WORKFLOW_ID))
+  await expect(liveStatus(page)).toHaveAttribute('data-state', 'live')
+  await expect(liveStatus(page)).toContainText(/Live · updated (just now|\d+ s ago)/)
+  await page.goto(runUrl(RUN_SUCCEEDED))
+  await expect(liveStatus(page)).toContainText('Finished · not polling')
 })

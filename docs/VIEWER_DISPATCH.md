@@ -23,6 +23,14 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
   readable, unreadable, then by last activity). Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
   "N paused" / "N running" / "N unpushed" on the clone's primary only) and a sub-line (repository · "N features" or "cannot be
   read" · date). The current page's row has `aria-current="page"`.
+- Counts (ux-critique-fixes M2, M19): every count reads one classification of the project's runs (`classifyRuns`, `lists.ts`).
+  "N waits on you" counts a question, a pane, an approval, a decision at the design challenge and an interrupted latest run
+  (paused or running), never as running; "N paused" counts only paused runs that need nobody and that no later run of their
+  own project and workflow superseded; "N running" the rest of the running runs. The badge carries its own tone class
+  (`tone-warn`, `tone-pause`, `tone-run`; `badge-neutral` for unpushed), never the row's latest result; when nothing waits or
+  runs and a live paused run exists, the row's glyph and tone are pause.
+- Loading (M1): until the registry run read settles each row says "reading…" with no badge, and the Triage count and the
+  chip say "…"; "cannot be read" is for a failed read only (`ProjectRunInfo.state`: `loading` | `failed` | `read`).
 - At 999px and below the rail is hidden and `nav[data-testid="dispatch-chips"]` (a `.dispatch-chip` row, `overflow-x: auto`)
   shows instead, starting "All projects", "Triage · N".
 
@@ -71,6 +79,18 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 `projects-workspace`, and on Triage the Runs-home ids are unchanged: `needs-you`, `running-runs`, `today-runs`, `paused-runs`,
 `recent-runs`, `run-list` (feature page), `projects-info` (the read-only note, now at the foot of the Triage content),
 `lists-errors`. `data-workflow-id` and `a.lists-group-head` are reused on the step chart ([L1]).
+
+## Stage A of the UX critique fixes (lane `lists`)
+
+- The project page builds each feature's rows from the run summaries (page 1 of each workflow); the `/steps` tracks join them
+  when they arrive (`ChartRun.steps` is null until then), so a pending steps read never makes a feature read "0 runs".
+  The reading pane says "Reading the recorded steps…" only while `/steps` loads, "The recorded steps could not be read." when
+  it failed, and "No steps recorded for this run." when it was read without an entry for the run.
+- The Projects card says "reading runs…" while the run read is pending, the header "repositories: reading…" until the
+  overview is read ("repositories not read" when that read failed), and a line `[data-testid="dispatch-card-live"]` with "N waits on you · N running · N paused".
+- "Add to Triage" (`src/projects/pins.ts`): a `button.pin-toggle` beside each run row's link (inside its `li`, never inside
+  the link, no `data-run-id`), in the reading pane's head, and on run and node pages in `[data-testid="crumb-row"]` beside the
+  crumbs, outside `projects-workspace`. Triage lists the pins in `[data-testid="pinned-runs"]` at the top.
 
 ## Run 002 additions (V1–V22)
 

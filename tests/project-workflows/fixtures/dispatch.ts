@@ -163,6 +163,130 @@ const nooriginRuns = {
   'main-001': summary(DISPATCH_NOORIGIN, 'main', 'main-001', { status: 'succeeded', stop: 'integrate', feature: 'Main' }),
 }
 
+// ---- The runs that need the operator, and the ones that do not (ux-critique-fixes M2, M14, M19) -----------------------
+// No Origin carries the Needs-you cases, each in its own workflow so that what is latest is decided per workflow: a run paused
+// at the design challenge, an interrupted paused run and an interrupted running run (each the latest of its workflow); a
+// challenge-paused run superseded by a later failed run of its workflow (whose feature text differs, and which ran 50 h); an
+// interrupted running run superseded the same way (it stays in Running); and a run paused at another step (Paused). The
+// decision run's only later run is in another workflow (`redo-002`), so it stays latest. Widgets worktree carries a live paused
+// run while its newest run, in another workflow, was cancelled. Every date is in 2024 or January 2025, so none of these runs is
+// ever in Today or Recent under the pinned clocks of the other specs.
+
+/** The challenge-paused run whose only later run is in another workflow: it needs a decision. */
+export const RUN_DECIDE = 'decide-001'
+/** Paused at the challenge, then superseded by `redo-002` in its own workflow. */
+export const RUN_REDO_OLD = 'redo-001'
+/** The later run of `redo`: failed after 50 h, a different feature text. */
+export const RUN_REDO_NEW = 'redo-002'
+/** Interrupted while paused (a step paused, then the supervisor stopped): needs the operator. */
+export const RUN_HALT = 'halt-001'
+/** Interrupted while served running (a controller row nothing followed): needs the operator. */
+export const RUN_HALT_LIVE = 'halt-live-001'
+/** Interrupted while served running, but superseded by `rerun-live-002`: stays in Running. */
+export const RUN_RERUN_OLD = 'rerun-live-001'
+export const RUN_RERUN_NEW = 'rerun-live-002'
+/** Paused at the review, not the challenge: a Paused row, needs nobody. */
+export const RUN_PARKED = 'parked-001'
+/** Widgets worktree's live paused run, and its newer cancelled run in another workflow. */
+export const RUN_WT_PARKED = 'wt-parked-001'
+export const RUN_WT_DROPPED = 'wt-dropped-001'
+/** The No Origin runs that need the operator, and its paused and running counts, by value. */
+export const NOORIGIN_NEEDS = [RUN_DECIDE, RUN_HALT, RUN_HALT_LIVE] as const
+export const NOORIGIN_PAUSED = [RUN_PARKED] as const
+export const NOORIGIN_RUNNING = [RUN_RERUN_OLD] as const
+/** The paused at the review since this instant, for the stopped-row words. */
+export const PARKED_SINCE = '2024-11-20T09:00:00Z'
+export const REDO_NEW_CREATED = '2024-12-03T00:00:00Z'
+export const REDO_NEW_FINISHED = '2024-12-05T02:00:00Z'
+
+const CHALLENGE_PAUSED_MESSAGE = 'Design challenge attempt 1 paused the run before any worker launch: 1 P0/P1 concern(s)'
+const SUPERVISOR_INTERRUPTED = 'Supervisor interrupted. Native workers were NOT stopped and keep running'
+
+type M2Row = [time: string, node: string, status: string, message: string]
+type M2Run = {
+  projectId: string; workflowId: string; runId: string; status: RunSummary['status']; created: string; feature: string
+  events: M2Row[]; next: string[]; tasks?: { node_id: string; error: string | null; interrupts: object[]; result: object | null }[]
+  focus: string | null; attention: { kind: 'paused' | 'interrupted' | 'failed'; node_id: string | null; since: string | null } | null
+  finished?: string
+}
+const label = (nodeId: string) => PIPELINE.find(node => node.node_id === nodeId)!.label
+const challengePaused = (projectId: string, workflowId: string, runId: string, created: string, feature: string): M2Run => {
+  const paused = new Date(Date.parse(created) + 4 * 60_000).toISOString().replace('.000Z', 'Z')
+  return {
+    projectId, workflowId, runId, status: 'paused', created, feature, next: [], focus: 'challenge',
+    events: [[created, 'challenge', 'running', 'Design challenge attempt 1 launched'], [paused, 'challenge', 'paused', CHALLENGE_PAUSED_MESSAGE]],
+    attention: { kind: 'paused', node_id: 'challenge', since: paused },
+  }
+}
+const at = (iso: string, minutes: number) => new Date(Date.parse(iso) + minutes * 60_000).toISOString().replace('.000Z', 'Z')
+const interruptedRunning = (projectId: string, workflowId: string, runId: string, created: string, feature: string): M2Run => ({
+  projectId, workflowId, runId, status: 'running', created, feature, next: ['launch_ui'], focus: 'launch_ui',
+  events: [[at(created, 5), 'challenge', 'succeeded', 'Design challenge accepted'], [at(created, 10), 'launch_ui', 'running', 'UI worker launched'],
+    [at(created, 30), 'controller', 'interrupted', SUPERVISOR_INTERRUPTED]],
+  attention: { kind: 'interrupted', node_id: 'launch_ui', since: at(created, 30) },
+})
+const failedRun = (projectId: string, workflowId: string, runId: string, created: string, failedAt: string, feature: string): M2Run => ({
+  projectId, workflowId, runId, status: 'failed', created, feature, next: ['verify_ui'], focus: 'verify_ui', finished: failedAt,
+  events: [[at(created, 5), 'challenge', 'succeeded', 'Design challenge accepted'], [failedAt, 'verify_ui', 'failed', 'Attempt 1; verification failed']],
+  tasks: [{ node_id: 'verify_ui', error: 'Gate failed after 1 attempts', interrupts: [], result: null }],
+  attention: { kind: 'failed', node_id: 'verify_ui', since: null },
+})
+const pausedAtReview = (projectId: string, workflowId: string, runId: string, created: string, feature: string): M2Run => ({
+  projectId, workflowId, runId, status: 'paused', created, feature, next: [], focus: 'review',
+  events: [[at(created, 5), 'challenge', 'succeeded', 'Design challenge accepted'], [at(created, 60), 'review', 'paused', 'Review held by the operator']],
+  attention: { kind: 'paused', node_id: 'review', since: at(created, 60) },
+})
+
+export const M2_RUNS: readonly M2Run[] = [
+  challengePaused(DISPATCH_NOORIGIN, 'decide', RUN_DECIDE, '2024-12-01T08:00:00Z', 'Decide'),
+  challengePaused(DISPATCH_NOORIGIN, 'redo', RUN_REDO_OLD, '2024-12-02T08:00:00Z', 'Redo'),
+  failedRun(DISPATCH_NOORIGIN, 'redo', RUN_REDO_NEW, REDO_NEW_CREATED, REDO_NEW_FINISHED, 'Redo, second take'),
+  {
+    projectId: DISPATCH_NOORIGIN, workflowId: 'halt', runId: RUN_HALT, status: 'paused', created: '2024-12-04T08:00:00Z', feature: 'Halt', next: [], focus: 'verify_ui',
+    events: [['2024-12-04T08:05:00Z', 'challenge', 'succeeded', 'Design challenge accepted'], ['2024-12-04T09:00:00Z', 'verify_ui', 'paused', 'Attempt 1; verification paused'],
+      ['2024-12-04T09:30:00Z', 'controller', 'interrupted', SUPERVISOR_INTERRUPTED]],
+    attention: { kind: 'interrupted', node_id: 'verify_ui', since: '2024-12-04T09:30:00Z' },
+  },
+  interruptedRunning(DISPATCH_NOORIGIN, 'halt-live', RUN_HALT_LIVE, '2024-12-04T10:00:00Z', 'Halt live'),
+  interruptedRunning(DISPATCH_NOORIGIN, 'rerun-live', RUN_RERUN_OLD, '2024-12-05T08:00:00Z', 'Rerun live'),
+  failedRun(DISPATCH_NOORIGIN, 'rerun-live', RUN_RERUN_NEW, '2024-12-06T08:00:00Z', '2024-12-06T09:00:00Z', 'Rerun live'),
+  pausedAtReview(DISPATCH_NOORIGIN, 'parked', RUN_PARKED, '2024-11-20T08:00:00Z', 'Parked'),
+  pausedAtReview(DISPATCH_WIDGETS_WT, 'wt-parked', RUN_WT_PARKED, '2024-11-01T08:00:00Z', 'Parked worktree'),
+  {
+    projectId: DISPATCH_WIDGETS_WT, workflowId: 'wt-dropped', runId: RUN_WT_DROPPED, status: 'cancelled', created: '2025-02-01T08:00:00Z', feature: 'Dropped',
+    // The server reads the cancelled run's end at its last step's row, not at the abandon row.
+    next: [], focus: null, finished: '2025-02-01T08:05:00Z',
+    events: [['2025-02-01T08:05:00Z', 'challenge', 'succeeded', 'Design challenge accepted'], ['2025-02-01T09:00:00Z', 'controller', 'cancelled', 'Abandoned by the operator']],
+    attention: null,
+  },
+]
+export const M2_WORKFLOWS: Record<string, readonly string[]> = {
+  [DISPATCH_NOORIGIN]: ['decide', 'redo', 'halt', 'halt-live', 'rerun-live', 'parked'],
+  [DISPATCH_WIDGETS_WT]: ['wt-parked', 'wt-dropped'],
+}
+
+/** A seeded run's summary as the server serves it (contract 1.5.0), for the worker-phase mocks. */
+function m2Summary(run: M2Run): RunSummary {
+  const last = run.events.at(-1)![0]
+  // The focus step's since is its own last row (none for a failed step), as the server reads it.
+  const focusRow = run.events.findLast(([, node]) => node === run.focus)
+  const focus = run.focus === null ? null : {
+    node_id: run.focus, label: label(run.focus), since: run.status === 'failed' ? null : focusRow?.[0] ?? null,
+    status: (run.status === 'failed' ? 'failed' : run.status === 'running' ? 'running' : 'paused') as 'failed' | 'running' | 'paused',
+  }
+  return {
+    contract_version: '1.5.0', project_id: run.projectId, workflow_id: run.workflowId, definition_revision: REVISION, run_id: run.runId,
+    status: run.status, created_at: run.created, updated_at: last,
+    activity: {
+      feature: run.feature, last_activity_at: last, finished_at: run.finished ?? null, focus, attention: run.attention, waiting_questions: 0,
+      headline: `${focus?.label ?? 'Run'} · ${run.events.at(-1)![3]}`, controller: null,
+    },
+  }
+}
+const m2Lists: Record<string, { runs: RunSummary[]; next_cursor: null }> = {}
+for (const run of M2_RUNS) (m2Lists[run.workflowId] ??= { runs: [], next_cursor: null }).runs.push(m2Summary(run))
+for (const list of Object.values(m2Lists)) list.runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.run_id.localeCompare(b.run_id))
+
 /** Every new workflow's runs, keyed by workflow id, for the shared `runLists`. */
 export const DISPATCH_RUN_LISTS: Record<string, { runs: RunSummary[]; next_cursor: null }> = {
   'ui-polish': { runs: [widgetsRuns['ui-polish-003'], widgetsRuns['ui-polish-002'], widgetsRuns['ui-polish-001']], next_cursor: null },
@@ -173,6 +297,7 @@ export const DISPATCH_RUN_LISTS: Record<string, { runs: RunSummary[]; next_curso
   'gamma-feature': { runs: [trioRuns['gamma-feature-001']], next_cursor: null },
   main: { runs: [nooriginRuns['main-001']], next_cursor: null },
   ship: { runs: [busyRuns['ship-002'], busyRuns['ship-001']], next_cursor: null },
+  ...m2Lists,
 }
 
 /** Each new project's workflow definitions, keyed by project id, for the shared `workflowLists`. `dispatch-unreadable` is
@@ -180,10 +305,10 @@ export const DISPATCH_RUN_LISTS: Record<string, { runs: RunSummary[]; next_curso
 export const DISPATCH_WORKFLOW_LISTS: Record<string, { workflows: WorkflowDefinition[] }> = {
   [DISPATCH_LOCAL]: { workflows: [def(DISPATCH_LOCAL, 'sync')] },
   [DISPATCH_WIDGETS]: { workflows: [def(DISPATCH_WIDGETS, 'ui-polish'), def(DISPATCH_WIDGETS, 'broken')] },
-  [DISPATCH_WIDGETS_WT]: { workflows: [def(DISPATCH_WIDGETS_WT, 'experiment')] },
+  [DISPATCH_WIDGETS_WT]: { workflows: [def(DISPATCH_WIDGETS_WT, 'experiment'), ...M2_WORKFLOWS[DISPATCH_WIDGETS_WT].map(id => def(DISPATCH_WIDGETS_WT, id))] },
   // Trio lists its three readable workflows and the unlistable one ([P34]); the mock answers the latter's run list with an error.
   [DISPATCH_TRIO]: { workflows: [def(DISPATCH_TRIO, 'alpha-feature'), def(DISPATCH_TRIO, 'beta-feature'), def(DISPATCH_TRIO, 'gamma-feature'), def(DISPATCH_TRIO, DISPATCH_TRIO_LOCKED)] },
-  [DISPATCH_NOORIGIN]: { workflows: [def(DISPATCH_NOORIGIN, 'main')] },
+  [DISPATCH_NOORIGIN]: { workflows: [def(DISPATCH_NOORIGIN, 'main'), ...M2_WORKFLOWS[DISPATCH_NOORIGIN].map(id => def(DISPATCH_NOORIGIN, id))] },
   [DISPATCH_BUSY]: { workflows: [def(DISPATCH_BUSY, 'ship')] },
   // The unreadable project lists one workflow whose runs cannot be listed, so its run state reads "cannot be read" while its
   // project page still renders (git unavailable → "git not read", V10). The candidate seeds the same workflow with an unreadable run.
@@ -457,6 +582,21 @@ function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string,
   if (shape.kind !== 'unreadable') writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: runId, base_commit: RUN_BASE }, null, 2)}\n`)
 }
 
+/** Writes one of the M2 runs (`M2_RUNS`) in the storage format, its rows as given, so the server derives the same state. */
+function writeM2Run(runsRootDir: string, run: M2Run): void {
+  const dir = join(runsRootDir, run.runId)
+  mkdirSync(dir, { recursive: true })
+  const events = run.events.map(([time, node, status, message], index) => ({ sequence: index + 1, time, node, status, message }))
+  const state = {
+    version: '1.0.0', run_id: run.runId, base_commit: RUN_BASE, created_at: run.created, updated_at: run.events.at(-1)![0],
+    definition: { name: 'Feature implementation', nodes: PIPELINE_NODES.map(node => ({ ...node, depends_on: [] })) },
+    values: { run_id: run.runId }, next: run.next, tasks: run.tasks ?? [], events, verification_packets: [],
+  }
+  writeFileSync(join(dir, 'run-state.json'), `${JSON.stringify(state, null, 2)}\n`)
+  writeFileSync(join(dir, 'events.jsonl'), events.map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: run.runId, base_commit: RUN_BASE }, null, 2)}\n`)
+}
+
 export type DispatchSeed = {
   /** Registry project entries to append (`project_id`, `name`, `repository`, `workflows`). */
   projects: { project_id: string; name: string; repository: string; workflows: { workflow_id: string; runs_root: string; definition: { name: string; nodes: unknown[] } }[] }[]
@@ -543,6 +683,7 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
   writeDispatchRun(runsRoot(DISPATCH_TRIO, 'beta-feature'), 'beta-feature-001', '2025-01-01T09:00:00Z', { kind: 'cancelled' })
   writeDispatchRun(runsRoot(DISPATCH_TRIO, 'gamma-feature'), 'gamma-feature-001', '2025-01-01T09:00:00Z', { kind: 'failed', attempt: 2 })
   writeDispatchRun(runsRoot(DISPATCH_NOORIGIN, 'main'), 'main-001', '2025-01-01T09:00:00Z', { kind: 'integrated', integratedSha: sha('land-main') })
+  for (const run of M2_RUNS) writeM2Run(runsRoot(run.projectId, run.workflowId), run)
   // The unreadable project's only run is unreadable too, so its whole run list fails and the project reads "cannot be read".
   writeDispatchRun(runsRoot(DISPATCH_UNREADABLE, 'x'), 'x-001', '2025-01-01T09:00:00Z', { kind: 'unreadable' })
 
@@ -561,9 +702,9 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
     projects: [
       { project_id: DISPATCH_LOCAL, name: 'Local only', repository: localonly, workflows: workflowsFor(DISPATCH_LOCAL, ['sync']) },
       { project_id: DISPATCH_WIDGETS, name: 'Widgets', repository: widgets, workflows: workflowsFor(DISPATCH_WIDGETS, ['ui-polish', 'broken']) },
-      { project_id: DISPATCH_WIDGETS_WT, name: 'Widgets worktree', repository: worktree, workflows: workflowsFor(DISPATCH_WIDGETS_WT, ['experiment']) },
+      { project_id: DISPATCH_WIDGETS_WT, name: 'Widgets worktree', repository: worktree, workflows: workflowsFor(DISPATCH_WIDGETS_WT, ['experiment', ...M2_WORKFLOWS[DISPATCH_WIDGETS_WT]]) },
       { project_id: DISPATCH_TRIO, name: 'Trio', repository: trio, workflows: trioWorkflows },
-      { project_id: DISPATCH_NOORIGIN, name: 'No origin', repository: noorigin, workflows: workflowsFor(DISPATCH_NOORIGIN, ['main']) },
+      { project_id: DISPATCH_NOORIGIN, name: 'No origin', repository: noorigin, workflows: workflowsFor(DISPATCH_NOORIGIN, ['main', ...M2_WORKFLOWS[DISPATCH_NOORIGIN]]) },
       { project_id: DISPATCH_BUSY, name: 'Busy', repository: busy, workflows: workflowsFor(DISPATCH_BUSY, ['ship']) },
       { project_id: DISPATCH_UNREADABLE, name: 'Unreadable', repository: unreadable, workflows: workflowsFor(DISPATCH_UNREADABLE, ['x']) },
     ],

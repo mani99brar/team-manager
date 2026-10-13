@@ -9,12 +9,14 @@ import assert from 'node:assert/strict'
 import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
   cardStateWord, commitsAheadMore, everyRunListFailed, githubHeadState, githubNoHeadText, issueGroups, landingWording,
-  OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
+  OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railBadgeTone, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
   showMoreText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED, type RailInfo,
 } from '../../src/projects/dispatch/derive.ts'
-import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
+import { FAILED_RUN_INFO, projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
 import type { ProjectRuns, RunSummary, WorkflowDefinition, Project } from '../../src/projects/api.ts'
-import type { GithubState, GitState, Issue, Pr } from '../../src/projects/dispatch/types.ts'
+import type { GithubState, GitState, Issue, Pr, ProjectStepsRun } from '../../src/projects/dispatch/types.ts'
+import { endedCounts, landingKnown, noStopWording, runStepsRead, stopOf } from '../../src/projects/dispatch/stops.ts'
+import type { RunClass } from '../../src/projects/lists.ts'
 
 const phaseName = (nodeId: string, kind: string) => PHASES[phaseOf(nodeId, kind)]
 
@@ -308,5 +310,115 @@ describe('sync wording', () => {
     assert.deepEqual(syncAsOf(git({ origin: origin({ ahead: 1, updated_at: '2026-10-09T11:54:00Z' }) })), { ref: 'origin/main', updatedAt: '2026-10-09T11:54:00Z' })
     assert.deepEqual(syncAsOf(git({ origin: origin({ ahead: 1, updated_at: null }) })), { ref: 'origin/main', updatedAt: null })
     assert.equal(syncAsOf(git({ origin: null })), null)
+  })
+})
+
+describe('a project\'s run state while it loads, when it failed, once read (M1)', () => {
+  test('a read that has not settled is loading: nothing failed, nothing counted, no badge', () => {
+    const info = projectRunInfo(null)
+    assert.equal(info.state, 'loading')
+    assert.equal(info.allBad, false)
+    assert.equal(railBadge({ ...info, projectId: 'p', name: 'p', unpushed: 3, loading: true }), null)
+    assert.equal(cardStateWord({ tone: info.tone, waits: 0, running: 0, allBad: info.allBad, loading: true, featureCount: 0, worstLatestCount: 0 }), 'reading runs…')
+  })
+  test('an errored entry, or one whose every workflow failed, is failed and reads "cannot be read"', () => {
+    const errored = projectRunInfo({ project: { project_id: 't', name: 'T' } as unknown as Project, error: new Error('down'), workflows: [] })
+    assert.equal(errored.state, 'failed')
+    assert.equal(errored.allBad, true)
+    assert.equal(FAILED_RUN_INFO.state, 'failed')
+    const allFailed = projectRunInfo({ project: { project_id: 't', name: 'T' } as unknown as Project, error: null, workflows: [{ workflow: { workflow_id: 'w' } as unknown as WorkflowDefinition, runs: [], more: false, error: new Error('x') }] })
+    assert.equal(allFailed.state, 'failed')
+    assert.equal(cardStateWord({ tone: allFailed.tone, waits: 0, running: 0, allBad: allFailed.allBad, featureCount: 0, worstLatestCount: 0 }), 'cannot be read')
+  })
+})
+
+describe('badges carry their own state tone (M19)', () => {
+  const run = (runId: string, workflowId: string, status: string, created: string, attention: object | null = null): RunSummary => ({
+    contract_version: '1.5.0', project_id: 'q', workflow_id: workflowId, definition_revision: 'r', run_id: runId, status, created_at: created, updated_at: created,
+    activity: { feature: 'F', last_activity_at: created, finished_at: ['succeeded', 'failed', 'cancelled'].includes(status) ? created : null, focus: null, attention, waiting_questions: 0, headline: null, controller: null },
+  } as unknown as RunSummary)
+  const entry = (runs: RunSummary[]): ProjectRuns => ({
+    project: { project_id: 'q', name: 'Q' } as unknown as Project, error: null,
+    workflows: [...new Set(runs.map(item => item.workflow_id))].map(id => ({ workflow: { workflow_id: id } as unknown as WorkflowDefinition, runs: runs.filter(item => item.workflow_id === id), more: false, error: null })),
+  })
+  const rail = (info: ReturnType<typeof projectRunInfo>): RailInfo => ({ projectId: 'q', name: 'Q', waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed: null })
+  test('each badge is toned by what it counts: warn for waits, pause for paused, run for running, neutral otherwise', () => {
+    assert.equal(railBadgeTone(info({ waits: 1, paused: 2, running: 3 })), 'warn')
+    assert.equal(railBadgeTone(info({ paused: 2, running: 3 })), 'pause')
+    assert.equal(railBadgeTone(info({ running: 3 })), 'run')
+    assert.equal(railBadgeTone(info({ unpushed: 2 })), null)
+    assert.equal(railBadgeTone(info({ waits: 1, loading: true })), null)
+  })
+  test('a live paused run sets the pause glyph when nothing waits or runs, even when a newer run of another feature was cancelled or failed', () => {
+    const paused = run('parked-1', 'parked', 'paused', '2024-11-01T08:00:00Z', { kind: 'paused', node_id: 'review', since: '2024-11-01T09:00:00Z' })
+    for (const status of ['cancelled', 'failed', 'succeeded']) {
+      const info = projectRunInfo(entry([paused, run('dropped-1', 'dropped', status, '2025-02-01T08:00:00Z')]))
+      assert.equal(info.paused, 1, status)
+      assert.equal(info.tone, 'pause', status)
+      assert.equal(railBadge(rail(info)), '1 paused')
+      assert.equal(railBadgeTone(rail(info)), 'pause')
+    }
+  })
+  test('a paused run superseded in its own workflow adds no paused badge', () => {
+    const old = run('redo-1', 'redo', 'paused', '2024-12-02T08:00:00Z', { kind: 'paused', node_id: 'handoff', since: '2024-12-02T09:00:00Z' })
+    const info = projectRunInfo(entry([old, run('redo-2', 'redo', 'succeeded', '2024-12-03T08:00:00Z')]))
+    assert.equal(info.paused, 0)
+    assert.equal(railBadge(rail(info)), null)
+    assert.notEqual(info.tone, 'pause')
+  })
+  test('a decision-waiting or interrupted running run counts as a wait, never running; a plain running run is running', () => {
+    const decide = run('decide-1', 'decide', 'paused', '2024-12-01T08:00:00Z', { kind: 'paused', node_id: 'challenge', since: '2024-12-01T08:04:00Z' })
+    const halted = run('halt-1', 'halt', 'running', '2024-12-04T10:00:00Z', { kind: 'interrupted', node_id: 'launch_ui', since: '2024-12-04T10:30:00Z' })
+    const info = projectRunInfo(entry([decide, halted]))
+    assert.equal(info.waits, 2)
+    assert.equal(info.running, 0)
+    assert.equal(railBadge(rail(info)), '2 waits on you')
+    assert.equal(railBadgeTone(rail(info)), 'warn')
+    const live = projectRunInfo(entry([run('live-1', 'live', 'running', '2024-12-04T10:00:00Z')]))
+    assert.equal(railBadge(rail(live)), '1 running')
+    assert.equal(railBadgeTone(rail(live)), 'run')
+    assert.equal(live.tone, 'run')
+  })
+  test('the card says the paused count when nothing waits or runs', () => {
+    assert.equal(cardStateWord({ tone: 'pause', waits: 0, running: 0, paused: 2, allBad: false, featureCount: 3, worstLatestCount: 1 }), '2 paused')
+  })
+})
+
+describe('the step chart claims no stop while a run\'s steps are not read (M1)', () => {
+  const run = (status: string): RunSummary => ({
+    contract_version: '1.5.0', project_id: 'q', workflow_id: 'w', definition_revision: 'r', run_id: `w-${status}`, status, created_at: '2026-03-19T09:00:00Z', updated_at: '2026-03-19T09:00:00Z',
+    activity: { feature: 'F', last_activity_at: '2026-03-19T09:00:00Z', finished_at: '2026-03-19T09:00:00Z', focus: null, attention: null, waiting_questions: 0, headline: null, controller: null },
+  } as unknown as RunSummary)
+  const cls = { needs: null, supersededBy: null } as unknown as RunClass
+  const steps: ProjectStepsRun = {
+    run_id: 'w-failed', source_branch: null, base_commit: null, integrated_commit: null, lanes: [],
+    steps: [
+      { node_id: 'challenge', label: 'Challenge', kind: 'agent', status: 'succeeded', attempt: 1 },
+      { node_id: 'verify_ui', label: 'Verify ui', kind: 'command', status: 'failed', attempt: 1 },
+    ],
+  }
+  test('a failed run without its steps has no stop and counts in no phase; with them it ends at its failed step', () => {
+    assert.equal(stopOf({ run: run('failed'), cls, steps: null }), null)
+    assert.deepEqual(endedCounts([{ run: run('failed'), cls, steps: null }, { run: run('cancelled'), cls, steps: null }]), PHASES.map(() => 0))
+    const counts = endedCounts([{ run: run('failed'), cls, steps }])
+    assert.equal(counts[phaseOf('verify_ui', 'command')], 1)
+    assert.equal(counts.reduce((a: number, b: number) => a + b, 0), 1)
+  })
+  test('a row with no stop says its steps are reading while they load, "not read" only for a failed read, and "no steps recorded" for a read without them', () => {
+    assert.deepEqual(noStopWording('loading'), { text: 'reading steps…', aria: 'Reading its steps.' })
+    assert.deepEqual(noStopWording('failed'), { text: 'steps not read', aria: 'Steps not read.' })
+    assert.deepEqual(noStopWording('read'), { text: 'no steps recorded', aria: 'No steps recorded.' })
+    for (const state of ['loading', 'read'] as const) assert.doesNotMatch(`${noStopWording(state).text} ${noStopWording(state).aria}`, /not read|cannot/i)
+  })
+  test('a run whose own steps entry failed reads "failed", and a feature\'s landing is unknown until every run\'s steps are read (M1)', () => {
+    const failedEntry = { run: run('failed'), cls, steps: null, stepsError: { code: 'unreadable', message: 'state.json is corrupt' } }
+    const absentEntry = { run: run('failed'), cls, steps: null }
+    assert.equal(runStepsRead(failedEntry, 'read'), 'failed')
+    assert.equal(runStepsRead(absentEntry, 'read'), 'read')
+    assert.equal(runStepsRead(absentEntry, 'loading'), 'loading')
+    assert.equal(landingKnown([absentEntry], 'loading'), false)
+    assert.equal(landingKnown([absentEntry], 'failed'), false)
+    assert.equal(landingKnown([absentEntry, failedEntry], 'read'), false)
+    assert.equal(landingKnown([absentEntry, { run: run('failed'), cls, steps }], 'read'), true)
   })
 })

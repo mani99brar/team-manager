@@ -11,6 +11,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { deriveNow, type Now } from '../../../contracts/projects/triage.ts'
 import { fetchRunDetail, type RunDetail, type RunSummary } from '../api.ts'
+import type { RunClass } from '../lists.ts'
+import { PinToggle } from '../RunRow.tsx'
 import { CommandBlock } from '../CommandBlock.tsx'
 import { runPathname } from '../routes.ts'
 import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
@@ -23,7 +25,14 @@ import type { ProjectStepsRun } from './types.ts'
 
 type Props = {
   run: RunSummary
-  steps: ProjectStepsRun
+  /** The run's class in the project's classified run list: a run that needs the operator is drawn warn, nothing else. */
+  cls: RunClass
+  /** The run's recorded steps; null while the dispatch steps load, when their read failed, or when they hold no entry for it. */
+  steps: ProjectStepsRun | null
+  /** The state of this run's dispatch steps read ('failed' when its own entry failed), so a null `steps` says which of the three it is. */
+  stepsRead: StepsRead
+  /** The read's error for this run's entry, if any: shown with the failed-read sentence. */
+  stepsError?: { code: string; message: string } | null
   projectId: string
   workflowId: string
   onClose: () => void
@@ -32,12 +41,15 @@ type Props = {
   onNext?: () => void
 }
 
+/** The project's dispatch steps read: loading until it settles, failed when it failed with nothing read, read otherwise. */
+export type StepsRead = 'loading' | 'failed' | 'read'
+
 type DetailState = { status: 'loading' } | { status: 'ready'; now: Now } | { status: 'error' }
 
-export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavigate, phone, onNext }: Props) {
+export function ReadingPane({ run, cls, steps, stepsRead, stepsError, projectId, workflowId, onClose, onNavigate, phone, onNext }: Props) {
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => { closeRef.current?.focus() }, [run.run_id])
-  const tone = stateTone({ status: run.status, attention: run.activity?.attention?.kind ?? null, accepted: run.accepted })
+  const tone = cls.needs !== null ? 'warn' : stateTone({ status: run.status, accepted: run.accepted })
   const word = run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]
   const activity = run.activity
   const finished = activity?.finished_at ?? null
@@ -64,10 +76,11 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
     ['Started', <Time key="s" iso={run.created_at} />],
     finished ? ['Finished', <Time key="f" iso={finished} />] : ['Last activity', <Time key="l" iso={activity?.last_activity_at ?? run.updated_at} />],
     ['Wall time', wall ?? <span className="dispatch-nr">not recorded</span>],
-    ['Lanes', steps.lanes.length ? steps.lanes.join(', ') : <span className="dispatch-nr">not recorded</span>],
+    ['Lanes', steps === null ? <span className="dispatch-nr">{stepsRead === 'loading' ? 'reading…' : stepsRead === 'failed' ? 'not read' : 'not recorded'}</span>
+      : steps.lanes.length ? steps.lanes.join(', ') : <span className="dispatch-nr">not recorded</span>],
     ['Feature', activity?.feature ?? <span className="dispatch-nr">not recorded</span>],
   ]
-  const lead = run.status === 'succeeded' && steps.integrated_commit
+  const lead = run.status === 'succeeded' && steps?.integrated_commit
     ? `Integrated: fast-forwarded to ${steps.integrated_commit.slice(0, 7)}.`
     : activity?.headline ?? `${word}.`
   return (
@@ -77,6 +90,7 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
           <StateGlyph tone={tone} live={tone === 'run'} />
           <h2 className="dispatch-pane-id">{run.run_id}</h2>
           <span className="dispatch-word">{word}</span>
+          <PinToggle target={{ project_id: projectId, workflow_id: workflowId, run_id: run.run_id }} className="pane-pin" />
           <button type="button" ref={closeRef} className="button button-small dispatch-pane-close" data-testid="dispatch-pane-close" onClick={onClose}>Close</button>
         </div>
       </header>
@@ -95,7 +109,12 @@ export function ReadingPane({ run, steps, projectId, workflowId, onClose, onNavi
         <section className="dispatch-pane-sec">
           <h3>Steps</h3>
           <ul className="dispatch-pane-steps" data-testid="dispatch-pane-steps">
-            {steps.steps.map(step => (
+            {steps === null && (
+              <li className="dispatch-muted" data-testid="dispatch-pane-steps-state">
+                {stepsRead === 'loading' ? 'Reading the recorded steps…' : stepsRead === 'failed' ? `The recorded steps could not be read.${stepsError ? ` ${stepsError.message}` : ''}` : 'No steps recorded for this run.'}
+              </li>
+            )}
+            {(steps?.steps ?? []).map(step => (
               <li key={step.node_id} data-step={step.node_id}>
                 <span className="dispatch-pane-phase">{PHASES[phaseOf(step.node_id, step.kind)]}</span>
                 <span className="dispatch-pane-step-label">{step.label}</span>

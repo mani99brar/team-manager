@@ -9,7 +9,7 @@ import { test, expect, type Locator, type Page } from '@playwright/test'
 import { attach, installHooks, phase, projectUrl, renderedText, workspace } from './support.ts'
 import { mockDispatchResponse } from './mock.ts'
 import {
-  DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT,
+  DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT, RUN_WT_DROPPED,
 } from './fixtures/dispatch.ts'
 
 installHooks()
@@ -30,7 +30,8 @@ async function box(locator: Locator) {
 test(`[scenario:dispatch-overview] /projects shows one card per project in rail order with state, repository, sync, counts and GitHub; the runs-read time is fixed (${phase})`, async ({ page }, testInfo) => {
   await page.goto(PROJECTS)
   await expect(page.getByRole('heading', { level: 1, name: 'Projects' })).toBeVisible()
-  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in')
+  // The repository count waits for the dispatch overview (until then the header says "repositories: reading…").
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
   await expect(page.getByTestId('dispatch-cards')).toBeVisible()
   // The three readable-feature project whose worst latest result is failed (its fourth workflow cannot be read, [L8]).
   await expect(card(page, DISPATCH_TRIO)).toContainText('1 of 3 features failed last')
@@ -264,6 +265,43 @@ test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the le
   await attach(page, testInfo, 'dispatch-pane')
 })
 
+test(`A failed steps read on a cold project page: the selected run's pane says the steps could not be read, never "reading…" (${phase})`, async ({ page }) => {
+  // The 503 is installed before the first load, so the steps resource never holds data a failed reload could keep.
+  await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS}/steps`,
+    route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
+  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await run(page, 'ui-polish-002').click()
+  const pane = page.getByTestId('dispatch-pane')
+  await expect(pane).toHaveAttribute('data-run-id', 'ui-polish-002', { timeout: 30_000 })
+  await expect(pane.getByTestId('dispatch-pane-steps-state')).toHaveText('The recorded steps could not be read.', { timeout: 30_000 })
+  await expect(pane.locator('.dispatch-fact', { hasText: 'Lanes' }).locator('dd')).toHaveText('not read')
+  await expect(pane.getByText('reading…', { exact: false })).toHaveCount(0)
+  await expect(pane.getByText('Reading the recorded steps…')).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+test(`A failed steps read: a run row with no served focus says its steps were not read, never "reading steps…" (${phase})`, async ({ page }) => {
+  await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS_WT}/steps`,
+    route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
+  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  const dropped = run(page, RUN_WT_DROPPED)
+  await expect(dropped.locator('.dispatch-run-2')).toContainText('steps not read', { timeout: 30_000 })
+  await expect(dropped).toHaveAttribute('aria-label', /Steps not read\.$/)
+  await expect(page.getByTestId('dispatch-chart').getByText('reading steps…')).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+test(`A failed overview read on a cold Projects page: the header says the repositories were not read, never "repositories: reading…" (${phase})`, async ({ page }) => {
+  await page.route(url => url.pathname === '/api/dispatch/projects',
+    route => route.fulfill({ status: 503, json: { error: { code: 'OVERVIEW_UNREADABLE', message: 'held for the test' } } }))
+  await page.goto(PROJECTS)
+  const meta = page.getByTestId('dispatch-projects-meta')
+  await expect(meta).toContainText('repositories not read', { timeout: 30_000 })
+  await expect(meta).not.toContainText('repositories: reading…')
+  await expect(meta).toContainText(/^\d+ projects? · repositories not read/)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
 test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the match, fold long groups, say the merged scope, a head-null read is read, and a not-read project keeps local counts (${phase})`, async ({ page }, testInfo) => {
   // In the worker phase only, serve Widgets' GitHub read with head null (an empty repository, Appendix A allows it): the card
   // must say the default branch has no commits, not "GitHub not read", and keep its PR and issue counts ([P35], V26). The
@@ -332,6 +370,7 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
 })
 
 test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary counts against origin with the naming split and the landings by value; no path leaks on every page (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // thirteen page loads come within a second of 30 s on a loaded 4-core host
   await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('shares its clone with Widgets')
   await expect(railRow(page, DISPATCH_WIDGETS_WT)).not.toContainText('unpushed')

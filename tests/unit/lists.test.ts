@@ -11,7 +11,10 @@ import {
   controllerSuffix, dayKey, cardElapsed, dayLabel, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun,
   NEXT_STEP, PREFIX_GROUP_MIN, projectFacts, projectPrefix, projectTone, railEntries, readsNextPage, RECENT_FILTERS, RECENT_SHOWN, recentCounts,
   recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
+  classifyRuns, classOf, rowLook, stoppedLabel, type RunClass,
 } from '../../src/projects/lists.ts'
+import { createPinStore, PINS_KEY, PINS_MAX, type PinStorage } from '../../src/projects/pins.ts'
+import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
 import { definition, laneGraphNodes, runDetail, type NodeState } from '../project-workflows/fixtures.ts'
 
 const NOW = Date.parse('2026-03-20T12:00:00Z')
@@ -25,9 +28,9 @@ const activity = (fields: Partial<RunActivity> = {}): RunActivity => ({
   feature: 'Runs home lists', last_activity_at: null, finished_at: null, focus: null, attention: null, waiting_questions: 0, headline: null, controller: null, ...fields,
 })
 
-function summary(runId: string, status: RunSummary['status'], fields: { created?: string; updated?: string; activity?: RunActivity | null } = {}): RunSummary {
+function summary(runId: string, status: RunSummary['status'], fields: { created?: string; updated?: string; activity?: RunActivity | null; workflow?: string; project?: string } = {}): RunSummary {
   const base: RunSummary = {
-    contract_version: '1.0.0', project_id: 'alpha-project', workflow_id: 'ux-lists', definition_revision: DEFINITION.definition_revision, run_id: runId, status,
+    contract_version: '1.0.0', project_id: fields.project ?? 'alpha-project', workflow_id: fields.workflow ?? 'ux-lists', definition_revision: DEFINITION.definition_revision, run_id: runId, status,
     created_at: fields.created ?? '2026-03-19T09:00:00Z', updated_at: fields.updated ?? fields.created ?? '2026-03-19T09:00:00Z',
   }
   return fields.activity ? { ...base, contract_version: '1.5.0', activity: fields.activity } : base
@@ -89,7 +92,11 @@ describe('Runs home sections', () => {
     assert.deepEqual(ids(sections.needsYou), ['approval', 'pane', 'asking'])
   })
   test('Today holds every run that moved today and waits on nobody, running first, then latest activity first', () => {
-    assert.deepEqual(ids(sections.today), ['live', 'interrupted'])
+    // `interrupted` is paused and a later run of its workflow exists (every run here shares created_at; the tie goes to the
+    // greater run id, `too-old`): it is superseded, folded apart, never in Today.
+    assert.deepEqual(ids(sections.today), ['live'])
+    assert.deepEqual(ids(sections.superseded), ['interrupted'])
+    assert.equal(sections.classes.get('alpha-project\u0000ux-lists\u0000interrupted')?.supersededBy, 'too-old')
     // A run finished today is Today's, not Recent's; a run that moved today in UTC but yesterday in a zone west of it follows the zone.
     const done = summary('done-today', 'succeeded', { activity: activity({ finished_at: '2026-03-20T00:30:00Z' }) })
     assert.deepEqual(ids(homeSections([row(done)], NOW).today), ['done-today'])
@@ -104,14 +111,15 @@ describe('Runs home sections', () => {
   test('Paused holds the paused runs since an earlier day that wait on nobody, oldest first (longest stopped at the top)', () => {
     assert.deepEqual(ids(sections.paused), [])
     // Two paused runs: the one stopped longer ago leads; a since-less paused run orders by its last activity.
-    const older = summary('paused-older', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-18T08:00:00Z' } }) })
-    const newer = summary('paused-newer', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-20T08:00:00Z' } }) })
-    const sinceless = summary('paused-sinceless', 'paused', { activity: activity({ attention: { kind: 'paused', node_id: null, since: null }, last_activity_at: '2026-03-19T08:00:00Z' }) })
+    // Each in its own workflow, so each is the latest of its workflow and none is superseded.
+    const older = summary('paused-older', 'paused', { workflow: 'w-older', activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-18T08:00:00Z' } }) })
+    const newer = summary('paused-newer', 'paused', { workflow: 'w-newer', activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-20T08:00:00Z' } }) })
+    const sinceless = summary('paused-sinceless', 'paused', { workflow: 'w-sinceless', activity: activity({ attention: { kind: 'paused', node_id: null, since: null }, last_activity_at: '2026-03-19T08:00:00Z' }) })
     assert.deepEqual(ids(homeSections([row(newer), row(older), row(sinceless)], NOW).paused), ['paused-older', 'paused-sinceless', 'paused-newer'])
   })
   test('Recent holds finished runs of the last seven days before today, newest first; an older run is absent, and no run appears twice', () => {
     assert.deepEqual(ids(sections.recent), ['legacy-recent', 'failed-now', 'failed-earlier'])
-    const all = [...ids(sections.needsYou), ...ids(sections.today), ...ids(sections.running), ...ids(sections.paused), ...ids(sections.recent)]
+    const all = [...ids(sections.needsYou), ...ids(sections.today), ...ids(sections.running), ...ids(sections.paused), ...ids(sections.superseded), ...ids(sections.recent)]
     assert.equal(new Set(all).size, all.length)
     assert.ok(!all.includes('too-old') && !all.includes('legacy-old'))
   })
@@ -418,19 +426,19 @@ describe('Runs home cards', () => {
     assert.equal(second.get('a')!.length, 2)
     assert.equal(controllerSuffix('running', second.get('a')!), 'not_running')
   })
-  test('a Running card names a stopped run\'s age as since it started, never as how long it has been stopped (run 006)', () => {
+  test('a Running card names a stopped run in the stopped rows\' words, never as a span of how long it has been stopped (run 006)', () => {
     const now = Date.parse('2026-03-12T20:00:00Z')
     const created = '2026-03-12T16:00:00Z'
-    const live = (status: RunSummary['status'], since: string | null) => ({ status, created_at: created, activity: { attention: since === null ? null : { kind: 'interrupted' as const, node_id: 'handoff', since } } })
+    const live = (status: RunSummary['status'], since: string | null, kind: 'interrupted' | 'paused' = 'interrupted') => ({ status, created_at: created, activity: { attention: since === null ? null : { kind, node_id: 'handoff', since } } })
     assert.deepEqual(cardElapsed(live('running', null), now), { elapsed: 'running for 4h00m', since: null, started: created })
-    // Interrupted at 16:20 after starting at 16:00: at 20:00 it says it started 4h00m ago and has been paused since 16:20.
-    assert.deepEqual(cardElapsed(live('paused', '2026-03-12T16:20:00Z'), now), { elapsed: 'paused · started 4h00m ago', since: '2026-03-12T16:20:00Z', started: null })
-    assert.doesNotMatch(cardElapsed(live('paused', null), now)!.elapsed, /^paused · \d/)
-    // Served without a since (run 007): the line already says when it started, so no start time follows it a second time.
-    assert.deepEqual(cardElapsed(live('paused', null), now), { elapsed: 'paused · started 4h00m ago', since: null, started: null })
+    // Interrupted at 16:20 after starting at 16:00: at 20:00 it says it has been interrupted since today, with its stop time.
+    assert.deepEqual(cardElapsed(live('paused', '2026-03-12T16:20:00Z'), now), { elapsed: 'interrupted today (since Mar 12)', since: '2026-03-12T16:20:00Z', started: null })
+    assert.deepEqual(cardElapsed(live('paused', '2026-03-09T16:20:00Z', 'paused'), now), { elapsed: 'paused 3 d (since Mar 9)', since: '2026-03-09T16:20:00Z', started: null })
+    // Served without a since (run 007): the stop counts from the start, and no start time follows the line a second time.
+    assert.deepEqual(cardElapsed(live('paused', null), now), { elapsed: 'paused today (since Mar 12)', since: null, started: null })
     assert.deepEqual(cardElapsed(live('awaiting_approval', null), now), { elapsed: 'awaiting approval · started 4h00m ago', since: null, started: null })
-    // A running run's since is not a stop time, and a finished run has no elapsed line.
-    assert.equal(cardElapsed(live('running', '2026-03-12T16:20:00Z'), now)?.since, null)
+    // An interrupted running run has stopped moving: its line is the stop, never a ticking span.
+    assert.deepEqual(cardElapsed(live('running', '2026-03-12T16:20:00Z'), now), { elapsed: 'interrupted today (since Mar 12)', since: '2026-03-12T16:20:00Z', started: null })
     assert.equal(cardElapsed({ status: 'failed', created_at: created, activity: { attention: null } }, now), null)
   })
   test('a paused run served without attention.since waits on nobody: a Paused row, not a Needs-you card (run 007)', () => {
@@ -443,15 +451,18 @@ describe('Runs home cards', () => {
     const earlier = homeSections([{ run: held }], NOW + 2 * DAY)
     assert.deepEqual(earlier.paused.map(row => row.run.run_id), ['held'])
     assert.equal(earlier.today.length + earlier.needsYou.length, 0)
-    assert.deepEqual(cardElapsed(held, NOW), { elapsed: 'paused · started 5h00m ago', since: null, started: null })
+    assert.deepEqual(cardElapsed(held, NOW), { elapsed: 'paused today (since Mar 20)', since: null, started: null })
   })
-  test('sincePausedLabel: whole days from the paused since, else today under a day', () => {
+  test('sincePausedLabel: whole days from the paused since in the stopped rows\' words, else today under a day, never 0 d', () => {
     const paused = (since: string | null, lastActivity = '2026-03-20T09:00:00Z') => summary('p', 'paused', { activity: activity({ last_activity_at: lastActivity, attention: { kind: 'paused', node_id: 'handoff', since } }) })
-    assert.equal(sincePausedLabel(paused('2026-03-20T09:30:00Z'), NOW), 'since today')
-    assert.equal(sincePausedLabel(paused('2026-03-19T11:00:00Z'), NOW), 'since 1 day')
-    assert.equal(sincePausedLabel(paused('2026-03-17T12:00:00Z'), NOW), 'since 3 days')
+    assert.equal(sincePausedLabel(paused('2026-03-20T09:30:00Z'), NOW), 'paused today (since Mar 20)')
+    assert.equal(sincePausedLabel(paused('2026-03-19T11:00:00Z'), NOW), 'paused 1 d (since Mar 19)')
+    assert.equal(sincePausedLabel(paused('2026-03-17T12:00:00Z'), NOW), 'paused 3 d (since Mar 17)')
     // Without a since, the last activity is the clock it counts from.
-    assert.equal(sincePausedLabel(paused(null, '2026-03-14T12:00:00Z'), NOW), 'since 6 days')
+    assert.equal(sincePausedLabel(paused(null, '2026-03-14T12:00:00Z'), NOW), 'paused 6 d (since Mar 14)')
+    assert.doesNotMatch(sincePausedLabel(paused('2026-03-20T11:59:00Z'), NOW), /\b0 d\b/)
+    // Another year is named.
+    assert.equal(sincePausedLabel(paused('2025-12-31T12:00:00Z'), NOW), 'paused 79 d (since Dec 31 2025)')
   })
   test('stepTally names and counts the step each row sits at, in first-seen order; rows without a focus step counted apart', () => {
     const at = (nodeId: string, label: string) => summary(`${nodeId}-run`, 'running', { activity: activity({ focus: { node_id: nodeId, label, status: 'running', since: null } }) })
@@ -465,5 +476,242 @@ describe('Runs home cards', () => {
     const guarded = [{ node_id: 'challenge', label: 'Design challenge', kind: 'review' as const }, ...NODES]
     assert.deepEqual(reviewStepsOf(guarded), ['Design challenge', 'Independent review'])
     assert.deepEqual(reviewStepsOf(NODES.filter(node => node.kind !== 'review')), [])
+  })
+})
+
+describe('Needs you: the closed set of runs that need the operator (M2)', () => {
+  type Attention = NonNullable<RunActivity['attention']>
+  const run = (runId: string, status: RunSummary['status'], attention: Attention | null, fields: { created?: string; workflow?: string; project?: string; feature?: string | null } = {}) =>
+    summary(runId, status, { created: fields.created ?? '2026-03-19T09:00:00Z', workflow: fields.workflow ?? 'w', project: fields.project ?? 'p',
+      activity: activity({ attention, feature: fields.feature === undefined ? 'F' : fields.feature, finished_at: ['failed', 'succeeded', 'cancelled'].includes(status) ? '2026-03-19T10:00:00Z' : null }) })
+  const challenge: Attention = { kind: 'paused', node_id: 'challenge', since: '2026-03-19T09:05:00Z' }
+  const interrupted: Attention = { kind: 'interrupted', node_id: 'handoff', since: '2026-03-19T09:30:00Z' }
+  const at = (kind: Attention['kind'], node: string | null = 'launch_ui'): Attention => ({ kind, node_id: node, since: '2026-03-19T09:10:00Z' })
+  const later = (runId: string, fields: { workflow?: string; project?: string; feature?: string | null; created?: string; status?: RunSummary['status'] } = {}) =>
+    run(runId, fields.status ?? 'succeeded', null, { created: fields.created ?? '2026-03-19T12:00:00Z', ...fields })
+  const classOfRun = (runs: RunSummary[], runId: string): RunClass => classOf(classifyRuns(runs), runs.find(item => item.run_id === runId)!)
+  const sectionOf = (runs: RunSummary[], runId: string) => {
+    const sections = homeSections(runs.map(item => ({ run: item })), NOW)
+    const names = (['needsYou', 'today', 'running', 'paused', 'superseded', 'recent'] as const).filter(name => sections[name].some(row => row.run.run_id === runId))
+    assert.ok(names.length <= 1, `${runId} is listed in ${names.join(', ')}`)
+    return names[0] ?? null
+  }
+
+  test('in: the latest run paused at the challenge (challenge_paused and challenge_held both serve it), interrupted paused, interrupted running', () => {
+    assert.deepEqual(classOfRun([run('c', 'paused', challenge)], 'c'), { needs: 'decision', supersededBy: null })
+    // A held challenge (C8) is served exactly the same way: the challenge node paused, status paused.
+    assert.deepEqual(classOfRun([run('held', 'paused', { ...challenge, since: null })], 'held'), { needs: 'decision', supersededBy: null })
+    assert.deepEqual(classOfRun([run('i', 'paused', interrupted)], 'i'), { needs: 'interrupted', supersededBy: null })
+    assert.deepEqual(classOfRun([run('ir', 'running', interrupted)], 'ir'), { needs: 'interrupted', supersededBy: null })
+    // Listed once, as a Needs-you row, never also under Running or Today (the interrupted running run moved today).
+    for (const runId of ['c', 'i', 'ir']) {
+      const runs = [run('c', 'paused', challenge, { workflow: 'a' }), run('i', 'paused', interrupted, { workflow: 'b' }), run('ir', 'running', { ...interrupted, since: '2026-03-20T11:00:00Z' }, { workflow: 'c', created: '2026-03-20T10:00:00Z' })]
+      assert.equal(sectionOf(runs, runId), 'needsYou', runId)
+    }
+  })
+  test('in, today\'s rule: an unfinished run with a question, a pane or an approval, whatever its status', () => {
+    for (const kind of ['question', 'pane', 'approval'] as const) {
+      assert.equal(classOfRun([run('r', 'running', at(kind))], 'r').needs, kind)
+      assert.equal(classOfRun([run('a', 'awaiting_approval', at(kind))], 'a').needs, kind)
+      // Not the latest of its workflow, and running: still waits (only a paused run is superseded).
+      assert.equal(classOfRun([run('r', 'running', at(kind)), later('z')], 'r').needs, kind)
+    }
+  })
+  test('out: a superseded paused run, whatever its attention, and whatever the later run\'s feature text (or none)', () => {
+    for (const attention of [challenge, interrupted, at('question'), at('pane'), at('approval'), at('paused', 'handoff')]) {
+      for (const feature of ['Another feature', null, 'F']) {
+        const runs = [run('old', 'paused', attention), later('new', { feature })]
+        assert.deepEqual(classOfRun(runs, 'old'), { needs: null, supersededBy: 'new' }, `${attention.kind} / ${feature}`)
+        assert.equal(sectionOf(runs, 'old'), 'superseded')
+      }
+    }
+  })
+  test('out: a superseded interrupted running run keeps Running or Today; a plain running run; paused elsewhere; finished; accepted; no activity', () => {
+    const runs = [run('ir', 'running', interrupted, { created: '2026-03-10T09:00:00Z' }), later('ir-next', { created: '2026-03-11T09:00:00Z', status: 'failed' })]
+    assert.deepEqual(classOfRun(runs, 'ir'), { needs: null, supersededBy: null })
+    assert.ok(['running', 'today'].includes(sectionOf(runs, 'ir')!))
+    assert.equal(classOfRun([run('live', 'running', null)], 'live').needs, null)
+    assert.equal(sectionOf([run('live', 'running', null, { created: '2026-03-10T09:00:00Z' })], 'live'), 'running')
+    assert.equal(classOfRun([run('parked', 'paused', at('paused', 'handoff'))], 'parked').needs, null)
+    assert.equal(classOfRun([run('held', 'paused', at('paused', null))], 'held').needs, null)
+    for (const status of ['failed', 'succeeded', 'cancelled'] as const) {
+      assert.equal(classOfRun([run('f', status, interrupted)], 'f').needs, null, status)
+      assert.equal(classOfRun([run('f', status, challenge)], 'f').needs, null, status)
+    }
+    const accepted = { ...run('acc', 'succeeded', challenge), accepted: { candidate: 'a'.repeat(40), reason: 'merged', by: 'operator', accepted_at: '2026-03-19T10:00:00Z', on_main: true, review: 'recorded' as const, open_findings: [], abandoned: null } }
+    assert.equal(classOfRun([accepted], 'acc').needs, null)
+    assert.equal(classOfRun([summary('bare', 'paused', { workflow: 'w', project: 'p' })], 'bare').needs, null)
+    // Status alone never puts a run in Needs you.
+    assert.equal(classOfRun([run('aw', 'awaiting_approval', null)], 'aw').needs, null)
+  })
+  test('not superseded: a later run only in another workflow of the project, in the same workflow id of another project, or an older run', () => {
+    assert.equal(classOfRun([run('c', 'paused', challenge), later('other', { workflow: 'w2' })], 'c').needs, 'decision')
+    assert.equal(classOfRun([run('c', 'paused', challenge), later('elsewhere', { project: 'p2' })], 'c').needs, 'decision')
+    assert.equal(classOfRun([run('c', 'paused', challenge), later('older', { created: '2026-03-18T09:00:00Z' })], 'c').needs, 'decision')
+  })
+  test('a created_at tie resolves by run id, and "superseded by" names the greatest later run, whatever the input order', () => {
+    const tie = [run('b', 'paused', challenge), run('a', 'paused', challenge)]
+    assert.deepEqual(classOfRun(tie, 'a'), { needs: null, supersededBy: 'b' })
+    assert.equal(classOfRun(tie, 'b').needs, 'decision')
+    // Pages come ordered by updated_at, not created_at: the superseding run may come after its predecessor.
+    const runs = [run('first', 'paused', at('question')), later('second', { created: '2026-03-19T10:00:00Z' }), later('third', { created: '2026-03-19T11:00:00Z' })]
+    for (const order of [runs, [...runs].reverse(), [runs[1], runs[0], runs[2]]]) {
+      assert.deepEqual(classOfRun(order, 'first'), { needs: null, supersededBy: 'third' })
+    }
+  })
+  test('a superseded question, pane or approval paused row is drawn as a paused row: never warn, never \'?\', no data-attention', () => {
+    for (const kind of ['question', 'pane', 'approval'] as const) {
+      const runs = [run('old', 'paused', at(kind)), later('new')]
+      const look = rowLook(runs[0], classOfRun(runs, 'old'))
+      assert.notEqual(look.tone, 'warn')
+      assert.equal(look.tone, 'pause')
+      assert.equal(look.glyph, null)
+      assert.equal(look.attention, null)
+      assert.doesNotMatch(rowSummary(runs[0], LABELS, classOfRun(runs, 'old').needs), /asked a question|needs attention|awaits your decision/)
+    }
+    assert.deepEqual(rowLook(run('c', 'paused', challenge), { needs: 'decision', supersededBy: null }), { tone: 'warn', glyph: '?', attention: 'decision' })
+  })
+  test('every count reads the one classification: a needs-operator run is one wait, never running; a superseded run is in none', () => {
+    const runs = [
+      run('decide', 'paused', challenge, { workflow: 'a' }),
+      run('halt', 'paused', interrupted, { workflow: 'b' }),
+      run('halt-live', 'running', interrupted, { workflow: 'c' }),
+      run('redo-old', 'paused', at('question'), { workflow: 'd' }), later('redo-new', { workflow: 'd', status: 'failed' }),
+      run('rerun-old', 'running', interrupted, { workflow: 'e' }), later('rerun-new', { workflow: 'e', status: 'failed' }),
+      run('parked', 'paused', at('paused', 'review'), { workflow: 'f' }),
+    ]
+    const project = { project_id: 'p', name: 'P' }
+    const info = projectRunInfo({ project, error: null, workflows: ['a', 'b', 'c', 'd', 'e', 'f'].map(id => ({ workflow: { workflow_id: id } as never, runs: runs.filter(item => item.workflow_id === id), more: false, error: null })) } as never)
+    assert.equal(info.state, 'read')
+    assert.equal(info.waits, 3)
+    assert.equal(info.running, 1)
+    assert.equal(info.paused, 1)
+    const sections = homeSections(runs.map(item => ({ run: item })), NOW)
+    assert.deepEqual(sections.needsYou.map(row => row.run.run_id).sort(), ['decide', 'halt', 'halt-live'])
+    assert.deepEqual(sections.superseded.map(row => row.run.run_id), ['redo-old'])
+    const listed = (['needsYou', 'today', 'running', 'paused', 'superseded', 'recent'] as const).flatMap(name => sections[name].map(row => row.run.run_id))
+    assert.equal(new Set(listed).size, listed.length)
+  })
+  test('a refresh that clears the interrupted attention returns a running run to Running or Today', () => {
+    const before = [run('ir', 'running', interrupted, { created: '2026-03-10T09:00:00Z' })]
+    assert.equal(sectionOf(before, 'ir'), 'needsYou')
+    const after = [run('ir', 'running', null, { created: '2026-03-10T09:00:00Z' })]
+    assert.ok(['running', 'today'].includes(sectionOf(after, 'ir')!))
+  })
+  test('the new kinds name their next step and what waits', () => {
+    assert.equal(NEXT_STEP.decision, 'resume or accept the challenge on the run page')
+    assert.equal(NEXT_STEP.interrupted, 'resume the run on the run page')
+    assert.match(rowSummary(run('c', 'paused', challenge), new Map([['challenge', 'Design challenge']]), 'decision'), /^Design challenge paused · your decision waits$/)
+  })
+})
+
+describe('a row\'s time: dates and days for a stopped run, a span only while it runs (M14)', () => {
+  const at = (runId: string, status: RunSummary['status'], attention: RunActivity['attention'], finished: string | null = null) =>
+    summary(runId, status, { created: '2026-03-08T12:00:00Z', activity: activity({ attention, finished_at: finished, last_activity_at: '2026-03-10T12:00:00Z' }) })
+  test('a paused row reads paused n d (since Mon D), from its attention since, else its last activity; no span', () => {
+    const paused = at('p', 'paused', { kind: 'paused', node_id: 'handoff', since: '2026-03-10T08:00:00Z' })
+    assert.deepEqual(rowTime(paused, NOW), { kind: 'stopped', how: 'paused', since: '2026-03-10T08:00:00Z' })
+    assert.equal(stoppedLabel('paused', '2026-03-10T08:00:00Z', NOW), 'paused 10 d (since Mar 10)')
+    assert.deepEqual(rowTime(at('q', 'paused', null), NOW), { kind: 'stopped', how: 'paused', since: '2026-03-10T12:00:00Z' })
+  })
+  test('an interrupted row reads interrupted n d whether its status is paused or running; never a span', () => {
+    const attention = { kind: 'interrupted' as const, node_id: 'handoff', since: '2026-03-18T08:00:00Z' }
+    assert.deepEqual(rowTime(at('ip', 'paused', attention), NOW), { kind: 'stopped', how: 'interrupted', since: '2026-03-18T08:00:00Z' })
+    assert.deepEqual(rowTime(at('ir', 'running', attention), NOW), { kind: 'stopped', how: 'interrupted', since: '2026-03-18T08:00:00Z' })
+    assert.equal(stoppedLabel('interrupted', '2026-03-18T08:00:00Z', NOW), 'interrupted 2 d (since Mar 18)')
+  })
+  test('under a day it reads today, never 0 d', () => {
+    assert.equal(stoppedLabel('paused', '2026-03-20T11:00:00Z', NOW), 'paused today (since Mar 20)')
+    assert.equal(stoppedLabel('interrupted', '2026-03-19T12:30:00Z', NOW), 'interrupted today (since Mar 19)')
+  })
+  test('a running row ticks; a finished row keeps its end and duration whatever attention it carries', () => {
+    assert.equal(rowTime(at('r', 'running', null), NOW).kind, 'live')
+    // A run that waits to start or on an approval does not run: it says when it last moved, with no ticking span.
+    assert.deepEqual(rowTime(at('w', 'awaiting_approval', { kind: 'approval', node_id: 'handoff', since: '2026-03-10T08:00:00Z' }), NOW), { kind: 'updated', at: '2026-03-10T12:00:00Z' })
+    assert.deepEqual(rowTime(at('n', 'pending', null), NOW), { kind: 'updated', at: '2026-03-10T12:00:00Z' })
+    const finished = at('f', 'failed', { kind: 'interrupted', node_id: 'handoff', since: '2026-03-09T08:00:00Z' }, '2026-03-10T14:00:00Z')
+    assert.deepEqual(rowTime(finished, NOW), { kind: 'finished', at: '2026-03-10T14:00:00Z', ms: 50 * 60 * 60 * 1000 })
+  })
+})
+
+describe('the Triage pin store ([O10])', () => {
+  /** A fake Web Storage that counts its calls, can throw, and can hold any text. */
+  function fakeStorage(initial: string | null = null, options: { throwOnRead?: boolean; throwOnWrite?: boolean } = {}) {
+    let value = initial
+    const calls = { get: 0, set: 0 }
+    const storage: PinStorage = {
+      getItem: key => { calls.get += 1; if (options.throwOnRead) throw new Error('denied'); return key === PINS_KEY ? value : null },
+      setItem: (key, text) => { calls.set += 1; if (options.throwOnWrite) throw new Error('quota'); if (key === PINS_KEY) value = text },
+    }
+    return { storage, calls, value: () => value }
+  }
+  const target = (runId: string) => ({ project_id: 'p', workflow_id: 'w', run_id: runId })
+  let tick = 0
+  const clock = () => new Date(Date.UTC(2026, 9, 13, 12, 0, tick++))
+
+  test('pins persist newest first under the key, with the entry shape, and survive a new store (a reload)', () => {
+    const fake = fakeStorage()
+    const store = createPinStore(fake.storage, clock)
+    store.add(target('a'))
+    store.add(target('b'))
+    assert.deepEqual(store.list().map(pin => pin.run_id), ['b', 'a'])
+    const stored = JSON.parse(fake.value()!) as unknown[]
+    assert.deepEqual(Object.keys(stored[0] as object).sort(), ['pinned_at', 'project_id', 'run_id', 'workflow_id'])
+    assert.deepEqual(createPinStore(fake.storage).list().map(pin => pin.run_id), ['b', 'a'])
+    assert.equal(store.saved(), true)
+  })
+  test('a duplicate pin leaves one entry (moved to the top); remove and toggle undo it', () => {
+    const store = createPinStore(fakeStorage().storage, clock)
+    store.add(target('a')); store.add(target('b')); store.add(target('a'))
+    assert.deepEqual(store.list().map(pin => pin.run_id), ['a', 'b'])
+    store.remove(target('a'))
+    assert.equal(store.has(target('a')), false)
+    store.toggle(target('b'))
+    assert.deepEqual(store.list(), [])
+  })
+  test('at most 50 runs: the 51st pin drops the oldest', () => {
+    const store = createPinStore(fakeStorage().storage, clock)
+    for (let index = 0; index <= PINS_MAX; index += 1) store.add(target(`r${index}`))
+    assert.equal(store.list().length, PINS_MAX)
+    assert.equal(store.has(target('r0')), false)
+    assert.equal(store.list()[0].run_id, `r${PINS_MAX}`)
+    // A stored list longer than 50 is cut too.
+    const long = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({ ...target(`s${index}`), pinned_at: '2026-10-13T12:00:00Z' })))
+    assert.equal(createPinStore(fakeStorage(long).storage).list().length, PINS_MAX)
+  })
+  test('a malformed, missing or foreign stored value reads as no pins', () => {
+    for (const text of ['not json', '{"a":1}', '[1,2]', '[{"run_id":"x"}]', 'null', null]) {
+      assert.deepEqual(createPinStore(fakeStorage(text).storage).list(), [], String(text))
+    }
+  })
+  test('a storage that throws never makes the store throw: pins live in memory and saved() turns false', () => {
+    const reads = createPinStore(fakeStorage(null, { throwOnRead: true }).storage, clock)
+    assert.equal(reads.saved(), false)
+    assert.doesNotThrow(() => reads.add(target('a')))
+    assert.deepEqual(reads.list().map(pin => pin.run_id), ['a'])
+    const writes = createPinStore(fakeStorage(null, { throwOnWrite: true }).storage, clock)
+    assert.doesNotThrow(() => writes.add(target('b')))
+    assert.equal(writes.has(target('b')), true)
+    assert.equal(writes.saved(), false)
+    const none = createPinStore(null, clock)
+    assert.doesNotThrow(() => none.toggle(target('c')))
+    assert.equal(none.saved(), false)
+  })
+  test('pinning and unpinning issue no request: only the storage is touched', () => {
+    const original = globalThis.fetch
+    let requests = 0
+    globalThis.fetch = (() => { requests += 1; return Promise.reject(new Error('no request expected')) }) as typeof fetch
+    try {
+      const fake = fakeStorage()
+      const store = createPinStore(fake.storage, clock)
+      const changes: number[] = []
+      store.subscribe(() => changes.push(store.list().length))
+      store.add(target('a')); store.toggle(target('a')); store.toggle(target('b')); store.remove(target('b'))
+      assert.equal(requests, 0)
+      assert.equal(fake.calls.set, 4)
+      assert.deepEqual(changes, [1, 0, 1, 0])
+    } finally {
+      globalThis.fetch = original
+    }
   })
 })

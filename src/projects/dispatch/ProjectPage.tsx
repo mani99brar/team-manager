@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Project, RunSummary, WorkflowDefinition, WorkflowRuns } from '../api.ts'
-import { waitingKind } from '../lists.ts'
+import { classifyRuns, classOf } from '../lists.ts'
 import { runPathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { formatSpan } from '../time.ts'
@@ -16,9 +16,10 @@ import { stateTone } from '../tone.ts'
 import { resolveRunWorkflow, sameRepoText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
 import { GithubColumn } from './GithubColumn.tsx'
-import { ReadingPane } from './ReadingPane.tsx'
+import { ReadingPane, type StepsRead } from './ReadingPane.tsx'
 import { AheadPane } from './AheadPane.tsx'
 import { StepChart, type ChartRun, type FeatureGroup } from './StepChart.tsx'
+import { runStepsRead } from './stops.ts'
 import type { DispatchOverview, Landing, ProjectDispatch, ProjectSteps } from './types.ts'
 
 /** What the reading pane docks for: a selected run, or the commits-ahead and landings list from the Local and GitHub card. */
@@ -48,6 +49,7 @@ type Props = {
   projectRuns: readonly WorkflowRuns[]
   runsState: RunsState
   steps: ProjectSteps | null
+  stepsRead: StepsRead
   dispatch: ProjectDispatch | null
   overview: DispatchOverview | null
   allProjects: readonly Project[]
@@ -56,7 +58,7 @@ type Props = {
   onNavigate: (pathname: string) => void
 }
 
-export function ProjectPage({ project, workflows, projectRuns, runsState, steps, dispatch, overview, allProjects, now, onNavigate }: Props) {
+export function ProjectPage({ project, workflows, projectRuns, runsState, steps, stepsRead, dispatch, overview, allProjects, now, onNavigate }: Props) {
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const [selected, setSelected] = useState<Selection>(null)
@@ -70,7 +72,11 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
     ? allProjects.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
 
-  // Join the dispatch steps with the registry run summaries per workflow, newest first.
+  // The project's one classification of its listed runs (page 1 of each workflow): every row, tone and count below reads it.
+  const classes = useMemo(() => classifyRuns(projectRuns.flatMap(w => w.runs)), [projectRuns])
+
+  // The registry run summaries per workflow, newest first, each joined with its recorded steps once the dispatch steps are
+  // read: a feature's rows and run count come from the summaries, so a pending steps read never makes it read "0 runs".
   const groups: FeatureGroup[] = useMemo(() => {
     const stepsByWorkflow = new Map((steps?.workflows ?? []).map(w => [w.workflow_id, w]))
     const runsByWorkflow = new Map(projectRuns.map(w => [w.workflow.workflow_id, w]))
@@ -78,17 +84,20 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
     return workflows.map(workflow => {
       const stepsWorkflow = stepsByWorkflow.get(workflow.workflow_id) ?? null
       const registryRuns = runsByWorkflow.get(workflow.workflow_id)?.runs ?? []
-      const summaries = new Map(registryRuns.map(run => [run.run_id, run]))
-      const runs: ChartRun[] = (stepsWorkflow?.runs ?? [])
-        .map(stepsRun => { const run = summaries.get(stepsRun.run_id); return run ? { run, steps: stepsRun } : null })
-        .filter((entry): entry is ChartRun => entry !== null)
+      const recorded = new Map((stepsWorkflow?.runs ?? []).map(stepsRun => [stepsRun.run_id, stepsRun]))
+      // A run whose own steps entry failed (or whose workflow's steps failed) carries that error, so it never reads as absent.
+      const failed = new Map((stepsWorkflow?.errors ?? []).map(err => [err.run_id, { code: err.code, message: err.message }]))
+      const runs: ChartRun[] = registryRuns
+        .map(run => ({ run, cls: classOf(classes, run), steps: recorded.get(run.run_id) ?? null, stepsError: failed.get(run.run_id) ?? stepsWorkflow?.error ?? null }))
         .sort((a, b) => movedOf(b) - movedOf(a) || a.run.run_id.localeCompare(b.run.run_id))
       // The header tone reads the latest registry run, so it is right even where the step data is absent ([L1]).
       const latest = registryRuns.reduce<RunSummary | null>((best, run) => (best === null || ms(run.activity?.last_activity_at ?? run.updated_at) > ms(best.activity?.last_activity_at ?? best.updated_at) ? run : best), null)
-      const headTone = latest ? stateTone({ status: latest.status, attention: latest.activity?.attention?.kind ?? null, accepted: latest.accepted }) : 'idle'
-      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings }
+      const headTone = latest ? (classOf(classes, latest).needs !== null ? 'warn' : stateTone({ status: latest.status, accepted: latest.accepted })) : 'idle'
+      const listed = runsByWorkflow.get(workflow.workflow_id)
+      const runsRead = runsState.kind === 'loading' ? 'loading' as const : runsState.kind === 'failed' || (listed && listed.error !== null) ? 'failed' as const : 'read' as const
+      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings, runsRead }
     })
-  }, [workflows, projectRuns, steps, git])
+  }, [workflows, projectRuns, steps, git, classes, runsState])
 
   // A filter is active when the box holds any non-blank word; the step chart then says "0 of N runs match" for a group whose
   // runs all filter out, never "0 runs" as if the feature never ran (V30).
@@ -148,7 +157,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   const finished = projectRuns.flatMap(w => w.runs).filter(run => run.activity?.finished_at)
   const dur = (run: typeof finished[number]) => ms(run.activity!.finished_at!) - ms(run.created_at)
   const counts = {
-    waits: projectRuns.flatMap(w => w.runs).filter(run => run.activity?.attention && ['question', 'pane', 'approval'].includes(run.activity.attention.kind)).length,
+    waits: projectRuns.flatMap(w => w.runs).filter(run => classOf(classes, run).needs !== null).length,
     succeeded: finished.filter(run => !run.accepted && run.status === 'succeeded').length,
     failed: finished.filter(run => run.status === 'failed').length,
     cancelled: finished.filter(run => run.status === 'cancelled').length,
@@ -200,8 +209,8 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   // before the chart. A workflow whose run list failed contributes no runs (its `runs` is empty) but is counted as unread, so
   // the section says "N feature(s) cannot be read" and never claims a plain all-clear the data does not hold ([L10], [L12]).
   const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
-  const waitingRuns = allRuns.filter(({ run }) => waitingKind(run) !== null)
-  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && waitingKind(run) === null)
+  const waitingRuns = allRuns.filter(({ run }) => classOf(classes, run).needs !== null)
+  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && classOf(classes, run).needs === null)
   const unreadFeatures = projectRuns.filter(w => w.error !== null).length
   const unreadText = unreadFeatures > 0 ? `${unreadFeatures} feature${unreadFeatures === 1 ? '' : 's'} cannot be read` : null
 
@@ -266,7 +275,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
                               <li key={run.run_id} className="tone-warn">
                                 <StateGlyph tone="warn" />
                                 <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
-                                <span className="dispatch-muted">waits on you{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                                <span className="dispatch-muted">{classOf(classes, run).needs === 'decision' ? 'decision waits on you' : classOf(classes, run).needs === 'interrupted' ? 'interrupted; waits on you' : 'waits on you'}{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
                               </li>
                             ))}
                             {runningRuns.map(({ run, workflowId }) => (
@@ -283,7 +292,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
                   )}
           </section>
           <section id="dispatch-runs-section" aria-label="Runs by feature" tabIndex={-1} ref={chartRef}>
-            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} filtering={filtering} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
+            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} filtering={filtering} stepsRead={stepsRead} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
           </section>
         </div>
         <GithubColumn project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
@@ -292,7 +301,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
       </div>
       </div>
       {selected?.kind === 'run' && selectedEntry && selectedWorkflowId && (
-        <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} steps={selectedEntry.steps} projectId={project.project_id} workflowId={selectedWorkflowId}
+        <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} cls={selectedEntry.cls} steps={selectedEntry.steps} stepsRead={runStepsRead(selectedEntry, stepsRead)} stepsError={selectedEntry.stepsError ?? null} projectId={project.project_id} workflowId={selectedWorkflowId}
           onClose={close} onNavigate={onNavigate} phone={typeof window !== 'undefined' && window.innerWidth <= 480}
           onNext={() => move(1)} />
       )}

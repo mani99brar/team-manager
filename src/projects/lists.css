@@ -34,6 +34,15 @@
 .home-rail a:focus-visible, .rail-group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .runs-home { display: flex; flex-direction: column; gap: 20px; margin-bottom: 20px; min-width: 0; }
+/* Triage is one column: the queue takes the whole main column (the project rail is the shell's). */
+.triage-layout { min-width: 0; }
+.runs-home .home-section[hidden] { display: none; }
+.home-quiet { margin: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--muted); }
+.home-incomplete { margin: 0; padding: 8px 12px; border: 1px solid var(--warn); border-radius: var(--radius); background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+/* Superseded paused runs: folded away inside Paused, closed by default, never in the warn tone. */
+.home-superseded > summary { cursor: pointer; min-height: 36px; display: flex; align-items: center; color: var(--muted); font-weight: 600; }
+.home-superseded > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.home-superseded > .run-rows { margin-top: 4px; }
 .runs-home-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .runs-home-head h2 { margin: 0; font-family: var(--font-display); }
 /* The section jumps: one pill per section with its count, the whole width on a phone, for traversing the home without scrolling. */
@@ -81,9 +90,13 @@
 }
 .home-show-older:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* One row: a single link, the whole row its tap target, a stripe in its tone. Wide: the id, its names and status on the left,
-   the time on the right, the outcome on one line under them (full text in its title). */
-.run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+/* One row: a single link, the whole row its tap target, a stripe in its tone, and beside it (never inside it) the row's
+   "Add to Triage" toggle. Wide: the id, its names and status on the left, the time on the right, the outcome on one line
+   under them (full text in its title). The rows are queried against their own list's width: a narrow list puts the time on
+   its own line under the id instead of squeezing the id. */
+.run-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; container-type: inline-size; container-name: run-rows; }
+.run-row-item { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.run-row-item > .run-row { flex: 1 1 auto; min-width: 0; }
 .run-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: baseline; min-height: 44px; box-sizing: border-box;
   padding: 8px 12px; border: 1px solid var(--border); border-left: 4px solid var(--border-strong); border-radius: var(--radius);
@@ -100,7 +113,7 @@
 .run-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .run-row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
 .run-row-glyph { width: 1.1em; text-align: center; color: var(--muted); }
-.run-row-id { font-weight: 600; font-family: var(--font-mono); font-size: 0.95rem; }
+.run-row-id { font-weight: 600; font-family: var(--font-mono); font-size: 0.95rem; white-space: nowrap; overflow-wrap: normal; }
 .run-row-context { color: var(--muted); }
 .run-row-when { color: var(--muted); font-size: 0.9rem; text-align: right; white-space: nowrap; }
 .run-row-span { font-variant-numeric: tabular-nums; color: var(--fg); }
@@ -116,6 +129,31 @@
 /* The paused "since <n> days", in the paused tone beside the outcome. */
 .run-row-paused-since { flex: none; white-space: pre; }
 .run-row-paused-since.tone-pause-text { color: var(--pause); font-weight: 600; }
+/* A stopped row's "paused 3 d (since Mar 9)" in the paused tone; a row that needs the operator keeps the warn colour. */
+.run-row-stopped.tone-pause-text { color: var(--pause); font-weight: 600; }
+@container run-rows (max-width: 900px) {
+  .run-row { grid-template-columns: minmax(0, 1fr); }
+  .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }
+}
+
+/* "Add to Triage": a quiet toggle beside the row, in the crumb row and in the reading pane; pressed, it names the pin. */
+.pin-toggle {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px; box-sizing: border-box; min-height: 28px; padding: 0 10px;
+  font: inherit; font-size: 0.85rem; font-weight: 600; white-space: nowrap; cursor: pointer;
+  color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.pin-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.pin-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.pin-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.projects-shell .home-card { display: flex; flex-direction: column; }
+.home-card-pin { align-self: flex-end; margin: 0 14px 10px; }
+.pinned-unread-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.pinned-unread-link { font-weight: 600; font-family: var(--font-mono); }
+/* The run and node pages' crumbs share their row with the run's toggle; the row is never taller than the crumbs or the toggle. */
+.crumb-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.crumb-row > :first-child { flex: 1 1 auto; min-width: 0; }
+.crumb-pin { height: 28px; min-height: 0; }
+
 /* Waiting on the operator: a warn ring and a `?`; the status stays what it is. */
 .run-row[data-attention] { border-color: var(--warn); box-shadow: inset 3px 0 0 var(--warn); }
 .run-row[data-attention] .run-row-glyph { color: var(--warn); font-weight: 700; }
@@ -172,6 +210,8 @@
 }
 
 @media (max-width: 760px) {
+  /* The toggles are full tap targets on a phone. */
+  .pin-toggle, .crumb-pin { min-height: 44px; height: auto; }
   /* Three short lines: id and status, then the time, then the summary. */
   .run-row { grid-template-columns: minmax(0, 1fr); }
   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }

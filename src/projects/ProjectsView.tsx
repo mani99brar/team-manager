@@ -5,21 +5,21 @@ import {
   describeApiError, fetchProjects, fetchRegistryRuns, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
+import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
 import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { projectPathname, projectsPathname, runPathname, triagePathname, workflowPathname, type ProjectsRoute } from './routes.ts'
-import { RunRow } from './RunRow.tsx'
+import { PinToggle, RunRow } from './RunRow.tsx'
 import { RunsHome } from './RunsHome.tsx'
 import { fetchDispatchOverview } from './dispatch/client.ts'
 import { fetchProjectSteps } from './dispatch/client.ts'
 import { Rail, type RailRow } from './dispatch/Rail.tsx'
 import { ProjectsPage, type CardData } from './dispatch/ProjectsPage.tsx'
 import { ProjectPage, type RunsState } from './dispatch/ProjectPage.tsx'
-import { projectRunInfo } from './dispatch/projectModel.ts'
-import { everyRunListFailed, railBadge, railOrder, type RailInfo } from './dispatch/derive.ts'
+import { FAILED_RUN_INFO, projectRunInfo } from './dispatch/projectModel.ts'
+import { everyRunListFailed, railBadge, railBadgeTone, railOrder, type RailInfo } from './dispatch/derive.ts'
 import { dateOnly } from './dispatch/format.ts'
 import './dispatch/dispatch.css'
 import { RunView } from './RunView.tsx'
@@ -29,7 +29,7 @@ import { Time } from './Time.tsx'
 import { stateTone, toneClass, TONE_LABEL } from './tone.ts'
 import { Chip, Section } from './ui/index.tsx'
 import { TimeReferenceContext, useNow, useTimeZone } from './useNow.ts'
-import { usePoll } from './usePoll.ts'
+import { POLL_INTERVAL_MS, usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
 
@@ -72,12 +72,16 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const listGeneration = `${runsKey}\u0000${refreshToken}`
   useEffect(() => { setMorePages({ base: null, pages: [], loading: false, error: null }) }, [listGeneration])
   const listPoll = usePoll(route?.level === 'workflow' && !morePages.loading && morePages.pages.length === 0)
-  const runPoll = usePoll(route?.level === 'run' && !finished)
+  // A failed run can still be repaired or resumed, so it is re-read, at the lists' slower cadence (the live chip's stale
+  // threshold follows that cadence, LiveStatus).
+  const [runFailed, setRunFailed] = useState(false)
+  const runPoll = usePoll(route?.level === 'run' && !finished, runFailed ? LISTS_POLL_MS : POLL_INTERVAL_MS)
   const { state: firstPage, reload: reloadRuns, meta: runsMeta } = useResource(runsKey, loadRuns, refreshToken, listPoll)
   const scope = useMemo(() => (projectId === null || workflowId === null || runId === null ? null : { projectId, workflowId, runId }), [projectId, workflowId, runId])
   const loadDetail = useCallback((signal: AbortSignal) => fetchRunDetail({ projectId: projectId!, workflowId: workflowId!, runId: runId! }, signal), [projectId, workflowId, runId])
   const { state: detail, reload: reloadDetail, meta: detailMeta } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
   const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
+  useEffect(() => { setRunFailed(detailStatus === 'failed') }, [detailStatus])
   useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
 
   // The lists (docs/PRD_VIEWER_UX.md 4.1) read run lists only, never a run detail, and re-read them every 15 s. Runs home
@@ -105,6 +109,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const loadSteps = useCallback((signal: AbortSignal) => fetchProjectSteps(projectId!, signal), [projectId])
   const { state: projectSteps } = useResource(route?.level === 'project' && projectId !== null ? `steps:${projectId}` : null, loadSteps, refreshToken, stepsPoll)
   const projectStepsData = projectSteps.status === 'ready' ? projectSteps.data : null
+  // Which of loading, failed or read a missing step entry means in the reading pane: a failed read never says "reading…".
+  const projectStepsRead = projectSteps.status === 'ready' ? 'read' as const : projectSteps.status === 'error' ? 'failed' as const : 'loading' as const
   const workflowsData = workflows.status === 'ready' ? workflows.data : null
   const projectRunsPoll = usePoll(route?.level === 'project', LISTS_POLL_MS)
   const loadProjectRuns = useCallback((signal: AbortSignal) => fetchWorkflowRuns(projectId!, workflowsData ?? [], () => false, signal), [projectId, workflowsData])
@@ -125,38 +131,45 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // overview's git and GitHub, ordered needs-you, running, readable, unreadable, then by last activity ([D6]).
   const homeRunsData = homeRuns.status === 'ready' ? homeRuns.data : null
   const overviewMap = useMemo(() => new Map((overviewData?.projects ?? []).map(entry => [entry.project_id, entry])), [overviewData])
+  // Until the registry run read settles, every project is `loading` (no "cannot be read", no zero counts); a failed request
+  // is a failed read for every project.
+  const homeFailed = homeRuns.status === 'error'
   const dispatchProjects = useMemo(() => {
     if (projectsData === null) return []
     const runsByProject = new Map((homeRunsData ?? []).map(entry => [entry.project.project_id, entry]))
     return projectsData.map(project => {
-      const info = projectRunInfo(runsByProject.get(project.project_id) ?? null)
+      const entry = runsByProject.get(project.project_id) ?? null
+      const info = homeFailed && entry === null ? FAILED_RUN_INFO : projectRunInfo(entry)
       const dispatch = overviewMap.get(project.project_id) ?? null
       const git = dispatch?.git ?? null
       const isPrimary = git !== null && git.clone_primary === project.project_id
       const unpushed = isPrimary && git?.origin?.compare === 'compared' ? git.origin.ahead : null
       const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
         ? projectsData.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
-      const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed }
+      const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed, loading: info.state === 'loading' }
       return { project, dispatch, info, primaryName, railInfo, unpushed }
     })
-  }, [projectsData, homeRunsData, overviewMap])
+  }, [projectsData, homeRunsData, overviewMap, homeFailed])
   const orderedProjects = useMemo(() => {
     const byId = new Map(dispatchProjects.map(entry => [entry.project.project_id, entry]))
     return railOrder(dispatchProjects.map(entry => entry.railInfo)).map(railInfo => byId.get(railInfo.projectId)!).filter(Boolean)
   }, [dispatchProjects])
   const railRows: RailRow[] = useMemo(() => orderedProjects.map(entry => ({
     projectId: entry.project.project_id, name: entry.project.name, tone: entry.info.tone,
-    badge: railBadge(entry.railInfo), repoShort: entry.dispatch?.github.repo ? entry.dispatch.github.repo.split('/')[1] : entry.dispatch?.git.repository_label ?? null,
+    badge: railBadge(entry.railInfo), badgeTone: railBadgeTone(entry.railInfo), loading: entry.info.state === 'loading', repoShort: entry.dispatch?.github.repo ? entry.dispatch.github.repo.split('/')[1] : entry.dispatch?.git.repository_label ?? null,
     features: entry.info.features, allBad: entry.info.allBad,
     date: entry.info.lastActivity ? dateOnly(new Date(entry.info.lastActivity).toISOString(), zone) : null,
     worst: TONE_LABEL[entry.info.tone],
   })), [orderedProjects, zone])
-  const triageBadge = useMemo(() => ({
+  const triageBadge = useMemo(() => (homeRunsData === null || dispatchProjects.some(entry => entry.info.state === 'loading') ? null : {
     waits: dispatchProjects.reduce((sum, entry) => sum + entry.info.waits, 0),
     paused: dispatchProjects.reduce((sum, entry) => sum + entry.info.paused, 0),
-  }), [dispatchProjects])
+  }), [dispatchProjects, homeRunsData])
   const cards: CardData[] = useMemo(() => orderedProjects.map(entry => ({ project: entry.project, dispatch: entry.dispatch, info: entry.info, primaryName: entry.primaryName })), [orderedProjects])
-  const repositoryCount = useMemo(() => new Set((overviewData?.projects ?? []).map(entry => entry.git.clone_id ?? entry.project_id)).size || projectsData?.length || 0, [overviewData, projectsData])
+  // Null until the dispatch overview is read: the header says "repositories: reading…", never a count it has not read; a
+  // failed overview read says the repositories were not read, never that they are still reading.
+  const overviewFailed = overview.status === 'error'
+  const repositoryCount = useMemo(() => (overviewData !== null ? new Set(overviewData.projects.map(entry => entry.git.clone_id ?? entry.project_id)).size : overviewFailed ? 'failed' as const : null), [overviewData, overviewFailed])
 
   // What the run page reads beyond its export (B2, B3): the served activity and run directory, and the controller reading of
   // every poll, so the live chip and the Now banner believe `not_running` only once it has held for 15 s (6.3).
@@ -209,6 +222,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const reviewersKey = projectId !== null && workflowId !== null && latestReviewedId !== null ? `feature-review:${projectId}/${workflowId}/${latestReviewedId}` : null
   const { state: featureReviewers } = useResource(reviewersKey, loadReviewers, refreshToken)
   const reviewers = featureReviewers.status === 'ready' ? featureReviewers.data : []
+  // Neither the reviewers nor the review steps show until the reviewer read has settled (or there is none to make).
+  const reviewersSettled = reviewersKey === null || featureReviewers.status === 'ready' || featureReviewers.status === 'error'
+  const featureClasses = useMemo(() => classifyRuns(runs), [runs])
   const loadMore = async () => {
     if (!nextCursor || projectId === null || workflowId === null || firstPageData === null) return
     setMorePages({ ...extra, base: firstPageData, loading: true, error: null })
@@ -331,7 +347,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
         <ProjectPage project={projectEntry} workflows={workflows.data}
           projectRuns={projectRuns.status === 'ready' ? projectRuns.data : []}
           runsState={projectRunsState}
-          steps={projectStepsData} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
+          steps={projectStepsData} stepsRead={projectStepsRead} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
           allProjects={projectsData ?? []} now={listClock} zone={zone} onNavigate={onNavigate} />
       )
     }
@@ -359,7 +375,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 {laneNamesOf(currentWorkflow.nodes).map(lane => <Chip key={lane} plain className="lane-chip">{lane}</Chip>)}
               </p>
             )}
-            {currentWorkflow && (reviewers.length > 0
+            {currentWorkflow && reviewersSettled && (reviewers.length > 0
               ? (
                 // The run's actual reviewers, from the latest finished run's review result (PRD_VIEWER_REFINE 5.7).
                 <p className="feature-reviewers">
@@ -395,7 +411,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             ) : (
               <ul className="run-rows run-list" data-testid="run-list">
                 {runs.map(run => (
-                  <RunRow key={run.run_id} run={run} labels={labels} now={listClock} onNavigate={onNavigate} href={runPathname(route.projectId, route.workflowId, run.run_id)} />
+                  <RunRow key={run.run_id} run={run} cls={classOf(featureClasses, run)} labels={labels} now={listClock} onNavigate={onNavigate} href={runPathname(route.projectId, route.workflowId, run.run_id)} />
                 ))}
               </ul>
             )}
@@ -470,7 +486,13 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   return (
     <>
       <div className={`navigation${route?.level === 'projects' || route?.level === 'triage' || route?.level === 'project' ? ' navigation-dispatch' : ''}`}>
-        <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
+        {scope !== null ? (
+          // On run and node pages the crumbs share their row with the run's "Add to Triage" toggle, outside the workspace.
+          <div className="crumb-row" data-testid="crumb-row">
+            <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
+            <PinToggle target={{ project_id: scope.projectId, workflow_id: scope.workflowId, run_id: scope.runId }} className="crumb-pin" />
+          </div>
+        ) : <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />}
         {/* Runs home says it at the rail's foot (docs/PRD_VIEWER_REVAMP.md 3); a Projects root without the rail says it here. */}
         {info !== null && !homeShown && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>
