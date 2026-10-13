@@ -5,6 +5,7 @@
  * "not recorded". Pure, so the unit tests read the same cards. Nothing here renders a transcript or an absolute path.
  */
 import type { LaneReview, NightShiftDecision, PanelResults, SessionRow, Sessions, SessionTotals } from '../api.ts'
+import { panelsAtStage } from '../node/providerPanel.ts'
 import { formatSpan } from '../time.ts'
 import type { Tone } from '../tone.ts'
 
@@ -183,20 +184,27 @@ export function panelWord(record: PanelRecordView): 'running' | 'failed' | 'not 
   return 'reviewed'
 }
 
+/** The card of a panel whose state cannot be read: never the node's served `succeeded`, which a failed panel also has (PRD 3.2). */
+const panelNotRecorded = (did: string): StageCard => ({ word: 'not recorded', tone: 'idle', openP01: null, cost: 'cost not recorded', did, startedAt: null, seconds: null, models: [] })
+
 /**
- * The panel node's aggregate card (PRD 3.1), from the panel's own record alone ([L12] 1): its state word, how many providers
- * answered (status ok) of how many ran, the open P0/P1 the panel accepted (a finding raised by two providers counts once; a
- * rejected one not at all), and the providers' costs apart (a `pi` provider's estimate is subscription-covered, a `claude`
- * provider metered, as the server's rows say, [P11]). Until the record has loaded the card is null and the stage keeps the
- * node's served status, never a word derived from the provider rows.
+ * The panel node's aggregate card (PRD 3.1), from the panel's own record alone ([L12] 1) and only its review-stage panels (a
+ * challenge-stage panel belongs to the design challenge, whose page shows it): its state word, how many providers answered
+ * (status ok) of how many ran, the open P0/P1 the panel accepted (a finding raised by two providers counts once; a rejected one
+ * not at all), and the providers' costs apart (a `pi` provider's estimate is subscription-covered, a `claude` provider metered,
+ * as the server's rows say, [P11]). Until the record has loaded, when the panels route fails, or when it holds no review-stage
+ * panel, the card says "not recorded" in the neutral tone: never the node's served status, which reads `succeeded` for a
+ * failed panel too, and never a word derived from the provider rows.
  */
-export function panelCard(record: PanelRecordView | null): StageCard | null {
-  if (record === null || record.panels.length === 0) return null
-  const word = panelWord(record)
-  const providers = record.panels.flatMap(panel => panel.providers)
+export function panelCard(record: PanelRecordView | null): StageCard {
+  if (record === null) return panelNotRecorded('The panel record has not loaded, so its state is not recorded.')
+  const panels = panelsAtStage(record.panels, 'review')
+  if (panels.length === 0) return panelNotRecorded('No review-stage panel is recorded.')
+  const word = panelWord({ panels })
+  const providers = panels.flatMap(panel => panel.providers)
   const answered = providers.filter(provider => provider.status === 'ok').length
-  const open = record.panels.flatMap(panel => panel.findings).filter(finding => finding.accepted && (finding.severity === 'P0' || finding.severity === 'P1')).length
-  const first = [...record.panels].filter(panel => panel.started_at !== null).sort((a, b) => a.started_at!.localeCompare(b.started_at!))[0] ?? null
+  const open = panels.flatMap(panel => panel.findings).filter(finding => finding.accepted && (finding.severity === 'P0' || finding.severity === 'P1')).length
+  const first = [...panels].filter(panel => panel.started_at !== null).sort((a, b) => a.started_at!.localeCompare(b.started_at!))[0] ?? null
   const seconds = first?.started_at && first.ended_at ? (Date.parse(first.ended_at) - Date.parse(first.started_at)) / 1000 : NaN
   const plural = (n: number) => `${n} provider${n === 1 ? '' : 's'}`
   const did = word === 'running' ? `${plural(providers.length)} running; ${answered} answered so far` : word === 'not started' ? 'Not started'
@@ -210,7 +218,20 @@ export function panelCard(record: PanelRecordView | null): StageCard | null {
   }
 }
 
-/** The stage card facts for a projected node (its state word, tone, open P0/P1, cost and sheet facts); null when the payload has nothing for it. */
+/**
+ * The Panel node page's meaning line (PRD 3.2): the node is `succeeded` once its review-stage panel ended, whatever the
+ * outcome (the panel is report-only), so a failed or timed-out panel says so here instead of "This step completed." and the
+ * header never reads "The run cannot succeed without intervention."; a record that did not load says its state is not
+ * recorded. Null when the header's own wording holds.
+ */
+export function panelMeaning(record: PanelRecordView | null): string | null {
+  if (record === null) return 'The panel record did not load, so whether the panel failed is not recorded.'
+  const ended = panelsAtStage(record.panels, 'review').find(panel => panel.status === 'failed' || panel.status === 'timed_out')
+  if (!ended) return null
+  return `The panel ${ended.status === 'timed_out' ? 'timed out' : 'failed'} (report-only; the run's verdict is unchanged). Its error is below.`
+}
+
+/** The stage card facts for a projected node (its state word, tone, open P0/P1, cost and sheet facts); null when the payload has nothing for it, except the panel's, which always has one (`panelCard`). */
 export function stageCardOf(sessions: Sessions | null, nodeId: string, panels: PanelRecordView | null = null): StageCard | null {
   if (nodeId === PANEL_NODE_ID) return panelCard(panels)
   if (sessions === null) return null

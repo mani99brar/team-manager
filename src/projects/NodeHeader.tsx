@@ -161,6 +161,8 @@ type Props = {
   attemptHref: (attempt: number) => string
   /** The run's likely next step when this node is its focus and the latest attempt is shown; null otherwise. */
   next: Now['next'] | null
+  /** What the status means when the node's own record words it (a failed report-only panel, PRD 3.2); replaces the status wording. */
+  meaning?: string | null
   onNavigate: (pathname: string) => void
 }
 
@@ -169,7 +171,7 @@ type Props = {
  * its times (the source named when it is not an event); what the status means, worded by its cause; the attempt strip
  * when there were several; and the run's next step when this node is where the run stopped.
  */
-export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, next, onNavigate }: Props) {
+export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, next, meaning = null, onNavigate }: Props) {
   const starts = timing?.start ? Date.parse(timing.start.at) : Infinity
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && marker.node_id === definition.node_id && Date.parse(marker.at) <= starts).map(marker => marker.repair?.n ?? 0).filter(n => n > 0)
   return (
@@ -187,7 +189,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
         {timing && <TimingText timing={timing} clock={clock} />}
       </p>
       <p className="node-status-meaning" data-testid="node-status-meaning">
-        {statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
+        {meaning ?? statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
       </p>
       {strip.length > 0 && <AttemptStrip items={strip} loaded={loaded} shown={attempt} attemptHref={attemptHref} onNavigate={onNavigate} />}
       {next && (

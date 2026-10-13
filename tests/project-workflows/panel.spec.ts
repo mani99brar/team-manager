@@ -159,13 +159,33 @@ test(`[scenario:panel-section] A run whose export carries the Appendix A panels 
   expect(await texts(failedProviders.getByTestId('panel-provider-status'))).toEqual(['failed', 'parse failed'])
   await expect(failedProviders.nth(0).getByTestId('panel-provider-error')).toHaveText(`Error: ${CLAUDE_DIED}`)
   await expect(failedProviders.nth(1).getByTestId('panel-provider-error')).toHaveText(`Error: ${PI_PARSE_FAILED}`)
-  // PRD 3.2: the panel is report-only, so a failed or timed-out panel is a decided step (its card and section above say it
-  // failed); the header never says "The run cannot succeed without intervention."
-  for (const runId of [RUN_PANEL_FAILED, RUN_PANEL_TIMED_OUT]) {
+  // PRD 3.2: the panel is report-only, so a failed or timed-out panel is a decided step: its snapshot status stays succeeded
+  // and the header never says "The run cannot succeed without intervention."; its meaning line says the panel failed and its
+  // Panel section shows the error, whether or not the run's sessions payload loaded (the worker phase serves none for these
+  // runs) (run-sessions-006 review A, C).
+  for (const [runId, word, error] of [[RUN_PANEL_FAILED, 'failed', FAILED_ERROR], [RUN_PANEL_TIMED_OUT, 'timed out', TIMED_OUT_ERROR]] as const) {
     await page.goto(nodePage(runId, 'panel'))
     await expect(page.getByTestId('node-header').locator('.status-badge')).toHaveAttribute('data-status', 'succeeded')
-    await expect(page.getByTestId('node-status-meaning')).toHaveText('This step completed.')
+    await expect(page.getByTestId('node-status-meaning')).toHaveText(`The panel ${word} (report-only; the run's verdict is unchanged). Its error is below.`)
+    await expect(page.getByTestId('node-header')).not.toContainText('cannot succeed without intervention')
+    await expect(section(page).getByTestId('panel-error')).toHaveText(`The panel ${word}: ${error}`)
+    if (phase === 'worker') await expect(page.getByTestId('panel-sessions-section').getByTestId('session-not-recorded')).toHaveText('No session of this run is recorded.')
   }
+  // A panel that succeeded keeps the header's own wording.
+  await page.goto(nodePage(RUN_PANEL_SUCCEEDED, 'panel'))
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('This step completed.')
+  await expect(section(page).getByTestId('panel-error')).toHaveCount(0)
+  // When the panels route fails, the failed panel's card does not fall back to the node's served `succeeded`: it says its state
+  // is not recorded, in the neutral tone (run-sessions-006 review B).
+  const failedPanels = (url: URL) => url.pathname === panelsApi(RUN_PANEL_FAILED)
+  await page.route(failedPanels, route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INTERNAL', message: 'the panels route failed' } }) }))
+  await page.goto(runPage(RUN_PANEL_FAILED))
+  await expect(graphNode(page, 'panel').locator('.n-word')).toHaveText('not recorded')
+  await expect(graphNode(page, 'panel')).toHaveAttribute('data-tone', 'idle')
+  await expect(graphNode(page, 'panel')).toHaveAttribute('data-status', 'succeeded')
+  await page.goto(nodePage(RUN_PANEL_FAILED, 'panel'))
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('The panel record did not load, so whether the panel failed is not recorded.')
+  await page.unroute(failedPanels)
   // A timed-out panel shows its error; every provider timed out.
   await page.goto(runPage(RUN_PANEL_TIMED_OUT))
   await openReviewSheet(page)
@@ -197,6 +217,18 @@ test(`[scenario:panel-challenge-and-live] A challenge-stage panel renders on the
   await expect(section(page)).toBeVisible()
   expect(await attributes(section(page).getByTestId('panel'), 'data-stage')).toEqual(['challenge', 'review'])
   await expect(headline(panel(page, 'review-panel'))).toContainText('Pending: runs at the review stage')
+  // The Panel card before the review gate is the review-stage panel's (pending), never the challenge panel's word, provider
+  // count or accepted P0/P1 (run-sessions-006 review D).
+  await expect(graphNode(page, 'panel').locator('.n-word')).toHaveText('not started')
+  await expect(graphNode(page, 'panel')).toHaveAttribute('data-tone', 'idle')
+  await expect(graphNode(page, 'panel')).not.toContainText('open P0/P1')
+  await openStepSheet(page, 'panel')
+  await expect(stepSheet(page).getByTestId('sheet-status')).toHaveText('not started')
+  await expect(stepSheet(page).getByTestId('sheet-did')).toHaveText('Not started.')
+  // The Panel node's page shows the review-stage panel; the challenge-stage one shows on the challenge node's page.
+  await page.goto(nodePage(RUN_PANEL_CHALLENGE, 'panel'))
+  expect(await attributes(section(page).getByTestId('panel'), 'data-stage')).toEqual(['review'])
+  await page.goto(runPage(RUN_PANEL_CHALLENGE))
   await openStep(page, 'challenge')
   await expect(page.getByTestId('section-index').locator('[data-section="panel"]')).toContainText('Panel')
   await expect(page.getByTestId('challenge')).toBeVisible()
