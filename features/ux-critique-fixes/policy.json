@@ -1,0 +1,314 @@
+{
+  "version": "1.4.0",
+  "feature": "UX critique fixes, stage A: a truthful, readable Projects shell (loading states, Needs you with decision-waiting paused runs and no superseded ones, full-width Triage, dates and days, state-toned badges, Add to Triage pins, the run chip's state) and run detail pages that reach their answer (one findings list, verdict-led reviewers, compact node pages, folded Assignment, a storage error that says what to fix); read-only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "lists",
+      "role": "frontend lists",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/App.tsx",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/RunsHome.tsx",
+        "src/projects/RunRow.tsx",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/routes.ts",
+        "src/projects/time.ts",
+        "src/projects/tone.ts",
+        "src/projects/LiveStatus.tsx",
+        "src/projects/pins.ts",
+        "src/projects/dispatch",
+        "tests/unit/lists.test.ts",
+        "tests/unit/time.test.ts",
+        "tests/unit/routes.test.ts",
+        "tests/unit/tone.test.ts",
+        "tests/unit/dispatch.test.ts",
+        "tests/unit/accepted.test.ts",
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/ux-time.spec.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/accepted.spec.ts",
+        "tests/project-workflows/fixtures/dispatch.ts",
+        "tests/project-workflows/fixtures/ux-lists.ts",
+        "tests/project-workflows/fixtures/ux-revamp-lists.ts",
+        "tests/project-workflows/fixtures/ux-time.ts",
+        "tests/project-workflows/fixtures/ux-accepted.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/mock.ts",
+        "tests/project-workflows/seed.ts",
+        "tests/project-workflows/support.ts",
+        "tests/project-workflows/dispatch-app.ts",
+        "docs/VIEWER_DISPATCH.md",
+        "docs/handoff/ux-fixes-lists.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": [
+            {
+              "id": "triage-attention",
+              "description": "Triage at 1440x900 with the lane's seeded runs (existing projects only): a paused run whose served attention is paused at the challenge node and that is the latest run of its project and workflow is a Needs-you card with the chip 'decision waits', data-attention='decision', its since-time and the next step naming the run page; an interrupted latest run is a Needs-you card whether its status is paused or running, and the running one is absent from the Running and Today sections; a challenge-paused run with a later run in the same workflow whose activity.feature text differs is superseded: not in Needs you, not counted in 'Needs you · n', inside the Paused section's closed fold 'N superseded' that, opened, says 'superseded by <the later run id>' with no warn tone; a challenge-paused run whose only later run is in another workflow of the same project stays in Needs you; a superseded interrupted running run stays in Running or Today and is not in Needs you; a run paused at a non-challenge step stays in Paused; 'Needs you · n' and the tab title's '(n) ' equal the Needs-you count by value and every needs-operator run appears in exactly one state section; the seeded project's page lists the decision-waiting and interrupted runs under 'Needs you and running' once each, linking to their run pages; its Projects card and rail count them as 'N waits on you' (never 'N running') and show 'N paused' counting only non-superseded paused runs that do not need the operator. The counts are asserted by value from the seed."
+            },
+            {
+              "id": "triage-loading",
+              "description": "In both phases, with the registry run lists, the dispatch overview and /steps held open by page.route: every rail row says 'reading…' and shows no badge, the rail's Triage count and the 390 px chip show '…', no element of the page contains 'cannot be read', 'nothing waits', 'Triage · 0' or '0 runs', Projects cards say 'reading runs…' and the header 'repositories: reading…'; releasing the lists settles the rows and badges to the seeded values; with /steps still held the project page's feature rows show their run counts from the run summaries, never '0 runs'. Then with one project's run list answered 503 by page.route: its rail row says 'cannot be read' and Triage shows 'N of M projects read; lists incomplete' above the Needs-you section (its top above Needs you's top); the feature page shows no 'Review steps' line before its reviewers read settles."
+            },
+            {
+              "id": "triage-desktop",
+              "description": "Triage at 1440x900 and 1920x1080: the queue's width equals the main column's width (within 1 px; no 240 px column), every '.run-row-id' renders on one line (its height under 1.5 times its line height) and the page does not scroll sideways; at 1100 px a row whose time would not fit puts '.run-row-when' on its own line under the id instead of squeezing it. With Needs you, Today and Running all empty (the spec filters the run lists with page.route in both phases, dropping every waiting, running and moved-today run, as the 'Needs you · 0' test in revamp-lists.spec.ts does), Triage shows the one line 'Nothing waits on you, moved today or runs' instead of three headed empty sections (their testids stay in the DOM) and the Paused section lists every non-superseded paused run with no 'Show all' button; with a non-empty Running section, Paused folds after 5 as before."
+            },
+            {
+              "id": "rail-state",
+              "description": "On the Projects page at 1440 px: a project whose only live run is a non-superseded paused run (the project's latest run, in another workflow, cancelled) shows the badge 'N paused' in the pause tone (the badge's computed colour equals the pause token's) and a pause glyph, whatever its latest result; a project with a decision-waiting run shows 'N waits on you' in the warn tone; a project with a running run and no waits shows 'N running' in the run tone; a project whose paused runs are all superseded by later runs in their own workflows shows no paused badge; an interrupted running run counts in 'N waits on you', not in 'N running'. The rail rows keep the [D6] order: waits, running, readable before unreadable, then last activity."
+            },
+            {
+              "id": "run-times",
+              "description": "With page.clock fixed: a paused row on Triage and on the feature page reads 'paused <n> d (since <Mon D>)' from its attention since and shows no '.run-row-span'; an interrupted row reads 'interrupted <n> d (since <Mon D>)' with no span whether its status is paused or running; a running row shows a span that advances when the clock moves 1 minute; a finished row keeps its end time and duration; no row on Triage, the feature page or the project page contains a span of the form '<3+ digits>h<2 digits>m'; a duration of 50 h reads '2 d 2 h'."
+            },
+            {
+              "id": "triage-pins",
+              "description": "After the initial reads settle and with polling timers frozen by page.clock during each pin or unpin window (navigation and reload outside the window), activating 'Add <run id> to Triage' on a Recent row issues no /api request (requests counted in the window must be 0) and adds a 'Pinned' section at the top of Triage listing that run (its link opens its run page) and the control becomes 'Remove <run id> from Triage'; the run also stays in its own section; the pin survives a reload; on the run page and on one of its node pages the crumb bar carries the same toggle (outside [data-testid=projects-workspace]) and adds no line to the crumb bar at 1440 or 390 px (its height equals the crumb bar's height on the workflow page) and removing it there removes the Pinned row on Triage; the toggle sits beside the row link inside its li, never inside the link, and is at least 44 px tall at 390 px; a pinned run that Triage did not read shows its id as a link with 'not among the runs read (older than 7 days)'; with localStorage made to throw (addInitScript) Triage still renders, pinning works for the page session and the Pinned section says 'Pins are not saved in this browser'; a malformed stored value reads as no pins; pinning an already pinned run from its run page leaves one Pinned row; the toggles on a feature-page row and in the project page's reading pane read and change the same pin state (a run pinned on Triage shows 'Remove …' there, and removing it there removes the Pinned row on Triage), each window again issuing no request."
+            },
+            {
+              "id": "run-freshness",
+              "description": "With page.clock: on a failed run's page the live chip reads 'Failed <Mon D> · checked <n> s ago' (data-state watching, never 'Watching'), on a paused run's page 'Paused since <Mon D> · checked …'; the failed run's detail is requested at the 15 s list cadence (2 reads in 31 s after the first, not 6) and the chip does not turn stale between two on-time polls; it turns 'Not updating …' after two failed polls; a running run still reads 'Live · updated …' and a succeeded one 'Finished · not polling'."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "pages",
+      "role": "frontend pages",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/NodeDetail.tsx",
+        "src/projects/NodeHeader.tsx",
+        "src/projects/StepStrip.tsx",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/SectionIndex.tsx",
+        "src/projects/Assignment.tsx",
+        "src/projects/RunView.tsx",
+        "src/projects/RunHeader.tsx",
+        "src/projects/WorkerInputs.tsx",
+        "src/projects/panels.tsx",
+        "src/projects/findings.ts",
+        "src/projects/node.css",
+        "src/projects/assignment.css",
+        "src/projects/run.css",
+        "src/projects/node",
+        "DESIGN.md",
+        "tests/unit/node.test.ts",
+        "tests/unit/panels.test.ts",
+        "tests/unit/assignment.test.ts",
+        "tests/unit/inputs.test.ts",
+        "tests/unit/steps.test.ts",
+        "tests/unit/attack.test.ts",
+        "tests/unit/challenge.test.ts",
+        "tests/unit/gate.test.ts",
+        "tests/unit/launch.test.ts",
+        "tests/unit/sidecar.test.ts",
+        "tests/unit/providerPanel.test.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "tests/project-workflows/ux-review.spec.ts",
+        "tests/project-workflows/ux-node.spec.ts",
+        "tests/project-workflows/ux-run.spec.ts",
+        "tests/project-workflows/ux-refine.spec.ts",
+        "tests/project-workflows/ux-verify.spec.ts",
+        "tests/project-workflows/ux-launch.spec.ts",
+        "tests/project-workflows/panel.spec.ts",
+        "tests/project-workflows/review.spec.ts",
+        "tests/project-workflows/reviewers.spec.ts",
+        "tests/project-workflows/critique.spec.ts",
+        "tests/project-workflows/clarity.spec.ts",
+        "tests/project-workflows/lanes.spec.ts",
+        "tests/project-workflows/inputs.spec.ts",
+        "tests/project-workflows/guardrails.spec.ts",
+        "tests/project-workflows/sidecar.spec.ts",
+        "tests/project-workflows/attack.spec.ts",
+        "tests/project-workflows/sessions.spec.ts",
+        "tests/project-workflows/fixtures/ux-review.ts",
+        "tests/project-workflows/fixtures/ux-node.ts",
+        "tests/project-workflows/fixtures/ux-panel.ts",
+        "tests/project-workflows/fixtures/ux-revamp-pages.ts",
+        "tests/project-workflows/fixtures/ux-run.ts",
+        "tests/project-workflows/fixtures/ux-refine.ts",
+        "tests/project-workflows/fixtures/ux-verify.ts",
+        "tests/project-workflows/fixtures/ux-launch.ts",
+        "tests/project-workflows/fixtures/ux-critique.ts",
+        "tests/project-workflows/fixtures/ux-sidecar.ts",
+        "tests/project-workflows/fixtures/ux-attack.ts",
+        "tests/project-workflows/fixtures/sessions.ts",
+        "docs/handoff/ux-fixes-pages.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": [
+            {
+              "id": "review-one-list",
+              "description": "The seeded blocked review node at 1440x900: one findings list (no separate 'Blocks integration' list); it opens filtered to open P0/P1 with the toggle on; the filter row has severity toggles 'P0 n', 'P1 n', 'P2 n' beside the reviewer and lane toggles and they combine; 'All n' shows every finding; each blocking finding carries a 'blocks integration' chip in place and its message text occurs exactly once on the page; a card's head shows severity, reviewer, lane and the message's first sentence, the rest behind 'More', which expands it; every finding message has computed font-weight 400; the section index has no 'Blocking' entry; at 1920 px every '.finding-message' is at most 70ch wide (its width at most 70 times the width of '0' in its font, plus 1 px)."
+            },
+            {
+              "id": "reviewer-verdict",
+              "description": "A reviewer that blocked with open P1s (the seeded blocked review's general reviewer and its projected reviewer node page): the node header leads with 'Blocked · round <n> · <k> open P1' by value, shows the session outcome as neutral metadata ('session succeeded'), and contains no 'This step completed.'; an approving reviewer leads with 'Approved · round <n>'; in the step strip each reviewer chip carries data-verdict (blocked, approved) and the fail or ok tone class to match, while its li keeps data-status equal to the step's status; the strip and the run graph agree on each reviewer's tone; a worker node still reads 'not workflow completion'."
+            },
+            {
+              "id": "node-compact",
+              "description": "On node pages at 1440x900 and 390x844: no element with role tablist (the Run/Assignment tabs are gone from node pages; an 'Assignment' link in the run bar opens the Assignment view, which keeps its 'Run views' tablist); the run bar is one line at 1440 px (its height at most 48 px) and keeps run-status, run-status-meaning, live-status and time-zone-toggle; exactly one sticky band (the step strip, run-node-list) among the node page's bands; on the seeded blocked review the first finding card's top is within the first screen at 1440x900 (not asserted at 390x844, which would be rejected phone work); on a worker node the figure tiles are on one row at 1440 px, there is no figure-completion tile, and the worker report's heading carries a 'completed' chip in the ok tone; the page does not scroll sideways at 390 px."
+            },
+            {
+              "id": "assignment-folded",
+              "description": "The Assignment view of a seeded run with decisions and tasks: the feature title appears once; decisions.md is a closed details whose summary reads 'Decisions · <n> words' and each worker's task a closed details 'Task · <n> characters' with owned paths and checks folded the same way; opening the decisions fold renders the Markdown as before (headings, inert links as text); at 1920 px the opened decisions prose and an opened task's prose are each at most 70ch wide (width at most 70 times the width of '0' in their font, plus 1 px); the lane table's headers read 'Lane', 'Role', 'Model', 'Skills', 'Owned paths', 'Checks', 'Task (chars)'; activating a lane name moves focus to that worker's section; at 390 px each lane is a card with those labels and the page does not scroll sideways."
+            },
+            {
+              "id": "storage-missing",
+              "description": "A workflow page whose runs request answers 503 with error code RUNS_ROOT_UNAVAILABLE (page.route, both phases): the panel leads with 'Run storage missing', names the project id from the request path and says to fix its runs_root entry in the projects registry (projects.json), links to that project's page (the link's href is /projects/<id>), keeps Retry as a secondary action, and shows the HTTP code and request path only inside a closed 'Technical details' (not visible until opened); a 503 with any other code renders the generic panel exactly as before, with 'Retry once it has recovered'."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/dispatch-app.ts"
+    ],
+    "ready_path": "/api/dispatch/projects",
+    "timeout_seconds": 180
+  }
+}
