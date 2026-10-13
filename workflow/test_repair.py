@@ -1139,6 +1139,237 @@ class MemoryKilledAttempts(unittest.TestCase):
             self.assertEqual(slept, [])
 
 
+class DiskFullAttempts(unittest.TestCase):
+    """An attempt whose every gate reason's retained log ends with a full-disk line is transient like a memory kill: rerun once
+    the disk floor holds, never an identical failure, no repair round, no attempt spent, the cap of three shared with kills."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.runtime = Pipeline.__new__(Pipeline)
+        self.runtime.directory, self.runtime.policy, self.runtime.workers = self.root, {"max_verification_attempts": 3}, ["ui"]
+        self.runtime.plan = {"repository": str(self.root)}
+        self.events = []
+        self.runtime.event = lambda node, status, message: self.events.append((node, status, message))
+        self.state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
+        self.waits = []
+        self.real_wait = automatic.wait_for_disk
+        for context in (patch("workflow.automatic.wait_for_disk", side_effect=lambda runtime: self.waits.append("disk")),
+                        patch("workflow.automatic.wait_for_memory", side_effect=lambda runtime: self.waits.append("memory"))):
+            context.start()
+            self.addCleanup(context.stop)
+
+    def packet(self, attempt: int, kind: str = "check", line: str = "npm ERR! nospc ENOSPC: no space left on device, write",
+               reasons=None, killed: bool = False) -> Path:
+        """A blocked packet whose setup or check log ends with `line`; `killed` makes it a memory kill instead."""
+        folder = self.root / "verification/worker/ui" / str(attempt)
+        folder.mkdir(parents=True)
+        (folder / ("setup-0.log" if kind == "setup" else "check-0.log")).write_text("installing\n" * 30 + line + "\n")
+        result = {"checks": [{"command": "npm test", "exit_code": 1, **({"transient": "memory"} if killed else {})}]}
+        if killed:
+            result["transient_checks"] = ["unit"]
+        if reasons is None:
+            reasons = ["Setup 0 failed with exit 1"] if kind == "setup" else ["unit: exit 1"]
+        save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
+                                           "evidence": {"checks": [{"id": "unit", "worker_check_index": 0}]},
+                                           "gate": {"status": "blocked", "reasons": list(reasons)}})
+        save_json(self.root / "attempts.json", {"worker:ui": attempt})
+        return folder / "packet.json"
+
+    def test_each_signature_in_a_setup_or_check_log_is_a_full_disk(self):
+        for attempt, (kind, line) in enumerate((("setup", "npm ERR! code ENOSPC"), ("check", "OSError: [Errno 28] No space left on device"),
+                                                ("check", "cp: error writing 'x': Disk quota exceeded")), 1):
+            self.assertTrue(repair.disk_packet(self.packet(attempt, kind, line)), line)
+            self.assertTrue(repair.transient_attempt(self.root / f"verification/worker/ui/{attempt}/packet.json"))
+        self.assertFalse(repair.disk_packet(self.packet(4, "check", "AssertionError: 2 != 3")))
+        # A real failure beside the full disk is a real failure, and a signature above the last 20 lines is not read.
+        self.assertFalse(repair.disk_packet(self.packet(5, reasons=["unit: exit 1", "Changed file outside ownership: x"])))
+        folder = self.root / "verification/worker/ui/6"
+        self.packet(6)
+        (folder / "check-0.log").write_text("ENOSPC\n" + "ok\n" * 25)
+        self.assertFalse(repair.disk_packet(folder / "packet.json"))
+        # A raised step's error, live or as the checkpoint's repr.
+        for error in (OSError(28, "No space left on device"), "OSError(28, 'No space left on device')", "OSError(28)", "[Errno 28] x"):
+            self.assertTrue(repair.disk_full_error(error), error)
+        self.assertFalse(repair.disk_full_error("RuntimeError('Check ui-unit left no packet')"))
+        self.assertFalse(repair.disk_full_error(None))
+
+    def test_a_reused_candidate_packet_reads_its_worker_packets_logs(self):
+        # A one-lane run's candidate packet reuses the worker packet (C28) and holds only packet.json beside it.
+        def candidate(attempt: int, worker: Path, sha256: str | None = None) -> Path:
+            folder = self.root / "verification/candidate/ui" / str(attempt)
+            folder.mkdir(parents=True)
+            packet = read_json(worker)
+            save_json(folder / "packet.json", {"phase": "candidate", "result": packet["result"], "gate": packet["gate"],
+                                               "reused_from": {"path": str(worker.relative_to(self.root)),
+                                                               "sha256": sha256 or hashlib.sha256(worker.read_bytes()).hexdigest()}})
+            return folder / "packet.json"
+        full = candidate(1, self.packet(1))
+        self.assertEqual(sorted(path.name for path in full.parent.iterdir()), ["packet.json"])
+        self.assertTrue(repair.disk_packet(full))
+        self.assertTrue(repair.transient_attempt(full))
+        self.assertFalse(repair.disk_packet(candidate(2, self.packet(2, "check", "AssertionError: 2 != 3"))))
+        # A worker packet changed since, or one outside the run, is no evidence of a full disk.
+        self.assertFalse(repair.disk_packet(candidate(3, self.packet(3), sha256="0" * 64)))
+        outside = candidate(4, self.packet(4))
+        save_json(outside, {**read_json(outside), "reused_from": {"path": "../elsewhere/packet.json", "sha256": "0" * 64}})
+        self.assertFalse(repair.disk_packet(outside))
+
+    def test_full_disk_attempts_are_free_never_identical_and_wait_for_disk_not_memory(self):
+        for attempt in (1, 2, 3):  # Three identical full-disk failures: each is rerun, none spends the budget.
+            self.packet(attempt)
+            self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 4)
+        self.assertEqual(self.waits, ["disk"] * 3)
+        self.assertIn(("controller", "running", "worker/ui failed on a full disk: transient, rerun once the disk floor holds"), self.events)
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+        self.assertEqual(repair.attempt_limit(self.root, self.runtime.policy, "worker", "ui", 3), 1 + 3 + 3)
+        # No repair round: blocked_lanes leaves a transient attempt to the retry path.
+        self.assertIsNone(automatic.blocked_lanes(self.runtime, "worker", ["ui"]))
+
+    def test_memory_kills_and_full_disks_share_the_cap_of_three(self):
+        self.packet(1, killed=True, reasons=["unit: exit -9"])
+        self.packet(2)
+        self.packet(3, killed=True, reasons=["unit: exit -9"])
+        self.packet(4)  # The fourth transient attempt of the revision counts like any failure.
+        self.assertEqual(repair.attempt_limit(self.root, self.runtime.policy, "worker", "ui", 4), 1 + 3 + 3)
+        self.assertEqual(sum(repair.transient_attempt(self.root / f"verification/worker/ui/{n}/packet.json") for n in range(1, 5)), 4)
+        for attempt in (5, 6):
+            self.packet(attempt, reasons=[f"unit: exit {attempt}"], line="AssertionError")
+        with self.assertRaisesRegex(RuntimeError, "retry limit exhausted"):
+            advance_failed_checks(self.runtime, self.state)
+
+    def test_the_disk_wait_polls_until_the_floor_holds_or_ten_minutes(self):
+        from .test_feature_launch import disk_reading
+        self.runtime.plan = {"repository": str(self.root / "repo")}
+        (self.root / "repo").mkdir()
+        clock, slept = [0.0], []
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        reading = lambda path: disk_reading(mb=1024) if clock[0] < 90 else disk_reading()  # Space is freed after 90 s.
+        with patch.dict(os.environ, {"WORKFLOW_DISK_FLOOR_MB": "", "WORKFLOW_INODE_FLOOR_PCT": ""}), \
+                patch("workflow.checks.os.statvfs", side_effect=reading):
+            self.real_wait(self.runtime, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [15] * 6)
+        self.assertEqual([message for _, _, message in self.events], ["waiting for disk: 1024 MB, 50.0 % inodes free"] * 2)  # At 0 s and 60 s.
+        clock[0], slept[:], self.events[:] = 0.0, [], []
+        with patch.dict(os.environ, {"WORKFLOW_DISK_FLOOR_MB": "", "WORKFLOW_INODE_FLOOR_PCT": ""}), \
+                patch("workflow.checks.os.statvfs", return_value=disk_reading(inodes_pct=1)), \
+                self.assertRaisesRegex(RuntimeError, r"The disk floor still fails after 10 minutes: .* 1\.0 % of its inodes free, under the 5 % "
+                                                     r"floor \(WORKFLOW_INODE_FLOOR_PCT\)"):
+            self.real_wait(self.runtime, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual((sum(slept), len(self.events)), (600, 10))
+
+
+class AllFailedAfterAFullDisk(RepairFixture):
+    """Four lanes whose verify steps raised a full disk: one `retry --phase worker --all-failed` raises each lane's attempt as
+    `retry --node <lane>` does, and `automatic --live` reruns all four once the disk floor holds."""
+
+    FOUR = ["adapter", "ui", "docs", "notes"]
+
+    def prepare(self, name: str) -> OfflinePipeline:
+        directory = self.root / name
+        policy = repair_policy()
+        policy["workers"].append({"node_id": "notes", "role": "writer", "required_check_kinds": ["unit"], "owned_paths": ["notes"], "checks": [
+            {"id": "notes-unit", "kind": "unit", "argv": ["python", "-c", "print('Ran 1 test in 0.001s\\n\\nOK')"], "timeout_seconds": 30, "scenarios": []}]})
+        tasks = {lane: f"The {lane} work." for lane in self.FOUR}
+        plan = prepare(directory, self.repo, "HEAD", tasks, True, declared=self.FOUR)
+        plan.update(mode="interactive", policy_sha256=policy_digest(policy), source_branch=git(self.repo, "symbolic-ref", "--short", "HEAD"),
+                    automatic=automatic_settings())
+        save_json(directory / "plan.json", plan)
+        save_json(directory / "policy.json", policy)
+        self.directory = directory
+        self.sessions = FakeSessions(directory, plan)
+        self.sessions.edits.update(adapter=("backend.py", "VALUE = 2\n"), ui=("ui.txt", "after"), docs=("docs/README.md", "docs v2\n"),
+                                   notes=("notes/a.txt", "n\n"))
+        self.runtime = OfflinePipeline(directory, self.sessions)
+        return self.runtime
+
+    def setUp(self):
+        super().setUp()
+        for name in ("WORKFLOW_DISK_FLOOR_MB", "WORKFLOW_INODE_FLOOR_PCT"):
+            environment = patch.dict(os.environ)
+            environment.start()
+            self.addCleanup(environment.stop)
+            os.environ.pop(name, None)
+
+    def fill_the_disk(self):
+        """Every verify step raises errno 28 before any packet; the controller stops on it."""
+        self.start()
+        with patch.object(self.runtime, "verify", side_effect=OSError(28, "No space left on device")), \
+                patch("workflow.automatic.wait_handoffs"), self.assertRaisesRegex(RuntimeError, "Non-retryable"):
+            drive(self.runtime)
+
+    def retry_cli(self, *arguments: str) -> tuple[int, str, str]:
+        with patch("workflow.pipeline.InteractiveSessions", side_effect=lambda run, timeout: self.sessions):
+            return self.pipeline_cli("retry", str(self.directory), *arguments)
+
+    def test_one_retry_raises_every_lane_and_the_supervisor_reruns_all_four(self):
+        from .test_feature_launch import disk_reading
+        directory = self.directory
+        self.fill_the_disk()
+        # One lane retried alone first: --all-failed records the same for the others and leaves that one as it is.
+        code, out, err = self.retry_cli("--phase", "worker", "--node", "adapter")
+        self.assertEqual(code, 0, err)
+        single = (read_json(directory / "attempts.json"), read_json(directory / "retry-requests.json"))
+        self.assertEqual(single, ({"worker:adapter": 2}, {"worker:adapter": 2}))
+        code, out, err = self.retry_cli("--phase", "worker", "--all-failed")
+        self.assertEqual(code, 0, err)
+        automatic_command = f"{sys.executable} -m workflow automatic {directory} --live --by operator"
+        self.assertEqual(out.splitlines(), ["worker/adapter attempt 2 is already requested and has not run; nothing changed",
+                                            "worker/ui will run attempt 2", "worker/docs will run attempt 2", "worker/notes will run attempt 2",
+                                            f"Nothing ran. An automatic run continues under its supervisor: {automatic_command}"])
+        self.assertEqual(read_json(directory / "attempts.json"), {f"worker:{lane}": 2 for lane in self.FOUR})
+        self.assertEqual(read_json(directory / "retry-requests.json"), {f"worker:{lane}": 2 for lane in self.FOUR})
+        retried = [message for node, status, message in ((e["node"], e["status"], e["message"]) for e in self.events()) if "Retry by" in message]
+        self.assertEqual(retried, [f"Retry by the operator: worker/{lane} attempt 2" for lane in self.FOUR])
+        with patch("workflow.checks.os.statvfs", return_value=disk_reading()), patch("workflow.automatic.wait_handoffs"):
+            commit = drive(self.runtime)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
+        for lane in self.FOUR:
+            packet = read_json(directory / f"verification/worker/{lane}/2/packet.json")
+            self.assertEqual(packet["gate"]["status"], "passed")
+            self.assertTrue(all(check.get("transient", "memory") == "memory" for check in packet["result"]["checks"]))
+        messages = [event["message"] for event in self.events()]
+        self.assertIn("worker/adapter, worker/ui, worker/docs, worker/notes failed on a full disk: transient, rerun once the disk floor holds", messages)
+        self.assertFalse(any("memory" in message for message in messages))
+        self.assertFalse((directory / "repairs.json").exists())  # No repair round.
+
+    def test_a_disk_that_stays_full_stops_the_rerun_after_ten_minutes(self):
+        from .test_feature_launch import disk_reading
+        self.fill_the_disk()
+        code, _, err = self.retry_cli("--phase", "worker", "--all-failed")
+        self.assertEqual(code, 0, err)
+        clock = [0.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        real = automatic.wait_for_disk
+        with patch("workflow.checks.os.statvfs", return_value=disk_reading(mb=1024)), patch("workflow.automatic.wait_handoffs"), \
+                patch("workflow.automatic.wait_for_disk", side_effect=lambda runtime: real(runtime, clock=lambda: clock[0], sleep=sleep)), \
+                self.assertRaisesRegex(RuntimeError, r"The disk floor still fails after 10 minutes: .*1024 MB of free space, under the 5120 MB floor"):
+            drive(self.runtime)
+        self.assertEqual(clock[0], 600)
+        self.assertFalse(any((self.directory / f"verification/worker/{lane}/2").exists() for lane in self.FOUR))
+
+    def test_the_refusals(self):
+        code, _, err = self.retry_cli("--phase", "worker", "--all-failed")  # Nothing failed yet.
+        self.start()
+        code, _, err = self.retry_cli("--phase", "worker", "--all-failed")
+        self.assertEqual(code, 1, err)
+        self.assertIn("No verify step failed or was left without a verdict", err)
+        for flags, message in ((["--phase", "worker", "--node", "ui", "--all-failed"], "--all-failed retries every failed lane; it takes no --node"),
+                               (["--phase", "candidate", "--all-failed"], "--all-failed applies to --phase worker only")):
+            code, _, err = self.retry_cli(*flags)
+            self.assertEqual(code, 2, err)
+            self.assertIn(message, err)
+        code, _, err = self.retry_cli("--phase", "worker", "--all-failed", "--by", "panel")
+        self.assertEqual(code, 1, err)
+        self.assertIn("retry is refused for --by panel", err)
+        self.assertFalse((self.directory / "retry-requests.json").exists())
+
+
 class CandidateGenerations(RepairFixture):
     automatic = False
 
@@ -1209,6 +1440,8 @@ class RepairSession(RepairFixture):
                          f"Last 60 lines of {failing / 'check-0.log'}:", "## Owned paths", "ui owns: ui.txt, web", "run-report",
                          str(directory / "repair-1.completion.json"), entry["session"]["launch_token"], "No questions in a repair"):
             self.assertIn(expected, prompt)
+        flat = " ".join(prompt.split())
+        self.assertIn("End your final message without asking or telling the operator to do anything", flat)
         self.assertNotIn("Write the final text.", prompt)
         self.assertNotIn("screenshot:<id>", prompt)
         self.assertIn(("repair_ui", "running"), [(event["node"], event["status"]) for event in self.events()])
@@ -1222,6 +1455,19 @@ class RepairSession(RepairFixture):
         self.assertEqual(bundle["snapshots"]["ui"]["prior_session_ids"], [receipt["session_id"]])
         self.assertIn(f"Operator repair 1: repair session round 1: candidate", bundle["snapshots"]["ui"]["summary"])
         self.assertEqual(sorted(self.sessions.starts), ["adapter", "repair-1", "review", "ui"])
+
+    def test_a_1_1_0_session_brief_carries_the_final_turn_rule(self):
+        from .repair import session_brief
+        self.block()
+        self.sessions.repair_edits["ui"] = {"ui.txt": "after"}
+        code, _, err = self.session_cli("ui", "--session", "--live")
+        self.assertEqual(code, 0, err)
+        [entry] = self.entries()
+        self.runtime.plan["completion_version"] = "1.1.0"
+        brief = " ".join(session_brief(self.runtime, "ui", entry, 1, " Your deadline is soon.").split())
+        self.assertIn("End your final message without asking or telling the operator to do anything: a final message that waits on a "
+                      "human lists your session as blocked", brief)
+        self.assertIn("Put any step for the operator in verify_yourself, never in your final message.", brief)
 
     def test_a_blocked_round_applies_nothing(self):
         self.block()

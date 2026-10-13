@@ -5,6 +5,8 @@ No agent starts without `start --live`. Operator controls are local CLI-only.
 The worker lanes come from the run's plan (`plan.workers`, pinned at prepare from the policy
 and an optional `--workers` selection): one `launch_<lane>` and one `verify_<lane>` node per
 selected lane around the fixed tail. Excluded lanes keep their owned paths off-limits.
+
+RUNBOOK §2 to §6 and "Status, failures and recovery": preflight's disk, Herdr-pane and opt-in setup checks, `start`'s attach note, the freeze's running events and `retry --all-failed`.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ from langgraph.types import Command, interrupt
 
 from .actor import BY_OPERATOR, actor_text, add_actor_argument, require_actor
 from .attention import attention
-from .checks import now, recheck_packet, reuse_packet, verify_revision
+from .checks import disk_refusal, now, recheck_packet, reuse_packet, verify_revision
 from .costs import record_session_cost
 from .export_state import export_state
 from .outcome import outcome_block
@@ -506,13 +508,18 @@ class Pipeline:
 
     def stop_workers(self):
         """Stop every lane, continuing past failures, so no session keeps using quota for a run that cannot continue (the lane
-        that blocked a wait is often one whose stop is refused); the unconfirmed ones are then raised together, by lane."""
+        that blocked a wait is often one whose stop is refused); the unconfirmed ones are then raised together, by lane.
+        Under the freeze (`freezing`), one `freeze running` line per lane as its stop is confirmed (RUNBOOK §4)."""
+        progress = getattr(self, "freezing", False)
         failures = {}
         for node in self.workers:
             try:
                 self.stop_session(node)
             except Exception as error:
                 failures[node] = error
+            else:
+                if progress:
+                    self.event("freeze", "running", f"Worker {node} stopped")
         if failures:
             # Claude Code unavailable for each of them keeps a freeze resumable; any other refusal decides the run.
             transient = all(isinstance(error, TransientInfraError) for error in failures.values())
@@ -579,7 +586,13 @@ class Pipeline:
             handoffs[node] = handoff
         from .sidecar import close
         close(self, "freeze")  # The review sidecar ends here, whatever its ledger says; it never raises.
-        self.stop_workers()
+        # Stopping can take a minute: the timeline says so, then names each lane as its stop is confirmed.
+        self.event("freeze", "running", f"Stopping the workers: {', '.join(self.workers)}")
+        self.freezing = True
+        try:
+            self.stop_workers()
+        finally:
+            self.freezing = False
         self.check_shared_git("freeze")  # No worker can change the shared .git any more; nothing is captured yet.
         snapshots = {}
         for node in self.workers:
@@ -1031,7 +1044,61 @@ def start_workers(runtime, attach: bool = False) -> None:
         finally:
             print(f"Report: {report(runtime, graph.get_state(config))}")
     if attach:
+        attach_after_launch(runtime)
+
+
+def retry_all_failed(runtime, state, actor: str) -> None:
+    """`retry --phase worker --all-failed` on an automatic run: every lane whose verify step is pending with an error (a
+    failed packet, or a step that raised before any packet, such as a full disk) gets its attempt raised and a retry request,
+    exactly as `retry --phase worker --node <lane>` does for one; one line per lane, then the continuation. Refused (ValueError)
+    for a manual run and when no verify step failed (RUNBOOK "Status, failures and recovery")."""
+    from .automatic import RETRY_REQUESTS, request_retry
+    from .repair import continuation
+    if not runtime.plan.get("automatic"):
+        raise ValueError("retry --all-failed applies to automatic runs; retry a manual run's lanes one by one with --node <lane>")
+    lanes = [task.name.removeprefix("verify_") for task in state.tasks
+             if task.error and task.name in state.next and task.name.removeprefix("verify_") in runtime.workers and task.name.startswith("verify_")]
+    lanes = [node for node in runtime.workers if node in lanes]  # The run's lane order.
+    if not lanes:
+        raise ValueError("No verify step failed or was left without a verdict; nothing to retry")
+    path = runtime.directory / RETRY_REQUESTS
+    for node in lanes:
+        requests = read_json(path) if path.exists() else {}
+        current = runtime.attempt("worker", node)
+        if requests.get(f"worker:{node}") == current and not (runtime.directory / "verification" / "worker" / node / str(current)).exists():
+            print(f"worker/{node} attempt {current} is already requested and has not run; nothing changed")
+            continue
+        attempt = runtime.retry_check("worker", node)
+        action_event(runtime.event, actor, "retry", f"worker/{node} attempt {attempt}")
+        request_retry(runtime, "worker", node, attempt)
+        print(f"worker/{node} will run attempt {attempt}")
+    print(f"Nothing ran. An automatic run continues under its supervisor: {continuation(runtime)}")
+
+
+def herdr_pane_refusal() -> str | None:
+    """Preflight with --herdr: `herdr pane current --current` must succeed, else the launch would start workers it cannot
+    attach (RUNBOOK §2). None when it does; the refusal for a missing `herdr` or a failing call."""
+    if not shutil.which("herdr"):
+        return "not in a Herdr pane: launch with --no-herdr (no herdr executable on PATH)"
+    try:
+        result = subprocess.run(["herdr", "pane", "current", "--current"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"not in a Herdr pane: launch with --no-herdr ({error})"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        return f"not in a Herdr pane: launch with --no-herdr (herdr pane current exited {result.returncode}{': ' + detail[-1] if detail else ''})"
+    return None
+
+
+def attach_after_launch(runtime) -> None:
+    """`start --herdr` once the workers launched: their panes, or, when attaching fails, a note naming attach-one and one
+    timeline event, never a failed start, so the supervisor still runs (RUNBOOK §3). Only attachment failures are kept."""
+    try:
         print(json.dumps(attach_panels(runtime.sessions), indent=2))
+    except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as error:
+        attach = f"{sys.executable} -m workflow.interactive attach-one {shlex.quote(str(runtime.directory))} --node <lane>"
+        print(f"Note: panes not attached ({error}); attach each lane with python -m workflow.interactive attach-one \"$RUN\" --node <lane>")
+        runtime.event("controller", "note", f"Panes not attached ({error}); the workers run. Attach each lane with: {attach}")
 
 
 def advance(runtime, graph, value, config) -> None:
@@ -1444,6 +1511,8 @@ def main():
     parser.add_argument("--review-file", type=Path)
     parser.add_argument("--bundle-sha256")
     parser.add_argument("--node", help="retry: the lane whose failed check reruns (validated against the run's lanes)")
+    parser.add_argument("--all-failed", action="store_true", help="retry --phase worker on an automatic run: raise the attempt of every "
+                                                                  "lane whose verify step failed or was left without a verdict")
     parser.add_argument("--phase", choices=["worker", "candidate"], default="worker")
     parser.add_argument("--guardrails", action="store_true", help="prepare: a feature.json 2.2.0 run: completion 1.1.0, decisions.md pinned, "
                                                                   "and the design challenge before any worker launch")
@@ -1480,8 +1549,14 @@ def main():
     parser.add_argument("--attack", action="store_true", help="preflight: the feature declares an attack pass (feature.json 2.5.0 attack, [L16]); "
                                                               "preflight then runs the secret-file guard and requires --max-budget-usd, from the "
                                                               "feature's attack and not the policy's attack_check")
+    parser.add_argument("--setup", action="store_true", help="preflight: also run the policy's setup once in a throwaway worktree of the "
+                                                             "repository's HEAD (launch --preflight-setup); default off")
     add_actor_argument(parser)
     args = parser.parse_args()
+    if args.setup and args.action != "preflight":
+        parser.error("--setup applies to preflight only")
+    if args.all_failed and args.action != "retry":
+        parser.error("--all-failed applies to retry only")
     if args.action not in {"preflight", "prepare"} and (args.tryout or args.allow_untried is not None):
         parser.error("--tryout and --allow-untried apply to preflight and prepare only; the tryout is pinned at prepare")
     if args.attack and args.action != "preflight":
@@ -1503,6 +1578,10 @@ def main():
         # C8: prepare pins plan.holds; a `start` or `automatic` given it would launch the workers without the hold, saying nothing.
         parser.error("--hold-challenge applies to prepare only: the hold is pinned there (launch --hold-challenge, or prepare --hold-challenge)")
     directory = args.directory.resolve()
+    if args.all_failed and args.node:
+        parser.error("--all-failed retries every failed lane; it takes no --node (retry one lane with --node <lane> alone)")
+    if args.all_failed and args.phase != "worker":
+        parser.error("--all-failed applies to --phase worker only; a candidate check is retried with --phase candidate --node <lane>")
     try:
         # Before anything reads the run: a gate without --by, or the maintainer at approve, changes nothing.
         actor = require_actor(args, args.action) if args.action in GATE_ACTIONS else None
@@ -1528,6 +1607,10 @@ def main():
             if not args.policy:
                 parser.error("preflight requires --policy")
             policy = validate_pipeline_policy(read_json(args.policy))
+            # The disk and inode floor on the run root and the repository, before any Git action (RUNBOOK §2).
+            refusal = disk_refusal([directory, args.repo.resolve()])
+            if refusal:
+                raise ValueError(refusal)
             if git(args.repo.resolve(), "status", "--porcelain"):
                 raise ValueError("Source must be clean before prepare")
             for executable in ("git", "claude", "node"):
@@ -1561,6 +1644,13 @@ def main():
                 panel.prove_transports([{"providers": [{"transport": name} for name in args.panels.split(",") if name]}])
             if args.herdr and os.environ.get("HERDR_ENV") != "1":
                 raise ValueError("Herdr attachment requires a managed caller pane")
+            if args.herdr:
+                refusal = herdr_pane_refusal()
+                if refusal:
+                    raise ValueError(refusal)
+            if args.setup:  # Opt-in: a setup that fails here fails before any lane launches (RUNBOOK §2).
+                from .checks import preflight_setup
+                print(preflight_setup(args.repo.resolve(), policy), file=sys.stderr, flush=True)
             print(json.dumps({"preflight": "passed", "base_commit": git(args.repo.resolve(), "rev-parse", "HEAD"),
                               "policy_sha256": policy_digest(policy), "note": "No agents launched. Actual dependency/test availability is checked in isolated verification worktrees."}, indent=2))
             return
@@ -1704,11 +1794,12 @@ def main():
                 print(f"Note: {note}", file=sys.stderr, flush=True)
             if (args.profile or args.critical) and not args.automatic:
                 parser.error("--profile and --critical apply to --automatic runs only")
-            from .guardrails import check_restore, pin_restore, resolve_commit
+            from .guardrails import check_restore, pin_restore, refuse_empty_restore, resolve_commit
             restore = None
             if args.restore_from is not None:  # Before the run directory.
                 check_restore(args.automatic, selected)
                 restore = resolve_commit(args.repo.resolve(), args.restore_from)
+                refuse_empty_restore(args.repo.resolve(), restore, policy, selected)
             from .brief import follows_record
             follows = follows_record(args.follows) if args.follows else None  # Refused before the run directory is made.
             from .launch import launch_notes
@@ -1982,6 +2073,9 @@ def main():
                 elif args.action == "retry":
                     from .repair import refuse_recorded
                     refuse_recorded(directory)  # Its counters and refs may exist already: only rerunning the repair continues.
+                    if args.all_failed:
+                        retry_all_failed(runtime, state, actor)
+                        return
                     if not state.values or pending or not state.next:
                         parser.error("Retry requires a failed graph step, not an interrupt/completed run")
                     if args.node:
@@ -2032,7 +2126,7 @@ def main():
                     if note:
                         print(note)
                 if args.action == "start" and args.herdr:
-                    print(json.dumps(attach_panels(runtime.sessions), indent=2))
+                    attach_after_launch(runtime)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         # The supervisor's own Blocked line says only that a step exited 1: the outcome block says what the record holds.
         outcome = outcome_lines(directory) if args.action == "automatic" else ""

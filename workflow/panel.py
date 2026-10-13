@@ -69,6 +69,9 @@ BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "panels"
 BUILTIN_PREFIX = "builtin:"
 DEFAULTS = {"budget_usd": 5, "timeout_minutes": 15, "overlap_threshold": 2}
 BOUNDS = {"budget_usd": (0.5, 50), "timeout_minutes": (1, 180)}
+# A panel with a claude provider and no budget_usd gets this per-call budget (RUNBOOK "Multi-provider panel"): a large context
+# ran out of the default 5. A pi-only panel keeps DEFAULTS' 5, which pi never receives (it has no budget flag).
+CLAUDE_BUDGET_USD = 25
 MAX_PROVIDERS = 4
 ID_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,31}")
 MODEL_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*")  # pi's `provider/id`.
@@ -135,7 +138,8 @@ def provider_settings(value, where: str) -> dict:
 
 def settings(value, where: str = "panels[] ") -> dict:
     """One panel's settings with the defaults filled in; a missing, unknown or out-of-range value is refused, naming the key.
-    `report_only` must be true (blocking is not in v1, [O4])."""
+    `report_only` must be true (blocking is not in v1, [O4]). Without `budget_usd`, a panel with a claude provider gets
+    CLAUDE_BUDGET_USD per claude call and a pi-only one the default 5; a given value is kept."""
     from .attack import requirements_of
     if not isinstance(value, dict):
         raise ValueError(f"{where}must be an object")
@@ -165,6 +169,8 @@ def settings(value, where: str = "panels[] ") -> dict:
         raise ValueError(f"{where}report_only must be true (a blocking panel is not in v1; PRD_MULTI_PROVIDER_PANEL 4.2)")
     result = {"id": panel_id, "stage": value["stage"], "providers": providers, "prompt": prompt,
               "requirements": requirements_of(value, where), **DEFAULTS, "report_only": True}
+    if "budget_usd" not in value and any(item["transport"] == "claude" for item in providers):
+        result["budget_usd"] = CLAUDE_BUDGET_USD
     for key, (low, high) in BOUNDS.items():
         if key in value:
             item = value[key]
@@ -727,7 +733,8 @@ class ClaudeTransport:
         cost = cost if _number(cost) else None
         if returncode != 0 or result.get("session_id") != session_id or result.get("is_error") is not False or result.get("subtype") != "success":
             reason = result.get("result") if isinstance(result.get("result"), str) else result.get("subtype")
-            return {"findings": None, "cost_usd": cost, "error": f"the claude print job did not succeed (exit {returncode}): {reason}", "raw": None}
+            return {"findings": None, "cost_usd": cost, "error": f"the claude print job did not succeed (exit {returncode}): {reason}", "raw": None,
+                    "budget_exceeded": result.get("subtype") == "error_max_budget_usd"}
         output = result.get("structured_output")
         if isinstance(output, dict) and isinstance(output.get("findings"), list):
             return {"findings": output["findings"], "cost_usd": cost, "error": None, "raw": None}
@@ -1047,9 +1054,17 @@ def _terminate_all(jobs: dict) -> None:
                     pass
 
 
-def _reap(job: Job, provider: dict, labels: list[str], worktree: str, size: int, side: Path) -> list[dict]:
+def budget_error(item: dict, cost) -> str:
+    """What a claude provider's `error_max_budget_usd` failure adds to its error: the budget, what it spent, where to raise it."""
+    spent = f"spent {cost} USD" if _number(cost) else "spent amount unavailable"
+    return (f"; the call reached budget_usd {item['budget_usd']} ({spent}): raise budget_usd in the panel entry \"{item['id']}\" of "
+            f"feature.json panels (maximum {BOUNDS['budget_usd'][1]})")
+
+
+def _reap(job: Job, provider: dict, labels: list[str], worktree: str, size: int, side: Path, item: dict | None = None) -> list[dict]:
     """An exited provider: parse its output file (whatever the clock says), set its status, keep its normalized findings in its
-    side file (so an interrupted collect's reaped providers survive to the resume's re-merge) and return them."""
+    side file (so an interrupted collect's reaped providers survive to the resume's re-merge) and return them. A claude call
+    that ran out of budget names the panel's (`item`) budget_usd, the spent amount and where to raise it (budget_error)."""
     result = job.transport.parse(job.stdout, job.process.returncode, job.session_id)
     job.result = result
     provider["cost_usd"] = result["cost_usd"]
@@ -1061,7 +1076,8 @@ def _reap(job: Job, provider: dict, labels: list[str], worktree: str, size: int,
     if result["raw"] is not None:
         provider.update(status="parse_failed", error=clip(f"parse_failed ({size} context bytes): {result['raw']}", 4000))
     else:
-        provider.update(status="error", error=clip(f"{result['error']} ({size} context bytes)", 4000))
+        budget = budget_error(item, result["cost_usd"]) if item is not None and result.get("budget_exceeded") else ""
+        provider.update(status="error", error=clip(f"{result['error']} ({size} context bytes){budget}", 4000))
     return []
 
 
@@ -1162,7 +1178,7 @@ def collect(runtime, error: BaseException | None = None, *, clock=time.time, sle
                         provider = entry["providers"][job.provider_index]
                         reaped.setdefault(job.panel_index, {})[job.provider_index] = _reap(
                             job, provider, labels[job.panel_index], worktree, entry["context_bytes"] or 0,
-                            findings_side_file(directory, item, item["providers"][job.provider_index]))
+                            findings_side_file(directory, item, item["providers"][job.provider_index]), item)
 
         if interrupted:
             reap_exited()  # Their findings are kept (reap-first); the still-running ones are stopped and stay `running` for the next resume.

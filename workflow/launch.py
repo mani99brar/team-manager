@@ -3,6 +3,8 @@
 The target repository is `--repo`, else the current directory when it is a Git repository with a
 `features/` directory, else the repository this tool lives in (md-manager). The feature is any
 directory under `<target>/features/` that holds a `feature.json`.
+
+RUNBOOK "One-command launch" and "Command reference": the disk floor and the empty-restore refusal apply to the dry run too; `--preflight-setup` passes `--setup` to preflight.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from pathlib import Path
 
 from .actor import BY_OPERATOR, add_actor_argument, require_actor
 from .guardrails import (DECISIONS, LAUNCH_NOTE_ENV, LEGACY_DECISIONS_NOTE, PLACEHOLDER, check_restore, conventions_summary, finished_note,
-                         has_operator_decisions, is_guarded, is_held, migration_note, prd_path, refusals, resolve_commit, resume_command, source_checkout)
+                         has_operator_decisions, is_guarded, is_held, migration_note, prd_path, refuse_empty_restore, refusals, resolve_commit, resume_command, source_checkout)
 from .pipeline import finish_policy, parse_lane_selection, policy_workers, validate_pipeline_policy
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, role_pin, validate_node_id, validate_reviewer_id
@@ -279,7 +281,7 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
                     roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
                     follows: str | None = None, allow_untried: str | None = None, prove=None,
-                    fix_rounds: int | None = None) -> tuple[Path, list[list[str]], list[str]]:
+                    fix_rounds: int | None = None, preflight_setup: bool = False) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes. Nothing of the run is executed
     here; the one exception is a feature with `panels` (2.6.0), whose two read-only transport probes (`claude --help` for a
     claude provider, `pi --version` for a pi provider; `panel.prove_transports`, injectable as `prove`) run here so a dry run
@@ -295,6 +297,9 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
 
     `restore_from` (C12) is resolved to its commit here, in the target (the run's worktree shares its objects and refs),
     before any Git action, and prepare gets that commit.
+
+    `preflight_setup` passes --setup to preflight, which then runs the policy's setup once in a throwaway worktree before any
+    lane launches (RUNBOOK §2); off by default, so a launch runs no setup of its own.
 
     `hold_challenge` (C8) holds the run after a passing design challenge until `resume --launch`; prepare pins it as
     plan.holds. It is refused for a feature without the challenge (before 2.2.0, or challenge: false).
@@ -464,6 +469,8 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     if herdr:
         preflight.append("--herdr")
         start.append("--herdr")
+    if preflight_setup:
+        preflight.append("--setup")
     branch = f"{manifest['branch_prefix']}/{run_id}"
     prepare = [*base, "prepare", str(run), "--repo", str(source), "--policy", str(in_source(policy_path))]
     if workers is not None:
@@ -538,9 +545,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
             raise ValueError("--hold-challenge needs the design challenge, which this feature does not run (feature.json before 2.2.0, "
                              "or challenge: false)")
         prepare.append("--hold-challenge")
+    from .checks import disk_refusal
+    refusal = disk_refusal([run, repo])  # As preflight refuses it, so the dry run says so too (RUNBOOK §2).
+    if refusal:
+        raise ValueError(refusal)
     if restore_from is not None:
         check_restore(automatic, selected)
-        prepare.extend(["--restore-from", resolve_commit(repo, restore_from)])
+        restore = resolve_commit(repo, restore_from)
+        refuse_empty_restore(repo, restore, policy, selected)
+        prepare.extend(["--restore-from", restore])
     commands = [preflight, ["git", "worktree", "add", "-b", branch, str(source), "HEAD"], prepare, start]
     if automatic:
         from .automatic import automatic_settings
@@ -643,6 +656,8 @@ def main(argv=None):
                                                          "prepare pins its id, verdict and candidate as plan.follows. See `python -m workflow brief`")
     parser.add_argument("--allow-untried", metavar="REASON", help="A tryout feature: launch although 3 other features wait for their tryout "
                                                                   "(pinned as plan.allow_untried, only when the launch goes past the limit; the operator's decision)")
+    parser.add_argument("--preflight-setup", action="store_true", help="Preflight also runs the policy's setup once in a throwaway worktree "
+                                                                        "of HEAD, before any lane launches (preflight --setup)")
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     run_id = args.run_id or f"{args.feature}-001"
@@ -660,7 +675,7 @@ def main(argv=None):
         run, commands, notes = launch_commands(repo, args.feature, run_id, run_root.resolve(), not args.no_herdr, args.automatic,
                                                args.worker_timeout_seconds, args.review_timeout_seconds, args.reviewer_transport, args.workers,
                                                by, args.profile, roles, args.restore_from, args.hold_challenge, args.follows, args.allow_untried,
-                                               fix_rounds=args.fix_rounds)
+                                               fix_rounds=args.fix_rounds, preflight_setup=args.preflight_setup)
         prepare = commands[2]
         selected = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--task"]
         reviewers = [prepare[index + 1].split("=", 1)[0] for index, item in enumerate(prepare) if item == "--reviewer"] or ["review"]

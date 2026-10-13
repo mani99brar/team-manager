@@ -76,6 +76,24 @@ class CompletionTests(unittest.TestCase):
                       "## Design (settled) in the documents your task cites, each naming its proof: a test (file::name), a check id, "
                       "a self-report, or none.", prompt)
 
+    def test_every_worker_prompt_says_to_end_without_addressing_the_operator(self):
+        # A final message that waits on a human lists the session as blocked: every completion version carries the rule, and 1.1.0
+        # also routes the operator's steps into verify_yourself.
+        from .automatic import completion_prompt
+        final = ("End your final message without asking or telling the operator to do anything: a final message that waits on a human "
+                 "lists your session as blocked, the controller never accepts a completion from a blocked session, and the run stops at "
+                 "your deadline.")
+        routed = "Put any step for the operator in verify_yourself, never in your final message."
+        legacy = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn("then finish your turn and do not modify more files. " + final, legacy)
+        self.assertNotIn(routed, legacy)
+        self.plan["completion_version"] = "1.1.0"
+        self.plan["nodes"]["ui"]["task"] = "## Goal\n\nBuild it.\n"
+        current = " ".join(completion_prompt(self.root, self.plan, "ui").split())
+        self.assertIn(final, current)
+        self.assertIn("verify_yourself names one assumption the operator should verify independently, and question is null; a completed "
+                      "file without them is refused. " + routed, current)
+
     def test_a_reading_that_departs_from_a_task_line_is_asked_or_recorded_as_the_runs_profile_says(self):
         # C16 step 1: before building on a reading of a task line that departs from its plain words (its own, or one an advisory
         # note or a sidecar message suggests), the worker of an attended run writes a question, that of an unattended run records
@@ -2879,7 +2897,18 @@ class ClaudeUnavailableTests(GraphFixture):
         unavailable = "Claude session inventory unavailable for 60s: `claude agents --json` exited 1"
         self.assertIn(("freeze", "running", f"Resuming the freeze interrupted by: ui: {unavailable}; adapter: {unavailable}; "
                                             "its recorded stops are completed, nothing is relaunched"), messages)
-        self.assertEqual([status for node, status, _ in messages if node == "freeze"], ["interrupted", "running", "stopped", "succeeded"])
+        # The freeze says it is stopping the workers each time it does, and names each lane as its stop is confirmed.
+        stopping = ("running", "Stopping the workers: ui, adapter")
+        self.assertEqual([(status, text) for node, status, text in messages if node == "freeze" and status == "running"],
+                         [stopping, ("running", f"Resuming the freeze interrupted by: ui: {unavailable}; adapter: {unavailable}; "
+                                                "its recorded stops are completed, nothing is relaunched"),
+                          stopping, ("running", "Worker ui stopped"), ("running", "Worker adapter stopped")])
+        self.assertEqual([status for node, status, _ in messages if node == "freeze"],
+                         ["running", "interrupted", "running", "running", "running", "running", "stopped", "succeeded"])
+        # A freeze entered again once snapshots.json exists returns it and writes no event.
+        before = self.events()
+        self.assertEqual(sorted(f.runtime.freeze()), ["adapter", "ui"])
+        self.assertEqual(self.events(), before)
 
     def test_a_freeze_re_entry_cut_short_is_re_entered_by_the_next_controller(self):
         # The re-entered freeze can wait up to 60 seconds on a listing: a Ctrl-C then (or a closed terminal, a kill) records
@@ -2907,7 +2936,12 @@ class ClaudeUnavailableTests(GraphFixture):
         self.assertEqual(verify.call_count, 2)
         self.assertFalse(marker.exists())
         self.assertEqual(sorted(read_json(f.directory / "snapshots.json")), ["adapter", "ui"])
-        self.assertEqual([event["status"] for event in self.events() if event["node"] == "freeze"], ["interrupted", "running", "running", "stopped", "succeeded"])
+        # Each of the three freezes says it is stopping the workers (this fixture's stop_workers is the offline one, which
+        # names no lane).
+        self.assertEqual([(event["status"], event["message"]) for event in self.events() if event["node"] == "freeze" and event["message"].startswith(("Stopping", "Worker"))],
+                         [("running", "Stopping the workers: ui, adapter")] * 3)
+        self.assertEqual([event["status"] for event in self.events() if event["node"] == "freeze"],
+                         ["running", "interrupted", "running", "running", "running", "running", "stopped", "succeeded"])
 
     def test_a_freeze_that_failed_for_another_reason_is_named_and_never_re_entered(self):
         # A stop that failed, an ownership violation, a moved HEAD: the freeze is not re-entered (the supervisor would loop),

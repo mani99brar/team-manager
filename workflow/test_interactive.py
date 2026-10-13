@@ -15,6 +15,11 @@ from .interactive import InteractiveSessions, attach_panels, claude_config_path,
 from .sessions import read_json, save_json
 
 
+def setUpModule():
+    from .test_pipeline import isolate_registry
+    isolate_registry()  # Attention records beside a temporary registry; every in-process statvfs reads a healthy disk.
+
+
 class InteractiveTests(unittest.TestCase):
     def setUp(self):
         from .test_sessions import SessionTests
@@ -1412,3 +1417,341 @@ class UpdateGapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- relaunch: a lane whose launch died -------------------------------------------------------------------------------
+
+import hashlib
+import shlex
+import sys
+
+from .interactive import conflicting_rows, launch_name, relaunch_main
+from .test_pipeline import FakeSessions, OfflinePipeline, by_operator
+from .test_repair import RepairFixture
+
+DEAD = "dead0001"
+
+
+class RelaunchSessions(FakeSessions):
+    """FakeSessions whose ui launch dies once (a receipt needing reconciliation and a launch log naming DEAD, no session), with
+    a registry that names rows by their launch name, `listed` extra rows, an inventory that can fail, and the real launch
+    path's name guard and reconcile-on-receipt. `bg` records every fresh `--bg`."""
+
+    def __init__(self, directory, plan):
+        super().__init__(directory, plan)
+        self.dies, self.listed, self.inventory_error, self.bg = {"ui"}, [], None, []
+        self.listed_fresh = None  # The extra rows of the launch's own fresh listing when they differ from `--all`'s (`listed`).
+        self.refuse_launch = None  # A refusal of the launch's own checks (prompt length, trust), after relaunch's conditions.
+
+    def launch_name(self, node):
+        return launch_name(self.plan["run_id"], node)
+
+    def inventory(self, extra=None):
+        rows = []
+        for row in super().inventory():
+            node = next((node for node in self.workers if row["id"] == self.background_id(node)), None)
+            if node is not None and read_json(self.directory / f"{node}.interactive.json").get("status") == "needs_reconciliation":
+                continue  # Its launch produced no session.
+            rows.append({**row, **({"name": self.launch_name(node)} if node else {})})
+        listed = extra if extra is not None else self.listed if self.listed_fresh is None else self.listed_fresh
+        return rows + [dict(row) for row in listed]
+
+    def inventory_all(self):
+        if self.inventory_error:
+            raise RuntimeError(self.inventory_error)
+        return self.inventory(extra=self.listed)
+
+    def run(self, node, allowed_ids=frozenset(), before_launch=None):
+        path = self.directory / f"{node}.interactive.json"
+        if path.exists() and before_launch is None:
+            return self.reconcile(node, path, read_json(path))
+        if conflicting_rows(self.inventory(), self.launch_name(node), allowed_ids):  # The production name rule.
+            raise RuntimeError("Unowned session already exists with this launch name")
+        if self.refuse_launch:
+            raise RuntimeError(self.refuse_launch)
+        if before_launch is not None:
+            before_launch()
+        self.bg.append(node)
+        if node in self.dies:
+            self.dies.discard(node)
+            self.record(node)
+            save_json(path, {"node_id": node, "session_id": None, "launch_token": self.plan["nodes"][node]["session_id"], "status": "needs_reconciliation",
+                             "error": "No exact matching background session after launch", "attempt": 1, "launcher_invocations": 1})
+            (self.directory / f"{node}.launch.log").write_text(f"Starting background service...\nclaude attach {DEAD}    open in this terminal\n")
+            raise RuntimeError("No exact matching background session after launch")
+        return super().run(node)
+
+
+class Relaunch(RepairFixture):
+    """`relaunch <run> <lane> --by operator [--dry-run]`: proven, then archived, then launched once; every refusal and dry run
+    changes no file; reconcile and automatic continue the run."""
+
+    def setUp(self):
+        super().setUp()
+        self.sessions = RelaunchSessions(self.directory, self.runtime.plan)
+        self.runtime = OfflinePipeline(self.directory, self.sessions)
+        with self.graph() as (graph, config), self.assertRaisesRegex(Exception, "No exact matching background session"):
+            graph.invoke({"run_id": self.runtime.plan["run_id"]}, config)
+        self.assertEqual(sorted(self.sessions.bg), ["adapter", "ui"])  # The two lanes launch in parallel.
+        self.launched = list(self.sessions.bg)
+        self.dead_row = {"id": DEAD, "name": launch_name(self.runtime.plan["run_id"], "ui"), "kind": "background", "state": "done"}
+
+    def pipeline(self, directory, *args, **kwargs):
+        return OfflinePipeline(Path(directory), self.sessions)
+
+    def relaunch(self, *argv: str, lane: str = "ui") -> tuple[int, str]:
+        output = io.StringIO()
+        arguments = [str(self.directory), lane, *argv]
+        with patch("workflow.pipeline.Pipeline", side_effect=self.pipeline), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                relaunch_main(arguments if "--by" in arguments else [*arguments, "--by", "operator"])
+                code = 0
+            except SystemExit as exit_:
+                code = exit_.code or 0
+        return code, output.getvalue()
+
+    def printed(self, line: str) -> tuple[int, str]:
+        """A printed `python -m workflow ...` line run as written, in process."""
+        from . import pipeline
+        from .automatic import drive
+        argv = shlex.split(line)
+        self.assertEqual(argv[:3], [sys.executable, "-m", "workflow"])
+        output = io.StringIO()
+        with patch("workflow.pipeline.Pipeline", side_effect=self.pipeline), patch.object(sys, "argv", ["workflow", *argv[3:]]), \
+                patch("workflow.automatic.supervise", side_effect=lambda directory, *_, **__: drive(self.pipeline(directory))), \
+                patch("workflow.automatic.wait_handoffs"), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                pipeline.main()
+                code = 0
+            except SystemExit as exit_:
+                code = exit_.code or 0
+        return code, output.getvalue()
+
+    def hashes(self) -> dict:
+        return {str(path.relative_to(self.directory)): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in sorted(self.directory.rglob("*")) if path.is_file() and ".git" not in path.parts}
+
+    def assert_refused(self, message: str, *argv: str, lane: str = "ui") -> None:
+        before = self.hashes()
+        for dry in ((), ("--dry-run",)):
+            code, output = self.relaunch(*argv, *dry, lane=lane)
+            self.assertEqual(code, 1, output)
+            self.assertIn(message, output.splitlines()[0] if dry else output)
+            self.assertEqual(self.hashes(), before)
+            self.assertEqual(self.sessions.bg, self.launched)  # No --bg.
+            self.assertFalse(list(self.directory.glob("*.launch-*")))
+
+    def test_a_relaunch_launches_once_and_reconcile_and_automatic_continue_the_run(self):
+        for listed in ([self.dead_row], []):  # The dead session listed `done` without a PID, then absent from the registry.
+            with self.subTest(listed=bool(listed)):
+                self.sessions.listed = listed
+                before = self.hashes()
+                code, output = self.relaunch("--dry-run")
+                self.assertEqual(code, 0, output)
+                self.assertEqual(output.splitlines()[0], "relaunch ui: allowed")
+                self.assertIn("would archive: ui.interactive.json as ui.launch-1.receipt.json, ui.launch.log as ui.launch-1.log", output)
+                self.assertEqual((self.hashes(), self.sessions.bg), (before, self.launched))
+        receipt, log = (self.directory / "ui.interactive.json").read_bytes(), (self.directory / "ui.launch.log").read_bytes()
+        self.sessions.listed = [self.dead_row]
+        code, output = self.relaunch()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.sessions.bg, [*self.launched, "ui"])  # Exactly one more --bg.
+        self.assertEqual(((self.directory / "ui.launch-1.receipt.json").read_bytes(), (self.directory / "ui.launch-1.log").read_bytes()), (receipt, log))
+        reconcile, automatic_line = output.splitlines()[-2:]
+        self.assertEqual(reconcile, f"{sys.executable} -m workflow reconcile {self.directory} --by operator")
+        self.assertEqual(automatic_line, f"{sys.executable} -m workflow automatic {self.directory} --live --by operator")
+        self.assertIn(("controller", "note", "Relaunch by the operator: ui: archived ui.interactive.json as ui.launch-1.receipt.json, "
+                                             "ui.launch.log as ui.launch-1.log; launching it once"),
+                      [(event["node"], event["status"], event["message"]) for event in self.events()])
+        # start keeps its guard and launches nothing.
+        code, output = self.printed(f"{sys.executable} -m workflow start {self.directory} --live --by operator")
+        self.assertEqual(code, 2, output)
+        self.assertIn("Run already started; use status/explicit controls, never start again", output)
+        # The two printed lines, as written: reconcile binds the new receipt and moves launch_ui on; automatic finishes the run.
+        code, output = self.printed(reconcile)
+        self.assertEqual(code, 0, output)
+        with self.graph() as (graph, config):
+            self.assertNotIn("launch_ui", graph.get_state(config).next)
+        code, output = self.printed(automatic_line)
+        self.assertEqual(code, 0, output)
+        self.assertIn("Automatic run reached a verified feature branch", output)
+        self.assertEqual(self.sessions.bg, [*self.launched, "ui"])
+        from .clean import run_nodes
+        self.assertFalse(any("launch-" in node for node in run_nodes(self.directory, self.runtime.plan)))
+
+    def test_a_second_relaunch_archives_as_2_and_keeps_1(self):
+        save_json(self.directory / "ui.launch-1.receipt.json", {"earlier": True})
+        (self.directory / "ui.launch-1.log").write_text("an earlier launch\n")
+        kept = self.hashes()
+        code, output = self.relaunch()
+        self.assertEqual(code, 0, output)
+        self.assertTrue((self.directory / "ui.launch-2.receipt.json").exists() and (self.directory / "ui.launch-2.log").exists())
+        self.assertEqual({name: kept[name] for name in ("ui.launch-1.receipt.json", "ui.launch-1.log")},
+                         {name: self.hashes()[name] for name in ("ui.launch-1.receipt.json", "ui.launch-1.log")})
+
+    def test_a_lock_another_process_holds_refuses(self):
+        for name in ("controller.lock", "automatic-supervisor.lock"):
+            (self.directory / name).touch()
+            holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time\nhandle = open(sys.argv[1], 'a')\n"
+                                       "fcntl.flock(handle, fcntl.LOCK_EX)\nprint('held', flush=True)\ntime.sleep(120)", str(self.directory / name)],
+                                      stdout=subprocess.PIPE, text=True)
+            self.addCleanup(holder.kill)
+            self.assertEqual(holder.stdout.readline().strip(), "held")
+            with self.subTest(name):
+                self.assert_refused("Another controller owns this run")
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
+
+    def test_an_abandoned_run_refuses(self):
+        save_json(self.directory / "abandon.json", {"reason": "superseded", "by": "operator", "abandoned_at": "2026-10-13T12:00:00Z"})
+        self.assert_refused("The run was abandoned")
+
+    def test_a_lane_whose_launch_is_not_pending_refuses(self):
+        self.assert_refused("launch_adapter is not pending", lane="adapter")
+
+    def test_a_receipt_in_another_state_refuses(self):
+        path = self.directory / "ui.interactive.json"
+        save_json(path, {**read_json(path), "status": "attached_session_available"})
+        self.assert_refused("ui's receipt is 'attached_session_available', not needs_reconciliation")
+
+    def test_a_session_that_may_live_refuses(self):
+        for row, message in (({**self.dead_row, "pid": 4242}, f"session {DEAD} is listed 'done' with pid 4242"),
+                             ({**self.dead_row, "state": "working"}, f"session {DEAD} is listed 'working'"),
+                             ({**self.dead_row, "id": "live0002", "state": "idle", "pid": 4243}, "session live0002 ('idle') carries the launch name")):
+            with self.subTest(message):
+                self.sessions.listed = [row]
+                self.assert_refused(message)
+
+    def test_a_dead_session_listed_live_again_by_the_launch_listing_refuses_before_the_archive(self):
+        # `--all` lists the dead session done without a PID, so every condition holds; the launch's own fresh listing then
+        # shows it idle with a PID under the launch name: the launch refuses, nothing is archived and nothing launches.
+        self.sessions.listed = [self.dead_row]
+        self.sessions.listed_fresh = [{**self.dead_row, "state": "idle", "pid": 4244}]
+        before = self.hashes()
+        code, output = self.relaunch()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: Unowned session already exists with this launch name", output)
+        self.assertEqual((self.hashes(), self.sessions.bg), (before, self.launched))
+        self.assertFalse(list(self.directory.glob("ui.launch-*")))
+
+    def test_a_name_row_without_a_recorded_id_refuses(self):
+        (self.directory / "ui.launch.log").write_text("Starting background service...\n")
+        self.sessions.listed = [self.dead_row]
+        self.assert_refused(f"session {DEAD} ('done') carries the launch name {self.dead_row['name']}, and no launch id was recorded")
+
+    def test_an_unreadable_inventory_refuses(self):
+        self.sessions.inventory_error = "`claude agents --json --all` exited 1 or printed no session list"
+        self.assert_refused("the session inventory is unreadable: `claude agents --json --all` exited 1")
+
+    def test_a_worktree_that_is_absent_unreadable_dirty_or_moved_refuses(self):
+        worktree = Path(self.runtime.plan["nodes"]["ui"]["worktree"])
+        aside = worktree.with_name("aside")
+        worktree.rename(aside)
+        self.assert_refused(f"{worktree} is absent; relaunch never recreates a worktree")
+        aside.rename(worktree)
+        with patch("workflow.interactive.git", side_effect=subprocess.CalledProcessError(128, ["git"], "fatal: not a git repository")):
+            self.assert_refused(f"{worktree} cannot be read")
+        (worktree / "ui.txt").write_text("edited")
+        self.assert_refused(f"{worktree} has uncommitted changes")
+        subprocess.run(["git", "-C", str(worktree), "commit", "-qam", "A commit on the lane"], check=True)
+        self.assert_refused(f"{worktree} is not at the run's base")
+
+    def test_a_completion_handoff_or_stop_refuses(self):
+        for name in ("ui.completion.json", "ui.handoff.json", "ui.stop.json"):
+            with self.subTest(name):
+                save_json(self.directory / name, {})
+                self.assert_refused(f"{name} exists: the lane ran")
+                (self.directory / name).unlink()
+
+    def test_only_the_operator_relaunches(self):
+        for actor in ("maintainer", "panel"):
+            self.assert_refused(f"relaunch is the operator's decision: --by {actor} is refused", "--by", actor)
+
+    def test_a_refusal_of_the_launch_itself_archives_nothing_and_the_next_relaunch_still_runs(self):
+        # The conditions hold, then the launch's own check refuses: the receipt and log (with the dead session's ID) stay.
+        self.sessions.listed, self.sessions.refuse_launch = [self.dead_row], "Prompt for ui is too long for argv"
+        before = self.hashes()
+        code, output = self.relaunch()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Blocked: Prompt for ui is too long for argv", output)
+        self.assertEqual((self.hashes(), self.sessions.bg), (before, self.launched))
+        self.assertFalse(list(self.directory.glob("*.launch-*")))
+        self.assertFalse(any(event["message"].startswith("Relaunch by") for event in self.events()))
+        # The dead session is still listed and its recorded ID still allows its row: the operator's next relaunch launches.
+        self.sessions.refuse_launch = None
+        code, output = self.relaunch()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.sessions.bg, [*self.launched, "ui"])
+        self.assertTrue((self.directory / "ui.launch-1.receipt.json").exists() and (self.directory / "ui.launch-1.log").exists())
+
+
+class LaunchNameGuard(unittest.TestCase):
+    setUp, row = InteractiveTests.setUp, InteractiveTests.row
+
+    def test_a_launch_other_than_relaunch_refuses_any_row_of_its_launch_name(self):
+        for row in (self.row(id=DEAD, state="done", pid=None), self.row(id="live0002")):
+            with self.subTest(row["id"]), patch.object(self.sessions, "inventory", return_value=[row]), \
+                    patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run") as launch:
+                with self.assertRaisesRegex(RuntimeError, "Unowned session already exists with this launch name"):
+                    self.sessions.run("ui")
+                launch.assert_not_called()
+                self.assertFalse((self.directory / "ui.interactive.json").exists())
+
+    def test_an_allowed_id_listed_live_refuses_the_launch(self):
+        # Relaunch allows its dead session's row only while it is listed ended; listed working with a PID it refuses.
+        path = self.directory / "ui.interactive.json"
+        dead = {"node_id": "ui", "session_id": None, "status": "needs_reconciliation"}
+        save_json(path, dead)
+        archive = Mock()
+        for row in (self.row(id=DEAD, state="working", pid=4245), self.row(id=DEAD, state="done", pid=4246), self.row(id=DEAD, state="idle", pid=None)):
+            with self.subTest(row["state"], pid=row["pid"]), patch.object(self.sessions, "inventory", return_value=[row]), \
+                    patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run") as launch:
+                with self.assertRaisesRegex(RuntimeError, "Unowned session already exists with this launch name"):
+                    self.sessions.run("ui", allowed_ids=frozenset({DEAD}), before_launch=archive)
+                launch.assert_not_called()
+                archive.assert_not_called()
+                self.assertEqual(read_json(path), dead)
+
+    def test_before_launch_runs_only_after_every_refusal_of_the_launch(self):
+        # relaunch's archive step: a refused launch never calls it, so the ended receipt stays; a passing one calls it before
+        # the new receipt is written (the existing receipt is archived, not reconciled).
+        path = self.directory / "ui.interactive.json"
+        dead = {"node_id": "ui", "session_id": None, "status": "needs_reconciliation"}
+        calls = []
+
+        def archive():
+            calls.append(read_json(path))
+            path.rename(self.directory / "ui.launch-1.receipt.json")
+        refusals = ((patch.object(self.sessions, "inventory", return_value=[self.row(id="live0002")]), "Unowned session already exists"),
+                    (patch("workflow.interactive.refuse_long_prompt", side_effect=ValueError("Prompt too long")), "Prompt too long"),
+                    (patch.object(self.sessions, "trust", side_effect=OSError("trust write failed")), "trust write failed"))
+        for refusal, message in refusals:
+            save_json(path, dead)
+            with self.subTest(message), refusal, patch.object(self.sessions, "inventory", return_value=[]) if "Unowned" not in message else contextlib.nullcontext(), \
+                    patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run") as launch:
+                with self.assertRaisesRegex(Exception, message):
+                    self.sessions.run("ui", before_launch=archive)
+                launch.assert_not_called()
+                self.assertEqual((calls, read_json(path)), ([], dead))
+
+        def started(*args, **kwargs):
+            kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
+            return subprocess.CompletedProcess([], 0)
+        with patch.object(self.sessions, "inventory", side_effect=[[], [self.row()]]), patch.object(self.sessions, "trust"), \
+                patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), patch("workflow.interactive.subprocess.run", side_effect=started) as launch:
+            result = self.sessions.run("ui", before_launch=archive)
+        self.assertEqual((calls, launch.call_count, result["session_id"]), ([dead], 1, self.row()["sessionId"]))
+        self.assertEqual(read_json(self.directory / "ui.launch-1.receipt.json"), dead)
+
+    def test_the_relaunch_inventory_reads_every_row_and_refuses_an_unreadable_answer(self):
+        for result, message in ((subprocess.CompletedProcess([], 0, "[]", ""), None),
+                                (subprocess.CompletedProcess([], 1, "", "unknown option --all"), "exited 1 or printed no session list: unknown option --all"),
+                                (subprocess.CompletedProcess([], 0, "not json", ""), "printed no session list")):
+            with self.subTest(message), patch("workflow.interactive.run_claude", return_value=result) as claude:
+                if message is None:
+                    self.assertEqual(self.sessions.inventory_all(), [])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        self.sessions.inventory_all()
+                self.assertEqual(claude.call_args.args[0], ["claude", "agents", "--json", "--all"])

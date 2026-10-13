@@ -48,6 +48,28 @@ def isolate_registry() -> None:
     environment.start()
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
+    isolate_statvfs()
+
+
+HEALTHY_DISK = SimpleNamespace(f_bavail=100_000 * 256, f_frsize=4096, f_favail=500_000, f_files=1_000_000)
+
+
+def isolate_statvfs() -> None:
+    """Called by isolate_registry: until the module's last test, every in-process statvfs reads HEALTHY_DISK (100 GB and 50 %
+    of inodes free), so no floor check in process reads the host's disk, even in a test that clears the floor variables. A
+    floor test patches its own readings over it."""
+    reading = patch("workflow.checks.os.statvfs", return_value=HEALTHY_DISK)
+    reading.start()
+    unittest.addModuleCleanup(reading.stop)
+
+
+def isolate_disk() -> None:
+    """Called by stub_claude_cli: until the module's last test, the disk and inode floors are 0 (disabled), so no preflight or
+    launch reads the host's free disk, in process or in a child, whatever the parent exported. A floor test sets them itself."""
+    from .checks import DISK_FLOOR_ENV, INODE_FLOOR_ENV
+    environment = patch.dict(os.environ, {DISK_FLOOR_ENV: "0", INODE_FLOOR_ENV: "0"})
+    environment.start()
+    unittest.addModuleCleanup(environment.stop)
 
 
 def stub_claude_cli() -> None:
@@ -67,6 +89,7 @@ def stub_claude_cli() -> None:
         del os.environ[key]
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
+    isolate_disk()
 
 
 def setUpModule():

@@ -30,7 +30,7 @@ from .checks import now
 from .export_state import EXPORT_VERSION, graph_nodes, inputs_section
 from .guardrails import CHECK_REPORT, PANE_ANSWER, answer_main, brief_problems, iso, pinned_task, repin, resume_main, stop_rule
 from .interactive import worker_prompt, write_private
-from .launch import TOOL, launch_commands
+from .launch import TOOL, launch_commands, main as launch_main
 from .pipeline import ExportRuntime, build_pipeline, combine_imported_reviews, export_run, graph_config
 from .sessions import plan_digest, read_json, save_json
 from .test_export import legacy_run
@@ -1163,6 +1163,29 @@ class ClaudeUpdateAroundTheChallenge(GuardedFeature):
 
 
 class ChallengePauses(GuardedFeature):
+    def test_a_rerun_exports_its_new_base_and_a_running_challenge_while_its_job_runs(self):
+        directory = self.prepare("repin-001")
+        self.challenge_says([concern("P1", "The lanes overlap")])
+        output, code = self.cli(pipeline.main, ["start", str(directory), "--live"])
+        self.assertEqual(code, 0, output)
+        task = self.folder / "ui-task.md"
+        task.write_text(task.read_text() + "\nOnly ui.txt.\n")
+        seen = []
+        def stopped(process, attempt, timeout):
+            # The job is stopped while challenge.running.json exists: what the viewer reads then.
+            self.assertTrue((directory / "challenge.running.json").exists())
+            seen.append((read_json(directory / "plan.json"), read_json(directory / "run-state.json")))
+            process.kill()
+            raise KeyboardInterrupt
+        with patch("workflow.guardrails.wait_challenge", side_effect=stopped):
+            with contextlib.suppress(KeyboardInterrupt):
+                self.cli(resume_main, [str(directory)])
+        [(plan, state)] = seen
+        self.assertEqual(state["base_commit"], plan["base_commit"])
+        challenge = [event for event in state["events"] if event["node"] == "challenge"]
+        self.assertEqual(challenge[-1]["status"], "running")
+        self.assertIn(f"on base {plan['base_commit']}", challenge[-1]["message"])
+
     def test_challenge_pauses_on_p1_launches_nothing_and_resume_reruns_or_accepts(self):
         """Scenario challenge-pauses."""
         directory = self.prepare("pause-001")
@@ -2317,6 +2340,75 @@ class PerRunCheckout(GuardedFeature):
         self.assertEqual((git(target, "symbolic-ref", "--short", "HEAD"), git(target, "rev-parse", "HEAD")), (mine[0], git(first_source, "rev-parse", "HEAD")))
 
 
+class AttachAfterLaunch(GuardedFeature):
+    """`start --herdr` once the workers launched: a failed attach is a note naming attach-one and one event, and start exits 0,
+    so `launch --automatic` still runs the supervisor. Any other launch failure keeps its exit."""
+
+    NOTE = 'Note: panes not attached (Herdr controls require a Herdr-managed caller pane (HERDR_ENV=1)); attach each lane with ' \
+           'python -m workflow.interactive attach-one "$RUN" --node <lane>'
+
+    def events(self, directory: Path) -> list:
+        return [(event["node"], event["status"], event["message"]) for event in map(json.loads, (directory / "events.jsonl").read_text().splitlines())]
+
+    def attach_events(self, directory: Path) -> list:
+        return [event for event in self.events(directory) if event[0] == "controller" and event[2].startswith("Panes not attached")]
+
+    def test_a_failed_attach_after_the_workers_launched_is_a_note_and_start_exits_0(self):
+        run = self.prepare("attach-001")
+        failure = RuntimeError("Herdr controls require a Herdr-managed caller pane (HERDR_ENV=1)")
+        with patch("workflow.pipeline.attach_panels", side_effect=failure) as attach:
+            output, code = self.cli(pipeline.main, ["start", str(run), "--live", "--herdr"])
+        self.assertEqual(code, 0, output)
+        attach.assert_called_once()
+        self.assertIn(self.NOTE, output)
+        self.assertEqual(self.launches(run), ["challenge", "adapter", "ui"])
+        [event] = self.attach_events(run)
+        self.assertEqual(event[1], "note")
+        self.assertIn(f"-m workflow.interactive attach-one {run} --node <lane>", event[2])
+
+    def test_launch_automatic_runs_the_supervisor_after_a_failed_attach(self):
+        steps = []
+        def run_command(command, cwd, check, **_):
+            step = "git" if command[0] == "git" else command[3]
+            steps.append(step)
+            if step in {"git", "prepare"}:
+                subprocess.run(command, cwd=cwd, check=True, capture_output=True, timeout=120)
+            elif step == "start":
+                output, code = self.cli(pipeline.main, command[3:])
+                self.assertIn(self.NOTE, output)
+                if code:
+                    raise subprocess.CalledProcessError(code, command, output)
+        failure = RuntimeError("Herdr controls require a Herdr-managed caller pane (HERDR_ENV=1)")
+        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/base")
+        with patch("workflow.launch.run_command", side_effect=run_command), patch("workflow.pipeline.attach_panels", side_effect=failure), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            launch_main([FEATURE, "--repo", str(self.repo), "--run-root", str(self.runs), "--live", "--automatic", "--by", "operator"])
+        self.assertEqual(steps, ["preflight", "git", "prepare", "start", "automatic"])
+
+    def test_a_launch_that_fails_before_the_attach_keeps_its_exit_and_attaches_nothing(self):
+        run = self.prepare("attach-002")
+        with patch("workflow.pipeline.attach_panels") as attach, \
+                patch("workflow.pipeline.Pipeline.launch", side_effect=RuntimeError("claude --bg exited 1")):
+            output, code = self.cli(pipeline.main, ["start", str(run), "--live", "--herdr"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("claude --bg exited 1", output)
+        attach.assert_not_called()
+        self.assertEqual(self.attach_events(run), [])
+
+    def test_a_start_without_herdr_never_attaches(self):
+        run = self.prepare("attach-003")
+        bin_dir, log = self.root / "herdr-bin", self.root / "herdr.log"
+        bin_dir.mkdir()
+        (bin_dir / "herdr").write_text(f"#!/bin/sh\necho \"$@\" >> {log}\n")
+        (bin_dir / "herdr").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "HERDR_ENV": "1"}), \
+                patch("workflow.pipeline.attach_panels", wraps=pipeline.attach_panels) as attach:
+            output, code = self.cli(pipeline.main, ["start", str(run), "--live"])
+        self.assertEqual(code, 0, output)
+        attach.assert_not_called()
+        self.assertFalse(log.exists())
+
+
 class RestoreFrom(GuardedFeature):
     """C12: `--restore-from <commit>` pins a candidate a follow-up run restores; the challenge reads a read-only copy of the
     lanes' owned paths at it, and each worker's prompt starts with its own restore command. Automatic runs only: a manual
@@ -2420,6 +2512,36 @@ class RestoreFrom(GuardedFeature):
         self.assertEqual([call["add_dirs"] for call in self.challenge_calls()], [[str(run / "challenge-inputs")]] * 2)
         self.assertEqual((run / "challenge-inputs" / "restore" / "ui.txt").read_text(), "candidate")
         self.assertIn(f"git restore --source={self.candidate} --staged --worktree -- ui.txt", self.given["ui"]["prompt"])
+
+    def test_a_restore_equal_to_the_base_over_the_owned_paths_is_refused_before_the_run_exists(self):
+        git(self.repo, "switch", "-q", "-c", f"feature/{FEATURE}/restore-empty")
+        head = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "outside")
+        (self.repo / "unowned.txt").write_text("only outside the owned paths")
+        commit_all(self.repo, "Outside the lanes")
+        outside = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-")
+        for name, commit in (("HEAD", head), ("outside", outside)):
+            with self.subTest(name):
+                message = (f"--restore-from {commit} equals the base over the lanes' owned paths: the run would review an empty diff. "
+                           "Launch from the followed run's candidate (`git worktree add -b <branch> <dir> <candidate>`; `launch --repo <dir>`)")
+                with self.assertRaises(ValueError) as refused:
+                    launch_commands(self.repo, FEATURE, "restore-empty", self.runs, herdr=False, automatic=True, restore_from=name)
+                self.assertEqual(str(refused.exception), message)
+                output = io.StringIO()
+                with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(output), contextlib.redirect_stderr(output), \
+                        self.assertRaises(SystemExit):
+                    launch_main([FEATURE, "--repo", str(self.repo), "--run-root", str(self.runs), "--dry-run", "--automatic", "--restore-from", name])
+                command.assert_not_called()
+                self.assertIn(message, output.getvalue())
+                run, commands, _ = launch_commands(self.repo, FEATURE, "restore-empty", self.runs, herdr=False, automatic=True)
+                result = self.prepare_here(commands, "--restore-from", commit)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(run.exists())
+        # The candidate differs on owned paths: accepted.
+        _, commands, _ = launch_commands(self.repo, FEATURE, "restore-empty", self.runs, herdr=False, automatic=True, restore_from="candidate")
+        self.assertIn(self.candidate, commands[2])
 
     def test_a_lane_named_restore_from_is_refused_before_any_git_action(self):
         policy = read_json(self.folder / "policy.json")

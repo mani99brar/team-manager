@@ -255,6 +255,172 @@ class PreflightClaudeFlags(Isolated):
         self.assertFalse(run.exists())  # The preflight writes nothing.
 
 
+class StubbedPreflight(Isolated):
+    """A target with one lane and stand-in claude, node and herdr on a temporary PATH that leaves out the host's own herdr."""
+
+    def setUp(self):
+        super().setUp()
+        self.target = make_target(self.root)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        (self.bin / "claude").write_text("#!/bin/sh\nif [ \"$1\" = --help ]; then echo '--bg --safe-mode --setting-sources --plugin-dir --tools "
+                                         "--permission-mode --settings --effort'; elif [ \"$1\" = auth ]; then echo '{\"loggedIn\": true}'; else exit 2; fi\n")
+        (self.bin / "node").write_text("#!/bin/sh\nexit 0\n")
+        self.log = self.root / "herdr.log"
+        self.herdr(0)
+        # The host's own herdr never runs: every PATH directory holding one is left out.
+        path = [item for item in os.environ["PATH"].split(os.pathsep) if item and not (Path(item) / "herdr").exists()]
+        self.env = {**os.environ, "PATH": os.pathsep.join([str(self.bin), *path]), "HERDR_ENV": "1"}
+        self.env.pop("WORKFLOW_WORKER_EFFORT", None)
+
+    def herdr(self, code: int) -> None:
+        (self.bin / "herdr").write_text(f"#!/bin/sh\necho \"$@\" >> {self.log}\necho 'no current pane' >&2\nexit {code}\n" if code else
+                                        f"#!/bin/sh\necho \"$@\" >> {self.log}\necho '{{\"result\": {{\"pane\": {{\"pane_id\": \"p1\"}}}}}}'\n")
+        for item in self.bin.iterdir():
+            item.chmod(0o755)
+
+    def launch(self, *flags: str) -> subprocess.CompletedProcess:
+        return subprocess.run([PY, "-m", "workflow", "launch", "skeleton", "--repo", str(self.target), "--run-root", str(self.root / "runs"),
+                               "--live", "--by", "operator", *flags], cwd=TOOL, env=self.env, capture_output=True, text=True, timeout=120)
+
+    def preflight(self, *flags: str) -> subprocess.CompletedProcess:
+        return subprocess.run([PY, "-m", "workflow", "preflight", str(self.root / "runs/skeleton-001"), "--repo", str(self.target),
+                               "--policy", str(self.target / "features/skeleton/policy.json"), *flags], cwd=TOOL, env=self.env,
+                              capture_output=True, text=True, timeout=120)
+
+    def assert_nothing_created(self):
+        self.assertFalse((self.root / "runs").exists())
+        self.assertEqual(git(self.target, "branch", "--list", "feature/*"), "")
+        self.assertEqual(len(git(self.target, "worktree", "list").splitlines()), 1)
+
+class HerdrPanePreflight(StubbedPreflight):
+    """Preflight with --herdr runs `herdr pane current --current`: a failing call or no herdr at all refuses the launch before
+    any Git action; without --herdr no herdr is ever called."""
+
+    def test_outside_a_pane_or_without_herdr_the_launch_is_refused_at_preflight(self):
+        self.herdr(1)
+        result = self.launch()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not in a Herdr pane: launch with --no-herdr (herdr pane current exited 1: no current pane)", result.stderr)
+        self.assertEqual(self.log.read_text(), "pane current --current\n")
+        self.assert_nothing_created()
+        (self.bin / "herdr").unlink()
+        result = self.preflight("--herdr")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not in a Herdr pane: launch with --no-herdr (no herdr executable on PATH)", result.stderr)
+        self.assert_nothing_created()
+
+    def test_inside_a_pane_preflight_passes_and_without_herdr_it_never_calls_herdr(self):
+        result = self.preflight("--herdr")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
+        self.assertEqual(self.log.read_text(), "pane current --current\n")
+        self.log.unlink()
+        self.herdr(1)
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.log.exists())
+
+
+class SetupPreflight(StubbedPreflight):
+    """`preflight --setup` (launch --preflight-setup) runs the policy's setup once in a throwaway worktree of HEAD and leaves
+    no worktree or temporary directory behind; without the flag nothing runs it."""
+
+    def setUp(self):
+        super().setUp()
+        self.temp = self.root / "tmp"  # The children's (and this process's) temporary directory: empty again after each setup.
+        self.temp.mkdir()
+        self.env["TMPDIR"] = str(self.temp)
+        for context in (patch.dict(os.environ, {"TMPDIR": str(self.temp)}), patch("tempfile.tempdir", str(self.temp))):
+            context.start()
+            self.addCleanup(context.stop)
+        self.invocations = self.root / "setup.log"
+
+    def use_setup(self, *argvs: list) -> None:
+        policy_path = self.target / "features/skeleton/policy.json"
+        policy = read_json(policy_path)
+        policy["setup"] = [{"argv": argv, "timeout_seconds": 60} for argv in argvs]
+        save_json(policy_path, policy)
+        commit_all(self.target, "Setup")
+
+    def recording(self, code: int = 0) -> list:
+        return [PY, "-c", f"import os, sys; open({str(self.invocations)!r}, 'a').write(os.getcwd() + '\\n'); sys.exit({code})"]
+
+    def unchanged(self, before: str) -> None:
+        self.assertEqual(git(self.target, "worktree", "list"), before)
+        self.assertEqual(list(self.temp.iterdir()), [])
+
+    def test_a_passing_setup_runs_once_in_a_throwaway_worktree(self):
+        self.use_setup(self.recording())
+        before = git(self.target, "worktree", "list")
+        result = self.preflight("--setup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stderr, r"setup: passed \(\d+ s\)")
+        self.assertEqual(json.loads(result.stdout)["preflight"], "passed")
+        [cwd] = self.invocations.read_text().splitlines()
+        self.assertTrue(cwd.startswith(str(self.temp)), cwd)  # Never the target, never a run directory.
+        self.unchanged(before)
+
+    def test_a_failing_setup_names_its_index_argv_exit_and_log(self):
+        failing = [PY, "-c", "import sys; print('npm ERR! gyp failed'); sys.exit(1)"]
+        self.use_setup(self.recording(), failing)
+        before = git(self.target, "worktree", "list")
+        result = self.preflight("--setup")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn(f"setup 1 failed: {shlex.join(failing)} exited 1. Last 20 lines of its log:\nnpm ERR! gyp failed", result.stderr)
+        self.unchanged(before)
+
+    def test_an_interrupted_setup_leaves_nothing_behind(self):
+        from . import checks
+        self.use_setup(self.recording())
+        before = git(self.target, "worktree", "list")
+        with patch("workflow.checks.execute", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            checks.preflight_setup(self.target, read_json(self.target / "features/skeleton/policy.json"))
+        self.unchanged(before)
+
+    def test_a_policy_without_setup_says_so(self):
+        from . import checks
+        self.assertEqual(checks.preflight_setup(self.target, read_json(self.target / "features/skeleton/policy.json")), "setup: none")
+
+    def test_setup_runs_outside_the_worktree_lock(self):
+        # Another run's worktree add is not held up while setup runs: setup waits for it, so a held lock would time it out.
+        from . import checks
+        from .worktrees import git_worktree
+        marker = self.root / "other-added"
+        waits = [PY, "-c", f"import os, sys, time\nfor _ in range(200):\n    if os.path.exists({str(marker)!r}): sys.exit(0)\n    time.sleep(0.1)\nsys.exit(1)"]
+        self.use_setup(waits)
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(value=checks.preflight_setup(self.target, read_json(self.target / "features/skeleton/policy.json"))))
+        thread.start()
+        deadline = time.monotonic() + 30
+        while not any(path.name.startswith("mdwf-setup-") and (path / "worktree").exists() for path in self.temp.iterdir()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        git_worktree(self.target, "add", "--detach", str(self.root / "other"), "HEAD")
+        marker.write_text("")
+        thread.join(60)
+        self.assertRegex(result.get("value", ""), r"setup: passed")
+
+    def test_without_the_flag_no_launch_dry_run_or_preflight_runs_setup(self):
+        self.use_setup(self.recording())
+        result = self.preflight()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("setup:", result.stderr)
+        printed = self.dry_run("skeleton", "--repo", str(self.target), "--run-root", str(self.root / "runs"), "--no-herdr")
+        self.assertNotIn("--setup", printed["commands"][0])
+        steps = []
+        def run_command(command, cwd, check, **_):
+            steps.append(command[3] if command[0] != "git" else "git")
+            if command[3:4] == ["preflight"]:
+                subprocess.run(command, cwd=cwd, env=self.env, check=True, capture_output=True, timeout=120)
+        with patch("workflow.launch.run_command", side_effect=run_command), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            launch_main(["skeleton", "--repo", str(self.target), "--run-root", str(self.root / "runs"), "--no-herdr", "--live", "--by", "operator"])
+        self.assertEqual(steps[0], "preflight")
+        self.assertFalse(self.invocations.exists())
+        printed = self.dry_run("skeleton", "--repo", str(self.target), "--run-root", str(self.root / "runs"), "--no-herdr", "--preflight-setup")
+        self.assertEqual(printed["commands"][0][-1], "--setup")
+        self.assertFalse(self.invocations.exists())
+
+
 class MdManagerDefaults(Isolated):
     def test_md_manager_defaults_launch_without_repo_builds_the_same_commands_run_root_and_branch(self):
         """Scenario md-manager-defaults: the commands the launch builds, spelled out; since C56 the run gets its own worktree in place of `git switch`."""

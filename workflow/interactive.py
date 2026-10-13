@@ -2,6 +2,11 @@
 
 The pipeline (`python -m workflow`) is the only entry point that launches sessions. This module's own
 CLI keeps one action: `attach-one`, which the Herdr panes run to reconnect one session in a terminal.
+
+`python -m workflow relaunch <run> <lane> --by operator [--dry-run]` (relaunch_main, RUNBOOK "Relaunch a lane whose launch
+died") is the operator's one recovery for a lane whose launch produced no live session: every condition is proven under the
+run's locks before anything changes, the receipt and launch log are archived as `<lane>.launch-<n>.receipt.json` and
+`<lane>.launch-<n>.log`, and the lane is launched once; `reconcile` and `automatic` then continue the run.
 """
 from __future__ import annotations
 
@@ -90,6 +95,21 @@ def listed_rows(result: subprocess.CompletedProcess) -> list | None:
     except (TypeError, ValueError):
         return None
     return rows if isinstance(rows, list) else None
+
+
+ENDED_STATES = frozenset({"stopped", "failed", "done"})
+
+
+def ended_row(row: dict) -> bool:
+    """An inventory row of a session that has ended: its state is stopped, failed or done, and it lists no positive PID."""
+    pid = row.get("pid")
+    return row.get("state") in ENDED_STATES and not (isinstance(pid, int) and pid > 0)
+
+
+def conflicting_rows(rows: list, name: str, allowed_ids=frozenset()) -> list[dict]:
+    """The inventory rows carrying the launch name `name` that refuse a fresh launch under it: every such row, but an ended
+    one (ended_row) whose id relaunch allows. A row of an allowed id that is listed live again still refuses."""
+    return [row for row in rows if row.get("name") == name and not (row.get("id") in allowed_ids and ended_row(row))]
 
 
 TRUSTED = "hasTrustDialogAccepted"
@@ -306,18 +326,37 @@ class InteractiveSessions(ClaudeSessions):
             return settings, ["--setting-sources", "", "--plugin-dir", str(plugin_dir(self.directory, lane))], tools + ",Skill"
         return worker_settings(self.directory), ["--safe-mode"], tools
 
-    def run(self, node: str) -> dict:
+    def inventory_all(self) -> list[dict]:
+        """`claude agents --json --all`, read once for relaunch's safety probe: every row the registry keeps, ended sessions
+        included. A failing or unparseable answer raises RuntimeError; it proves nothing."""
+        try:
+            response = run_claude([self.executable, "agents", "--json", "--all"], capture_output=True, text=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"`claude agents --json --all` failed: {error}") from error
+        rows = listed_rows(response)
+        if rows is None:
+            detail = ((response.stderr or "").strip() or (response.stdout or "").strip())[-300:]
+            raise RuntimeError(f"`claude agents --json --all` exited {response.returncode} or printed no session list" + (f": {detail}" if detail else ""))
+        return rows
+
+    def run(self, node: str, allowed_ids: frozenset = frozenset(), before_launch=None) -> dict:
+        """The lane's one session: bound from its receipt, or launched once. `allowed_ids` (relaunch only, empty otherwise) are
+        the ended sessions whose rows may still carry the lane's launch name while listed ended (conflicting_rows); any other
+        such row, and an allowed id listed live again, refuses the launch.
+        `before_launch` (relaunch only, None otherwise) is called once every refusal below has passed and before the receipt is
+        written: it archives the ended launch's receipt and log, so that receipt is not reconciled and a refusal changes nothing."""
         if node not in self.workers or self.plan.get("mode") != "interactive":
             raise ValueError("Expected an interactive worker plan")
         info = self.plan["nodes"][node]
         path = self.directory / f"{node}.interactive.json"
-        if path.exists():
+        if path.exists() and before_launch is None:
             return self.reconcile(node, path, read_json(path))
         cwd = Path(info["worktree"])
         if git(cwd, "rev-parse", "HEAD") != self.plan["base_commit"] or git(cwd, "status", "--porcelain"):
             raise RuntimeError("Worktree changed since preparation")
-        # Native IDs do not exist until launch. Reject conflicting terminal names.
-        if any(row.get("name") == self.launch_name(node) for row in self.inventory()):
+        # Native IDs do not exist until launch. Reject conflicting terminal names (but the ended sessions relaunch allows,
+        # while they are still listed ended).
+        if conflicting_rows(self.inventory(), self.launch_name(node), allowed_ids):
             raise RuntimeError("Unowned session already exists with this launch name")
         receipt = {"node_id": node, "session_id": None, "launch_token": info["session_id"], "plan_digest": plan_digest(self.plan),
                    "worktree": str(cwd), "base_commit": self.plan["base_commit"],
@@ -332,6 +371,8 @@ class InteractiveSessions(ClaudeSessions):
         prompt = worker_prompt(self.directory, self.plan, node, receipt["launch_requested_at"])
         refuse_long_prompt(node, prompt)
         self.trust(cwd)  # Before the receipt: a failed write records nothing, so the launch can simply run again.
+        if before_launch is not None:
+            before_launch()
         save_json(path, receipt)
         automatic = bool(self.plan.get("automatic"))
         if automatic:
@@ -849,6 +890,150 @@ def attach_one(sessions: InteractiveSessions, node: str, *, clock=time.monotonic
         if row is not None or ended != "detached":
             ended = None  # A detach stays undecided until a row shows whether the PID changed.
         sleep(delay)
+
+
+# ---- relaunch: a lane whose launch died (RUNBOOK "Relaunch a lane whose launch died") ----------------------------------
+
+
+def held_lock(directory: Path, name: str):
+    """run_lock on a lock file that exists, else nothing to hold: a run that never had that process creates no file here."""
+    import contextlib
+    from .sessions import run_lock
+    return run_lock(directory, name) if (directory / name).exists() else contextlib.nullcontext()
+
+
+def launch_ids(log: Path) -> set[str]:
+    """The `claude attach <id>` ids a launch log printed (InteractiveSessions.locate binds exactly one)."""
+    return set(re.findall(r"claude attach ([a-f0-9-]{8,36})\s", log.read_text(errors="replace"))) if log.exists() else set()
+
+
+def archive_number(directory: Path, lane: str) -> int:
+    """The next archive number of the lane: past every `<lane>.launch-<n>.receipt.json` and `<lane>.launch-<n>.log`."""
+    pattern = re.compile(rf"{re.escape(lane)}\.launch-([0-9]+)\.(?:receipt\.json|log)")
+    return max((int(match[1]) for path in directory.iterdir() if (match := pattern.fullmatch(path.name))), default=0) + 1
+
+
+def relaunch_conditions(runtime, lane: str, state) -> tuple[list[str], str | None, str | None]:
+    """Every relaunch condition's verdict line, the first refusal (None when all hold) and the session id the fresh launch may
+    find under the lane's launch name (the dead one). It only reads; evidence it cannot read is a refusal."""
+    directory, plan, sessions = runtime.directory, runtime.plan, runtime.sessions
+    lines, refusals, allowed = [], [], None
+
+    def verdict(name: str, refusal: str | None) -> None:
+        lines.append(f"{name}: " + ("holds" if refusal is None else f"refused: {refusal}"))
+        if refusal is not None:
+            refusals.append(refusal)
+
+    if lane not in runtime.workers:
+        verdict("lane", f"{lane} is not a lane of this run ({', '.join(runtime.workers)})")
+        return lines, refusals[0], None
+    started = bool(state.values)
+    verdict("launch pending", None if started and f"launch_{lane}" in state.next else
+            (f"launch_{lane} is not pending: the lane launched, or the run moved on" if started else
+             "the run has not started: start launches its lanes"))
+    path, log = directory / f"{lane}.interactive.json", directory / f"{lane}.launch.log"
+    receipt = None
+    try:
+        receipt = read_json(path) if path.exists() else None
+        status = receipt.get("status") if isinstance(receipt, dict) else None
+        verdict("receipt", None if receipt is None or status == "needs_reconciliation" else
+                f"{lane}'s receipt is {status!r}, not needs_reconciliation: reconcile it instead")
+    except (OSError, ValueError) as error:
+        verdict("receipt", f"{lane}'s receipt cannot be read: {error}")
+    try:
+        ids = {receipt["background_id"]} if isinstance(receipt, dict) and receipt.get("background_id") else launch_ids(log)
+    except OSError as error:
+        ids = None
+        verdict("session", f"{lane}'s launch log cannot be read: {error}")
+    if ids is not None and len(ids) > 1:
+        verdict("session", f"{lane}'s launch log printed {len(ids)} session ids; which one it launched is unknown")
+    elif ids is not None:
+        allowed = next(iter(ids), None)
+        name = sessions.launch_name(lane)
+        try:
+            rows = sessions.inventory_all()
+        except Exception as error:  # Unknown evidence proves nothing.
+            verdict("session", f"the session inventory is unreadable: {error}")
+        else:
+            live = [row for row in rows if allowed is not None and row.get("id") == allowed and
+                    (row.get("state") not in ENDED_STATES or (isinstance(row.get("pid"), int) and row["pid"] > 0))]
+            other = conflicting_rows(rows, name, frozenset({allowed}) if allowed else frozenset())
+            if live:
+                verdict("session", f"session {allowed} is listed {live[0].get('state')!r}"
+                        + (f" with pid {live[0]['pid']}" if live[0].get("pid") else "") + ": it may still run")
+            elif other:
+                verdict("session", f"session {other[0].get('id')} ({other[0].get('state')!r}) carries the launch name {name}"
+                        + ("" if allowed else ", and no launch id was recorded"))
+            else:
+                verdict("session", None)
+    worktree = Path(plan["nodes"][lane]["worktree"])
+    try:
+        if not worktree.is_dir():
+            verdict("worktree", f"{worktree} is absent; relaunch never recreates a worktree")
+        elif git(worktree, "rev-parse", "HEAD") != plan["base_commit"]:
+            verdict("worktree", f"{worktree} is not at the run's base {plan['base_commit']}")
+        elif git(worktree, "status", "--porcelain"):
+            verdict("worktree", f"{worktree} has uncommitted changes")
+        else:
+            verdict("worktree", None)
+    except (OSError, subprocess.SubprocessError) as error:
+        verdict("worktree", f"{worktree} cannot be read: {error}")
+    found = [name for name in (f"{lane}.completion.json", f"{lane}.handoff.json", f"{lane}.stop.json") if (directory / name).exists()]
+    verdict("completion, handoff, stop", f"{', '.join(found)} exists: the lane ran" if found else None)
+    return lines, (refusals[0] if refusals else None), allowed
+
+
+def relaunch_main(argv=None):
+    """`relaunch <run> <lane> --by operator [--dry-run]`: the operator's relaunch of a lane whose launch produced no live
+    session. Under the supervisor's and the controller's locks (when their files exist) every condition is proven first
+    (relaunch_conditions); a refusal exits 1 naming it and changes nothing. `--dry-run` prints the verdicts, exits 0 when all
+    hold and 1 with the first refusal on its first line, and changes nothing. Otherwise, once the launch's own refusals (fresh
+    inventory, prompt length, trust) have also passed, the receipt and launch log are archived, one event names the actor and
+    the archives, the lane is launched once, and the last two lines are the reconcile and
+    automatic commands that continue the run. It never stops a session or advances the graph."""
+    from .actor import BY_OPERATOR, add_actor_argument, require_actor
+    parser = argparse.ArgumentParser(prog="python -m workflow relaunch", description="Relaunch a lane whose launch produced no live session (operator only)")
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("lane")
+    parser.add_argument("--dry-run", action="store_true", help="Prove every condition and print the verdicts; change nothing")
+    add_actor_argument(parser)
+    args = parser.parse_args(argv)
+    directory = args.directory.resolve()
+    try:
+        actor = require_actor(args, "relaunch")
+        from .pipeline import Pipeline, action_event, persisted_state
+        with held_lock(directory, "automatic-supervisor.lock"), held_lock(directory, "controller.lock"):
+            runtime = Pipeline(directory)
+            lines, refusal, allowed = relaunch_conditions(runtime, args.lane, persisted_state(runtime))
+            number = archive_number(directory, args.lane) if refusal is None else None
+            moves = [(directory / f"{args.lane}.{suffix}", directory / f"{args.lane}.launch-{number}.{archived}")
+                     for suffix, archived in (("interactive.json", "receipt.json"), ("launch.log", "log"))
+                     if refusal is None and (directory / f"{args.lane}.{suffix}").exists()]
+            if args.dry_run:
+                print(f"relaunch {args.lane}: " + (f"refused: {refusal}" if refusal else "allowed"))
+                print("\n".join(lines))
+                if refusal is None:
+                    print("would archive: " + (", ".join(f"{source.name} as {target.name}" for source, target in moves) or "nothing"))
+                    print(f"would launch {args.lane} once")
+                parser.exit(1 if refusal else 0)
+            if refusal:
+                raise ValueError(refusal)
+            archived = ", ".join(f"{source.name} as {target.name}" for source, target in moves) or "nothing to archive"
+
+            def archive():
+                # Only once the launch's own refusals (worktree, inventory, prompt length, trust) have passed: a refusal
+                # there leaves the receipt and log, with the ended session's ID, where the next relaunch reads them.
+                for source, target in moves:
+                    os.rename(source, target)
+                action_event(runtime.event, actor, "relaunch", f"{args.lane}: archived {archived}; launching it once")
+            receipt = runtime.sessions.run(args.lane, allowed_ids=frozenset({allowed}) if allowed else frozenset(), before_launch=archive)
+    except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+        parser.exit(1, f"Blocked: {error}\nNothing was relaunched.\n")
+    run = shlex.quote(str(directory))
+    print(f"Relaunched {args.lane} once: session {receipt.get('session_id')}; archived {archived}.")
+    print("Continue the run with:")
+    print(f"{sys.executable} -m workflow reconcile {run} {BY_OPERATOR}")
+    print(f"{sys.executable} -m workflow automatic {run} --live {BY_OPERATOR}")
 
 
 def main():

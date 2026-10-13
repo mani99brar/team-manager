@@ -141,6 +141,12 @@ def awaits_approval(plan: dict) -> bool:
     return isinstance(automatic, dict) and automatic.get("finish") == "approval"
 
 
+# The worker's final-turn rule (RUNBOOK "Completion evidence"): a final message that addresses the operator stalls the lane.
+FINAL_TURN = ("End your final message without asking or telling the operator to do anything: a final message that waits on a human "
+              "lists your session as blocked, the controller never accepts a completion from a blocked session, and the run stops "
+              "at your deadline.")
+
+
 def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str | None = None, *, launch_token: str | None = None,
                       task: str | None = None, deadline: str | None = None) -> str:
     """An automatic worker's completion protocol: its bounds, the default on running checks and run-report (C16 step 8; a manual worker has no
@@ -172,7 +178,8 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
         evidence = ("\nCompletion 1.1.0 evidence: for status completed, untested lists the behaviours no executed check covers (it may "
                     "be empty), falsifying_check names the check that would fail if your implementation were wrong (a check id from "
                     "your approved checks, or the exact command), verify_yourself names one assumption the operator should verify "
-                    "independently, and question is null; a completed file without them is refused. The commands you ran are not "
+                    "independently, and question is null; a completed file without them is refused. Put any step for the operator in "
+                    "verify_yourself, never in your final message. The commands you ran are not "
                     "evidence by themselves: the controller reruns the checks. End your summary with a Proof table: one row per line of "
                     "your task's ## Acceptance section and per line under ## Design (settled) in the documents your task cites, each "
                     "naming its proof: a test (file::name), a check id, a self-report, or none. Keep the rows short: a completion "
@@ -185,7 +192,7 @@ def completion_prompt(directory: Path, plan: dict, node: str, launched_at: str |
             "On completion write the following JSON shape atomically (temporary file then rename) to "
             f"{directory / (node + '.completion.json')}. This one output file is allowed outside your worktree. "
             "Use status blocked if you cannot finish; never manufacture checks. Write it as your last action, "
-            "then finish your turn and do not modify more files. Controller checks and independent review "
+            "then finish your turn and do not modify more files. " + FINAL_TURN + " Controller checks and independent review "
             "still determine acceptance." + (deadline if deadline is not None else deadline_sentence(directory, plan, node, launched_at))
             + "\n" + json.dumps(example) + evidence)
 
@@ -1836,14 +1843,15 @@ def same_revision(previous: Path, packet: Path) -> bool:
 
 
 def previous_failure(runtime, phase: str, node: str, attempt: int) -> Path | None:
-    """The packet of the latest earlier attempt of the lane's revision that was not killed for memory: the identical-failure
-    rule compares real failures only, so a memory kill between two identical failures does not hide them."""
-    from .repair import transient_packet
+    """The packet of the latest earlier attempt of the lane's revision that was not transient (killed for memory, or a full
+    disk): the identical-failure rule compares real failures only, so a transient attempt between two identical failures does
+    not hide them."""
+    from .repair import transient_attempt
     for earlier in range(attempt - 1, 0, -1):  # same_revision, the caller's, tells another revision's attempt apart.
         path = runtime.directory / "verification" / phase / node / str(earlier) / "packet.json"
         if not path.exists():
             return None  # An attempt without a verdict: nothing to compare, as before.
-        if not transient_packet(path):
+        if not transient_attempt(path):
             return path
     return None
 
@@ -1876,7 +1884,7 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
     """advance_failed_checks' decision, read only: the checks to rerun, as (phase, node), and the `retry` requests to consume;
     None when the failed steps are not all checks it reruns, or one has nothing to rerun. Raises RuntimeError when a check
     failed identically on two attempts of one revision, or the attempt limit is reached."""
-    from .repair import attempt_limit, transient_packet
+    from .repair import attempt_limit, transient_attempt
     # A checkpoint can carry an error from an earlier attempt of a task that has since
     # succeeded (its writes are applied and it is no longer pending). Only pending
     # tasks with errors are failures to classify.
@@ -1905,7 +1913,7 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
                 stage_requested.append(f"{phase}:{node}")
             elif path.exists() and read_json(path)["gate"]["status"] != "passed":
                 previous = previous_failure(runtime, phase, node, attempt)
-                if previous and not transient_packet(path) and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
+                if previous and not transient_attempt(path) and same_revision(previous, path) and gate_reasons(previous) == gate_reasons(path):
                     # Retries rerun immutable code; two identical failures mean the cause is
                     # deterministic (code or environment), and more attempts only burn time.
                     raise RuntimeError(f"{phase}/{node} failed identically on attempts {previous.parent.name} and {attempt}; "
@@ -1916,7 +1924,7 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
         targets.extend(stage_targets)
         requested.extend(stage_requested)
     # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision, and an attempt
-    # killed for memory does not spend it (repair.attempt_limit).
+    # killed for memory, or failed on a full disk, does not spend it (repair.attempt_limit).
     if any(runtime.attempt(p, n) >= attempt_limit(runtime.directory, runtime.policy, p, n, runtime.attempt(p, n)) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
     return targets, requested
@@ -1955,19 +1963,57 @@ def wait_for_memory(runtime, *, read=None, clock=time.monotonic, sleep=time.slee
         sleep(MEMORY_POLL_SECONDS)
 
 
+DISK_WAIT_SECONDS = 600
+DISK_POLL_SECONDS = 15
+DISK_EVENT_SECONDS = 60
+
+
+def wait_for_disk(runtime, *, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Before rerunning an attempt that failed on a full disk: wait until preflight's disk and inode floors (checks.disk_floors,
+    their env overrides included) hold on the run directory and the repository, polling every DISK_POLL_SECONDS with one
+    `running` event at most once a minute. After DISK_WAIT_SECONDS with a floor still unmet it raises RuntimeError naming it;
+    it never loosens a floor (RUNBOOK "Status, failures and recovery")."""
+    from .checks import disk_free, disk_shortfalls, nearest_existing
+    paths = [runtime.directory, Path(runtime.plan["repository"])]
+    started, said = clock(), None
+    while True:
+        shortfalls = disk_shortfalls(paths)
+        if not shortfalls:
+            return
+        if clock() - started >= DISK_WAIT_SECONDS:
+            raise RuntimeError(f"The disk floor still fails after {DISK_WAIT_SECONDS // 60} minutes: {'; '.join(shortfalls)}. The rerun did not "
+                               "start; free space (df -h, df -i), then continue the run")
+        if said is None or clock() - said >= DISK_EVENT_SECONDS:
+            said = clock()
+            readings = [disk_free(nearest_existing(path)) for path in paths]
+            inodes = [value for _, value in readings if value is not None]
+            runtime.event("controller", "running", f"waiting for disk: {min(free for free, _ in readings):.0f} MB, "
+                                                   + (f"{min(inodes):.1f} % inodes free" if inodes else "inodes not reported"))
+        sleep(DISK_POLL_SECONDS)
+
+
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review. A check killed
-    for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget."""
-    from .repair import transient_packet
+    for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget. An attempt
+    that failed on a full disk (repair.disk_packet), and a raised attempt whose step failed with errno 28, are rerun once the
+    disk floors hold again (wait_for_disk); a full-disk packet spends no attempt either."""
+    from .repair import disk_full_error, disk_packet, transient_packet
     retries = check_retries(runtime, state)
     if retries is None:
         return False
     targets, requested = retries
-    killed = [f"{phase}/{node}" for phase, node in targets
-              if transient_packet(runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json")]
+    packet = lambda phase, node: runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"
+    killed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node))]
     if killed:
         runtime.event("controller", "running", f"{', '.join(killed)} killed under memory pressure: transient, rerun without spending an attempt")
         wait_for_memory(runtime)
+    errors = {task.name: task.error for task in state.tasks if task.error and task.name in state.next}
+    full = [f"{phase}/{node}" for phase, node in targets if f"{phase}/{node}" not in killed and disk_packet(packet(phase, node))]
+    full += [key.replace(":", "/") for key in requested
+             if disk_full_error(errors.get("candidate" if key.startswith("candidate:") else f"verify_{key.split(':', 1)[1]}"))]
+    if full:
+        runtime.event("controller", "running", f"{', '.join(full)} failed on a full disk: transient, rerun once the disk floor holds")
+        wait_for_disk(runtime)
     for phase, node in targets:
         runtime.retry_check(phase, node)
     if requested:
@@ -1984,8 +2030,8 @@ def advance_failed_checks(runtime, state) -> bool:
 
 def blocked_lanes(runtime, phase: str, nodes: list[str]) -> list[tuple[str, Path]] | None:
     """The lanes of `nodes` whose packet at their current attempt is blocked, with the packet; None when one has no verdict yet
-    (an interrupted check, a raised attempt) or was killed for memory: those are the retry path's."""
-    from .repair import transient_packet
+    (an interrupted check, a raised attempt) or was transient (killed for memory, a full disk): those are the retry path's."""
+    from .repair import transient_attempt
     found = []
     for node in nodes:
         path = runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"
@@ -1993,7 +2039,7 @@ def blocked_lanes(runtime, phase: str, nodes: list[str]) -> list[tuple[str, Path
             if phase == "worker":
                 return None
             continue  # The candidate gate stops at its first blocked lane: the later ones have no packet at this attempt.
-        if transient_packet(path):
+        if transient_attempt(path):
             return None
         if read_json(path)["gate"]["status"] == "blocked":
             found.append((node, path))

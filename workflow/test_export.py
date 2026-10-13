@@ -310,6 +310,17 @@ class ExportRunTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
+    def test_a_task_error_is_exported_only_for_a_pending_task(self):
+        runtime = ExportRuntime(legacy_run(self.root))
+        task = lambda name, error: SimpleNamespace(name=name, error=error, interrupts=[], result=None)
+        state = SimpleNamespace(values={"run_id": "legacy-001"}, next=("verify_adapter",),
+                                tasks=[task("verify_ui", RuntimeError("ui failed earlier")), task("verify_adapter", OSError(28, "No space left on device"))])
+        exported = export_state(runtime, state)
+        errors = {item["node_id"]: item["error"] for item in exported["tasks"]}
+        self.assertIsNone(errors["verify_ui"])
+        self.assertEqual(errors["verify_adapter"], "[Errno 28] No space left on device")
+        self.assertEqual(exported["next"], ["verify_adapter"])
+
     def test_legacy_run_directory_re_exports_to_current_version_and_stays_stable(self):
         directory = legacy_run(self.root)
         # The checkpoint of a finished run: no pending work, integrated commit recorded.

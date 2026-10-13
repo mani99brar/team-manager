@@ -86,12 +86,83 @@ def transient_packet(path: Path) -> bool:
     return all(reason in commands or reason.startswith(prefixes) for reason in gate["reasons"])
 
 
+# A full disk is no verdict on the code either (RUNBOOK "Status, failures and recovery"): a step that raised errno 28, or an
+# attempt whose every gate reason's retained log ends with one of these, is transient like a memory kill. The packet itself
+# keeps `transient: "memory"` as its only value (workerResult.schema.json): the controller derives this, it never records it.
+DISK_SIGNATURES = ("ENOSPC", "No space left on device", "Disk quota exceeded")
+DISK_ERRNO_FORMS = ("OSError(28", "[Errno 28]")  # A checkpoint keeps a raised step's error as its repr.
+DISK_TAIL_LINES = 20
+
+
+def disk_full_text(text: str) -> bool:
+    """Whether `text` (a step's error, a log's tail) says the disk or the quota was full."""
+    return any(marker in text for marker in DISK_SIGNATURES + DISK_ERRNO_FORMS)
+
+
+def disk_full_error(error) -> bool:
+    """A step's error (a live exception or the checkpoint's repr of one) that is errno 28 or names a full disk."""
+    if isinstance(error, OSError) and error.errno == 28:
+        return True
+    return error is not None and (disk_full_text(str(error)) or disk_full_text(repr(error)))
+
+
+def reason_log(packet: dict, folder: Path, reason: str) -> Path | None:
+    """The retained log of the setup command or check a gate reason names, or None for a reason no command's log explains."""
+    if reason.startswith("Setup "):
+        index = reason.split()[1]
+        return folder / f"setup-{index}.log" if index.isdigit() else None
+    commands = [check.get("command") for check in (packet.get("result") or {}).get("checks", [])]
+    if reason.startswith("Executed check failed: ") and reason.removeprefix("Executed check failed: ") in commands:
+        return folder / f"check-{commands.index(reason.removeprefix('Executed check failed: '))}.log"
+    for receipt in (packet.get("evidence") or {}).get("checks", []):
+        if reason.startswith((f"{receipt.get('id')}:", f"{receipt.get('id')}/")):
+            return folder / f"check-{receipt['worker_check_index']}.log"
+    return None
+
+
+def disk_packet(path: Path) -> bool:
+    """A blocked packet whose every gate reason is a setup or check failure whose retained log's last 20 lines name a full disk
+    (DISK_SIGNATURES). A real failure beside one makes the attempt a real failure. A reused candidate packet's logs are its
+    worker packet's."""
+    if not path.is_file():
+        return False
+    packet = read_json(path)
+    gate = packet.get("gate", {})
+    if gate.get("status") != "blocked" or not gate.get("reasons"):
+        return False
+    source, folder = packet, path.parent
+    if packet.get("reused_from"):
+        # A reused candidate packet (C28) holds only packet.json: its logs, results and receipts are the worker packet's, read
+        # only while it is inside the run (verification/<phase>/<node>/<attempt>/packet.json) and unchanged since.
+        run = path.resolve().parents[4]
+        worker = (run / packet["reused_from"].get("path", "")).resolve()
+        if not worker.is_relative_to(run) or not worker.is_file():
+            return False
+        with worker.open("rb") as handle:
+            if hashlib.file_digest(handle, "sha256").hexdigest() != packet["reused_from"].get("sha256"):
+                return False
+        source, folder = read_json(worker), worker.parent
+    for reason in gate["reasons"]:
+        log = reason_log(source, folder, reason)
+        if log is None or not log.is_file():
+            return False
+        if not disk_full_text("\n".join(log.read_text(errors="replace").splitlines()[-DISK_TAIL_LINES:])):
+            return False
+    return True
+
+
+def transient_attempt(path: Path) -> bool:
+    """Transient, memory or disk: a check killed for memory (transient_packet) or a full disk (disk_packet). Such an attempt
+    starts no repair round, never counts as an identical failure and spends no attempt, up to MAX_TRANSIENT_RERUNS together."""
+    return transient_packet(path) or disk_packet(path)
+
+
 def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:
     """The first attempt past the budget of the lane's current revision: its floor plus max_verification_attempts plus its
-    transient attempts from the floor up to `through` (at most MAX_TRANSIENT_RERUNS)."""
+    transient attempts (memory or disk) from the floor up to `through` (at most MAX_TRANSIENT_RERUNS)."""
     floor = attempt_floor(directory, phase, node)
     folder = directory / "verification" / phase / node
-    transient = sum(transient_packet(folder / str(attempt) / "packet.json") for attempt in range(floor, through + 1))
+    transient = sum(transient_attempt(folder / str(attempt) / "packet.json") for attempt in range(floor, through + 1))
     return floor + policy.get("max_verification_attempts", 3) + min(transient, MAX_TRANSIENT_RERUNS)
 
 

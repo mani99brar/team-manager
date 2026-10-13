@@ -6,6 +6,8 @@ it keeps the sidecar's refusals: nothing is recorded or typed after freeze, for 
 or a lane waiting on a question (answer it instead); the note is recorded `undeliverable` when the pane is not attached to
 the lane's session or its input line is not empty. The worker prompt says an operator note may amend the task, while a
 maintainer note, like a sidecar message, is advice; review_prompt lists the notes that reached a worker (notes_note).
+
+RUNBOOK "Who acted: --by and notes" and "Review sidecar" (the delivery readback).
 """
 from __future__ import annotations
 
@@ -77,14 +79,17 @@ def send_note(runtime, lane: str, actor: str, text: str, clock=None) -> dict:
         entry = {"n": number, "id": f"N-{number}", **actor_record(actor, "author"), "text": text,
                  "sent_at": iso((clock or time.time)()), "delivery": "pending", "reason": None}
         save_note(directory, lane, entry)
+    unsubmitted = []
     try:
-        status, reason = deliver_text(runtime, lane, typed_note(entry))
+        status, reason = deliver_text(runtime, lane, typed_note(entry), on_unsubmitted=unsubmitted.append)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         status, reason = "undeliverable", failure_reason(error)
     entry.update(delivery=status, reason=reason)
     with notes_lock(directory):
         save_note(directory, lane, entry)
     outcome = "typed into its pane" if status == "delivered" else f"{status}, not typed ({reason})"
+    if unsubmitted:  # Typed, but two Enters left it in the input line.
+        outcome = f"{status} ({reason}): {unsubmitted[0]}"
     # A plain record (status `note`, served as a log line): never a lane status, so it cannot end an interruption's scope
     # or read as the lane running while no controller does.
     runtime.event(lane, "note", f"Note {entry['id']} from {actor_text(actor)} to worker {lane}: {outcome}")

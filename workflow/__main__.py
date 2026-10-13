@@ -1,4 +1,4 @@
-"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `abandon`, `accept`, `check-report`, `run-report`, `browser-queue`, `clean`, `ledger`, `tryout`, `attention-notify` and `presence`."""
+"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `relaunch`, `abandon`, `accept`, `check-report`, `run-report`, `browser-queue`, `clean`, `ledger`, `tryout`, `attention-notify` and `presence`. RUNBOOK "Command reference"."""
 import os
 import sys
 
@@ -40,6 +40,9 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "brief":
         from .brief import brief_main
         brief_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "relaunch":
+        from .interactive import relaunch_main
+        relaunch_main(sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "abandon":
         from .abandon import abandon_main
         abandon_main(sys.argv[2:])

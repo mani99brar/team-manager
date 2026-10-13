@@ -20,7 +20,7 @@ from .launch import TOOL, launch_commands, main
 from .registry import previous_policy
 from .sessions import git, read_json, save_json
 from .worktrees import LOCK_NAME
-from .test_pipeline import stub_claude_cli
+from .test_pipeline import isolate_registry, stub_claude_cli
 
 TESTDATA = Path(__file__).resolve().parent / "testdata"
 
@@ -35,6 +35,7 @@ def fixture_target(root: Path) -> Path:
 
 
 def setUpModule():
+    isolate_registry()  # Attention records beside a temporary registry; every in-process statvfs reads a healthy disk.
     stub_claude_cli()  # prepare's `claude --version` reads a stand-in, never the operator's CLI.
 
 
@@ -596,9 +597,15 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_MODEL", errors.getvalue())
 
     def test_restore_from_is_resolved_and_passed_to_prepare_and_the_dry_run_shows_it(self):
-        # C12: launch resolves --restore-from in the target before any Git action and hands prepare the commit.
-        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True).strip()
-        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), automatic=True, restore_from="HEAD")
+        # C12: launch resolves --restore-from in the target before any Git action and hands prepare the commit. The restored
+        # commit differs from HEAD on a path a lane owns (one equal to it is refused: RestoreFrom in test_guardrails).
+        self.git("switch", "-q", "-c", "earlier-candidate")
+        (self.repo / "server").mkdir()
+        (self.repo / "server" / "index.ts").write_text("export {}\n")
+        self.git("add", "."), self.git("commit", "-qm", "Earlier candidate")
+        self.git("switch", "-q", "-")
+        head = self.git("rev-parse", "earlier-candidate")
+        _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), automatic=True, restore_from="earlier-candidate")
         prepare = commands[2]
         self.assertEqual(prepare[prepare.index("--restore-from") + 1], head)
         _, commands, _ = launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"))
@@ -608,10 +615,10 @@ class FeatureLaunchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--restore-from needs --automatic"):  # A manual worker has no shell.
             launch_commands(self.repo, "project-workflows", "restore-test", Path("/tmp/workflow-launch-tests"), restore_from="HEAD")
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output:
-            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--automatic", "--restore-from", "HEAD"])
+            main(["project-workflows", "--repo", str(self.repo), "--dry-run", "--automatic", "--restore-from", "earlier-candidate"])
         command.assert_not_called()
         printed = json.loads(output.getvalue())
-        self.assertEqual(printed["restore_from"], {"name": "HEAD", "commit": head})
+        self.assertEqual(printed["restore_from"], {"name": "earlier-candidate", "commit": head})
         self.assertIn(head, printed["commands"][2])
 
     def test_dry_run_does_not_execute_anything(self):
@@ -1186,3 +1193,117 @@ class TryoutFlag(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def disk_reading(mb: float = 100_000, inodes_pct: float = 50, files: int = 1_000_000) -> SimpleNamespace:
+    """A statvfs result with `mb` megabytes and `inodes_pct` % of `files` inodes free to an unprivileged user."""
+    return SimpleNamespace(f_bavail=int(mb * 256), f_frsize=4096, f_favail=int(files * inodes_pct / 100), f_files=files)
+
+
+class DiskFloor(unittest.TestCase):
+    """Preflight and launch refuse below 5120 MB or 5 % free inodes on the run root's nearest existing ancestor or on the
+    repository, before any Git action; every reading here is patched, never the host's."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        self.repo = fixture_target(self.root)
+        self.runs = self.root / "runs"
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "projects.json"), "HOME": str(self.root / "home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("WORKFLOW_DISK_FLOOR_MB", "WORKFLOW_INODE_FLOOR_PCT"):  # The defaults, whatever the module or the parent set.
+            os.environ.pop(name, None)
+        self.readings = {}
+
+    def statvfs(self, path):
+        return self.readings.get(Path(path), self.readings.get("run", disk_reading()))
+
+    def launch(self, *argv: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with patch("workflow.checks.os.statvfs", side_effect=self.statvfs), patch("workflow.launch.run_command") as command, \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.runs), "--no-herdr", *argv])
+                code = 0
+            except SystemExit as exit_:
+                code = exit_.code or 0
+        if code:
+            command.assert_not_called()
+        return code, output.getvalue()
+
+    def preflight(self) -> tuple[int, str]:
+        from . import pipeline
+        output = io.StringIO()
+        argv = ["pipeline", "preflight", str(self.runs / "project-workflows-001"), "--repo", str(self.repo), "--policy",
+                str(self.repo / "features/project-workflows/policy.json")]
+        with patch("workflow.checks.os.statvfs", side_effect=self.statvfs), patch.object(sys, "argv", argv), \
+                patch("workflow.pipeline.git", side_effect=AssertionError("a Git action ran")), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            try:
+                pipeline.main()
+                code = 0
+            except SystemExit as exit_:
+                code = exit_.code or 0
+        return code, output.getvalue()
+
+    def assert_nothing_created(self):
+        self.assertFalse(self.runs.exists())
+        self.assertEqual(git(self.repo, "branch", "--list", "feature/*"), "")
+        self.assertEqual(len(git(self.repo, "worktree", "list").splitlines()), 1)
+
+    def test_few_free_inodes_refuse_launch_preflight_and_the_dry_run_before_any_git_action(self):
+        self.readings["run"] = disk_reading(inodes_pct=1)
+        for refused in (self.launch("--live", "--by", "operator"), self.preflight(), self.launch("--dry-run")):
+            code, output = refused
+            self.assertEqual(code, 1, output)
+            for expected in ("1.0 % of its inodes free, under the 5 % floor (WORKFLOW_INODE_FLOOR_PCT)", "df -h", "df -i",
+                             'python -m workflow clean "$RUN" --by operator'):
+                self.assertIn(expected, output)
+            self.assertNotIn("MB of free space", output)
+        self.assert_nothing_created()
+
+    def test_little_free_space_is_refused_naming_it(self):
+        self.readings["run"] = disk_reading(mb=1024)
+        code, output = self.launch("--live", "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"{self.root} has 1024 MB of free space, under the 5120 MB floor (WORKFLOW_DISK_FLOOR_MB)", output)
+        self.assert_nothing_created()
+
+    def test_each_location_fails_alone(self):
+        self.readings[self.repo] = disk_reading(mb=1024)  # The repository short, the run root's ancestor healthy.
+        code, output = self.launch("--dry-run")
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"{self.repo} has 1024 MB of free space", output)
+        self.assertNotIn(f"{self.root} has", output)
+        self.readings = {"run": disk_reading(inodes_pct=2), self.repo: disk_reading()}  # The reverse.
+        code, output = self.launch("--dry-run")
+        self.assertEqual(code, 1, output)
+        self.assertIn(f"{self.root} has 2.0 % of its inodes free", output)
+        self.assertNotIn(f"{self.repo} has", output)
+
+    def test_healthy_readings_a_filesystem_without_inode_counts_and_a_lowered_floor_pass(self):
+        from .checks import disk_refusal
+        for readings in ({}, {"run": disk_reading(files=0, inodes_pct=0)}):
+            self.readings = readings
+            code, output = self.launch("--dry-run")
+            self.assertEqual(code, 0, output)
+        self.readings = {"run": disk_reading(mb=1024)}
+        with patch.dict(os.environ, {"WORKFLOW_DISK_FLOOR_MB": "512"}):
+            code, output = self.launch("--dry-run")
+            self.assertEqual(code, 0, output)
+        with patch.dict(os.environ, {"WORKFLOW_DISK_FLOOR_MB": "0", "WORKFLOW_INODE_FLOOR_PCT": "0"}), \
+                patch("workflow.checks.os.statvfs", side_effect=AssertionError("no floor, no reading")):
+            self.assertIsNone(disk_refusal([self.runs, self.repo]))
+
+    def test_a_floor_that_is_not_a_number_is_refused_naming_its_variable(self):
+        for name in ("WORKFLOW_DISK_FLOOR_MB", "WORKFLOW_INODE_FLOOR_PCT"):
+            with self.subTest(name), patch.dict(os.environ, {name: "abc"}):
+                code, output = self.launch("--dry-run")
+                self.assertEqual(code, 1, output)
+                self.assertIn(f"{name} must be a number", output)
+                code, output = self.preflight()
+                self.assertEqual(code, 1, output)
+                self.assertIn(f"{name} must be a number", output)
+        self.assert_nothing_created()

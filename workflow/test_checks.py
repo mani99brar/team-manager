@@ -23,6 +23,24 @@ UNIT = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
 
 
+class CheckEnvironmentTests(unittest.TestCase):
+    def test_a_check_imports_distutils_from_the_controllers_venv(self):
+        # node-gyp's `import distutils` on Python 3.12 needs setuptools in the venv the checks' PATH starts with. This runs
+        # under the venv built from workflow/requirements.lock and fails, never skips, when the lock lacks setuptools.
+        with tempfile.TemporaryDirectory() as temp:
+            env, _ = checks.verification_environment(Path(temp), "worker")
+            self.assertTrue(env["PATH"].startswith(str(Path(sys.executable).parent) + ":"))
+            self.assertEqual((env["XDG_CACHE_HOME"], env["npm_config_cache"]), (f"{temp}/xdg_cache_home", f"{temp}/npm_config_cache"))
+            result = subprocess.run(["python3", "-c", "from distutils.version import StrictVersion"], env=env, cwd=temp,
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_lock_pins_setuptools_and_the_requirements_list_it(self):
+        folder = Path(checks.__file__).resolve().parent
+        self.assertRegex((folder / "requirements.lock").read_text(), r"(?m)^setuptools==\d")
+        self.assertRegex((folder / "requirements.txt").read_text(), r"(?m)^setuptools>=")
+
+
 class FileCaptureTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

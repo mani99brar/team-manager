@@ -171,9 +171,29 @@ class Config(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "panels needs version 2.6.0"):
             panel.declared({"version": "2.5.0", "panels": [FEATURE_PANEL]})
         [item] = panel.declared({"version": "2.6.0", "panels": [{"id": "p", "stage": "review", "providers": [{"transport": "claude"}], "prompt": "builtin:review", "report_only": True}]})
-        self.assertEqual((item["budget_usd"], item["timeout_minutes"], item["overlap_threshold"], item["requirements"]), (5, 15, 2, []))
+        self.assertEqual((item["budget_usd"], item["timeout_minutes"], item["overlap_threshold"], item["requirements"]), (25, 15, 2, []))
         self.assertEqual(item["providers"], [{"transport": "claude", "model": None, "effort": None}])
         self.assertIsNone(panel.declared({"version": "2.6.0"}))
+
+    def test_a_panel_with_a_claude_provider_defaults_to_a_budget_of_25_per_claude_call(self):
+        def resolved(providers, **over):
+            [item] = panel.declared({"version": "2.6.0", "panels": [{"id": "p", "stage": "review", "providers": providers, "prompt": "builtin:review",
+                                                                     "report_only": True, **over}]})
+            return item
+        claude, pi = {"transport": "claude"}, {"transport": "pi", "model": "openai-codex/gpt-6-sol"}
+        self.assertEqual(resolved([claude])["budget_usd"], 25)
+        self.assertEqual(resolved([pi])["budget_usd"], 5)
+        mixed = resolved([claude, pi])
+        self.assertEqual(mixed["budget_usd"], 25)
+        self.assertEqual(resolved([claude], budget_usd=7)["budget_usd"], 7)
+        self.assertEqual(resolved([pi], budget_usd=7)["budget_usd"], 7)
+        for value in (0.4, 51):
+            with self.assertRaisesRegex(ValueError, "budget_usd must be a number from 0.5 to 50"):
+                resolved([claude], budget_usd=value)
+        with tempfile.TemporaryDirectory() as temp:
+            command = panel.claude_command("claude", "sid-1", mixed["providers"][0], mixed, Path(temp), {})
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "25")
+        self.assertFalse(any("budget" in part for part in panel.pi_command("/nvm/bin", mixed["providers"][1], "brief")))
 
     def test_each_refusal_names_its_key(self):
         def refused(pattern, **over):
@@ -474,8 +494,10 @@ time.sleep(spec.get("delay", 0))
 if spec.get("not_json"):
     sys.stdout.write("this is not json\n")
     sys.exit(0)
-result = {"session_id": argv[argv.index("--session-id") + 1], "is_error": bool(spec.get("is_error", False)), "subtype": "success",
+result = {"session_id": argv[argv.index("--session-id") + 1], "is_error": bool(spec.get("is_error", False)), "subtype": spec.get("subtype", "success"),
           "total_cost_usd": spec.get("cost", 0.021), "structured_output": {"findings": spec.get("findings", [])}}
+if spec.get("no_cost"):
+    del result["total_cost_usd"]
 sys.stdout.write(json.dumps(result) + "\n")
 sys.exit(int(spec.get("exit", 0)))
 '''
@@ -690,6 +712,36 @@ class ReviewStep(Harness):
         self.assertFalse((self.run / "panel" / "review-panel" / "claude-2.stdout.json").exists())
         panel.collect(again, None)
         self.assertEqual(self.record()["panels"][0]["status"], "succeeded")
+
+    def test_a_claude_call_out_of_budget_names_the_budget_what_it_spent_and_where_to_raise_it(self):
+        for spec, spent in (({"cost": 25.31}, "spent 25.31 USD"), ({"no_cost": True}, "spent amount unavailable")):
+            with self.subTest(spent=spent):
+                shutil.rmtree(self.run / "panel", ignore_errors=True)
+                (self.run / "panel.json").unlink(missing_ok=True)
+                (self.run / "review.json").unlink(missing_ok=True)
+                self.set_control(claude={"subtype": "error_max_budget_usd", "is_error": True, "exit": 1, **spec}, pi={"findings": []})
+                plan = self.plan(budget_usd=25)
+                runtime = self.runtime(plan)
+                panel.ensure_started(runtime)
+                self.decide()
+                panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
+                claude, pi = self.record()["panels"][0]["providers"]
+                self.assertEqual(claude["status"], "error")
+                self.assertIn("error_max_budget_usd", claude["error"])
+                self.assertIn(f"the call reached budget_usd 25 ({spent}): raise budget_usd in the panel entry \"review-panel\" of "
+                              "feature.json panels (maximum 50)", claude["error"])
+                self.assertEqual(pi["status"], "ok")
+                self.assertEqual(read_json(self.claude_seen)["argv"][read_json(self.claude_seen)["argv"].index("--max-budget-usd") + 1], "25")
+        # Any other claude failure keeps its message without the budget note.
+        shutil.rmtree(self.run / "panel", ignore_errors=True)
+        for name in ("panel.json", "review.json"):
+            (self.run / name).unlink(missing_ok=True)
+        self.set_control(claude={"is_error": True, "exit": 1}, pi={"findings": []})
+        runtime = self.runtime(self.plan(budget_usd=25))
+        panel.ensure_started(runtime)
+        self.decide()
+        panel.collect(runtime, None, sleep=lambda _: time.sleep(0.05))
+        self.assertNotIn("budget_usd", self.record()["panels"][0]["providers"][0]["error"])
 
     def test_a_follow_up_panel_reads_the_delta_since_the_followed_candidate_over_the_owned_paths(self):
         self.set_control(claude={"findings": []}, pi={"findings": []})

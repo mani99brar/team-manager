@@ -16,6 +16,8 @@ The label is cooperative: nothing checks it. The actor goes into the event text,
 repair journal and the note file, never into challenge.json, whose schema is closed. When CLAUDECODE=1 the command ran
 from a Claude Code session, and the text says so; that is evidence, never a refusal, since the operator also runs commands
 through Claude Code's `!` prefix.
+
+RUNBOOK "Who acted: --by and notes".
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ import os
 ACTORS = ("operator", "maintainer", "panel")
 # The operator's decisions: refused for --by maintainer whatever the run's state.
 OPERATOR_ONLY = frozenset({"answer", "accept-challenge", "resume --launch", "repair", "approve", "launch", "abandon", "clean", "tryout",
-                           "--allow-untried", "attack-pass", "attack-label", "accept"})
+                           "--allow-untried", "attack-pass", "attack-label", "accept", "relaunch"})
 # The only actions the panel may run: the three operator decisions it takes within the night's goals ([G2], [G4]).
 PANEL_ACTIONS = frozenset({"answer", "accept-challenge", "approve"})
 # What every printed next-step command carries: they are addressed to the operator.

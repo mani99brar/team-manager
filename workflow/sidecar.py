@@ -12,6 +12,8 @@ An independent senior-engineering reviewer beside the workers of a run, never a 
   question, already got one this pass or reached `max_messages_per_lane`, and after freeze; typed (`[Review sidecar
   S-n] <text>`, then Enter) only while the lane's row is `working` or `idle`, its pane shows `claude attach <id>` and
   the Claude Code input line is empty. The merged ledger with the messages `pending` is written before anything is typed.
+  After Enter the pane is read back: a text Enter did not submit gets one more Enter, then is `undeliverable`/`pane_busy`
+  with a `pane` attention record (RUNBOOK "Review sidecar").
 - In automatic mode `automatic.wait_handoffs` schedules the passes (Scheduler): on a cadence, at once when a lane
   writes a `completed` completion, and a final pass once every lane's completion is accepted, each a polled child.
   Manual runs use `python -m workflow sidecar-pass <run> [--final]`.
@@ -689,16 +691,48 @@ def typed_text(message: dict) -> str:
 
 
 def deliver_one(runtime, message: dict, herdr: Herdr) -> tuple[str, str | None]:
-    """(status, reason) of one pending message; typed only after a fresh gate (PRD 4.5). Exceptions are the caller's."""
-    return deliver_text(runtime, message["lane"], typed_text(message), herdr)
+    """(status, reason) of one pending message; typed only after a fresh gate (PRD 4.5). Exceptions are the caller's. A
+    message Enter did not submit is also one `interactive` event on the sidecar node."""
+    return deliver_text(runtime, message["lane"], typed_text(message), herdr,
+                        on_unsubmitted=lambda text: runtime.event(SIDECAR, "interactive", text))
 
 
-def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None) -> tuple[str, str | None]:
+# The readback after each Enter (RUNBOOK "Review sidecar"): the pane is read READBACK_READS times, READBACK_INTERVAL
+# seconds apart (about 2 s), until its input line no longer holds the typed text.
+READBACK_READS = 5
+READBACK_INTERVAL = 0.5
+
+
+def readback_sleep(seconds: float) -> None:
+    """The pause between two readbacks; tests replace it."""
+    time.sleep(seconds)
+
+
+def unsubmitted_text(lane: str) -> str:
+    """The event and `pane` attention text of a message that two Enters left in the lane's input line."""
+    return f"Enter did not submit the message; the text is still in {lane}'s input; clear it in the pane."
+
+
+def submitted(herdr: Herdr, pane: str, text: str) -> bool:
+    """Whether the pane's input line stopped holding `text`, read up to READBACK_READS times about 2 s apart."""
+    for read in range(READBACK_READS):
+        if read:
+            readback_sleep(READBACK_INTERVAL)
+        if input_shown(herdr.call("pane", "read", pane, "--source", "visible", text=True), text) is not None:
+            return True
+    return False
+
+
+def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None, on_unsubmitted=None) -> tuple[str, str | None]:
     """(status, reason) of typing `text` into `lane`'s pane, then Enter, behind the sidecar's gate: `refused` for a run
     after freeze, a lane not launched, a lane that went on and a lane waiting on a question; `undeliverable` without
     Herdr, without a pane, while the lane's row is not `working` or `idle`, while the pane is not attached to the lane's
     session, and while its input line is not empty. A sidecar message (deliver_one) and an operator's note
-    (`workflow note`) both pass it. `text` is typed as given. Exceptions are the caller's."""
+    (`workflow note`) both pass it. `text` is typed as given. Exceptions are the caller's.
+
+    The refusals are checked again just before the text is typed, so a lane that went on meanwhile gets nothing. After Enter
+    the pane is read back (submitted); a text still in the input line gets one more Enter, and a text still there after it is
+    `undeliverable`/`pane_busy` with a `pane` attention record on the lane, and `on_unsubmitted(text)` when given."""
     directory, plan = runtime.directory, runtime.plan
     herdr = herdr or Herdr(directory)
     reason = refusal(directory, plan, lane)
@@ -721,9 +755,19 @@ def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None) -> t
         return "undeliverable", "pane_not_attached"
     if input_shown(herdr.call("pane", "read", pane, "--source", "visible", text=True), ""):
         return "undeliverable", "pane_busy"  # A dialog replaced the input line, or the operator has a draft typed.
+    reason = refusal(directory, plan, lane)  # Again, just before typing: the lane may have gone on during the checks above.
+    if reason:
+        return "refused", reason
     herdr.call("pane", "send-text", pane, text)
-    herdr.call("pane", "send-keys", pane, "Enter")
-    return "delivered", None
+    for _ in range(2):
+        herdr.call("pane", "send-keys", pane, "Enter")
+        if submitted(herdr, pane, text):
+            return "delivered", None
+    unsubmitted = unsubmitted_text(lane)
+    attention(directory, "pane", unsubmitted, node=lane)
+    if on_unsubmitted is not None:
+        on_unsubmitted(unsubmitted)
+    return "undeliverable", "pane_busy"  # The closed reason enum's nearest value: a draft is in the input line.
 
 
 def failure_reason(error: BaseException) -> str:

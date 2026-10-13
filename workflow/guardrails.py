@@ -32,6 +32,8 @@
 
 2.0.0 and 2.1.0 features, and every run prepared before this slice, carry none of the plan keys read here and
 behave exactly as before.
+
+Procedures: RUNBOOK "Guardrails (feature.json 2.2.0)" (a challenge rerun re-exports run-state.json once re-pinned) and "Follow-up runs" (the empty-restore refusal).
 """
 from __future__ import annotations
 
@@ -281,6 +283,19 @@ def check_restore(automatic: bool, lanes: list[str]) -> None:
         raise ValueError("--restore-from needs --automatic: a manual worker has no shell to run its git restore command")
     if RESTORE_REF in lanes:
         raise ValueError(f"--restore-from needs the ref name {RESTORE_REF}, which a lane of this run takes; rename the lane")
+
+
+def refuse_empty_restore(repo: Path, restore: str, policy: dict, lanes: list[str], base: str = "HEAD") -> None:
+    """launch (its dry run included) and prepare refuse a `--restore-from` commit equal to the base over the selected lanes'
+    owned paths, before the run directory exists: the run would review an empty diff (RUNBOOK "Follow-up runs")."""
+    paths = [safe_path(prefix) for worker in policy["workers"] if worker["node_id"] in lanes for prefix in worker["owned_paths"]]
+    result = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv", base, restore, "--", *paths],
+                            capture_output=True, text=True)
+    if result.returncode == 0:
+        raise ValueError(f"--restore-from {restore} equals the base over the lanes' owned paths: the run would review an empty diff. "
+                         "Launch from the followed run's candidate (`git worktree add -b <branch> <dir> <candidate>`; `launch --repo <dir>`)")
+    if result.returncode != 1:
+        raise ValueError(f"Could not compare --restore-from {restore} with the base: {result.stderr.strip()}")
 
 
 def restore_ref(directory: Path) -> str:
@@ -1346,7 +1361,7 @@ def launched_workers(directory: Path, plan: dict) -> list[str]:
 
 
 def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = False, actor: str = "operator", launch: bool = False,
-                     dropped: frozenset[int] = frozenset()) -> dict:
+                     dropped: frozenset[int] = frozenset(), export=None) -> dict:
     """`resume`: rerun the challenge on the re-pinned feature files as the next attempt, or record `accepted` with a reason.
 
     Only before any worker launch. Edited feature files are committed on the run's branch first and the run moves to
@@ -1361,6 +1376,9 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     release (`dropped` are the note numbers left out of the workers' prompts) and returns it; with edits it reruns as after a
     pause, and a pass is released at once. A plain resume with edits reruns and the gate holds the pass again; with none, and
     an override, it is refused naming both commands. `launch` needs a plan that holds; `dropped` needs `launch` (resume_main).
+
+    `export`, when given, is called once the rerun is re-pinned and before its job runs, so run-state.json names the new base
+    and shows the challenge running while the job runs (RUNBOOK "Guardrails": the challenge rerun).
     """
     from .pipeline import action_event
     directory, plan = runtime.directory, runtime.plan
@@ -1424,6 +1442,8 @@ def resume_challenge(runtime, accept_reason: str | None = None, herdr: bool = Fa
     (directory / REVISION_INTENT).unlink()
     action_event(runtime.event, actor, "resume", f"rerunning the design challenge as attempt {attempt}")
     runtime.event(CHALLENGE, "running", f"Feature files re-pinned for design challenge attempt {attempt} on base {plan['base_commit']}")
+    if export is not None:
+        export()
     record = run_challenge(runtime, attempt, herdr, released=launch)
     if launch and record["status"] == "passed" and hold_pinned(plan):
         release_hold(runtime, record, actor, frozenset(), held=False)  # The operator asked for the launch before this attempt passed.
@@ -1774,7 +1794,8 @@ def resume_main(argv=None):
                                   (directory / "plan.json", directory / "challenge.json", directory / "challenge.running.json"))
             before = moved()
             try:
-                record = resume_challenge(runtime, args.accept_challenge, args.herdr, actor, args.launch, dropped)
+                record = resume_challenge(runtime, args.accept_challenge, args.herdr, actor, args.launch, dropped,
+                                          export=lambda: export(Pipeline(directory)))
             except BaseException:
                 # A rerun that failed after its re-pin has moved the base and the files: the viewer refuses an export
                 # whose base is not plan.json's, and shows the failed attempt's event. A refusal that changed nothing

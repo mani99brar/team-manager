@@ -1,3 +1,5 @@
 langgraph>=1.0,<2
 langgraph-checkpoint-sqlite>=3,<4
 jsonschema>=4.23,<5
+# node-gyp in a target's setup imports distutils, which Python 3.12 dropped; setuptools restores it on the checks' PATH.
+setuptools>=84,<90

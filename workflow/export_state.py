@@ -620,7 +620,10 @@ def export_state(runtime, state) -> dict:
     path = runtime.directory / "run-state.json"
     previous = read_json(path) if path.exists() else None
     events = read_events(runtime.directory)
-    tasks = [{"node_id": task.name, "error": str(task.error) if task.error else None,
+    # A task's error is exported only while the task is pending (in `next`), the controller's own rule: a verified step keeps
+    # no stale error from an earlier attempt (RUNBOOK "Status, failures and recovery").
+    pending = set(state.next)
+    tasks = [{"node_id": task.name, "error": str(task.error) if task.error and task.name in pending else None,
               "interrupts": [item.value for item in task.interrupts],
               "result": getattr(task, "result", None)} for task in state.tasks]
     created = runtime.plan.get("created_at") or utc((runtime.directory / "plan.json").stat().st_mtime)

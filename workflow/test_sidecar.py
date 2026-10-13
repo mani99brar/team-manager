@@ -117,11 +117,13 @@ def kill_quietly(pid: int) -> None:
 class FakeHerdr:
     """`herdr` as subprocess.run sees it: process-info shows each lane's pane attached to its session, `pane read` an empty
     Claude Code input line unless a screen is set, and `fail` maps a verb (read, send-text, ...), or a verb and a pane
-    (`read pane-ui`), to the error it raises; `fail_after` maps such a key to (n, error): the first n matching calls succeed."""
+    (`read pane-ui`), to the error it raises; `fail_after` maps such a key to (n, error): the first n matching calls succeed.
+    `reads` maps a pane to the screens its next reads return, in order, before `screens` applies again; a callable entry is
+    called and its return is the screen."""
 
     def __init__(self, root: Path, background=lambda lane: f"bg-{lane}"):
         self.root, self.background = root, background
-        self.calls, self.screens, self.processes, self.fail, self.fail_after = [], {}, {}, {}, {}
+        self.calls, self.screens, self.processes, self.fail, self.fail_after, self.reads = [], {}, {}, {}, {}, {}
 
     def run(self, command, *args, **kwargs):
         if command[:1] != ["herdr"]:
@@ -141,6 +143,9 @@ class FakeHerdr:
         if verb == "process-info":
             return subprocess.CompletedProcess(command, 0, json.dumps(self.processes.get(pane) or attached_pane(pane, self.root, lane, self.background(lane))), "")
         if verb == "read":
+            if self.reads.get(pane):
+                screen = self.reads[pane].pop(0)
+                return subprocess.CompletedProcess(command, 0, screen() if callable(screen) else screen, "")
             return subprocess.CompletedProcess(command, 0, self.screens.get(pane, claude_screen()), "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -620,13 +625,63 @@ class Messages(SidecarRun):
             self.assertNotIn("send-keys", self.herdr.verbs())
         return recorded
 
+    def readback(self, *screens):
+        """The pass's capture and the gate read an empty input line; the reads after the paste return `screens`, then the
+        default screen."""
+        environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.herdr.reads["pane-ui"] = [claude_screen(), claude_screen(), *screens]
+        self.sleeps = []
+        sleep = patch("workflow.sidecar.readback_sleep", side_effect=self.sleeps.append)
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def typed_screen(self):
+        return claude_screen("[Review sidecar S-1] Please fix the ui text. It is wrong.")
+
+    def test_a_swallowed_enter_gets_exactly_one_more(self):
+        self.readback(*[self.typed_screen()] * sidecar.READBACK_READS)
+        self.assert_outcome("delivered", None, typed=True)
+        self.assertEqual([command[-1] for command in self.herdr.calls if command[2] == "send-keys"], ["Enter", "Enter"])
+        self.assertEqual(self.sleeps, [sidecar.READBACK_INTERVAL] * (sidecar.READBACK_READS - 1))  # About 2 s after the first Enter.
+        self.assertFalse((self.directory / "attention.json").exists())
+
+    def test_an_input_that_clears_on_the_second_read_needs_no_extra_enter(self):
+        self.readback(self.typed_screen())
+        self.assert_outcome("delivered", None, typed=True)
+        self.assertEqual(self.herdr.verbs().count("send-keys"), 1)
+        self.assertEqual(self.sleeps, [sidecar.READBACK_INTERVAL])
+
+    def test_a_text_two_enters_left_in_the_input_is_undeliverable_with_a_pane_record(self):
+        self.readback()
+        self.herdr.screens["pane-ui"] = self.typed_screen()
+        recorded = self.assert_outcome("undeliverable", "pane_busy", typed=True)
+        self.assertEqual(self.herdr.verbs().count("send-keys"), 2)
+        self.assertEqual(len(self.herdr.typed()), 1)
+        text = "Enter did not submit the message; the text is still in ui's input; clear it in the pane."
+        self.assertIn(("interactive", text), self.sidecar_events())
+        states = read_json(self.directory / "attention.json")["states"]
+        self.assertIn({"kind": "pane", "node": "ui", "text": text}, [{key: state[key] for key in ("kind", "node", "text")} for state in states])
+        self.assertEqual(recorded["status"], "undeliverable")
+        validate_schema("sidecar", self.ledger())
+
+    def test_a_lane_that_went_on_after_the_gate_read_gets_nothing_typed(self):
+        def completes():
+            self.completion("ui")
+            return claude_screen()
+        self.readback()
+        self.herdr.reads["pane-ui"] = [claude_screen(), completes]
+        self.assert_outcome("refused", "lane_finished")
+        self.assertNotIn("send-text", self.herdr.verbs())
+
     def test_messages_are_typed_only_through_the_gate_and_refused_or_undeliverable_otherwise(self):
         """Scenario messages."""
         # Delivered to a working lane, and to an idle one: the prefix with the resolved id, newlines flattened, then Enter.
         recorded = self.assert_outcome("delivered", None, typed=True)
         self.assertEqual(self.herdr.typed(), [f"[Review sidecar {recorded['finding_ids'][0]}] Please fix the ui text. It is wrong."])
-        self.assertEqual(self.herdr.verbs()[-2:], ["send-text", "send-keys"])
-        self.assertEqual(self.herdr.calls[-1][-1], "Enter")
+        self.assertEqual(self.herdr.verbs()[-3:], ["send-text", "send-keys", "read"])  # Enter, then the readback.
+        self.assertEqual(self.herdr.calls[-2][-1], "Enter")
         self.assertEqual(recorded["finding_ids"], ["S-1"])
         self.states["ui"] = "idle"
         self.assert_outcome("delivered", None, typed=True)
@@ -1120,6 +1175,7 @@ class Scheduling(SidecarRun):
         self.now = 1400.0  # Inside the pass timeout, and a lane completed: nothing starts while the pass runs.
         for _ in range(3):
             scheduler.tick([], {"ui": {}}, False)
+        self.wait_logged(1)  # The pass's own job logs its call however loaded the host; then no second one may follow.
         time.sleep(0.2)
         self.assertEqual(len(self.job_calls()), 1)
         release.write_text("")
@@ -1235,7 +1291,7 @@ class Scheduling(SidecarRun):
         self.inventories = 0
         self.run_pass()
         self.assertEqual(self.inventories, 3)  # One for the inputs, one per message.
-        self.assertEqual(self.herdr.verbs().count("read"), 4)  # One capture per lane, one gate read per message.
+        self.assertEqual(self.herdr.verbs().count("read"), 6)  # One capture per lane, one gate read and one readback per message.
         self.assertEqual(self.herdr.verbs().count("process-info"), 2)
         self.assertEqual([item["status"] for item in self.ledger()["messages"]], ["delivered", "delivered"])
 
@@ -1740,7 +1796,7 @@ class Notes(SidecarRun):
         with patch.dict(os.environ, {"CLAUDECODE": "1"}):
             entry = self.note("Keep the old\nlabel.")
         self.assertEqual(self.herdr.typed(), ["[Note from the operator N-1] Keep the old label."])
-        self.assertEqual(self.herdr.verbs()[-2:], ["send-text", "send-keys"])
+        self.assertEqual(self.herdr.verbs()[-3:], ["send-text", "send-keys", "read"])
         self.assertEqual(self.notes(), [{"n": 1, "id": "N-1", "author": "operator", "via": "claude-code", "text": "Keep the old\nlabel.",
                                          "sent_at": iso(self.now), "delivery": "delivered", "reason": None}])
         self.assertEqual(entry, self.notes()[0])
@@ -1787,7 +1843,10 @@ class Notes(SidecarRun):
         message = {"id": "M-1", "lane": "ui", "finding_ids": ["S-1"], "text": "Fix\nit."}
         with patch("workflow.sidecar.deliver_text", return_value=("delivered", None)) as deliver:
             self.assertEqual(sidecar.deliver_one(self.runtime, message, self.herdr), ("delivered", None))
-        deliver.assert_called_once_with(self.runtime, "ui", "[Review sidecar S-1] Fix it.", self.herdr)
+        [call] = deliver.call_args_list
+        self.assertEqual(call.args, (self.runtime, "ui", "[Review sidecar S-1] Fix it.", self.herdr))
+        call.kwargs["on_unsubmitted"]("Enter did not submit the message")
+        self.assertEqual(self.events[-1], ("sidecar", "interactive", "Enter did not submit the message"))
 
     def test_the_note_command_records_and_types_it_and_exits_1_when_it_was_not_typed(self):
         from .notes import note_main

@@ -1,4 +1,7 @@
-"""Local, isolated check execution and artifact capture. Never launches agents."""
+"""Local, isolated check execution and artifact capture. Never launches agents.
+
+RUNBOOK "Verification policy and evidence" and §1: every setup and check command runs with one environment
+(verification_environment), the controller's interpreter first on PATH."""
 from __future__ import annotations
 
 import hashlib
@@ -440,17 +443,7 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     # Captured before any check runs, so a check that rewrites a file cannot change what is recorded; the
     # post-check cleanliness rule below invalidates the evidence if one does. The candidate phase captures nothing.
     files_not_captured = capture_changed_files(worktree, changed, capture) if phase == "worker" else None
-    env, dropped = check_environment(os.environ)
-    # Share installed browser executables read-only, not profiles or test caches.
-    if sys.platform == "linux":
-        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright"))
-    env.update(PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
-               PYTHONDONTWRITEBYTECODE="1", NO_COLOR="1", FORCE_COLOR="0", CI="1",
-               WORKFLOW_VERIFICATION_PHASE=phase)
-    for name in ("XDG_CACHE_HOME", "npm_config_cache"):
-        path = directory / name.lower()
-        path.mkdir()
-        env[name] = str(path)
+    env, dropped = verification_environment(directory, phase)
     # Unix domain sockets (tsx IPC, Chromium) are limited to ~107 bytes of path, so the
     # lane's TMPDIR cannot live under the run directory. It is private to this lane,
     # holds no evidence, and is removed once the checks finish.
@@ -532,6 +525,25 @@ def check_environment(environ) -> tuple[dict, list[str]]:
 
 SOCKET_PATH_LIMIT = 107  # sun_path on Linux, excluding the terminating NUL.
 SOCKET_NAME_ALLOWANCE = len("/tsx-4294967295/4294967295.pipe")
+
+
+def verification_environment(cache_root: Path, phase: str, environ=None) -> tuple[dict, list[str]]:
+    """The environment every setup and check command runs with (verify_revision, and preflight --setup), and the secret-like
+    names check_environment dropped. The controller's interpreter directory comes first on PATH, so its venv's setuptools
+    serves node-gyp's `import distutils` on Python 3.12 (RUNBOOK §1). Fresh `XDG_CACHE_HOME` and `npm_config_cache` are
+    created under `cache_root`, which must exist and hold neither yet; the caller sets TMPDIR (lane_tmpdir)."""
+    env, dropped = check_environment(os.environ if environ is None else environ)
+    # Share installed browser executables read-only, not profiles or test caches.
+    if sys.platform == "linux":
+        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "ms-playwright"))
+    env.update(PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
+               PYTHONDONTWRITEBYTECODE="1", NO_COLOR="1", FORCE_COLOR="0", CI="1",
+               WORKFLOW_VERIFICATION_PHASE=phase)
+    for name in ("XDG_CACHE_HOME", "npm_config_cache"):
+        path = cache_root / name.lower()
+        path.mkdir()
+        env[name] = str(path)
+    return env, dropped
 
 
 def lane_tmpdir() -> Path:
@@ -761,3 +773,110 @@ def check_report_main(argv=None):
         print("Blocked: the verifier would refuse this report for the reasons above")
         sys.exit(1)
     print("The scenarios in this report follow the verifier's rules")
+
+
+# ---- The disk and inode floor (RUNBOOK §2 and "Status, failures and recovery") ----------------------------------------
+
+DISK_FLOOR_MB = 5120
+INODE_FLOOR_PCT = 5
+DISK_FLOOR_ENV = "WORKFLOW_DISK_FLOOR_MB"
+INODE_FLOOR_ENV = "WORKFLOW_INODE_FLOOR_PCT"
+
+
+def disk_floors(environ=None) -> tuple[float, float]:
+    """(MB, % inodes) a run needs free: DISK_FLOOR_MB and INODE_FLOOR_PCT, or WORKFLOW_DISK_FLOOR_MB and
+    WORKFLOW_INODE_FLOOR_PCT when set; 0 disables that floor. A value that is not a non-negative number is refused, naming
+    the variable."""
+    environ = os.environ if environ is None else environ
+    floors = []
+    for name, default in ((DISK_FLOOR_ENV, DISK_FLOOR_MB), (INODE_FLOOR_ENV, INODE_FLOOR_PCT)):
+        raw = environ.get(name, "").strip()
+        try:
+            value = float(raw) if raw else float(default)
+        except ValueError:
+            value = -1.0
+        if not value >= 0 or value == float("inf"):
+            raise ValueError(f"{name} must be a number of {'MB' if name == DISK_FLOOR_ENV else 'percent'} (0 disables that floor), got {raw!r}")
+        floors.append(value)
+    return floors[0], floors[1]
+
+
+def nearest_existing(path: Path) -> Path:
+    """`path`, or its nearest ancestor that exists: what statvfs can read for a run directory not created yet."""
+    path = Path(path).absolute()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    return path
+
+
+def disk_free(path: Path) -> tuple[float, float | None]:
+    """(MB free to an unprivileged user, % of inodes free or None on a filesystem that reports no inode count) at `path`."""
+    stat = os.statvfs(path)
+    inodes = 100.0 * stat.f_favail / stat.f_files if stat.f_files else None
+    return stat.f_bavail * stat.f_frsize / (1024 * 1024), inodes
+
+
+def disk_shortfalls(paths, environ=None) -> list[str]:
+    """Each floor `paths` (the run root, the repository) fail, with the measured value; empty when every floor holds."""
+    mb_floor, inode_floor = disk_floors(environ)
+    if not mb_floor and not inode_floor:
+        return []
+    shortfalls = []
+    for path in dict.fromkeys(nearest_existing(path) for path in paths):
+        free, inodes = disk_free(path)
+        if mb_floor and free < mb_floor:
+            shortfalls.append(f"{path} has {free:.0f} MB of free space, under the {mb_floor:g} MB floor ({DISK_FLOOR_ENV})")
+        if inode_floor and inodes is not None and inodes < inode_floor:
+            shortfalls.append(f"{path} has {inodes:.1f} % of its inodes free, under the {inode_floor:g} % floor ({INODE_FLOOR_ENV})")
+    return shortfalls
+
+
+def disk_refusal(paths, environ=None) -> str | None:
+    """Preflight's and launch's refusal when a floor fails (disk_shortfalls), naming each and how to free space; None when they hold."""
+    shortfalls = disk_shortfalls(paths, environ)
+    if not shortfalls:
+        return None
+    return (f"Not enough free disk for a run: {'; '.join(shortfalls)}. Check with df -h and df -i, then free space (for example "
+            f"python -m workflow clean \"$RUN\" --by operator on a finished or abandoned run) and launch again; {DISK_FLOOR_ENV} and "
+            f"{INODE_FLOOR_ENV} set the floors (0 disables one)")
+
+
+# ---- preflight --setup (RUNBOOK §2) -----------------------------------------------------------------------------------
+
+def preflight_setup(repository: Path, policy: dict, clock=None) -> str:
+    """`preflight --setup`: the policy's setup commands, once, in order, each with its timeout and verify_revision's own
+    environment (verification_environment, a fresh TMPDIR), in a throwaway detached worktree of the repository's HEAD under
+    the system temp directory, outside any run directory. `setup: passed (<seconds> s)`, or `setup: none` for a policy
+    without setup; the first failure raises ValueError naming `setup <index>`, its argv, its exit code and the last 20 lines
+    of its log. The worktree and every temporary directory are removed in a `finally`, a Ctrl-C included. The worktree add
+    and remove take the worktree lock themselves (git_worktree, remove_worktree); setup runs outside it."""
+    import time
+    clock = clock or time.monotonic
+    setup = policy.get("setup", [])
+    if not setup:
+        return "setup: none"
+    root = Path(tempfile.mkdtemp(prefix="mdwf-setup-"))
+    worktree, tmpdir = root / "worktree", None
+    try:
+        git_worktree(repository, "add", "--detach", str(worktree), "HEAD")
+        (root / "caches").mkdir()
+        env, _ = verification_environment(root / "caches", "worker")
+        tmpdir = lane_tmpdir()
+        env["TMPDIR"] = str(tmpdir)
+        started = clock()
+        for index, item in enumerate(setup):
+            log = root / f"setup-{index}.log"
+            code, _, _ = execute(item["argv"], worktree, log, item["timeout_seconds"], env)
+            if code != 0:
+                tail = log.read_text(errors="replace").splitlines()[-MEMORY_TAIL_LINES:]
+                raise ValueError(f"setup {index} failed: {shlex.join(item['argv'])} exited {code}. Last {MEMORY_TAIL_LINES} lines of its log:\n"
+                                 + "\n".join(tail))
+        return f"setup: passed ({clock() - started:.0f} s)"
+    finally:
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        try:
+            if worktree.exists() or registered_worktree(repository, worktree):
+                remove_worktree(repository, worktree)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
