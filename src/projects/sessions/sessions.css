@@ -1,9 +1,11 @@
 /* Run-sessions views (docs/VIEWER_SIGNAL_BOX.md "Sessions"). Signal Box tokens only; colour is reserved for state words.
+   Sizes and corners stay on DESIGN.md's ramp and set (tests/unit/sessionsStyle.test.ts): body 15, body dense 13 to 13.5,
+   meta 12.5, word 12, title 15.5, headline 20; card 8 (--radius), control 10, small 4, pill 999.
    Phone-first: one column per session, every link and button at least 44 px tall. */
 
 .ss-section { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--border); }
 .ss-section h3 { margin: 0 0 4px; font-family: var(--font-display); font-size: 20px; line-height: 1.2; }
-.ss-totals { margin: 0 0 18px; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.ss-totals { margin: 0 0 18px; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
 .ss-group { margin-bottom: 22px; }
 .ss-group h4 { margin: 0 0 4px; font-size: 13px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
 .ss-group h4 .ss-dim { margin-left: 4px; font-variant-numeric: tabular-nums; }
@@ -24,7 +26,7 @@
 .ss-block { margin-top: 12px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .ss-blocks .ss-block:first-child { margin-top: 0; }
 .ss-block-title { margin: 0 0 8px; font-size: 15px; }
-.ss-facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 14px; }
+.ss-facts { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 13.5px; }
 .ss-fact { display: contents; }
 .ss-facts dt { color: var(--muted); }
 .ss-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
@@ -32,30 +34,34 @@
 .ss-resume { margin-top: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .ss-resume-label { font-size: 13px; color: var(--muted); }
 .ss-resume-cmd { flex: 1 1 260px; min-width: 0; padding: 8px 10px; font-family: var(--font-mono); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); overflow-wrap: anywhere; user-select: all; }
-.ss-copy { min-height: 44px; min-width: 64px; padding: 0 14px; font: inherit; font-weight: 700; color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); cursor: pointer; }
+.ss-copy { min-height: 44px; min-width: 64px; padding: 0 14px; font: inherit; font-weight: 700; color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; cursor: pointer; }
 .ss-copy:hover { border-color: var(--accent); color: var(--accent); }
 .ss-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ss-resume-note { flex-basis: 100%; font-size: 13px; color: var(--muted); }
 .ss-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* A Sessions row folds its resume command behind a 44 px disclosure; the node page's session block shows it open. */
+.ss-resume-fold > summary { position: relative; box-sizing: border-box; min-height: 44px; padding: 12px 0; line-height: 20px; width: fit-content; font-size: 13px; font-weight: 700; color: var(--accent); cursor: pointer; }
+.ss-resume-fold > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ss-resume-fold .ss-resume { margin-top: 0; }
 
-.ss-h { margin: 18px 0 6px; font-size: 14px; }
-.ss-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 4px; color: var(--muted); font-size: 14px; }
+.ss-h { margin: 18px 0 6px; font-size: 15px; }
+.ss-verdict { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 4px; color: var(--muted); font-size: 13.5px; }
 .ss-word { font-weight: 700; color: var(--fg); }
 .ss-word.tone-ok { color: var(--ok); }
 .ss-word.tone-run { color: var(--run); }
 .ss-word.tone-warn { color: var(--warn); }
 .ss-word.tone-fail { color: var(--fail); }
 .ss-word.tone-idle { color: var(--idle); }
-.ss-verdict .ss-word { font-size: 17px; }
-.ss-earlier li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.ss-verdict .ss-word { font-size: 15.5px; }
+.ss-earlier li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 
 .ss-fix-round { margin: 6px 0; font-size: 15px; }
 .ss-fix-round a { display: inline-flex; align-items: center; min-height: 44px; font-weight: 700; color: var(--accent); text-underline-offset: 3px; }
-.ss-lines li { display: flex; flex-wrap: wrap; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.ss-lines li { display: flex; flex-wrap: wrap; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .ss-k { color: var(--muted); }
 .ss-detail { flex-basis: 100%; display: block; margin-top: 2px; color: var(--muted); font-size: 13.5px; white-space: normal; }
 .ss-error { color: var(--danger-text); }
-.ss-findings li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+.ss-findings li { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
 .ss-loc { display: inline-block; margin-right: 8px; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
 .ss-sev { display: inline-block; min-width: 26px; padding: 1px 6px; border-radius: 4px; font-weight: 700; font-size: 12px; text-align: center; color: var(--sev-fg); }
 .ss-sev-P0 { background: var(--p0); }
@@ -66,10 +72,10 @@
 .ss-decision { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .ss-decision-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin: 0 0 6px; }
 .ss-decision-kind { font-family: var(--font-mono); font-size: 13px; }
-.ss-decision p { margin: 6px 0 0; font-size: 14px; }
+.ss-decision p { margin: 6px 0 0; font-size: 13.5px; }
 .ss-command code { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
 
-.ss-night-count { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 16px 0 0; font-size: 14.5px; }
+.ss-night-count { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 16px 0 0; font-size: 13.5px; }
 .ss-chip-link { display: inline-flex; align-items: center; min-height: 44px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--fg); background: var(--surface); text-decoration: none; font-weight: 700; font-size: 13.5px; }
 .ss-chip-link:hover { border-color: var(--accent); color: var(--accent); }
 .ss-chip-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

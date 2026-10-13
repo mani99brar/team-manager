@@ -4,7 +4,8 @@ import type { ReviewResult, RunDetail } from './api.ts'
 import { CommandBlock } from './CommandBlock.tsx'
 import { attemptWord, type StripItem, type Timing } from './node/model.ts'
 import { AppLink, StatusBadge } from './panels.tsx'
-import { executorCategory, executorOf, STATUS_LABEL } from './status.ts'
+import { nodeExecutor, projectedSucceededMeaning } from './signal/executor.ts'
+import { executorCategory, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
@@ -38,8 +39,9 @@ const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`)
  * "This is not workflow completion". A worker's success links the verification that proves it; a verification that passed
  * after earlier attempts says so, and after which repair.
  */
-function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavigate }: {
+function statusCause({ kind, nodeId, status, attempt, cause, repairs, verifyNode, onNavigate }: {
   kind: DefinitionNode['kind']
+  nodeId: string
   status: NodeStatus | 'no_record'
   attempt: number
   /** The latest status message of the shown attempt, humanized; null when none was recorded. */
@@ -58,6 +60,8 @@ function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavi
     case 'cancelled': return 'This step was cancelled.'
     case 'failed': return `This step failed.${cause ? ` ${sentence(cause)}` : ' The run cannot succeed without intervention.'}`
     case 'succeeded':
+      // A finished reviewer or lane review (run-sessions) points at its verdict, which may be blocked, not "This step completed."
+      if (projectedSucceededMeaning(nodeId)) return projectedSucceededMeaning(nodeId)
       if (kind === 'worker') {
         if (!verifyNode) return 'Session ended its turn. This is not workflow completion; verification, review and integration are separate steps.'
         return <>Session ended its turn. This is not workflow completion — {VERIFY_WORD[verifyNode.status]} <AppLink href={verifyNode.href} onNavigate={onNavigate}>{verifyNode.label} ›</AppLink></>
@@ -181,7 +185,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
         {status === 'no_record'
           ? <span className="status-badge status-cancelled" data-status="no_record" title="Ended without a record: a later attempt replaced it before any verdict."><span>No record</span></span>
           : <StatusBadge status={status} />}
-        <span className="node-executor-line"><span aria-hidden="true">· </span><span data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport, definition.node_id)}</span></span>
+        <span className="node-executor-line"><span aria-hidden="true">· </span><span data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{nodeExecutor(definition.kind, reviewTransport, definition.node_id)}</span></span>
       </div>
       <p className="node-timing" data-testid="node-timing">
         {attempt === 0 ? <span data-testid="node-attempt">{attemptWord(0)}</span> : <>attempt <span data-testid="node-attempt">{attemptWord(attempt)}</span></>}
@@ -189,7 +193,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
         {timing && <TimingText timing={timing} clock={clock} />}
       </p>
       <p className="node-status-meaning" data-testid="node-status-meaning">
-        {meaning ?? statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
+        {meaning ?? statusCause({ kind: definition.kind, nodeId: definition.node_id, status, attempt, cause, repairs, verifyNode, onNavigate })}
       </p>
       {strip.length > 0 && <AttemptStrip items={strip} loaded={loaded} shown={attempt} attemptHref={attemptHref} onNavigate={onNavigate} />}
       {next && (

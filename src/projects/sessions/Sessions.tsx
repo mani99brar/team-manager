@@ -244,12 +244,19 @@ function SessionRowLine({ row, nodeHref, onNavigate }: { row: SessionRow; nodeHr
       <span className="ss-row-meta">
         {items.map(([key, value]) => <span key={key} className="ss-item" data-fact={key}>{value}</span>)}
       </span>
-      <ResumeCommand row={row} />
+      {/* The list folds each resume command behind a 44 px disclosure, so a long run's list stays short on a phone; the
+          session block on the node page shows it open. */}
+      {resumeText(row) && (
+        <details className="ss-resume-fold" data-testid="session-resume-fold">
+          <summary>Resume command<span className="ss-sr"> for {row.label}</span></summary>
+          <ResumeCommand row={row} />
+        </details>
+      )}
     </li>
   )
 }
 
-/** The run page's Sessions section (PRD 3.4): every session in start order grouped by role, both totals, and resume commands. */
+/** The run page's Sessions section (PRD 3.4): every session in start order grouped by role, both totals, and each Claude row's resume command behind a disclosure. */
 export function SessionsSection({ sessions, nodeHref, onNavigate }: { sessions: Sessions; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
   const groups = groupSessions(sessions)
   if (groups.length === 0) return null
