@@ -106,6 +106,8 @@ Drafted by the cook session for the panel grill; each stands unless a grill answ
 
 (design challenge attempt 1 of ux-critique-fixes-001: panel split (GPT accept-challenge, Claude revise; Jev 0.2 below the 0.6 floor), held; decided by the session acting as the operator under the operator goal: revise with Claude bullets, because the 390 px assertion fails for any implementation and its text lives in policy.json, which workers cannot change.)
 
+- [L1]/[L2] note (2026-10-13 13:08): resume re-pins only the task files, decisions.md and the PRD, so the run ux-critique-fixes-001 keeps the triage-pins scenario text pinned in policy.json at prepare (with the 390 px workflow-page clause and '(older than 7 days)'). For this run [L1] and [L2] above override that text: the worker implements and tests the bullets, and a reviewer reads the bullets as the scenario's contract. The cook worktree's policy.json already carries the new text for any follow-up run.
+
 ## Deferred
 
 - **Stage B** (feature `ux-critique-fixes-b`, launched from this stage's integrated sha): M3 run filters, M4 one ordering everywhere, M7 project page features and dated rows, M16 Recent's Today filter, M17 list state in the URL (lane `lists`); M8 graph zoom and dock column, M21 sessions cue and table, M23 Open navigates, M33 identity line, and the run dock's words of M14 (lane `run`). The run-page placement of M20's toggle moves to the `run` lane if stage A's crumb-bar placement is refused.
