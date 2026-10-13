@@ -237,16 +237,16 @@ Each item lists where it lands, the behaviour, and the acceptance tests. "Refuse
   1. `launch_<lane>` is still pending, and the run is neither abandoned nor held by a controller lock.
   2. The receipt is `needs_reconciliation`, or there is none.
   3. The bound or printed session is absent from `claude agents --json`, or listed `stopped`, `failed`, or `done` with no PID. A listing that fails or cannot be parsed proves nothing, so the relaunch is refused.
-  4. The lane worktree is absent, or clean at `plan.base_commit` (HEAD equal, `status --porcelain` empty).
+  4. The lane worktree at `plan.nodes[<lane>].worktree` is present, readable, at `plan.base_commit` (HEAD equal) and clean (`status --porcelain` empty); absent, unreadable, dirty or moved is a refusal ([L10]).
   5. No completion file, handoff or stop record exists for the lane.
 
-  When allowed, it archives the receipt as `<lane>.launch-<n>.receipt.json` and the log as `<lane>.launch-<n>.log`. `n` counts archives from 1, and neither name ends in `.interactive.json` or `.launch.log`. It writes one timeline event naming the actor and the archive, stops nothing, and launches the lane once through the normal launch path. `start` or `automatic --live` then finds every launch bound.
+  When allowed, it archives the receipt as `<lane>.launch-<n>.receipt.json` and the log as `<lane>.launch-<n>.log`. `n` counts archives from 1, and neither name ends in `.interactive.json` or `.launch.log`. It writes one timeline event naming the actor and the archive, stops nothing, and launches the lane once through the normal launch path. The run then continues through the existing "Ambiguous startup" path: `reconcile "$RUN" --by operator`, then `automatic "$RUN" --live`, the two commands relaunch prints last ([L9]).
 
   `--dry-run` prints each condition's verdict and what it would archive and launch, then changes nothing. It exits 0 when allowed; otherwise it exits 1 with the first refusal on its first line. The stage C offer rule keys on this.
 
   Unknown or contradictory evidence refuses that relaunch without changing anything; it is never a reason to guess.
 - **Acceptance:** a fake `claude` whose first `--bg` leaves a `done`, PID-less row:
-  - `relaunch` launches exactly once (the fake records one more `--bg`), `start` completes and `automatic` proceeds.
+  - `relaunch` launches exactly once (the fake records one more `--bg`); `start` after it still prints "Run already started" and launches nothing; `reconcile` binds the new receipt and `automatic --live` proceeds past the launch step ([L9]).
   - **Refusals.** One test per case, each exiting non-zero with its own message:
     - a controller lock held;
     - an abandoned run;

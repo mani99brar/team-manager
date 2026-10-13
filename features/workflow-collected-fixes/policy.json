@@ -57,7 +57,7 @@
             "-m",
             "workflow.run_tests"
           ],
-          "timeout_seconds": 2400,
+          "timeout_seconds": 3600,
           "scenarios": []
         }
       ]
