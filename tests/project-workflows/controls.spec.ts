@@ -169,6 +169,8 @@ test(`[scenario:controls-restart] Run beside Copy restarts a stopped supervisor 
 })
 
 test(`[scenario:controls-unavailable] The Controls list greys what is unavailable with the server's reason; Pause says the workers keep running (${phase})`, async ({ page }, testInfo) => {
+  // Sixteen fresh page loads (four widths x four runs) do not fit the default 30 s on a 4-core host.
+  test.slow()
   await open(page, RUN_RUNNING)
   await openControls(page)
   await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(12)
