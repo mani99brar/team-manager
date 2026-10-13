@@ -1,0 +1,66 @@
+{
+  "version": "1.4.0",
+  "feature": "Workflow collected fixes: worker prompt rule, export and challenge-rerun fixes, setuptools in the controller venv, sidecar delivery readback, panel budget default, freeze events, disk/Herdr/setup preflight, empty-restore refusal, retry --all-failed, operator relaunch; workflow/ only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "venv",
+        ".venv"
+      ],
+      "timeout_seconds": 180
+    },
+    {
+      "argv": [
+        ".venv/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--no-input",
+        "--disable-pip-version-check",
+        "-r",
+        "workflow/requirements.lock"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "engine",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit"
+      ],
+      "owned_paths": [
+        "workflow",
+        "docs/BACKLOG.md",
+        "docs/handoff/ux-fixes-engine.md"
+      ],
+      "checks": [
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            ".venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": []
+        }
+      ]
+    }
+  ]
+}
