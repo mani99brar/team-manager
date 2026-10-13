@@ -371,13 +371,17 @@ test('sessions: a path, a credential and an out-of-range time in every file type
   })
 })
 
-test('sessions redaction: a path and a fake 40-character key are removed; task-file and a lone sk- stay intact', () => {
+test('sessions redaction: a path (one root-level segment too) and a fake 40-character key are removed; task-file and a lone sk- stay intact', () => {
   assert.equal(redactText('see /home/you/secret/run'), 'see <path>')
   assert.equal(redactText('see /données/runs/x, (/用户/run) and file:///Users/zoë/x'), 'see <path>, (<path>) and <path>')
   assert.equal(redactText('a relative données/runs/x stays'), 'a relative données/runs/x stays')
   // CJK puts no space before a path: a path right after a CJK letter is still absolute.
   assert.equal(redactText('无法读取/home/agentops/.ssh/id'), '无法读取<path>')
   assert.equal(redactText('文件/home/u/secret/run と ファイル/etc/x'), '文件<path> と ファイル<path>')
+  // A one-segment root path is absolute too; a slash between letters or digits is not a path.
+  assert.equal(redactText('cannot open /secret'), 'cannot open <path>')
+  assert.equal(redactText('/srv, (/tmp) and file:///etc'), '<path>, (<path>) and <path>')
+  assert.equal(redactText('P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays'), 'P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays')
   assert.equal(redactText(`token sk-${'x'.repeat(40)}`), 'token <redacted>')
   assert.equal(redactText(`ghp_${'A'.repeat(36)} github_pat_${'b'.repeat(30)} xoxb-1234567890-abc Bearer ${'c'.repeat(30)} token=abcdefghijklmnop password=hunter22`), '<redacted> <redacted> <redacted> <redacted> <redacted> <redacted>')
   assert.equal(redactText('the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol'), 'the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol')
