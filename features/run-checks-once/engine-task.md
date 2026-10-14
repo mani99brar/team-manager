@@ -77,21 +77,21 @@ Each item of PRD §11 is proved by a named test:
 2. **Different ids, kinds and timeouts** (§11.2). A lane whose own timeout is shorter than the execution's duration is blocked for timeout. A lane check and a run check with the same argv execute once, with independent evaluations.
 3. **Browser checks** (§11.3). The same browser argv in two lanes runs twice. A lane with both kinds passes recheck with exactly its two cwds.
 4. **A failing shared lane check** (§11.4) blocks the first declaring lane only, and `fix_decision` repairs that lane.
-5. **Cache, retry and tamper** (§11.5).
-6. **Policy 1.5.0** (§11.6):
+5. **Cache, retry and tamper** (§11.5), with lane attempts in lockstep under a shared record ([L2]).
+6. **Policy 1.5.0** (§11.6; the `contract.test.ts` placement per [L3]):
    - schema and `validate_policy`, with their four refusals;
    - the keeps-everything test;
    - `contract.test.ts` assertions for the enum and both widened rules.
 7. **Run checks run once on the candidate** (§11.7), never in the worker phase. The C28 one-lane case is included, and its packet carries both `reused_from` and `shared_record`.
-8. **Attribution** (§11.8 a-i), each case on a fixture repository whose base and lane snapshots differ in which test fails ([G3]-[G5]).
-   - The one-lane case h is end to end: retries run to exhaustion and `controller_blocked`, with zero repair sessions launched.
+8. **Attribution** (§11.8 a-i), each case on a fixture repository whose base and lane snapshots differ in which test fails ([G3]-[G5], [L2]). Every attribution rerun runs one at a time ([L3]).
+   - The one-lane case h is end to end: retries run to exhaustion and `controller_blocked`, with zero repair sessions launched, through the narrow `fix_decision` exception of [L1].
    - The owner fallback (d) is recorded as owner-attributed.
 9. **`run_tests --tests`** (§11.9).
 10. **The failing-id parser** (§11.10) and `run_report.failures`. It returns method ids over class ids, and the class id only for a crashed class.
-11. **Compatibility** (§11.11): a literal key-set test on a 1.5.0 fixture run; no `packet.json` outside the lane paths; and citation targets: `reused_from` → a worker packet, `shared_record` → a shared record. Plus the 1.4.0 regression test from Constraints.
+11. **Compatibility** (§11.11): a literal key-set test on a 1.5.0 fixture run; no `packet.json` outside the lane paths; and citation targets: `reused_from` → a worker packet, `shared_record` → a shared record. Plus the 1.4.0 regression test from Constraints, with the mixed-timeout reasons and the single-lane-retry difference ([L2], [L3]).
 12. **The lint note** (§11.12).
 13. **Docs:** the RUNBOOK sections, the README setup and files, and contracts/workflow/README (PRD §10).
-14. **The handoff doc** `docs/handoff/run-checks-once.md`: what changed, file by file; how a policy author moves the full suite into `run_checks` (one example policy at 1.5.0); what is left (decisions.md Deferred).
+14. **The handoff doc** `docs/handoff/run-checks-once.md` (with the [L2] and [L3] notes): what changed, file by file; how a policy author moves the full suite into `run_checks` (one example policy at 1.5.0); what is left (decisions.md Deferred).
 
 The worker's Proof table names a test for each item.
 
@@ -105,4 +105,4 @@ Stop and report `blocked`, with what you found, when:
 
 ## Changes after launch
 
-Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task. None yet.
+Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1).
