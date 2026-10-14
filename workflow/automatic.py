@@ -49,8 +49,8 @@ DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermi
             "repair_timeout_seconds": 45 * 60}
 # The in-run fix loop (RUNBOOK, In-run fix loop): repair sessions per lane before attention. Pinned at prepare (`--fix-rounds`,
 # default FIX_ROUNDS); a plan pinned without it has no loop, as before.
-FIX_ROUNDS = 2
-MAX_FIX_ROUNDS = 5
+FIX_ROUNDS = 10
+MAX_FIX_ROUNDS = 10
 OPTIONAL_KEYS = ("fix_rounds",)
 TIMEOUT_KEYS = ("worker_timeout_seconds", "review_timeout_seconds")
 REVIEWER_TRANSPORTS = ("native", "print")

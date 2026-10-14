@@ -1425,7 +1425,7 @@ def main():
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="prepare --automatic: the run's profile (default unattended), pinned")
     parser.add_argument("--fix-rounds", type=int, metavar="N", help="prepare --automatic: repair sessions per lane in the in-run fix loop before "
-                                                                    "attention (default 2, 0 disables), pinned")
+                                                                    "attention (default 10, at most 10, 0 disables), pinned")
     parser.add_argument("--critical", action="store_true", help="prepare --automatic: the feature is marked critical (feature.json 2.4.0); "
                                                                 "the run stops after review for approve, whatever the profile")
     parser.add_argument("--worker-model", help="prepare: the workers' model, pinned (default: claude-opus-5-5, sessions.DEFAULT_WORKER_MODEL)")

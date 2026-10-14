@@ -37,7 +37,7 @@ from .sessions import git, read_json, run_lock, save_json
 from .verification import owns, safe_path
 from .worktrees import git_worktree
 
-MAX_REPAIRS = 3
+MAX_REPAIRS = 20
 JOURNAL_VERSION = "1.0.0"
 # Once any of these exists a reviewer has seen a candidate: code changes then need a new run.
 REVIEW_FILES = ("review-bundle.json", "review.json", "integration-intent.json")
