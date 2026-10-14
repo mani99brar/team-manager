@@ -1955,19 +1955,50 @@ def wait_for_memory(runtime, *, read=None, clock=time.monotonic, sleep=time.slee
         sleep(MEMORY_POLL_SECONDS)
 
 
+LOAD_WAIT_SECONDS = 1800  # A browser suite beside it takes 15-25 min on vea-vps.
+LOAD_POLL_SECONDS = 30
+LOAD_EVENT_SECONDS = 300
+
+
+def wait_for_quiet(runtime, *, read=None, cores=None, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Before rerunning a check that timed out under host load (checks.overloaded_timeout): wait until the 5-minute load average
+    is below the CPU count or LOAD_WAIT_SECONDS pass, polling every LOAD_POLL_SECONDS, with one `running` event at most every
+    LOAD_EVENT_SECONDS. The rerun follows either way; a load that cannot be read waits for nothing."""
+    read = read or os.getloadavg
+    cpus = (cores or os.cpu_count)() or 1
+    started, said = clock(), None
+    while True:
+        try:
+            five = read()[1]
+        except OSError:
+            return
+        if five < cpus or clock() - started >= LOAD_WAIT_SECONDS:
+            return
+        if said is None or clock() - said >= LOAD_EVENT_SECONDS:
+            said = clock()
+            runtime.event("controller", "running", f"waiting for a quieter host: load average {five:.1f} on {cpus} CPUs")
+        sleep(LOAD_POLL_SECONDS)
+
+
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review. A check killed
-    for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget."""
-    from .repair import transient_packet
+    for memory is rerun once the machine has memory again (wait_for_memory), and one that timed out under host load once the host
+    is quieter (wait_for_quiet), without spending the attempt budget."""
+    from .repair import transient_kinds
     retries = check_retries(runtime, state)
     if retries is None:
         return False
     targets, requested = retries
-    killed = [f"{phase}/{node}" for phase, node in targets
-              if transient_packet(runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json")]
+    kinds = [(f"{phase}/{node}", transient_kinds(runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"))
+             for phase, node in targets]
+    killed = [name for name, found in kinds if "memory" in found]
+    loaded = [name for name, found in kinds if "load" in found]
     if killed:
         runtime.event("controller", "running", f"{', '.join(killed)} killed under memory pressure: transient, rerun without spending an attempt")
         wait_for_memory(runtime)
+    if loaded:
+        runtime.event("controller", "running", f"{', '.join(loaded)} timed out under host load: transient, rerun without spending an attempt")
+        wait_for_quiet(runtime)
     for phase, node in targets:
         runtime.retry_check(phase, node)
     if requested:

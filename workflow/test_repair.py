@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1064,10 +1065,10 @@ class MemoryKilledAttempts(unittest.TestCase):
         self.runtime.event = lambda node, status, message: self.events.append((node, status, message))
         self.state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
 
-    def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",)) -> None:
+    def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",), kind="memory") -> None:
         folder = self.root / "verification/worker/ui" / str(attempt)
         folder.mkdir(parents=True)
-        result = {"transient_checks": ["unit"], "checks": [{"command": "npx vitest run", "transient": "memory"}]} if transient else {}
+        result = {"transient_checks": ["unit"], "checks": [{"command": "npx vitest run", "transient": kind}]} if transient else {}
         save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
                                            "gate": {"status": "blocked", "reasons": list(reasons)}})
         save_json(self.root / "attempts.json", {"worker:ui": attempt})
@@ -1119,6 +1120,43 @@ class MemoryKilledAttempts(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "failed identically|retry limit exhausted"):
             advance_failed_checks(self.runtime, self.state)
 
+    def test_a_timeout_under_load_is_free_and_waits_for_a_quieter_host(self):
+        reasons = ("Executed check failed: npx vitest run", "unit: execution exceeded approved timeout", "unit: exit 124")
+        with patch("workflow.automatic.os.getloadavg", return_value=(1.0, 1.0, 1.0)), \
+                patch("workflow.automatic.os.cpu_count", return_value=4), patch("workflow.automatic.time.sleep") as slept:
+            for attempt in (1, 2, 3):  # Three load timeouts in a row with identical reasons: each is rerun, none is identical.
+                self.packet(attempt, transient=True, reasons=reasons, kind="load")
+                self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 4)
+        self.assertFalse(slept.called)  # The host is quiet: no wait.
+        self.assertEqual(repair.transient_kinds(self.root / "verification/worker/ui/1/packet.json"), {"load"})
+        self.assertIn(("controller", "running", "worker/ui timed out under host load: transient, rerun without spending an attempt"), self.events)
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+        # A real failure beside the timeout makes the attempt a real failure, as for a memory kill.
+        self.packet(4, transient=True, reasons=("unit: exit 124", "lint: exit 1"), kind="load")
+        self.assertEqual(repair.transient_kinds(self.root / "verification/worker/ui/4/packet.json"), set())
+
+    def test_the_load_wait_polls_until_below_the_cpu_count_or_thirty_minutes(self):
+        clock, slept = [0.0], []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        readings = iter([(9.0, 12.0, 10.0)] * 11 + [(2.0, 3.5, 8.0)])
+        automatic.wait_for_quiet(self.runtime, read=lambda: next(readings), cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [30] * 11)
+        # One event every five minutes at most: at 0 s and 300 s of the 330 s wait.
+        self.assertEqual([message for _, _, message in self.events], ["waiting for a quieter host: load average 12.0 on 4 CPUs"] * 2)
+        clock[0], slept[:], self.events[:] = 0.0, [], []
+        automatic.wait_for_quiet(self.runtime, read=lambda: (20.0, 20.0, 20.0), cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual((sum(slept), len(self.events)), (1800, 6))
+
+        def unreadable():
+            raise OSError("no /proc/loadavg")
+        slept[:] = []
+        automatic.wait_for_quiet(self.runtime, read=unreadable, cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [])
+
     def test_the_memory_wait_polls_until_the_floor_or_ten_minutes(self):
         clock = [0.0]
         readings = iter([300, 400, 500, 600, 700, 1600])
@@ -1137,6 +1175,66 @@ class MemoryKilledAttempts(unittest.TestCase):
             slept[:] = []
             automatic.wait_for_memory(self.runtime, read=lambda: 10, clock=lambda: clock[0], sleep=sleep)
             self.assertEqual(slept, [])
+
+
+class DeferredFailuresInTheBrief(unittest.TestCase):
+    """A lane-review repair brief names the snapshot's failing deferred checks (cook IMPROVEMENTS item 3), environmental ones
+    (a memory kill, a timeout under host load) as such, and adds nothing when they passed."""
+
+    CHECKS = [{"id": "ui-unit", "kind": "unit", "argv": ["npm", "run", "test:unit"]},
+              {"id": "ui-build", "kind": "build", "argv": ["npm", "run", "build"]},
+              {"id": "ui-lint", "kind": "build", "argv": ["npm", "run", "lint"]},
+              {"id": "ui-browser", "kind": "browser", "argv": ["npx", "playwright", "test"]}]
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.runtime = type("Runtime", (), {})()
+        self.runtime.directory = self.root
+        self.runtime.worker_policy = lambda lane: {"owned_paths": ["src/ui", "tests/ui.spec.ts"], "checks": self.CHECKS}
+
+    def packet(self, executions: list[dict], node: str = "ui") -> dict:
+        folder = self.root / "verification/worker" / node / "1"
+        folder.mkdir(parents=True, exist_ok=True)
+        for index, execution in enumerate(executions):
+            (folder / f"check-{index}.log").write_text(execution.pop("log", "done\n"))
+        save_json(folder / "packet.json", {
+            "result": {"checks": [{"command": shlex.join(check["argv"]), **execution} for check, execution in zip(self.CHECKS, executions)]},
+            "evidence": {"checks": [{"id": check["id"], "worker_check_index": index} for index, check in enumerate(self.CHECKS)]},
+            "gate": {"status": "blocked", "reasons": ["lane-review: P1 src/ui/a.ts unchecked input"], "deferred_checks": ["ui-build", "ui-lint", "ui-browser"]}})
+        return {"phase": "worker", "node_id": node, "attempt": 1, "path": f"verification/worker/{node}/1/packet.json",
+                "reasons": ["lane-review: P1 src/ui/a.ts unchecked input"]}
+
+    def test_a_break_of_the_snapshot_names_its_files_by_owner(self):
+        log = ("> tsc -b && vite build\nsrc/ui/a.ts(3,1): error TS2339: no such property\n"
+               "tests/ui.spec.ts:191:7 - error TS2339\nsrc/other/b.ts:4:2 - error TS2304\n")
+        packet = self.packet([{"exit_code": 0}, {"exit_code": 2, "log": log}, {"exit_code": 0}, {"exit_code": 1, "log": "1 failed\n"}])
+        text = "\n".join(repair.deferred_failures(self.runtime, "ui", packet))
+        self.assertIn("## Checks recorded for the candidate gate that failed on this snapshot", text)
+        self.assertIn("### ui-build (build), exit 2: npm run build", text)
+        self.assertIn("Not environmental. This snapshot is the run's base plus your changes only", text)
+        self.assertIn("Files the log's tail names: yours: src/ui/a.ts, tests/ui.spec.ts; not yours: src/other/b.ts.", text)
+        self.assertIn("src/ui/a.ts(3,1): error TS2339: no such property", text)
+        self.assertNotIn("ui-lint", text)  # It passed.
+        self.assertNotIn("ui-browser", text)  # A deferred browser failure is left out: it may only want another lane's work.
+        self.assertNotIn("ui-unit", text)  # A gating check is never listed here: it gated the packet already.
+
+    def test_environmental_failures_are_named_as_such(self):
+        packet = self.packet([{"exit_code": 0}, {"exit_code": 137, "transient": "memory", "log": "Killed\n"},
+                              {"exit_code": 124, "transient": "load"}, {"exit_code": 0}])
+        text = "\n".join(repair.deferred_failures(self.runtime, "ui", packet))
+        self.assertIn("### ui-build (build), exit 137", text)
+        self.assertIn("Environmental: its process was killed for memory. It says nothing about your code: change nothing for it.", text)
+        self.assertIn("### ui-lint (build), exit 124", text)
+        self.assertIn("Environmental: it hit its timeout while the host was overloaded.", text)
+        self.assertNotIn("Not environmental", text)
+
+    def test_nothing_is_added_for_passing_checks_or_another_lane(self):
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", self.packet([{"exit_code": 0}] * 4)), [])
+        other = self.packet([{"exit_code": 0}, {"exit_code": 2}, {"exit_code": 0}, {"exit_code": 0}], node="api")
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", other), [])
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", {**other, "phase": "candidate", "node_id": "ui"}), [])
 
 
 class CandidateGenerations(RepairFixture):

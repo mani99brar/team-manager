@@ -37,8 +37,11 @@ export const checkSchema = z.strictObject({
   finished_at: timestamp,
   exit_code: z.number().int(),
   log_artifact_id: id,
-  /** "memory": the check's process ended on a signal or its log's tail says the system ran out of memory; absent otherwise. */
-  transient: z.literal('memory').optional(),
+  /**
+   * "memory": the check's process ended on a signal or its log's tail says the system ran out of memory. "load": the check hit
+   * its timeout while the host's load average was at least twice its CPU count. Absent otherwise.
+   */
+  transient: z.enum(['memory', 'load']).optional(),
 })
 
 /**

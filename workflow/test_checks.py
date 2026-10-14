@@ -508,6 +508,57 @@ class MemoryKilledCheckTests(unittest.TestCase):
         self.assertFalse(checks.memory_killed(124, self.root / "missing.log"))  # A timeout is execute's own kill, never memory.
 
 
+class LoadTimeoutCheckTests(unittest.TestCase):
+    """A check that hits its timeout while the host is overloaded is recorded as transient "load" (workflow-collected-fixes-001:
+    2400 s of 2400 s at load average 12-21 on 4 cores); on a quiet host, or with any other exit, it is a failure like any other."""
+
+    setUp, policy, snapshot, verify = FileCaptureTests.setUp, FileCaptureTests.policy, FileCaptureTests.snapshot, FileCaptureTests.verify
+
+    def run_timeout(self, load: tuple, attempt: int) -> dict:
+        if attempt == 1:
+            self.commit, self.changed = self.snapshot({"docs/NEW.md": b"# New\n"})
+        policy = self.policy([sys.executable, "-c", "import time; time.sleep(30)"])
+        policy["workers"][0]["checks"][0]["timeout_seconds"] = 1
+        with patch("workflow.checks.os.getloadavg", return_value=load), patch("workflow.checks.os.cpu_count", return_value=4):
+            return self.verify(self.commit, self.changed, policy=policy, attempt=attempt)
+
+    def test_a_timeout_under_load_is_transient_and_a_quiet_one_is_not(self):
+        packet = self.run_timeout((3.0, 12.0, 9.0), 1)  # The 5-minute average is three times the 4 CPUs.
+        self.assertEqual((packet["gate"]["status"], packet["result"]["checks"][0]["exit_code"]), ("blocked", 124))
+        self.assertEqual(packet["result"]["checks"][0]["transient"], "load")
+        self.assertEqual(packet["result"]["transient_checks"], ["unit"])
+        validate_schema("workerResult", packet["result"])
+        from .repair import transient_kinds, transient_packet
+        path = self.run_dir / "verification/worker/adapter/1/packet.json"
+        self.assertEqual((transient_packet(path), transient_kinds(path)), (True, {"load"}))
+        packet = self.run_timeout((4.0, 4.0, 4.0), 2)  # A check's own parallel work keeps the load near the CPU count.
+        self.assertEqual(packet["result"]["checks"][0]["exit_code"], 124)
+        self.assertNotIn("transient", packet["result"]["checks"][0])
+        self.assertNotIn("transient_checks", packet["result"])
+
+    def test_only_a_timeout_under_load_qualifies_and_the_factor_is_configurable(self):
+        high, four = (lambda: (30.0, 30.0, 30.0)), (lambda: 4)
+        self.assertTrue(checks.overloaded_timeout(124, read=high, cores=four))
+        for code in (0, 1, 2, -9, 137):
+            self.assertFalse(checks.overloaded_timeout(code, read=high, cores=four), code)
+        self.assertFalse(checks.overloaded_timeout(124, read=lambda: (30.0, 7.9, 7.9), cores=four))  # A spike in the last minute only.
+        self.assertTrue(checks.overloaded_timeout(124, read=lambda: (2.0, 7.0, 8.0), cores=four))  # The 15-minute average.
+
+        def unreadable():
+            raise OSError("no /proc/loadavg")
+        self.assertFalse(checks.overloaded_timeout(124, read=unreadable, cores=four))
+        with patch.dict("os.environ", {"WORKFLOW_LOAD_FACTOR": "10"}):
+            self.assertFalse(checks.overloaded_timeout(124, read=high, cores=four))
+        with patch.dict("os.environ", {"WORKFLOW_LOAD_FACTOR": "not a number"}):
+            self.assertTrue(checks.overloaded_timeout(124, read=high, cores=four))  # Falls back to LOAD_FACTOR.
+        log = self.root / "kernel.log"
+        log.write_text("Killed\n")
+        with patch("workflow.checks.os.getloadavg", return_value=(30.0, 30.0, 30.0)):
+            self.assertEqual(checks.transient_kind(137, log), "memory")  # A memory kill stays "memory", whatever the load.
+            self.assertEqual(checks.transient_kind(124, self.root / "missing.log"), "load")
+            self.assertIsNone(checks.transient_kind(1, self.root / "missing.log"))
+
+
 class VitestCountsTests(unittest.TestCase):
     SUMMARY = ("\x1b[2m Test Files \x1b[22m \x1b[1m\x1b[32m6 passed\x1b[39m\x1b[22m\x1b[90m (6)\x1b[39m\n"
                "\x1b[2m      Tests \x1b[22m \x1b[1m\x1b[32m70 passed\x1b[39m\x1b[22m\x1b[90m (70)\x1b[39m\n\x1b[2m   Start at \x1b[22m 09:20:57\n")
