@@ -136,6 +136,19 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
   - Every required gate runs again, including `JudgedCandidateTests` on the merged tree.
   - **Why:** both run-003 timeouts were environmental. Nothing had failed at the kill (1279/1304 and 1119/1324 tests done), and the code is byte-identical to run 002's verified tree.
 
+- [L12] (panel: agree, follow-up, run 004 blocked; decisions/006-controller_blocked) Follow-up run `review-panel-registry-005` follows run 004 and restores every lane from candidate `9245e1e` (`refs/workflow/79753a78f6f7de7f/candidate`) with `--restore-from`.
+  - **What stays:** it supersedes [L11]'s `f05855e` restore line. [L11]'s policy.json (`timeout_seconds` 3600 for `seats-workflow-unit` and `judge-workflow-unit`, `--jobs 4`) and its launch condition (host-capacity admission; wait while another cook's suite runs or the 1-minute load is above about 5) stand unchanged. No other policy, check or feature.json change.
+  - **Gates:** the judge lane carries no code item; it restores and verifies again. Every required gate runs again, including `JudgedCandidateTests` on the merged tree.
+  - **seats, B1 (confirmed P1; general, coverage, lane-review round 2):** a seat's cap is enforced from its own start while the built-in reviewers run, not only inside `settle`. Changes go in `workflow/panel.py` only, with no change in `automatic.py`:
+    - Arm a per-job watchdog at `start_seat`: a daemon `threading.Timer(job.timeout)` that SIGTERMs the group, SIGKILLs it after `KILL_GRACE_SECONDS`, and sets `job.expired`.
+    - In `_wait_seats`, check `job.expired` (or `clock() >= launched + timeout`) before `_reap_seat`. Record `timed_out` and drop that seat's findings.
+    - Cancel the timer on reap and on stop.
+
+    Named test in `workflow/test_panel.py`: a `cli` seat outlives its cap while no settle runs. The test must reject an `ok` record or any kept findings, and must show the process group gone at the cap and the record `timed_out`. A seat that finishes in time keeps its result. This makes seats Acceptance 4 ("killed on timeout") hold from the seat's start, per PRD 5.1 and [G11]/[G12]. Scratch and worktree removal on this path stays as Acceptance 4 requires.
+  - **viewer, B2 (confirmed P1; critique):** on a judged run the graph draws no `reviewer-judge` card. In `server/sessions.ts`, `drawnReviewerIds` filters out `JUDGE_REVIEWER_ID`, mirroring the archived-round skip at :750. The judge stays reachable through the Panel and Review surfaces, whose rows, session rows and labels do not change. Keep `tests/project-workflows/fixtures/ux-judged.ts` in step. Named server test (`server/projects.test.ts` or `sessions.test.ts`): a seeded judged run's detail has no `reviewer-judge` node, and the test fails if that node is drawn. PRD 8 and 10.11 are otherwise unchanged; the full Playwright suite passes at the viewer verify and at the candidate gate.
+  - **Record only, G8:** worker question 002 was answered by the cook's panel (option A, agreement), not by the operator. Judged seats get the [G13] brief from the new `review-judged.md`, `review.md` stays byte-identical, and the pinned `prompt.source` is the value the seats lane recorded. The seats lane corrects `docs/handoff/review-panel-seats.md:79-81` to say "panel answer". No code change.
+  - **Why a follow-up and not a hand-fix:** the two confirmed P1s sit in two lanes (seats and viewer), so the one-lane fix loop could not run. The blocking count went 1, 0, 0, 2, never flat at one across two runs.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.
@@ -163,4 +176,21 @@ Not changed:
   - F: `workflow/judge.py:482` a whitespace-only `requirement` reaches review.json and is rejected there instead of taking the judge fallback.
 
   Run 001's T2, T4 and T5 stay deferred.
+- From run 004's review (triage 006; all P2, fail safe or test gaps; they stay out of run 005):
+  - G3: claude seat `bin` advisory (refuted as P1 twice).
+  - G5: `.pid` written after `git worktree add`.
+  - G6: `fit` drops requirement blocks within about 200 bytes of the cap; it should raise `OverCap`.
+  - G7: the reuse branch skips `kill_orphan`.
+  - G9-G14, test gaps:
+    - scratch-dir removal on failure, timeout, Ctrl-C and orphan;
+    - a fake-clock resume timeout;
+    - a `subTest` per refusal;
+    - real `settle` in `JudgedCandidateTests`;
+    - a 1.0.0 Panel snapshot;
+    - a missing-plan seeded run.
+  - G15: the judge row's worktree note.
+  - G16: the pi `mpp-panel-*` scratch dir is never removed (pre-existing).
+  - Critique's two design P2s.
+
+  G4 (= A) and G17 (= the browser-queue/host-load item) stay deferred as before.
 - Test isolation: the workflow tests wait on the host-wide browser queue (`~/.config/md-manager/browser-queue`), so lane suites contend with live Playwright checks. This was run 001's seats timeout. It goes to a learning, not this cook.

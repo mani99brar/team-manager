@@ -14,9 +14,9 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 ## Context
 
-- **Follow-up run 004 ([L11]; restore as in [L10]): first restore the run-002 candidate's version of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
-  `git restore --source=f05855efff1a5712cbc4b440c328f09900c2a5e0 --staged --worktree -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
-  `git diff --stat f05855efff1a5712cbc4b440c328f09900c2a5e0 -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
+- **Follow-up run 005 ([L12]): first restore the run-004 candidate's version of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
+  `git restore --source=9245e1efb704377aa4a003246243f27974f185a2 --staged --worktree -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
+  `git diff --stat 9245e1efb704377aa4a003246243f27974f185a2 -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
 - **Literal records:** `features/review-panel-registry/examples/`. These are `panel-judged.example.json` (record 1.1.0, judged, blocked by J1), `panel-fallback.example.json` (judge timed out, a seat `auth_required`, Argon `unavailable`), `review-judged.example.json` and `reviewers.example.json`. Load them as literals in your contract and unit tests, and seed the browser runs from them.
 - **Panel contract today:** `contracts/projects/v1.ts:754-838` (`PANEL_TRANSPORTS` :767, provider :781, finding :794, entry :808, results `contract_version '1.9.0'` :834) and `validatePanelResults` :1198. The review validator is `validateReviewResult` :1067-1091 (strict `reviewFindingSchema` :204, `reviewerEntrySchema` :221). Generated JSON comes from `npm run contracts:export`.
 - **Server:** `server/projects.ts:1317` (the panels route) and :2218 (`resolvePanelRecord`, live `<run>/panel.json` first, then the export's `panels` section). The review sections are `z.strictObject` (`server/projects.ts:188-238`). Sessions: `server/sessions.ts:160/258/823` (`panel` node, `panel_provider` rows).
@@ -41,7 +41,12 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 Your checks (build, lint, `npm run test:contracts`, `npm run test:unit` and the Playwright suite) pass, with these named tests and scenarios:
 
-0. **Run 004 ([L11]):** restore from the run-002 candidate `f05855e`. Then make one change, as in [L10]: in `tests/project-workflows/controls.spec.ts`, the `[scenario:controls-unavailable]` test calls `test.setTimeout(90_000)` as its first line, as `home-sections` does at `revamp-lists.spec.ts:89`. No product code, fixture or assertion changes, and the test must still fail on a missing Controls button. The full Playwright suite passes. Nothing else differs from `f05855e`.
+0. **Run 005 ([L12]):** restore from the run-004 candidate `9245e1e`, then fix B2:
+   - On a judged run the graph draws no `reviewer-judge` card: `drawnReviewerIds` in `server/sessions.ts` filters out `JUDGE_REVIEWER_ID`.
+   - The judge stays reachable through the Panel and Review surfaces, with its session rows unchanged.
+   - Keep `tests/project-workflows/fixtures/ux-judged.ts` in step.
+
+   A named server test: a seeded judged run's detail has no `reviewer-judge` node, and the test fails if that node is drawn. The full Playwright suite passes. Nothing else differs from `9245e1e`.
 1. **Contracts:**
    - The zod schemas accept every example in `features/review-panel-registry/examples/` that they cover.
    - They reject a 1.1.0 record with transport `foo`, a seat status outside PRD 8's list, and a judge ruling outside `confirmed|refuted|deferred`.
