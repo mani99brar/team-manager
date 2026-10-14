@@ -115,7 +115,7 @@ On a run whose plan has a judged panel, the review step starts the built-in revi
   - Every input finding id appears in exactly one ruling's `sources`; a missing, duplicated or unknown id makes the judge `incomplete` → fallback (7.5) ([G32]).
   - A `refuted` ruling with empty or uncited `evidence` (no `path:line`) is recorded as `confirmed` at the highest severity among its sources.
   - Each ruling gets `id` `J<n>` in output order and a `worker`: the lane whose `owned_paths` own its `file` (`verification.owns`), else `none`; a ruling with no file → `none`.
-- **Record:** the judge object of `panel.json` 1.1.0 (Appendix A), written through `panel.record_judge`; statuses `pending → running → judged | failed | timed_out | incomplete`. Non-terminal shapes: `examples/judge-states.example.json` ([L2]). `record_judge` sets each seat finding's `accepted` and the panel's `ended_at` per [L4].
+- **Record:** the judge object of `panel.json` 1.1.0 (Appendix A), written through `panel.record_judge`; statuses `pending → running → judged | failed | timed_out | incomplete`. Non-terminal shapes: the `judge-states` block of PRD Appendix B ([L2]). `record_judge` sets each seat finding's `accepted` and the panel's `ended_at` per [L4].
 
 ### 7.4 Verdict and review.json (judged)
 - review.json keeps its closed key set. Its `reviewers` list is the declared built-in reviewers, then `judge` (then `critique` when declared, as today). Built-in entries keep their own verdicts for the record. The `judge` entry's verdict is `blocked` when any `confirmed` ruling is P0/P1, else `approved`; its `accepted_at` is the judge's end.
@@ -188,8 +188,8 @@ Examples (literal; both engine lanes' Python tests and the viewer's TypeScript t
 - `examples/panel-fallback.example.json`: panel record 1.1.0 after a judge timeout (fallback).
 - `examples/judge-output.example.json`: the judge job's raw output (before ids and lanes are added).
 - `examples/review-judged.example.json`: the judged review.json.
-- `examples/judge-states.example.json`: the `pending`, `running` and `incomplete` judge objects ([L2]).
-- `examples/plan-panel-judged.example.json`: the pinned `plan.panels[0]` of a judged panel naming claude, gpt, muse and argon ([L2]).
+- the `judge-states` block of PRD Appendix B: the `pending`, `running` and `incomplete` judge objects ([L2]).
+- the `plan-panel-judged` block of PRD Appendix B: the pinned `plan.panels[0]` of a judged panel naming claude, gpt, muse and argon ([L2]).
 
 Candidate-level test ([L8]): `test_judge.JudgedCandidateTests` runs the real ports and skips only where they are absent.
 
@@ -202,3 +202,139 @@ Functions (owner lane in brackets; signatures fixed, the other lane mocks them):
 
 Wiring rule: `automatic.py` calls `panel.settle` and `panel.record_judge` only on a judged run (`judge.judged(plan)` is not None), so the existing suite passes in the judge worktree, where `panel.py` has neither; the judge lane's tests patch both (`create=True`) at exactly these signatures.
 - [judge] `judge.run(runtime, panel_item: dict, seats: list[dict], reviewers: dict, *, clock=time.time, sleep=time.sleep) -> dict`: 7.3; returns the judge object (also recorded via `panel.record_judge`), never raises except `KeyboardInterrupt` / `TransientInfraError`.
+
+## Appendix B: frozen literals added after design challenge 1 ([L2])
+
+Tests load each block by its marker. A block is the JSON between the fenced lines that follow the marker.
+
+<!-- literal: judge-states -->
+```json
+{
+  "pending": {
+    "status": "pending",
+    "fallback": false,
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "session_id": null,
+    "started_at": null,
+    "ended_at": null,
+    "cost_usd": null,
+    "error": null,
+    "inputs": [],
+    "reviewer_findings": [],
+    "rulings": []
+  },
+  "running": {
+    "status": "running",
+    "fallback": false,
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "session_id": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71",
+    "started_at": "2026-10-15T10:24:03Z",
+    "ended_at": null,
+    "cost_usd": null,
+    "error": null,
+    "inputs": [
+      {"source": "general", "kind": "reviewer", "status": "blocked", "finding_ids": ["general-1"]},
+      {"source": "coverage", "kind": "reviewer", "status": "blocked", "finding_ids": ["coverage-1"]},
+      {"source": "claude", "kind": "seat", "status": "ok", "finding_ids": ["C1", "C2"]},
+      {"source": "gpt", "kind": "seat", "status": "ok", "finding_ids": ["G1"]},
+      {"source": "muse", "kind": "seat", "status": "ok", "finding_ids": ["M1"]}
+    ],
+    "reviewer_findings": [
+      {"id": "general-1", "reviewer": "general", "severity": "P1", "worker": "engine",
+       "message": "panel.settle can return while a resumed seat is still running (workflow/panel.py:212)."},
+      {"id": "coverage-1", "reviewer": "coverage", "severity": "P1", "worker": "viewer",
+       "message": "No unit test covers the judge-fallback banner."}
+    ],
+    "rulings": []
+  },
+  "incomplete": {
+    "status": "incomplete",
+    "fallback": true,
+    "model": "claude-opus-5-5",
+    "effort": "high",
+    "session_id": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71",
+    "started_at": "2026-10-15T10:24:03Z",
+    "ended_at": "2026-10-15T10:31:40Z",
+    "cost_usd": 2.94,
+    "error": "judge output incomplete: source ids missing from the rulings: G1, M1; the built-in reviewers' P0/P1 decided (today's rule) and the panel findings stay unjudged",
+    "inputs": [
+      {"source": "general", "kind": "reviewer", "status": "blocked", "finding_ids": ["general-1"]},
+      {"source": "coverage", "kind": "reviewer", "status": "blocked", "finding_ids": ["coverage-1"]},
+      {"source": "claude", "kind": "seat", "status": "ok", "finding_ids": ["C1", "C2"]},
+      {"source": "gpt", "kind": "seat", "status": "ok", "finding_ids": ["G1"]},
+      {"source": "muse", "kind": "seat", "status": "ok", "finding_ids": ["M1"]}
+    ],
+    "reviewer_findings": [
+      {"id": "general-1", "reviewer": "general", "severity": "P1", "worker": "engine",
+       "message": "panel.settle can return while a resumed seat is still running (workflow/panel.py:212)."},
+      {"id": "coverage-1", "reviewer": "coverage", "severity": "P1", "worker": "viewer",
+       "message": "No unit test covers the judge-fallback banner."}
+    ],
+    "rulings": []
+  }
+}
+```
+
+<!-- literal: plan-panel-judged -->
+```json
+{
+  "id": "review",
+  "stage": "review",
+  "report_only": false,
+  "prompt": {
+    "source": "workflow/prompts/panels/review.md",
+    "text": "<the brief text, pinned verbatim at prepare>",
+    "sha256": "4b1d0c9e7a3f5b2d8c6e1a0f9b7d5c3e2a4f6b8d0c1e3a5f7b9d2c4e6a8f0b1d"
+  },
+  "requirements": ["features/example/prd.md", "features/example/decisions.md"],
+  "requirement_docs": {
+    "features/example/prd.md": "<the PRD text, pinned at prepare>",
+    "features/example/decisions.md": "<decisions.md, pinned at prepare>"
+  },
+  "pi_bin": "/home/agentops/.nvm/versions/node/v24.21.0/bin",
+  "prd_label": "features/example/prd.md",
+  "reviewers_file": {
+    "label": "~/.local/share/agent-memory/repo/learnings/skills/review-panel/reviewers.json",
+    "sha256": "9e2c4a6b8d0f1e3a5c7b9d1f3e5a7c9b0d2f4e6a8c1b3d5f7a9c0e2b4d6f8a1c"
+  },
+  "seats": [
+    {"name": "claude", "transport": "claude", "model": null, "effort": null, "credential": "cli-login", "prefix": "C",
+     "cap": {"timeout_minutes": 15, "budget_usd": 5}, "enabled": true,
+     "status": "pending", "error": null, "bin": "/home/agentops/.local/bin/claude", "cli_version": null},
+    {"name": "gpt", "transport": "pi", "model": "openai-codex/gpt-6.1-sol", "effort": null, "credential": "cli-login", "prefix": "G",
+     "cap": {"timeout_minutes": 15}, "enabled": true,
+     "status": "pending", "error": null, "bin": "/home/agentops/.local/bin/pi", "cli_version": null},
+    {"name": "muse", "transport": "cli", "model": "muse-wonder-1.0", "effort": null, "credential": "cli-login", "prefix": "M",
+     "cap": {"timeout_minutes": 15}, "enabled": true,
+     "cli": {
+       "argv": ["muse", "exec", "--json", "--no-session-log", "--model", "{model}", "--reasoning-effort", "high",
+                "--prompt-file", "{prompt_file}", "--workspace", "{worktree}", "--approval-mode", "on-request",
+                "--sandbox-network", "restricted", "--no-foreign-personal-context", "--disable-web-tools",
+                "--max-model-steps", "200"],
+       "prompt_via": "file",
+       "output": {"format": "jsonl_event", "match": {"payload_type": "run.terminal.completed"}, "field": "payload.text"},
+       "served_model": {"format": "jsonl_event", "match": {"payload_type": "run.model.configured"}, "field": "payload.model_id"},
+       "env": {"set": {"MUSE_NO_AUTO_UPDATE": "1"}, "pass": []},
+       "version_argv": ["muse", "--version"],
+       "failures": {"auth": ["Not logged in", "run `muse login`", "API error 40[13]"], "quota": ["usage limit reached", "tier_limit", "rate limited"]}
+     },
+     "status": "pending", "error": null, "bin": "/home/agentops/.local/bin/muse", "cli_version": "Muse Code 1.4.7 (1.4.7-R6101.1)"},
+    {"name": "argon", "transport": "cli", "model": "gemini-4-argon", "effort": null, "credential": "cli-login", "prefix": "A",
+     "cap": {"timeout_minutes": 15}, "enabled": false,
+     "cli": {
+       "argv": ["agy", "-p", "Read the review brief in {prompt_file} and follow it exactly.", "--output-format", "json",
+                "--model", "{model}", "--effort", "high", "--print-timeout", "{timeout_minutes}m"],
+       "prompt_via": "file",
+       "output": {"format": "json_field", "match": {"status": "SUCCESS"}, "field": "response"},
+       "served_model": null,
+       "env": {"set": {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"}, "pass": ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]},
+       "version_argv": ["agy", "--version"],
+       "failures": {"auth": ["authentication required", "keyring is locked"], "quota": ["RESOURCE_EXHAUSTED", "quota exceeded"]}
+     },
+     "status": "unavailable", "error": "disabled in the reviewer list", "bin": null, "cli_version": null}
+  ],
+  "judge": {"model": "claude-opus-5-5", "effort": "high", "timeout_minutes": 30, "budget_usd": 15, "input_cap_bytes": 600000}
+}
+```

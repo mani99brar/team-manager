@@ -42,7 +42,7 @@ Your checks (build, lint, `npm run test:contracts`, `npm run test:unit` and the 
    - The zod schemas accept every example in `features/review-panel-registry/examples/` that they cover.
    - They reject a 1.1.0 record with transport `foo`, a seat status outside PRD 8's list, and a judge ruling outside `confirmed|refuted|deferred`.
    - A 1.0.0 record still validates.
-   - The `pending`, `running` and `incomplete` judge objects of `examples/judge-states.example.json` validate, and a `running` judge renders as "judging" ([L2]).
+   - The `pending`, `running` and `incomplete` judge objects of the `judge-states` block of PRD Appendix B validate, and a `running` judge renders as "judging" ([L2]).
    - Direct `validateReviewResult` tests: the judged review example is accepted with judged-plan context and rejected with legacy, report-only or missing plan context. A fallback record validates as today.
 2. **Server:**
    - The live read and the export fallback both return the judged record with its `judge` object. A 1.0.0 record is returned unchanged.

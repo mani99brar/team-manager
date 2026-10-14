@@ -91,10 +91,12 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
 
   Seats lane: a named regression test asserts that claude and pi seat argv equal today's builders; Acceptance 4's argv and prompt assertions stay cli-only. Touches seats Constraints, Acceptance 4-5, PRD 3 and 10.3.
 - [L2] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) New frozen literals, added to PRD 7.3 and Appendix A:
-  - `examples/judge-states.example.json` holds the `pending`, `running` and `incomplete` judge objects.
+  - the `judge-states` block of PRD Appendix B holds the `pending`, `running` and `incomplete` judge objects.
     - `pending` and `running` have `ended_at` null, `cost_usd` null, `rulings` [] and `fallback` false; `running` has its inputs filled.
     - `incomplete` is terminal, with `ended_at`, an `error`, `rulings` [] and `fallback` true. Malformed raw rulings never enter `rulings`.
-  - `examples/plan-panel-judged.example.json` is the pinned `plan.panels[0]` of a judged panel whose feature names the seats claude, gpt, muse and argon. Every default is filled: the resolved `seats`, `reviewers_file` (label, sha256) and `judge` (model, effort, timeout_minutes, budget_usd, input_cap_bytes).
+  - the `plan-panel-judged` block of PRD Appendix B is the pinned `plan.panels[0]` of a judged panel whose feature names the seats claude, gpt, muse and argon. Every default is filled: the resolved `seats`, `reviewers_file` (label, sha256) and `judge` (model, effort, timeout_minutes, budget_usd, input_cap_bytes).
+
+  Resume refuses new files, so both literals are fenced JSON blocks in PRD Appendix B (`<!-- literal: judge-states -->`, `<!-- literal: plan-panel-judged -->`). Tests parse them from the PRD, as the multi-provider-panel tests parse that PRD's Appendix A.
 
   `panel.record_judge` accepts every PRD 7.3 status. Per lane:
   - Seats: `panel.schema.json` 1.1.0 accepts the three judge objects and `validate_plan` accepts the plan item, with named tests (also in contract.test.ts).
