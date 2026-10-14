@@ -67,7 +67,8 @@
         "tests/zz-fixtures-clean.spec.ts",
         "tests/unit/dispatch.test.ts",
         "tests/unit/typeFloor.test.ts",
-        "tests/project-workflows/dispatch.spec.ts"
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/projects.spec.ts"
       ],
       "checks": [
         {
@@ -198,7 +199,7 @@
         "tests/unit/spend.test.ts",
         "tests/project-workflows/revamp-lists.spec.ts",
         "tests/project-workflows/ux-lists.spec.ts",
-        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/dispatch-server.spec.ts",
         "tests/project-workflows/controls.spec.ts",
         "tests/project-workflows/mock.ts",
         "tests/project-workflows/seed.ts",
