@@ -79,6 +79,17 @@ Every worker and reviewer prompt includes this file. The Operator decisions are 
   - Never start a full suite while another `workflow.run_tests --jobs` runs on the host ([G7]).
   - The review needs fresh verification; repair-2's environmental diagnosis does not establish readiness. (panel: agree)
 
+- [L10] **Isolate the browser queue in the workflow suite** (run-checks-once-003: `--follows 002`, `--restore-from 8eb67b6`). This supersedes nothing and adds to the engine task's Acceptance. Run 002's last blocker was environmental (triage group D): its fixture browser checks waited up to 161 s on the operator's live machine-wide queue while another run held it.
+  - The change: `isolate_registry()` in `workflow/test_pipeline.py` also sets `MD_MANAGER_BROWSER_QUEUE` to a `browser-queue` directory inside its per-test temporary directory, as `test_browser_queue` and `test_critique` already do. No test then ever waits on `~/.config/md-manager/browser-queue`.
+  - Acceptance:
+    - one test shows that under `isolate_registry()`, `browser_queue.queue_dir()` lies inside the temporary directory and never under `Path.home()`;
+    - fixture subprocesses inherit it;
+    - the whole workflow suite passes with the live queue left as it is.
+  - Nothing else changes: no other `workflow/` behaviour, no `browser_queue.py` or `checks.py` change, and no change to the policy or feature.json. The fixes of run 002 (triage A-C, at 8eb67b6) stay as they are.
+  - The handoff doc names the one-line overlap with review-panel-registry's seats-lane path (`workflow/test_pipeline.py`) for the operator's hand merge.
+  - [L9] holds for 003: `npm ci` before your full suite, and never start one while another `workflow.run_tests --jobs` runs on the host. Fresh verification, candidate checks and review follow; 8eb67b6 is not ready until they pass.
+  - (panel: agree; 002 controller_blocked, triage group D)
+
 ## Deferred
 
 - Showing run-level checks and the shared record in the viewer: a later Sonnet follow-up, after review-panel-registry lands, owned by server/ and src/.
