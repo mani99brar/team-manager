@@ -1,0 +1,18 @@
+{
+  "rulings": [
+    {"ruling": "confirmed", "severity": "P1", "sources": ["general-1", "C1", "M1"], "file": "workflow/panel.py", "line": 212,
+     "title": "settle does not wait for a seat relaunched on resume",
+     "detail": "The wait set is built once from the seats running at the first pass; a seat relaunched on resume is never awaited.",
+     "requirement": "PRD 7.2: the judge starts only after every seat has finished, failed or timed out",
+     "reason": "Seats added by _relaunch are not in `waiting`.", "evidence": "workflow/panel.py:205-214"},
+    {"ruling": "confirmed", "severity": "P2", "sources": ["coverage-1"], "file": "tests/unit/panels.test.ts", "line": null,
+     "title": "No unit test for the judge-fallback banner", "detail": "No unit test pins the banner text.",
+     "requirement": null, "reason": "A test gap: regraded from P1 to P2.", "evidence": "tests/project-workflows/panel.spec.ts:140"},
+    {"ruling": "refuted", "severity": "P2", "sources": ["C2"], "file": "workflow/judge.py", "line": 88,
+     "title": "judge stdin left open", "detail": "The job is started with stdin=DEVNULL.", "requirement": null,
+     "reason": "The cited line passes stdin=subprocess.DEVNULL.", "evidence": "workflow/judge.py:88"},
+    {"ruling": "deferred", "severity": "P0", "sources": ["G1"], "file": "workflow/attack.py", "line": 131,
+     "title": "secret file list includes a world-readable path", "detail": "Pre-existing.", "requirement": null,
+     "reason": "Unchanged since the run's base and named by no PRD or decisions line (base-scope rule).", "evidence": "workflow/attack.py:131"}
+  ]
+}
